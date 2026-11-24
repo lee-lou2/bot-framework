@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "triggers",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "triggers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/trigger"
+      }
+    }
+  },
+  "required": [
+    "version",
+    "triggers"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "cron": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "cron"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "binding": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            }
+          },
+          "required": [
+            "event",
+            "binding"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "http": {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "enum": [
+                    "GET",
+                    "POST",
+                    "PUT",
+                    "DELETE",
+                    "PATCH"
+                  ]
+                },
+                "path": {
+                  "type": "string",
+                  "pattern": "^/[^?#]*$"
+                }
+              },
+              "required": [
+                "method",
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "binding": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            }
+          },
+          "required": [
+            "http",
+            "binding"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "trigger": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+          "maxLength": 63
+        },
+        "on": {
+          "$ref": "#/$defs/source"
+        },
+        "principal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approver": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+                  "allOf": [
+                    {
+                      "pattern": "^[a-z0-9-]{1,63}\\.[a-z0-9-]{1,63}$"
+                    }
+                  ]
+                },
+                "args": {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "tool"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "instruction": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "instruction"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "order": {
+          "type": "integer"
+        },
+        "private": {
+          "type": "boolean"
+        },
+        "match": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "boolean",
+              "integer",
+              "number",
+              "null"
+            ]
+          },
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+          }
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+          },
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        },
+        "response": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "sync",
+                "accepted"
+              ]
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        "beat": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "on",
+        "target"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "on": {
+                "required": [
+                  "cron"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "principal"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "principal"
+                  ]
+                },
+                {
+                  "required": [
+                    "approver"
+                  ]
+                },
+                {
+                  "required": [
+                    "beat"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "response"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "on": {
+                "required": [
+                  "http"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "private"
+            ],
+            "properties": {
+              "private": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "allOf": [
+              {
+                "properties": {
+                  "on": {
+                    "required": [
+                      "event"
+                    ]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "target": {
+                    "required": [
+                      "tool"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

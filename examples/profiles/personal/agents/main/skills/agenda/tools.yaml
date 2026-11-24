@@ -1,0 +1,19 @@
+version: 1
+server: demo-agenda
+tools:
+  - id: list
+    class: read
+    scopes: [calendar.read]
+    secrets: {}
+    egress: []
+    input: {type: object, properties: {}, additionalProperties: false}
+  - id: delete
+    class: irreversible
+    scopes: [calendar.delete]
+    secrets: {}
+    egress: []
+    input:
+      type: object
+      required: [event]
+      properties: {event: {type: string}}
+      additionalProperties: false

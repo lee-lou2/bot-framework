@@ -1,0 +1,21 @@
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "BSL-1.0"]
+
+[advisories]
+yanked = "deny"
+# Remove these two maintenance exceptions after the scheduler/SQLx migration in docs/roadmap.md.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "Pinned chrono is used in SQLx and in the scheduler. Preserve UTC cursor and DST behaviour during migration." },
+    { id = "RUSTSEC-2026-0555", reason = "Pinned chrono-tz supplies the current cron time-zone rules. Compare gap, fold and historical occurrences before switching engines." },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

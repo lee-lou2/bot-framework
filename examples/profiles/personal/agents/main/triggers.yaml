@@ -1,0 +1,6 @@
+version: 1
+triggers:
+  - id: morning
+    "on": {cron: "* * * * *"}
+    principal: "service:morning"
+    target: {tool: agenda.list, args: {}}

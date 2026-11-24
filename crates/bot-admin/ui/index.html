@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>bot 관리</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/ui/app.css">
+  <link rel="stylesheet" href="/ui/map.css">
+  <link rel="stylesheet" href="/ui/views.css">
+  <link rel="stylesheet" href="/ui/runs.css">
+  <link rel="stylesheet" href="/ui/decide.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span id="mark" class="mark"></span><h1>bot 관리</h1></div>
+    <nav id="tabs" class="tabs" role="tablist" aria-label="화면">
+      <span id="tab-ink" class="tab-ink" aria-hidden="true"></span>
+    </nav>
+    <div class="controls">
+      <span id="who" class="who" title="로그인한 주체"></span>
+      <label class="field"><span class="lab">프로필</span><span class="sel"><select id="profile"><option value="">전체</option></select><span id="sel-ic" class="sel-ic"></span></span></label>
+      <label class="switch"><input type="checkbox" id="auto" checked><span class="track" aria-hidden="true"></span><span class="txt">5초마다 새로고침</span></label>
+      <span id="stamp" class="stamp"></span>
+    </div>
+  </header>
+  <div id="notice" class="notice" role="status"></div>
+  <main id="main">
+    <noscript><div class="boot"><p>이 화면은 자바스크립트를 켜야 열립니다.</p></div></noscript>
+    <div id="boot" class="boot" role="status"><div class="skeleton"><p class="sr">불러오는 중…</p><div class="sk-bar"></div><div class="sk-bar"></div><div class="sk-bar short"></div></div><p class="boot-hint">화면이 멈춘 듯하면 주소에 사용자 이름·비밀번호가 들어 있지 않은지 확인하고, 1분 뒤에 다시 여세요.</p></div>
+    <section id="view-structure" role="tabpanel" aria-labelledby="tab-structure" class="view view-map" hidden>
+      <h2 class="sr">구조</h2>
+      <div id="bar" class="mapbar">
+        <label class="search"><span id="search-ic" class="search-ic"></span><input type="search" id="query" placeholder="이름·설명 검색" aria-label="이름·설명 검색" autocomplete="off" spellcheck="false"><span id="hits" class="hits" aria-live="polite"></span></label>
+        <div id="kinds" class="legend" role="group" aria-label="종류 필터"></div>
+        <button type="button" id="fit" class="btn" aria-label="전체 보기"><span id="fit-ic" class="btn-ic"></span><span class="btn-t">전체 보기</span></button>
+      </div>
+      <div id="map" class="viewport" tabindex="0" role="region" aria-label="구조 지도. 끌어서 옮기고 Ctrl 또는 ⌘와 휠로 확대합니다">
+        <div id="stage" class="stage"></div>
+      </div>
+      <p id="maphint" class="maphint">노드를 눌러 설명·연결을 보세요 · 끌어서 이동 · Ctrl/⌘ + 휠로 확대</p>
+      <div id="dock" class="dock" role="group" aria-label="공통 자원"></div>
+      <div id="zoom" class="zoom" role="group" aria-label="확대·축소">
+        <button type="button" id="zin" aria-label="확대"></button>
+        <button type="button" id="zout" aria-label="축소"></button>
+      </div>
+      <aside id="detail" class="panel" aria-label="상세" aria-live="polite"></aside>
+    </section>
+    <section id="view-runs" role="tabpanel" aria-labelledby="tab-runs" class="view page" hidden></section>
+    <section id="view-decide" role="tabpanel" aria-labelledby="tab-decide" class="view page" hidden></section>
+    <section id="view-access" role="tabpanel" aria-labelledby="tab-access" class="view page" hidden></section>
+    <section id="view-audit" role="tabpanel" aria-labelledby="tab-audit" class="view page" hidden></section>
+    <section id="view-status" role="tabpanel" aria-labelledby="tab-status" class="view page" hidden></section>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/ui/dom.js"></script>
+  <script src="/ui/api.js"></script>
+  <script src="/ui/labels.js"></script>
+  <script src="/ui/holdpin.js"></script>
+  <script src="/ui/camera.js"></script>
+  <script src="/ui/layout.js"></script>
+  <script src="/ui/panel.js"></script>
+  <script src="/ui/needs.js"></script>
+  <script src="/ui/map.js"></script>
+  <script src="/ui/store.js"></script>
+  <script src="/ui/structure.js"></script>
+  <script src="/ui/runs.js"></script>
+  <script src="/ui/decide.js"></script>
+  <script src="/ui/access.js"></script>
+  <script src="/ui/audit.js"></script>
+  <script src="/ui/status.js"></script>
+  <script src="/ui/app.js"></script>
+</body>
+</html>

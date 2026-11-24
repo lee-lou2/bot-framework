@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/bot-core",
+    "crates/bot-profile",
+    "crates/bot-store",
+    "crates/bot-runtime",
+    "crates/bot-broker",
+    "crates/bot-gateway",
+    "crates/bot-admin",
+    "crates/bot-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+bot-core = { path = "crates/bot-core" }
+bot-profile = { path = "crates/bot-profile" }
+bot-store = { path = "crates/bot-store" }
+bot-runtime = { path = "crates/bot-runtime" }
+bot-broker = { path = "crates/bot-broker" }
+bot-gateway = { path = "crates/bot-gateway" }
+bot-admin = { path = "crates/bot-admin" }
+
+# Shared versions follow the existing deployment lock where available.
+anyhow = "=1.0.104"
+axum = "=0.8.9"
+base64 = "=0.22.1"
+chrono = { version = "=0.4.45", features = ["serde"] }
+chrono-tz = { version = "=0.10.4", features = ["serde"] }
+clap = { version = "=4.6.9", features = ["derive", "env"] }
+futures-util = "=0.3.34"
+hmac = "=0.12.1"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["fs", "std"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+# Approval and replay use the same IEEE-754 rounding in every role.
+serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }
+sha2 = "=0.10.9"
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate"] }
+tempfile = "=3.27.0"
+thiserror = "=2.0.21"
+time = "=0.3.55"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util", "signal"] }
+tokio-tungstenite = { version = "=0.29.0", features = ["rustls-tls-native-roots"] }
+tokio-util = { version = "=0.7.20", features = ["rt"] }
+tracing = "=0.1.44"
+tracing-subscriber = "=0.3.23"
+uuid = { version = "=1.29.3", features = ["v4", "serde"] }
+jiff-tzdb = "=1.0.0"
+regex = { version = "=1.13.2", default-features = false, features = ["std", "unicode"] }
+saphyr-parser = "=0.4.0"

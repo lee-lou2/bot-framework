@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "profile",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "maxLength": 63
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "maxLength": 63
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uniqueItems": true
+      },
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+        "maxLength": 63
+      }
+    },
+    "members": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "identity": {
+            "type": "string",
+            "minLength": 1
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "identity",
+          "roles"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/binding"
+      }
+    },
+    "secrets": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+        "maxLength": 63
+      },
+      "uniqueItems": true
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "agents": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$",
+            "allOf": [
+              {
+                "pattern": "^[a-z0-9-]{1,63}(?:/[a-z0-9-]{1,63})*$"
+              }
+            ]
+          }
+        },
+        "approve": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "id",
+    "model",
+    "roles",
+    "members",
+    "bindings"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "adapter": {
+              "const": "cli"
+            },
+            "agent": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$",
+              "allOf": [
+                {
+                  "pattern": "^[a-z0-9-]{1,63}(?:/[a-z0-9-]{1,63})*$"
+                }
+              ]
+            },
+            "account": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            }
+          },
+          "required": [
+            "id",
+            "adapter",
+            "agent",
+            "account"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "adapter": {
+              "const": "slack"
+            },
+            "agent": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$",
+              "allOf": [
+                {
+                  "pattern": "^[a-z0-9-]{1,63}(?:/[a-z0-9-]{1,63})*$"
+                }
+              ]
+            },
+            "workspace": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "channel": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            }
+          },
+          "required": [
+            "id",
+            "adapter",
+            "agent",
+            "workspace",
+            "channel"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "adapter": {
+              "const": "slack"
+            },
+            "agent": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$",
+              "allOf": [
+                {
+                  "pattern": "^[a-z0-9-]{1,63}(?:/[a-z0-9-]{1,63})*$"
+                }
+              ]
+            },
+            "workspace": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "dm": {
+              "const": true
+            }
+          },
+          "required": [
+            "id",
+            "adapter",
+            "agent",
+            "workspace",
+            "dm"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "adapter": {
+              "const": "http"
+            },
+            "agent": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$",
+              "allOf": [
+                {
+                  "pattern": "^[a-z0-9-]{1,63}(?:/[a-z0-9-]{1,63})*$"
+                }
+              ]
+            },
+            "endpoint": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            }
+          },
+          "required": [
+            "id",
+            "adapter",
+            "agent",
+            "endpoint"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

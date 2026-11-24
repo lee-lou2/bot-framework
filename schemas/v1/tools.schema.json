@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "tools",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "server": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "maxLength": 63
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tool"
+      }
+    }
+  },
+  "required": [
+    "version",
+    "server",
+    "tools"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "tool": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+          "maxLength": 63
+        },
+        "class": {
+          "enum": [
+            "read",
+            "write",
+            "irreversible"
+          ]
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "external": {
+          "type": "boolean"
+        },
+        "effects": {
+          "type": "boolean"
+        },
+        "destination": {
+          "oneOf": [
+            {
+              "const": "reply"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "recipient": {
+                  "type": "string",
+                  "pattern": "^args\\.[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+                },
+                "content": {
+                  "type": "string",
+                  "pattern": "^args\\.[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+                }
+              },
+              "required": [
+                "recipient",
+                "content"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "env": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z_][A-Z0-9_]*$",
+            "maxLength": 128
+          }
+        },
+        "secrets": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+            "maxLength": 63
+          },
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Z_][A-Z0-9_]*$"
+          }
+        },
+        "egress": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9.-]+:[0-9]{1,5}$"
+          },
+          "uniqueItems": true
+        },
+        "input": {
+          "type": "object",
+          "$ref": "https://json-schema.org/draft/2020-12/schema"
+        }
+      },
+      "required": [
+        "id",
+        "class",
+        "scopes",
+        "input"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

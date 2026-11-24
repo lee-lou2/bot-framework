@@ -1,0 +1,34 @@
+[package]
+name = "bot-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bot-core.workspace = true
+bot-profile.workspace = true
+bot-store.workspace = true
+bot-runtime.workspace = true
+bot-broker.workspace = true
+bot-gateway.workspace = true
+bot-admin.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+bot-broker = { workspace = true, features = ["testing"] }
+bot-gateway = { workspace = true, features = ["testing"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["process"] }
+
+[[bin]]
+name = "bot"
+path = "src/main.rs"

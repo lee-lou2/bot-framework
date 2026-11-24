@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AGENT.md front matter",
+  "type": "object",
+  "properties": {
+    "model": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "maxLength": 63
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^\\n\\r]+$"
+    },
+    "builtin": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "read",
+          "grep",
+          "glob"
+        ]
+      },
+      "uniqueItems": true,
+      "maxItems": 3,
+      "default": []
+    }
+  },
+  "additionalProperties": false
+}

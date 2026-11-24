@@ -1,0 +1,26 @@
+[package]
+name = "bot-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bot-core.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+# VM이 쓰는 세션 파일을 작업 폴더 밖으로 새지 않게 여는 `openat`(unsafe 없이)
+rustix.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+# Apple `container` 클라이언트 프로세스(모델 VM 어댑터)
+tokio = { workspace = true, features = ["process"] }
+tracing.workspace = true
+
+[dev-dependencies]
+# 워커·스케줄러 통합 시험: 실제 PG 저장소와 실제 BrokerService(가짜 실행기) 위에서 돌린다. 운영 빌드에는 들어가지 않는다.
+bot-broker = { workspace = true, features = ["testing"] }
+# 실제 입력 스키마 검증기(고정 스키마가 거절하는 호출을 실제 검증으로 확인한다)
+bot-profile.workspace = true
+bot-store.workspace = true
+sqlx.workspace = true

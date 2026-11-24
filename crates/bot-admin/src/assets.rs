@@ -1,0 +1,92 @@
+//! 바이너리에 내장한 화면 자산을 같은 인증 아래에서 내놓는다(`/ui`·`/ui/<자산>`). 자산 표에 없는 경로는 404다.
+//! 외부 라이브러리 없는 정적 HTML·CSS·JS다. 자산 표는 빌드 때 `ui/` 폴더에서 만든다(`build.rs`).
+
+use crate::{auth::digest, resp::reply};
+use axum::{
+    extract::Path,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use std::sync::OnceLock;
+
+struct Asset {
+    path: &'static str,
+    mime: &'static str,
+    bytes: &'static [u8],
+}
+
+const HTML: &str = "text/html; charset=utf-8";
+const CSS: &str = "text/css; charset=utf-8";
+const JS: &str = "text/javascript; charset=utf-8";
+#[allow(dead_code)] // 생성 표에 svg가 없으면 쓰이지 않는다
+const SVG: &str = "image/svg+xml";
+
+/// `build.rs`가 `ui/` 폴더에서 만든 표다(첫 항목이 `index.html`, 곧 `/ui`). 자산을 더하거나 지우면 폴더만 고치면 된다.
+const ASSETS: &[Asset] = include!(concat!(env!("OUT_DIR"), "/assets_table.rs"));
+
+/// 화면이 쓰는 CSP: 같은 출처의 스크립트·스타일만, 외부 요청 없음, 인라인 스크립트·스타일 없음.
+pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
+    connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// (경로, 바이트): 시험이 자산 규칙을 검사하는 데 쓴다.
+pub fn files() -> Vec<(&'static str, &'static [u8])> {
+    ASSETS.iter().map(|a| (a.path, a.bytes)).collect()
+}
+
+fn etag(i: usize) -> &'static str {
+    static TAGS: OnceLock<Vec<String>> = OnceLock::new();
+    &TAGS.get_or_init(|| {
+        ASSETS
+            .iter()
+            .map(|a| format!("\"{}\"", crate::json::hex(&digest(a.bytes)[..8])))
+            .collect()
+    })[i]
+}
+
+fn asset_response(i: usize, headers: &HeaderMap) -> Response {
+    let (asset, tag) = (&ASSETS[i], etag(i));
+    let fresh = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .any(|t| t.trim().trim_start_matches("W/") == tag || t.trim() == "*")
+        });
+    let mut r = if fresh {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        (StatusCode::OK, asset.bytes).into_response()
+    };
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(asset.mime));
+    h.insert(
+        header::ETAG,
+        HeaderValue::from_str(tag).unwrap_or(HeaderValue::from_static("\"-\"")),
+    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CSP),
+    );
+    r
+}
+
+pub(crate) async fn index(headers: HeaderMap) -> Response {
+    asset_response(0, &headers)
+}
+
+pub(crate) async fn asset(Path(path): Path<String>, headers: HeaderMap) -> Response {
+    match ASSETS.iter().skip(1).position(|a| a.path == path) {
+        Some(i) => asset_response(i + 1, &headers),
+        None => reply(StatusCode::NOT_FOUND, "not_found"),
+    }
+}

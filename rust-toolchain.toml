@@ -1,0 +1,6 @@
+# Rust 도구체인 고정: CI와 로컬 관문(`scripts/release-check.sh`)이 같은 컴파일러 · clippy · rustfmt를 쓴다.
+# 올릴 때는 channel 한 줄만 바꾸고, 그 판본으로 `scripts/release-check.sh --strict`가 통과하는지 본다(docs/release.md).
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

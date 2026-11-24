@@ -1,0 +1,56 @@
+/* 실행 탭: 목록(왼쪽)과 상세(오른쪽). 좁은 화면에서는 한 번에 하나만 보이고 «목록» 버튼으로 돌아온다. */
+.runs .wrap { max-width: 1280px; }
+.split { display: grid; grid-template-columns: minmax(320px, 420px) minmax(0, 1fr); gap: var(--s5); align-items: start; }
+.rl-pane, .rd-pane { min-width: 0; }
+.rl-count { min-height: 20px; margin-bottom: var(--s2); color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.rl { display: grid; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
+.rl-flat { gap: 6px; }
+.rl-none { margin-top: var(--s3); }
+.ri { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "main state" "meta time"; gap: 4px var(--s3); width: 100%; padding: var(--s3) var(--s4); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); text-align: left; transition: border-color 150ms var(--ease), background-color 150ms var(--ease), transform 80ms var(--ease); }
+.ri:active { transform: scale(0.99); }
+.ri.is-selected { border-color: var(--accent); background: var(--accent-wash); }
+.ri.is-selected .ri-meta, .ri.is-selected .ri-time { color: var(--ink-2); }
+.ri-main { grid-area: main; display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px var(--s2); min-width: 0; }
+.ri-main code { color: var(--ink); font-size: 13px; font-weight: 600; }
+.ri-agent { color: var(--ink-2); font-size: 13px; }
+.ri-prof { padding: 0 6px; border-radius: 6px; background: var(--surface-2); color: var(--ink-3); font-size: 12px; }
+.ri-state { grid-area: state; justify-self: end; }
+.ri-meta { grid-area: meta; min-width: 0; color: var(--ink-3); font-size: 12px; overflow-wrap: anywhere; }
+.ri-time { grid-area: time; justify-self: end; color: var(--ink-3); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.rd-pane { position: sticky; top: calc(var(--top-h) + var(--s4)); max-height: calc(100vh - var(--top-h) - 2 * var(--s4)); max-height: calc(100dvh - var(--top-h) - 2 * var(--s4)); overflow: auto; padding: var(--s5); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); }
+.rd-pane > .empty { width: 100%; }
+.rd { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); }
+.rd > * { min-width: 0; }
+.rd .sec { margin-top: var(--s2); }
+.rd .tbl { width: 100%; }
+.rd .tbl th { position: static; }
+.rd-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s3); }
+.rd-title { margin-right: auto; }
+.rd-title h3 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.3; }
+.rd-title code { font-size: 18px; }
+.rd-wait { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s3); padding: var(--s3) var(--s4); border-radius: var(--r-md); background: var(--warn-wash); color: var(--warn-ink); font-weight: 500; }
+.rd-wait code { color: inherit; }
+.rd-wait.is-none { background: var(--surface-2); color: var(--ink-3); font-weight: 400; }
+.rd-facts { grid-template-columns: minmax(104px, auto) minmax(0, 1fr); }
+.rd-facts dt, .rd-facts dd { padding-left: var(--s4); padding-right: var(--s4); }
+.crumbs ol { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.crumbs li + li::before { content: "›"; margin-right: 4px; color: var(--ink-3); }
+.crumb { display: inline-flex; align-items: baseline; gap: 6px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); font-size: 13px; transition: background-color 150ms var(--ease), border-color 150ms var(--ease); }
+.crumb code { color: var(--ink); font-weight: 600; }
+.crumb.is-now { border-color: var(--accent); background: var(--accent-wash); color: var(--accent-ink); }
+.crumb.is-now code { color: inherit; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ri:active { transform: none; }
+}
+@media (hover: hover) {
+  .ri:hover:not(.is-selected) { border-color: var(--line-strong); background: var(--surface-2); }
+  button.crumb:hover { border-color: var(--line-strong); background: var(--surface-2); }
+}
+@media (max-width: 960px) {
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .rd-pane { position: static; max-height: none; overflow: visible; padding: var(--s4); }
+  .runs .split:not(.has-detail) .rd-pane { display: none; }
+  .runs .split.has-detail .rl-pane { display: none; }
+}

@@ -1,0 +1,92 @@
+#!/bin/sh
+# 모델 VM의 신뢰 init(docs/model-image.md). 이미지의 ENTRYPOINT다: root로 시작해
+#   1 릴레이(BOT_RELAY_IP:BOT_RELAY_PORT) TCP와 그 연결의 응답만 허용하는 nft 규칙을 걸고(IPv6·다른 목적지는 기본 차단)
+#   2 규칙이 실제로 걸렸는지 읽어 확인하고
+#   3 권한을 버린 프로세스가 정말 비root·capability 0·no_new_privs인지 시험 실행으로 확인한 뒤
+#   4 같은 방식으로 고정 Claude(/usr/local/bin/claude)를 비root(10001:10001)로 exec한다.
+# 입력: 환경변수 BOT_RELAY_IP(숫자 IPv4, 사설 대역)·BOT_RELAY_PORT(1..65535) — 호스트(어댑터)만 정한다 — 와 인자 `claude <인자…>`.
+# 하나라도 어긋나거나 단계가 실패하면 모델을 시작하지 않고 비0(1)으로 끝낸다. 이 init이 내는 stderr는 `vm_init_failed` 한 단어뿐이다.
+# 필요한 capability 네 개: NET_ADMIN(nft) · SETUID·SETGID(사용자 전환) · SETPCAP(bounding set 비우기). 어댑터는 `--cap-drop ALL` 뒤에 이 넷만 더한다.
+# 하나라도 빠지면 3의 시험 실행에서 걸린다(SETPCAP이 없으면 setpriv가 bounding set을 못 비우고도 조용히 넘어가므로 읽어서 확인한다).
+unset ENV BASH_ENV LD_PRELOAD LD_LIBRARY_PATH
+PATH=/usr/sbin:/usr/bin:/bin
+fail() { echo vm_init_failed >&2; exit 1; }
+
+[ "${1-}" = claude ] || fail
+shift
+ip=${BOT_RELAY_IP-}
+port=${BOT_RELAY_PORT-}
+
+# 앞에 0이 없는 0..255
+octet() {
+  case $1 in
+    0 | [1-9] | [1-9][0-9] | 1[0-9][0-9] | 2[0-4][0-9] | 25[0-5]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+case $ip in *.*.*.*) ;; *) fail ;; esac
+a=${ip%%.*}; rest=${ip#*.}
+b=${rest%%.*}; rest=${rest#*.}
+c=${rest%%.*}; d=${rest#*.}
+case $d in *.*) fail ;; esac
+octet "$a" && octet "$b" && octet "$c" && octet "$d" || fail
+# 릴레이는 호스트 전용 망의 호스트 주소라 사설 IPv4(RFC 1918)여야 한다
+case $a.$b in
+  10.* | 192.168 | 172.16 | 172.17 | 172.18 | 172.19 | 172.20 | 172.21 | 172.22 | 172.23 | 172.24 | 172.25 | 172.26 | 172.27 | 172.28 | 172.29 | 172.30 | 172.31) ;;
+  *) fail ;;
+esac
+# 앞에 0이 없는 1..65535
+case $port in
+  [1-9] | [1-9][0-9] | [1-9][0-9][0-9] | [1-9][0-9][0-9][0-9] | [1-5][0-9][0-9][0-9][0-9] | 6[0-4][0-9][0-9][0-9] | 65[0-4][0-9][0-9] | 655[0-2][0-9] | 6553[0-5]) ;;
+  *) fail ;;
+esac
+
+# 1 방화벽: 나가는 것은 릴레이 TCP뿐, 들어오는 것은 그 연결의 응답뿐이다. 나머지(IPv6 포함)는 정책으로 버린다.
+# `create table`은 같은 이름의 표가 이미 있으면 실패한다(이미 있던 규칙에 섞이지 않는다).
+/usr/sbin/nft -f - 2>/dev/null <<RULES || fail
+create table inet bot_fw
+table inet bot_fw {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ip saddr $ip tcp sport $port ct state established accept
+  }
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+  }
+  chain output {
+    type filter hook output priority filter; policy drop;
+    ip daddr $ip tcp dport $port accept
+  }
+}
+RULES
+
+# 2 실제로 걸렸는지 읽어 확인한다
+rules=$(/usr/sbin/nft list table inet bot_fw 2>/dev/null) || fail
+for fragment in \
+  "hook input priority filter; policy drop;" \
+  "hook forward priority filter; policy drop;" \
+  "hook output priority filter; policy drop;" \
+  "ip saddr $ip tcp sport $port ct state established accept" \
+  "ip daddr $ip tcp dport $port accept"; do
+  case $rules in *"$fragment"*) ;; *) fail ;; esac
+done
+
+# 3 같은 옵션으로 권한을 버린 시험 프로세스가 실제로 uid·gid 10001, 보조 그룹 없음, capability 전부 0, no_new_privs인지 /proc에서 읽는다.
+unset BOT_RELAY_IP BOT_RELAY_PORT
+privs="--reuid=10001 --regid=10001 --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs"
+# shellcheck disable=SC2086
+/bin/setpriv $privs -- /bin/sh -c '
+  state=
+  while read -r key a b c d; do
+    case $key in
+      Uid: | Gid:) state="$state $key$a,$b,$c,$d" ;;
+      Groups: | CapInh: | CapPrm: | CapEff: | CapBnd: | CapAmb: | NoNewPrivs:) state="$state $key$a" ;;
+    esac
+  done </proc/self/status
+  [ "$state" = " Uid:10001,10001,10001,10001 Gid:10001,10001,10001,10001 Groups: CapInh:0000000000000000 CapPrm:0000000000000000 CapEff:0000000000000000 CapBnd:0000000000000000 CapAmb:0000000000000000 NoNewPrivs:1" ]
+' >/dev/null 2>&1 || fail
+
+# 4 고정 Claude를 exec한다. 모델은 이미지가 정한 PATH를 받는다.
+PATH=/usr/local/bin:/usr/bin:/bin
+# shellcheck disable=SC2086
+exec /bin/setpriv $privs -- /usr/local/bin/claude "$@"

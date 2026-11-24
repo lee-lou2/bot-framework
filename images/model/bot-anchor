@@ -1,0 +1,20 @@
+#!/bin/sh
+# 닻(anchor) 진입(docs/model-image.md): 호스트 전용 망에 붙어 있기만 하는 대기 전용 프로세스다. 호스트 쪽 게이트웨이 주소는 그 망에 붙은 VM이 있을 때만 생기므로,
+# 어댑터가 릴레이(프런트)를 그 주소에 바인드하기 전에 이것을 먼저 띄운다.
+# 모델 경로(bot-init)와 완전히 따로다: 환경변수가 빠졌다고 모델이 이쪽으로 바뀌지 않고, 이쪽은 아무것도 실행하지 않는다.
+# 비root이고 모든 capability가 0일 때만 돈다(어댑터가 `--user 10001:10001 --cap-drop ALL`로 띄운다). 아니면 `vm_anchor_failed`로 끝낸다.
+unset ENV BASH_ENV
+PATH=/bin
+fail() { echo vm_anchor_failed >&2; exit 1; }
+
+uid=
+caps=
+while read -r key value _; do
+  case $key in
+    Uid:) uid=$value ;;
+    CapInh: | CapPrm: | CapEff: | CapBnd: | CapAmb:) caps="$caps $value" ;;
+  esac
+done </proc/self/status
+case $uid in '' | 0 | *[!0-9]*) fail ;; esac
+[ "$caps" = " 0000000000000000 0000000000000000 0000000000000000 0000000000000000 0000000000000000" ] || fail
+exec sleep 2147483647
