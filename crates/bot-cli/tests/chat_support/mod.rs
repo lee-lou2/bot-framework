@@ -8,9 +8,18 @@ use std::{
         net::UnixListener,
     },
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
+
+/// 연결을 기다리는 최대 시간: 막 새로 만든 실행 파일의 첫 실행은 느릴 수 있다(macOS의 첫 실행 검사·과부하). 접속이 없어야 하는 시험은 `join`이 곧바로 끝낸다.
+const ACCEPT_WAIT: Duration = Duration::from_secs(30);
+/// 접속한 쪽이 요청 한 줄을 보내기를 기다리는 최대 시간
+const READ_WAIT: Duration = Duration::from_secs(5);
 
 /// 가짜 게이트웨이가 본 것
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -33,21 +42,37 @@ pub fn make_folder(folder: &Path, folder_mode: u32) {
     std::fs::set_permissions(folder, std::fs::Permissions::from_mode(folder_mode)).unwrap();
 }
 
-/// `socket`에서 한 연결을 받아 요청 한 줄을 읽고 `replies`를 한 줄씩 돌려준 뒤 닫는 가짜 게이트웨이. 연결이 오지 않으면 2초 뒤 끝난다.
+/// 가짜 게이트웨이 스레드. `join`은 «시험이 돌린 프로세스가 끝났다»는 신호이기도 하다 — 그때까지 연결이 하나도 오지 않았으면 더 기다리지 않고 끝난다.
+pub struct Gateway {
+    handle: JoinHandle<Seen>,
+    done: Arc<AtomicBool>,
+}
+
+impl Gateway {
+    pub fn join(self) -> std::thread::Result<Seen> {
+        self.done.store(true, Ordering::SeqCst);
+        self.handle.join()
+    }
+}
+
+/// `socket`에서 한 연결을 받아 요청 한 줄을 읽고 `replies`를 한 줄씩 돌려준 뒤 닫는 가짜 게이트웨이. 연결을 기다리는 것은 `ACCEPT_WAIT`까지이고,
+/// 시험이 `join`하면(돌린 프로세스가 끝난 뒤) 연결이 없을 때 곧바로 끝난다.
 /// 소켓 폴더는 `folder_mode`로 만든다(0700이 정상이고, 그 밖의 값은 «믿을 수 없는 폴더»를 만든다).
-pub fn fake_gateway(socket: &Path, folder_mode: u32, replies: Vec<Value>) -> JoinHandle<Seen> {
+pub fn fake_gateway(socket: &Path, folder_mode: u32, replies: Vec<Value>) -> Gateway {
     make_folder(socket.parent().unwrap(), folder_mode);
     let listener = UnixListener::bind(socket).unwrap();
     listener.set_nonblocking(true).unwrap();
-    std::thread::spawn(move || {
+    let done = Arc::new(AtomicBool::new(false));
+    let finished = done.clone();
+    let handle = std::thread::spawn(move || {
         let mut seen = Seen::default();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
+        let deadline = Instant::now() + ACCEPT_WAIT;
+        while Instant::now() < deadline && !finished.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     seen.connections += 1;
                     let _ = stream.set_nonblocking(false);
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                    let _ = stream.set_read_timeout(Some(READ_WAIT));
                     let mut line = Vec::new();
                     let mut byte = [0u8; 1];
                     while let Ok(1) = stream.read(&mut byte) {
@@ -71,7 +96,8 @@ pub fn fake_gateway(socket: &Path, folder_mode: u32, replies: Vec<Value>) -> Joi
             }
         }
         seen
-    })
+    });
+    Gateway { handle, done }
 }
 
 /// 터미널이 명령으로 읽을 바이트: C0(줄바꿈·탭 제외)·DEL, 그리고 UTF-8로 된 C1(U+0080–U+009F)
