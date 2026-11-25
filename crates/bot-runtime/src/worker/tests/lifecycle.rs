@@ -114,6 +114,54 @@ async fn a_cancel_request_seen_by_the_heartbeat_stops_the_model_and_ends_the_run
 }
 
 #[tokio::test]
+async fn a_cancel_that_lands_before_the_first_store_read_ends_the_run_cancelled_not_lost() {
+    // 저장소는 취소 요청이 선 run의 새 읽기를 `Stale`로 거절한다: 워커는 모델을 부르기도 전에 물러나려 하지만, 이 시도가 아직 소유자이고 취소가 요청됐으니
+    // 리스를 잃은 것이 아니다(그대로 물러나면 리스가 끝날 때까지 취소가 늦다)
+    let model = ScriptedModel::new(vec![]);
+    let r = rig(model.clone());
+    lock(&r.runs.state).cancel = true;
+    assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Cancelled);
+    let state = lock(&r.runs.state);
+    assert_eq!(state.failed, [Failure::Permanent("cancelled")]);
+    assert!(state.finished.is_empty() && state.steps.is_empty());
+    assert!(model.requests().is_empty(), "모델은 부르지 않았다");
+}
+
+#[tokio::test]
+async fn a_stale_read_without_a_cancel_request_is_still_a_lost_claim() {
+    // 대조군: 취소 요청이 없으면 소유권을 잃은 것이다. 아무것도 쓰지 않고 물러난다(옛 소유자는 실패도 보고하지 않는다)
+    let r = rig(Arc::new(BlockingModel));
+    lock(&r.runs.state).history_error = Some(Error::Stale);
+    assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Lost);
+    let state = lock(&r.runs.state);
+    assert!(state.finished.is_empty() && state.failed.is_empty() && state.steps.is_empty());
+}
+
+#[tokio::test]
+async fn a_cancel_request_does_not_turn_a_really_lost_claim_into_a_cancel() {
+    // 취소 요청이 서 있어도 저장소가 이 시도를 소유자로 인정하지 않으면(옛 세대·만료) 리스를 잃은 것이다: 취소로 쓰지 않고 아무것도 쓰지 않고 물러난다
+    let r = rig(Arc::new(BlockingModel));
+    lock(&r.runs.state).cancel = true;
+    r.runs.renew_script(Err(Error::Stale));
+    assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Lost);
+    let state = lock(&r.runs.state);
+    assert!(state.finished.is_empty() && state.failed.is_empty() && state.steps.is_empty());
+}
+
+#[tokio::test]
+async fn a_lease_the_heartbeat_already_lost_is_not_rechecked_into_a_cancel() {
+    // 하트비트가 이미 리스 상실을 알았으면 취소를 확인하지 않는다(다음 응답이 «취소 요청»이어도 쓰지 않는다)
+    let r = rig(Arc::new(BlockingModel));
+    r.runs.renew_script(Err(Error::Stale));
+    r.runs.renew_script(Ok(Beat {
+        cancel_requested: true,
+    }));
+    assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Lost);
+    let state = lock(&r.runs.state);
+    assert!(state.finished.is_empty() && state.failed.is_empty() && state.steps.is_empty());
+}
+
+#[tokio::test]
 async fn a_lost_lease_stops_the_model_and_writes_nothing() {
     let r = rig(Arc::new(BlockingModel));
     r.runs.renew_script(Err(Error::Stale));

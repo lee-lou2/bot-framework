@@ -1,6 +1,7 @@
 //! 시험용 가짜. 다른 크레이트도 `testing` 기능으로 쓸 수 있다(운영 빌드에는 넣지 않는다).
 //! `MemLedger`는 `CallLedger`가 지켜야 할 불변식을 실행 가능한 형태로 적어 둔 기준 구현이다.
 
+mod exec;
 mod fakes;
 mod journal;
 mod ledger;
@@ -14,6 +15,7 @@ mod schedules;
 mod turns;
 mod world;
 
+pub use exec::write_executable;
 pub use fakes::{FakeCatalog, FakeEffects, FakeRunner, MemAudit, RecordingTracer};
 pub use journal::MemJournal;
 pub use ledger::MemLedger;

@@ -2,17 +2,16 @@
 //! 조회가 실패하면 사라짐이 아니라 모름이다. 진짜 프로세스로는 Linux(`pgrep`이 좀비도 센다)와 macOS에서 같은 답이어야 한다.
 
 use super::*;
-use crate::srt::tools::Group;
+use crate::{srt::tools::Group, testing::write_executable};
 
 /// 정해진 줄을 찍고 정해진 코드로 끝나는 가짜 도구.
 fn fake_out(dir: &Path, name: &str, code: i32, out: &str) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(
+    write_executable(
         &path,
-        format!("#!/bin/sh\ncat <<'EOF'\n{out}EOF\nexit {code}\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\ncat <<'EOF'\n{out}EOF\nexit {code}\n"),
+        0o755,
+    );
     path
 }
 

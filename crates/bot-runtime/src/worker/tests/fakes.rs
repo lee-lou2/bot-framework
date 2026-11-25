@@ -188,6 +188,10 @@ pub(super) struct RunsState {
     pub renews: u32,
     pub renew_script: VecDeque<Result<Beat, Error>>,
     pub finish_error: Option<Error>,
+    /// 다음 `history` 한 번이 돌려줄 오류(소유권을 잃은 것처럼 새 읽기가 `Stale`로 거절될 때)
+    pub history_error: Option<Error>,
+    /// 운영자가 취소를 요청했다: 하트비트가 이를 알리고, 실제 저장소처럼 새 읽기를 `Stale`로 거절한다(`fence`)
+    pub cancel: bool,
     pub events: Vec<String>,
 }
 
@@ -226,9 +230,11 @@ impl RunStore for FakeRuns {
     fn renew(&self, _: Attempt) -> Reply<'_, Beat> {
         let mut state = lock(&self.state);
         state.renews += 1;
-        let result = state.renew_script.pop_front().unwrap_or(Ok(Beat {
-            cancel_requested: false,
-        }));
+        let cancel_requested = state.cancel;
+        let result = state
+            .renew_script
+            .pop_front()
+            .unwrap_or(Ok(Beat { cancel_requested }));
         Box::pin(async move { result })
     }
     fn checkpoint_batch(&self, _: Attempt, steps: Vec<Step>) -> Reply<'_, ()> {
@@ -260,8 +266,13 @@ impl RunStore for FakeRuns {
         Box::pin(async { Ok(Retry::Dead) })
     }
     fn history(&self, _: Attempt, _: u32) -> Reply<'_, Vec<Turn>> {
-        let history = lock(&self.state).history.clone();
-        Box::pin(async move { Ok(history) })
+        let mut state = lock(&self.state);
+        let result = match state.history_error.take() {
+            Some(error) => Err(error),
+            None if state.cancel => Err(Error::Stale),
+            None => Ok(state.history.clone()),
+        };
+        Box::pin(async move { result })
     }
 }
 

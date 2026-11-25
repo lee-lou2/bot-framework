@@ -395,14 +395,15 @@ async fn a_dead_letter_resumes_as_the_same_logical_run_after_the_operator_acts()
     assert!(state.result.unwrap().0.contains("이제 돼요"));
 }
 
-/// 취소 신호가 올 때까지 기다리는 CLI 모양 실행기.
-struct Waits;
+/// 취소 신호가 올 때까지 기다리는 CLI 모양 실행기. 불리면 `started`를 올려 시험이 «모델이 실제로 돌고 있다»를 시간 추정 없이 안다.
+struct Waits(Arc<std::sync::atomic::AtomicBool>);
 
 impl ModelRunner for Waits {
     fn kind(&self) -> RunnerKind {
         RunnerKind::Loop
     }
     fn step(&self, mut request: ModelRequest) -> StepFuture<'_> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
             while !*request.cancel.borrow() {
                 if request.cancel.changed().await.is_err() {
@@ -420,14 +421,16 @@ async fn an_operator_cancel_reaches_the_running_model_through_the_heartbeat() {
         return;
     };
     let run = w.accept("req-cancel", "오늘 일정 알려줘").await;
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = w.worker(
         &w.pg.store,
-        Arc::new(SingleModel(Arc::new(Waits))),
+        Arc::new(SingleModel(Arc::new(Waits(started.clone())))),
         config(),
     );
     let running = tokio::spawn(async move { worker.run_once().await });
-    until("run이 실행 중이어야 한다", async || {
-        w.pg.state_of(&run).await == "leased"
+    // `leased`는 집었다는 뜻일 뿐 워커가 아직 첫 저장소 읽기 전일 수 있다: 모델이 실제로 불린 뒤에 취소해야 «실행 중인 모델에 하트비트가 닿는다»를 본다
+    until("모델이 실제로 돌고 있어야 한다", async || {
+        started.load(std::sync::atomic::Ordering::SeqCst)
     })
     .await;
     w.pg.store
@@ -445,4 +448,40 @@ async fn an_operator_cancel_reaches_the_running_model_through_the_heartbeat() {
         .unwrap();
     assert_eq!(outcome, Some(Outcome::Cancelled));
     assert_eq!(w.status("req-cancel").await.state, RunState::Cancelled);
+}
+
+/// 운영자의 취소가 워커의 첫 저장소 읽기보다 먼저 닿으면: 저장소는 취소 요청이 선 run의 새 읽기를 `Stale`로 거절한다(`fence`). 리스를 잃은 것(`Lost`)이 아니라
+/// 아직 소유자이므로 바로 취소로 끝나야 한다(그대로 물러나면 리스 30초가 지나 다른 워커가 집을 때까지 run이 `leased`로 남는다).
+#[tokio::test]
+async fn an_operator_cancel_that_lands_before_the_workers_first_read_ends_the_run_cancelled() {
+    let Some(w) = world().await else {
+        return;
+    };
+    let run = w.accept("req-early-cancel", "오늘 일정 알려줘").await;
+    let ctx = w.pg.store.claim().await.unwrap().expect("집은 run");
+    assert_eq!(ctx.attempt.run, run);
+    w.pg.store
+        .cancel(
+            ProfileId("personal".into()),
+            run.clone(),
+            PrincipalId("local:admin".into()),
+            "그만".into(),
+        )
+        .await
+        .unwrap();
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = w.worker(
+        &w.pg.store,
+        Arc::new(SingleModel(Arc::new(Waits(started.clone())))),
+        config(),
+    );
+    assert_eq!(worker.execute(ctx).await, Outcome::Cancelled);
+    assert_eq!(
+        w.status("req-early-cancel").await.state,
+        RunState::Cancelled
+    );
+    assert!(
+        !started.load(std::sync::atomic::Ordering::SeqCst),
+        "모델은 부르지 않았다"
+    );
 }

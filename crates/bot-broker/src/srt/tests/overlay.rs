@@ -2,18 +2,20 @@
 //! 바꾸는지와, 대리 실행 파일을 언제 만들고 srt 설정에 언제 적는지를 본다(진짜 효과는 Linux 카나리가 증명한다).
 
 use super::*;
-use crate::srt::overlay::{SHARED_TMP, find_bwrap, locate, script, write_launcher};
+use crate::{
+    srt::overlay::{SHARED_TMP, find_bwrap, locate, script, write_launcher},
+    testing::write_executable,
+};
 
 /// 받은 인자를 한 줄에 하나씩 찍는 가짜 `bwrap`.
 fn fake_bwrap(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join("bwrap");
-    std::fs::write(
+    write_executable(
         &path,
         "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        0o755,
+    );
     path
 }
 
@@ -21,8 +23,7 @@ fn fake_bwrap(dir: &Path) -> PathBuf {
 fn run(real: &Path, hide: &str, args: &[&str]) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let launcher = dir.path().join("launcher");
-    std::fs::write(&launcher, script(real, hide)).unwrap();
-    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
+    write_executable(&launcher, &script(real, hide), 0o700);
     let output = std::process::Command::new(&launcher)
         .args(args)
         .output()

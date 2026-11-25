@@ -9,7 +9,7 @@ mod state;
 use crate::{
     sandbox::{Limits, ProxyEndpoint},
     sys::OsEntropy,
-    testing::CountingEntropy,
+    testing::{CountingEntropy, write_executable},
 };
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -20,8 +20,7 @@ pub(super) fn fake_srt(dir: &Path, version: &str) -> PathBuf {
     let script = format!(
         "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '{version}'; exit 0; fi\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --settings) settings=\"$2\"; env > \"$settings.launcher-env\"; shift 2 ;;\n    --) shift; break ;;\n    *) shift ;;\n  esac\ndone\n\"$@\"\nexit $?\n"
     );
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&path, &script, 0o755);
     path
 }
 
@@ -126,8 +125,7 @@ pub(super) fn work_dir(root: &Path) -> PathBuf {
 /// `pgrep`을 대신하는 가짜: 종료 코드만 돌려준다.
 pub(super) fn fake_tool(dir: &Path, name: &str, code: i32) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&path, &format!("#!/bin/sh\nexit {code}\n"), 0o755);
     path
 }
 

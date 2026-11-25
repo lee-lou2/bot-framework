@@ -3,7 +3,7 @@
 
 use super::{Flow, Outcome, Worker, calls::Called, control::Control, interrupted, span::RunSpan};
 use bot_core::{
-    command::{Failure, Finish, Retry, Target},
+    command::{Beat, Failure, Finish, Retry, Target},
     id::CallId,
     port::Error,
     state::{ConversationKind, RunContext},
@@ -91,6 +91,14 @@ impl Worker {
         match flow {
             Flow::Parked => (Outcome::Parked, None),
             Flow::Lost => {
+                // 저장소는 취소 요청이 선 run의 새 일(읽기·체크포인트·도구 시작)을 `Stale`로 거절한다(`fence`). 워커는 이를 리스 상실과 구별하지 못해 `Lost`로 보지만,
+                // 이 시도가 아직 소유자이고 운영자가 취소를 요청한 것이라면 잃은 것이 아니다: 취소로 끝낸다. 그대로 물러나면 리스가 끝나고 다른 워커가 집을 때까지(최대 한 리스)
+                // 취소가 늦는다. 하트비트가 이미 리스 상실을 알았으면 확인하지 않는다
+                if !control.lost() && self.cancel_pending(ctx).await {
+                    return self
+                        .report(ctx, control, Failure::Permanent("cancelled"))
+                        .await;
+                }
                 self.hand_back(ctx).await;
                 (Outcome::Lost, None)
             }
@@ -140,6 +148,17 @@ impl Worker {
             // 보고하지 못했다: 리스가 끝나면 다른 워커가 이어받는다
             Err(_) => (Outcome::Lost, Some(code)),
         }
+    }
+
+    /// 이 시도가 아직 소유자이고 운영자가 취소를 요청했는가: 하트비트와 같은 `renew`를 한 번 더 불러 확인한다(소유자가 아니면 오류라 `false`다).
+    async fn cancel_pending(&self, ctx: &RunContext) -> bool {
+        matches!(
+            tokio::time::timeout(HAND_BACK_TIMEOUT, self.deps.runs.renew(ctx.attempt.clone()))
+                .await,
+            Ok(Ok(Beat {
+                cancel_requested: true
+            }))
+        )
     }
 
     /// 물러나기 전에 저장소에 조건부 반납을 청한다: 이 프로세스의 활성 집합이 더는 현재가 아니고 이 시도가 아직 소유자일 때만 대기열로 돌아가
