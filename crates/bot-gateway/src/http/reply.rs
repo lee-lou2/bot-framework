@@ -64,7 +64,10 @@ fn unwrap_mcp(value: Value) -> Option<Value> {
     if let Some(sc) = map.get("structuredContent") {
         return Some(sc.clone());
     }
-    if let Some([only]) = map.get("content").and_then(Value::as_array).map(Vec::as_slice)
+    if let Some([only]) = map
+        .get("content")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
         && only.get("type").and_then(Value::as_str) == Some("text")
         && let Some(text) = only.get("text").and_then(Value::as_str)
     {
@@ -138,7 +141,9 @@ mod tests {
         assert_eq!(status_of(&huge), None);
         // MCP CallToolResult로 감싼 {status, body}도 정상 결과만 풀어 쓴다.
         assert_eq!(
-            status_of(r#"{"content":[{"type":"text","text":"{\"status\":404,\"body\":{\"ok\":false}}"}],"isError":false}"#),
+            status_of(
+                r#"{"content":[{"type":"text","text":"{\"status\":404,\"body\":{\"ok\":false}}"}],"isError":false}"#
+            ),
             Some(404)
         );
         assert_eq!(
@@ -146,11 +151,15 @@ mod tests {
             Some(200)
         );
         assert_eq!(
-            status_of(r#"{"content":[{"type":"text","text":"{\"status\":200,\"body\":{\"ok\":true}}"}],"isError":true}"#),
+            status_of(
+                r#"{"content":[{"type":"text","text":"{\"status\":200,\"body\":{\"ok\":true}}"}],"isError":true}"#
+            ),
             None
         );
         assert_eq!(
-            status_of(r#"{"content":[{"type":"text","text":"{\"status\":500,\"body\":{}}"}],"isError":false}"#),
+            status_of(
+                r#"{"content":[{"type":"text","text":"{\"status\":500,\"body\":{}}"}],"isError":false}"#
+            ),
             None
         );
     }

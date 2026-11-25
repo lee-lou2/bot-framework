@@ -98,11 +98,7 @@ impl SlackGateway {
     /// Slack 진행 상태(👀/✅ · 스트림 상태 카드)와 스레드 중단(버튼·"중단해줘") 제어기를 붙인다.
     #[must_use]
     pub fn with_ux(mut self, runs: Arc<dyn RunStore>, admin: Arc<dyn RunAdmin>) -> Self {
-        self.ux = Some(Arc::new(ux::SlackUx::new(
-            self.creds.clone(),
-            runs,
-            admin,
-        )));
+        self.ux = Some(Arc::new(ux::SlackUx::new(self.creds.clone(), runs, admin)));
         self
     }
 

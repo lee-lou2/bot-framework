@@ -54,6 +54,9 @@ fn bad(message: impl Into<String>) -> HostFileError {
     HostFileError(message.into())
 }
 
+/// 프로필별 사설/로컬 고정 egress 매핑(`host:port -> ip:port`).
+pub type PrivateEgressMap = BTreeMap<String, BTreeMap<(String, u16), std::net::SocketAddr>>;
+
 /// 해석한 호스트 등록부
 pub struct HostFile {
     pub gateway: HostConfig,
@@ -71,7 +74,7 @@ pub struct HostFile {
     /// 도구 호출 시간 한도의 천장(`limits` 절). 활성화 지문에 든다.
     pub limits: HostLimits,
     /// 프로필별 사설/로컬 고정 egress 매핑(`private_egress` 절). 비어 있지 않으면 활성화 지문에 든다.
-    pub private_egress: BTreeMap<String, BTreeMap<(String, u16), std::net::SocketAddr>>,
+    pub private_egress: PrivateEgressMap,
     /// 파일 없이 내장 데모로 만든 것인가
     pub demo: bool,
 }

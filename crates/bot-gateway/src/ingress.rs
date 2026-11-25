@@ -495,10 +495,7 @@ impl Ingress {
             tool: tool.clone(),
             args: JsonPayload(args),
         };
-        self.private
-            .receive(call)
-            .await
-            .map_err(private_rejection)
+        self.private.receive(call).await.map_err(private_rejection)
     }
 }
 

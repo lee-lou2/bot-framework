@@ -19,7 +19,9 @@ use bot_core::{
         PreapprovalRow, TriggerKey,
     },
     id::*,
-    intake::{DeliveryKey, DeliveryOutcome, Outbox, Outgoing, RequestKey, RequestState, RunProgress},
+    intake::{
+        DeliveryKey, DeliveryOutcome, Outbox, Outgoing, RequestKey, RequestState, RunProgress,
+    },
     ledger::{
         ApprovalState, CallLedger, CallRecord, Decision, FinishCall, OpenApproval, PrivateLedger,
         PrivateOutcome, PrivatePermit, PrivateRequest, PrivateStart, StartCall, StoredApproval,

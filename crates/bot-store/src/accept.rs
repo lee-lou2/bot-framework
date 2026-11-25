@@ -320,10 +320,8 @@ impl Store {
         );
         let mut active_agent = None;
         let mut active_tool = None;
-        let mut waiting_approval = root
-            .get::<Option<String>, _>("wait_kind")
-            .as_deref()
-            == Some("approval");
+        let mut waiting_approval =
+            root.get::<Option<String>, _>("wait_kind").as_deref() == Some("approval");
         if !terminal {
             // 가장 깊은 활성 자식 에이전트
             for r in rows.iter().rev() {

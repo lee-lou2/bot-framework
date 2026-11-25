@@ -1,5 +1,5 @@
 //! 호스트 등록부의 목록형 절(`models`·`egress`) 해석 도우미.
-use super::{HostFileError, bad};
+use super::{HostFileError, PrivateEgressMap, bad};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -44,13 +44,9 @@ pub(super) fn profile_map(
 }
 
 /// `private_egress`: 프로필 → `{ "host:port": "ip:port" }` (사설/로컬 고정 목적지 매핑).
-pub(super) fn private_egress_map(
-    value: &Value,
-) -> Result<BTreeMap<String, BTreeMap<(String, u16), std::net::SocketAddr>>, HostFileError> {
+pub(super) fn private_egress_map(value: &Value) -> Result<PrivateEgressMap, HostFileError> {
     let Value::Object(profiles) = value else {
-        return Err(bad(
-            "private_egress: 프로필 이름을 키로 하는 객체여야 해요",
-        ));
+        return Err(bad("private_egress: 프로필 이름을 키로 하는 객체여야 해요"));
     };
     profiles
         .iter()
