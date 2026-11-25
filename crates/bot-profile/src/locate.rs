@@ -40,9 +40,10 @@ fn below_root(root: &Path, dir: &Path) -> Option<PathBuf> {
     let absolute = std::path::absolute(dir).ok()?;
     let canonical = std::fs::canonicalize(root).ok()?;
     let given = std::path::absolute(root).ok()?;
+    // 준 루트를 먼저 본다: 정규 루트를 먼저 보면 `<정규 루트>/../<링크>/…`가 `..`로 시작하는 상대 경로로 잘린다
     let rel = absolute
-        .strip_prefix(&canonical)
-        .or_else(|_| absolute.strip_prefix(&given))
+        .strip_prefix(&given)
+        .or_else(|_| absolute.strip_prefix(&canonical))
         .ok()?;
     rel.components()
         .all(|part| matches!(part, Component::Normal(_)))

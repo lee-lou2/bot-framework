@@ -48,13 +48,14 @@ fn a_skill_folder_of_a_valid_profile_is_located_with_its_bytes() {
     let found =
         locate(&root, &root.path().join("personal/skills/shared")).expect("프로필 수준 스킬");
     assert_eq!(found.skill, "skills/shared");
-    // 심볼릭 루트(루트 자체가 링크)는 허용하고, 링크를 거친 경로와 실제 경로가 같은 곳을 가리킨다
-    let link = root
-        .path()
+    // 심볼릭 루트(루트 자체가 링크)는 허용하고, 링크를 거친 경로와 실제 경로가 같은 곳을 가리킨다.
+    // 링크 경로는 정규 루트를 지나 `..`로 나온다: 임시 폴더가 링크 밑인지(macOS)와 상관없이 같은 경우를 본다
+    let real = std::fs::canonicalize(root.path()).unwrap();
+    let link = real
         .join("..")
         .join(format!("loc-link-{}", std::process::id()));
     let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(root.path(), &link).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
     let via = locate_skill(&link, &link.join("personal/skills/shared"), &LIMITS());
     let _ = std::fs::remove_file(&link);
     assert_eq!(via.expect("링크된 루트").skill, "skills/shared");
