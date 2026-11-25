@@ -297,6 +297,7 @@ fn snapshot() -> Arc<Snapshot> {
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )
@@ -312,6 +313,7 @@ fn snapshot() -> Arc<Snapshot> {
             Adapter::SlackChannel {
                 workspace: "other".into(),
                 channel: "general".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )

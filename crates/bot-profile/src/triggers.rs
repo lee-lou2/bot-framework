@@ -111,6 +111,7 @@ fn parse_one(
     )?;
     let matches = parse_matches(obj.get("match"), path, at, issues);
     let input = parse_input(obj.get("input"), path, at, issues);
+    let declared = crate::approval::parse(obj, path, at, issues);
     (issues.error_count() == before).then(|| Trigger {
         id: text(obj, "id").to_owned(),
         on,
@@ -119,6 +120,8 @@ fn parse_one(
         private: obj.get("private").and_then(Value::as_bool).unwrap_or(false),
         matches,
         input,
+        preapproved: declared.preapproved,
+        human_approval: declared.human_approval,
     })
 }
 
@@ -159,17 +162,20 @@ fn parse_source(
             sync,
         });
     }
-    let event = text(on, "event");
-    if event != "message" {
-        issues.error_at(
-            "unsupported-event",
-            path,
-            format!("{at}/event"),
-            format!("지원하는 이벤트는 `message`예요: {event}"),
-        );
-        return None;
+    match text(on, "event") {
+        "message" => Some(Source::Message { binding }),
+        "thread-reply" => Some(Source::ThreadReply { binding }),
+        "reaction" => Some(Source::Reaction { binding }),
+        event => {
+            issues.error_at(
+                "unsupported-event",
+                path,
+                format!("{at}/event"),
+                format!("지원하는 이벤트는 `message`·`thread-reply`·`reaction`이에요: {event}"),
+            );
+            None
+        }
     }
-    Some(Source::Message { binding })
 }
 
 fn http_path_ok(route: &str) -> bool {
@@ -303,9 +309,18 @@ mod tests {
             ["bad-identity"]
         );
         assert_eq!(
-            run(base(json!({"on": {"event": "reaction", "binding": "b"}}))).1,
+            run(base(json!({"on": {"event": "edited", "binding": "b"}}))).1,
             ["unsupported-event"]
         );
+        // 스레드 답글·반응은 지원하는 사건이다(바인딩의 `events`와 맞는지는 resolve가 본다)
+        for event in ["thread-reply", "reaction"] {
+            assert!(
+                run(base(json!({"on": {"event": event, "binding": "b"}})))
+                    .1
+                    .is_empty(),
+                "{event}"
+            );
+        }
         assert_eq!(
             run(base(
                 json!({"on": {"http": {"method": "POST", "path": "/a/../b"}, "binding": "b"}})

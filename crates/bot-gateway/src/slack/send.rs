@@ -10,7 +10,7 @@ use super::{
     blocks::{
         PLAIN_LIMIT, card_blocks, card_fits, card_text, fits_block, markdown_block, neutralize,
     },
-    creds::Credentials,
+    creds::{BotCheck, Credentials},
 };
 use crate::{
     delivery::{Delivery, Sender},
@@ -20,6 +20,7 @@ use crate::{
 use bot_core::{
     intake::{NotSentReason, Outgoing},
     profile::{Adapter, Snapshot},
+    slack::{BotThread, BotThreads},
     state::ConversationKind,
 };
 use serde_json::{Value, json};
@@ -43,11 +44,71 @@ const UNKNOWN_ERRORS: [&str; 5] = [
 pub struct SlackSender {
     api: SlackApi,
     creds: Arc<Credentials>,
+    /// 확인된 게시를 «봇이 이 스레드에 참여했다»는 증거로 남기는 곳(F2 `thread_reply`). 없으면 남기지 않는다.
+    threads: Option<Arc<dyn BotThreads>>,
 }
 
 impl SlackSender {
     pub fn new(api: SlackApi, creds: Arc<Credentials>) -> Self {
-        Self { api, creds }
+        Self {
+            api,
+            creds,
+            threads: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_threads(mut self, threads: Arc<dyn BotThreads>) -> Self {
+        self.threads = Some(threads);
+        self
+    }
+
+    /// 채널에 확인된 게시(영수증)를 스레드 증거로 기록한다: 스레드 안의 회신이면 그 루트, 최상위 글이면 그 글 자신이 루트다(그 아래로 답글이 달린다).
+    /// 이미 보낸 뒤라 기록에 실패해도 발송 결과는 그대로이고, 그 스레드는 자기 봇 글 이벤트로 확인될 때까지 사람 답글을 받지 못한다.
+    async fn note_thread(
+        &self,
+        snapshot: &Snapshot,
+        item: &Outgoing,
+        (workspace, bot): (&str, &str),
+        (channel, thread): (&str, Option<&str>),
+        receipt: &str,
+    ) {
+        let Some(threads) = &self.threads else {
+            return;
+        };
+        let root = match thread {
+            Some(thread) => thread.to_owned(),
+            // 영수증은 `채널:ts`다(첨부는 `채널:파일ID`라 글 ts를 알 수 없다)
+            None => match receipt.split_once(':') {
+                Some((_, ts)) if is_ts(ts) => ts.to_owned(),
+                _ => return,
+            },
+        };
+        let Some(team) = self
+            .creds
+            .host()
+            .slack
+            .workspaces
+            .get(workspace)
+            .map(|ws| ws.team_id.clone())
+        else {
+            return;
+        };
+        let noted = threads
+            .note(BotThread {
+                profile: snapshot.id.clone(),
+                binding: item.binding.clone(),
+                team,
+                bot: bot.to_owned(),
+                channel: channel.to_owned(),
+                root_ts: root,
+            })
+            .await;
+        if noted.is_err() {
+            tracing::warn!(
+                "봇이 참여한 스레드를 기록하지 못했어요 — 사람 답글은 자기 봇 글 이벤트로 확인될 때까지 받지 않아요"
+            );
+        }
     }
 }
 
@@ -339,7 +400,12 @@ impl Sender for SlackSender {
         };
         let destination = &item.destination;
         let place = match (&binding.source, &destination.kind) {
-            (Adapter::SlackChannel { workspace, channel }, ConversationKind::Channel) => {
+            (
+                Adapter::SlackChannel {
+                    workspace, channel, ..
+                },
+                ConversationKind::Channel,
+            ) => {
                 let host = self.creds.host();
                 host.slack
                     .workspaces
@@ -374,23 +440,39 @@ impl Sender for SlackSender {
             if !sendable(body) {
                 return Delivery::Rejected;
             }
-            let Some(token) = self.creds.bot_token(&item.key.profile, workspace).await else {
-                // 자격을 읽지 못했다 — 아무것도 보내지 않았다
-                return Delivery::NotSent {
-                    reason: NotSentReason::BeforeWrite,
-                    retry_after: None,
-                };
+            let (token, bot) = match self.creds.check_bot(&item.key.profile, workspace).await {
+                BotCheck::Verified(token, auth) => (token, auth.user_id),
+                // 자격을 읽지 못했거나 확인하지 못했다 — 아무것도 보내지 않았다
+                _ => {
+                    return Delivery::NotSent {
+                        reason: NotSentReason::BeforeWrite,
+                        retry_after: None,
+                    };
+                }
             };
             // Slack API에는 채널 ID만 간다(정규 경로의 팀은 위에서 대조를 마쳤다)
             let channel = split_route(&item.destination.id)
                 .map_or(item.destination.id.as_str(), |(_, channel)| channel);
             let thread = item.destination.thread.as_deref();
-            match (body.attachments.is_empty(), &body.approval) {
+            let delivery = match (body.attachments.is_empty(), &body.approval) {
                 (true, _) => self.post(&token, channel, thread, body).await,
                 (false, None) => self.upload(&token, channel, thread, body).await,
                 // 승인 카드와 첨부는 한 회신에 함께 보내지 않는다(`sendable`이 이미 걸렀다)
                 (false, Some(_)) => Delivery::Rejected,
+            };
+            if let (Delivery::Sent { receipt }, ConversationKind::Channel) =
+                (&delivery, &item.destination.kind)
+            {
+                self.note_thread(
+                    snapshot,
+                    item,
+                    (workspace, &bot),
+                    (channel, thread),
+                    receipt,
+                )
+                .await;
             }
+            delivery
         })
     }
 }
@@ -399,160 +481,4 @@ mod card;
 pub use card::{CardPost, slack_user};
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    fn delivery(raw: Raw) -> Delivery {
-        match step(raw, |v| receipt_of("C1", v)) {
-            Step::Done(delivery) => delivery,
-            Step::Format => Delivery::Rejected,
-        }
-    }
-
-    #[test]
-    fn outcomes_follow_the_documented_classification() {
-        assert_eq!(
-            delivery(Raw::Ok(json!({"channel": "C1", "ts": "1.5"}))),
-            Delivery::Sent {
-                receipt: "C1:1.5".into()
-            }
-        );
-        // ok인데 영수증을 확인할 수 없으면 올라갔는지 알 수 없다: ts가 없거나 모양이 아니거나, 응답의 채널이 없거나 보낸 곳과 다르다
-        assert_eq!(delivery(Raw::Ok(json!({}))), Delivery::Held);
-        for reply in [
-            json!({"channel": "C1", "ts": ""}),
-            json!({"channel": "C1", "ts": "later"}),
-            json!({"channel": "C1"}),
-            json!({"ts": "1.5"}),
-            json!({"channel": "C2", "ts": "1.5"}),
-            json!({"channel": "c1", "ts": "1.5"}),
-            json!({"channel": 7, "ts": "1.5"}),
-        ] {
-            assert_eq!(delivery(Raw::Ok(reply.clone())), Delivery::Held, "{reply}");
-        }
-        assert_eq!(
-            delivery(Raw::Error("channel_not_found".into())),
-            Delivery::Rejected
-        );
-        assert_eq!(
-            delivery(Raw::Error("not_in_channel".into())),
-            Delivery::Rejected
-        );
-        assert_eq!(
-            delivery(Raw::Error("internal_error".into())),
-            Delivery::Held
-        );
-        assert_eq!(delivery(Raw::Unknown), Delivery::Held);
-        // 토큰을 Slack가 거절했다: 아무것도 실행되지 않았다 — 영구 거절이 아니라 다시 시도할 수 있는 미실행이다
-        assert_eq!(
-            delivery(Raw::TokenRejected),
-            Delivery::NotSent {
-                reason: NotSentReason::BeforeWrite,
-                retry_after: None
-            }
-        );
-        assert_eq!(
-            delivery(Raw::BeforeWrite),
-            Delivery::NotSent {
-                reason: NotSentReason::BeforeWrite,
-                retry_after: None
-            }
-        );
-        assert_eq!(
-            delivery(Raw::RateLimited(Duration::from_secs(9))),
-            Delivery::NotSent {
-                reason: NotSentReason::RateLimited,
-                retry_after: Some(Duration::from_secs(9))
-            }
-        );
-        for code in FORMAT_ERRORS {
-            assert!(
-                matches!(step(Raw::Error(code.into()), |_| None), Step::Format),
-                "{code}"
-            );
-        }
-    }
-
-    #[test]
-    fn thread_timestamps_must_look_like_slack_ts() {
-        for ok in ["1700000000.000100", "1.1", "123456789012.123456789"] {
-            assert!(is_ts(ok), "{ok}");
-        }
-        for bad in [
-            "",
-            "1",
-            ".1",
-            "1.",
-            "a.1",
-            "1.b",
-            "1.2.3",
-            "1234567890123.1",
-            "1.1234567890",
-            "1 .1",
-        ] {
-            assert!(!is_ts(bad), "{bad}");
-        }
-    }
-
-    #[test]
-    fn an_upload_receipt_needs_exactly_the_files_we_sent_with_nonempty_unique_ids() {
-        let receipt = |reply: Value, asked: &[&str]| files_receipt("C1", &reply, asked);
-        assert_eq!(
-            receipt(
-                json!({"files": [{"id": "F2"}, {"id": "F1", "title": "x"}]}),
-                &["F1", "F2"]
-            )
-            .as_deref(),
-            Some("C1:F1,F2")
-        );
-        for (reply, asked) in [
-            (json!({}), vec!["F1"]),
-            (json!({"files": []}), vec!["F1"]),
-            (json!({"files": [{"id": "F1"}]}), vec!["F1", "F2"]),
-            (
-                json!({"files": [{"id": "F1"}, {"id": "F9"}]}),
-                vec!["F1", "F2"],
-            ),
-            (json!({"files": [{"title": "no id"}]}), vec!["F1"]),
-            // 올린 것 외의 항목·ID 없는 항목·빈 ID·문자열이 아닌 ID·중복은 하나라도 있으면 확인할 수 없다
-            (
-                json!({"files": [{"id": "F1"}, {"id": "F2"}, {"id": "F3"}]}),
-                vec!["F1", "F2"],
-            ),
-            (
-                json!({"files": [{"id": "F1"}, {"title": "extra"}]}),
-                vec!["F1", "F2"],
-            ),
-            (json!({"files": [{"id": "F1"}, {}]}), vec!["F1"]),
-            (json!({"files": [{"id": ""}]}), vec![""]),
-            (
-                json!({"files": [{"id": "F1"}, {"id": "F1"}]}),
-                vec!["F1", "F1"],
-            ),
-            (
-                json!({"files": [{"id": "F1"}, {"id": "F1"}]}),
-                vec!["F1", "F2"],
-            ),
-            (json!({"files": [{"id": 1}]}), vec!["F1"]),
-        ] {
-            assert_eq!(receipt(reply.clone(), &asked), None, "{reply} {asked:?}");
-        }
-    }
-
-    #[test]
-    fn only_the_truncation_warning_holds_a_successful_post() {
-        let reply = |warnings: Value| json!({"ok": true, "channel": "C1", "ts": "1.5", "response_metadata": {"warnings": warnings}});
-        assert!(truncated(&reply(json!(["message_truncated"]))));
-        assert!(truncated(&reply(json!([
-            "missing_charset",
-            "message_truncated"
-        ]))));
-        assert!(!truncated(&reply(json!(["missing_charset"]))));
-        assert!(!truncated(&reply(json!([]))));
-        assert!(!truncated(
-            &json!({"ok": true, "channel": "C1", "ts": "1.5"})
-        ));
-        assert!(!truncated(&reply(json!("message_truncated"))));
-    }
-}
+mod tests;

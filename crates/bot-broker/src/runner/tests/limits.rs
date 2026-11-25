@@ -32,6 +32,38 @@ async fn results_that_leak_a_credential_or_have_an_odd_shape_are_blocked() {
     }
 }
 
+/// 실행기의 결과 파서를 거치면 표식과 함께 온 다른 `_meta` 항목은 내용 없이 표지(`bot/extra`)만 남는다: 브로커가 `invalid_pass`로 닫을 수 있다.
+#[tokio::test]
+async fn a_pass_marker_with_other_meta_reaches_the_broker_flagged_and_without_the_other_meta() {
+    let reply = |meta: Value| {
+        let server = Server::new(&[("delete", schema())]).replying(move || {
+            Answer::Result(json!({"content": [], "isError": false, "_meta": meta.clone()}))
+        });
+        rig(server, |_| {}, |_| {})
+    };
+    let ran = run(
+        &reply(json!({"bot/pass": true, "other": {"note": "무시되는 항목"}})),
+        job(decl(&[], &[], false), r#"{"event":"a"}"#),
+    )
+    .await;
+    let text = done_text(&ran);
+    assert_eq!(
+        text,
+        r#"{"_meta":{"bot/extra":true,"bot/pass":true},"content":[],"isError":false}"#
+    );
+    assert!(!text.contains("무시되는"), "다른 항목의 내용은 가지 않는다");
+    // 표식만 오면 표지 없이 그대로다
+    let ran = run(
+        &reply(json!({"bot/pass": true})),
+        job(decl(&[], &[], false), r#"{"event":"a"}"#),
+    )
+    .await;
+    assert_eq!(
+        done_text(&ran),
+        r#"{"_meta":{"bot/pass":true},"content":[],"isError":false}"#
+    );
+}
+
 #[tokio::test]
 async fn an_oversized_result_is_blocked_and_a_tool_that_leaks_the_proxy_url_is_caught() {
     let r = rig(

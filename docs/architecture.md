@@ -67,6 +67,7 @@ flowchart LR
 | 설정 | 용도와 기본값 |
 |---|---|
 | `sandbox.srt.binary`, `work_root` | 도구를 실행하는 역할은 고정된 srt와 읽기 전용 서버 설치본을 사용한다. 실행 파일과 작업 루트는 절대 경로다. |
+| `limits.tool_call_max_secs` | 선택 사항. 도구가 `timeout_secs`로 선언할 수 있는 호출 시간 한도(초)의 천장이다. 기본 60, 최대 900이다. 천장만 올려도 선언하지 않은 도구의 한도는 60초다. 값은 활성화 지문에 들어간다. [도구 호출 시간 한도](plugins.md#일반-호출) |
 | `sandbox.apple.image`, `sandbox.apple.network` | 모델 CLI 워커에 필요한 이미지 다이제스트와 호스트 전용 망 이름이다. 워커가 실행되는 동안 닻 VM이 이 망의 호스트 인터페이스를 유지한다. |
 | `sandbox.apple.relay_bind` | 선택 사항. 기본값은 닻 VM이 확인한 게이트웨이 IPv4 주소와 OS가 배정하는 빈 포트다. 지정한 주소는 그 게이트웨이 IP와 일치해야 한다. |
 | `sandbox.apple.work_root` | 선택 사항. 모델 작업 폴더의 절대 경로다. 워커 사용자만 접근하도록 준비한다(0700). 기본값은 도구 설치 폴더의 상위 디렉터리 아래 `work/models`다. |

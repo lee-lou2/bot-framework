@@ -19,6 +19,7 @@ use bot_core::{
     id::{ApprovalId, RequestId},
     ledger::ApprovalState,
     port::Error,
+    slack::{SlackSource, SourceKind},
     state::{Conversation, ConversationKind},
     trace::now_nano,
 };
@@ -52,6 +53,24 @@ pub fn strip_mention(text: &str, bot_user: &str) -> String {
     out.trim().to_owned()
 }
 
+/// 글에 봇 멘션(`<@봇>` 또는 `<@봇|이름>`)이 있는가(`strip_mention`이 떼는 것과 같은 모양).
+pub fn mentions_bot(text: &str, bot_user: &str) -> bool {
+    let open = format!("<@{bot_user}");
+    let mut rest = text;
+    while let Some(at) = rest.find(&open) {
+        let after = &rest[at + open.len()..];
+        if after.starts_with('>')
+            || after
+                .strip_prefix('|')
+                .is_some_and(|named| named.contains('>'))
+        {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
 const RETRY_NOTICE: &str = "지금은 처리하지 못했어요 — 잠시 뒤 다시 눌러 주세요";
 
 /// 버튼 클릭 처리 결과
@@ -83,7 +102,13 @@ impl SlackGateway {
     /// 받은 프레임을 처리하고 «ack해도 되는가»를 돌려준다.
     pub async fn on_frame(&self, install: &Installation, frame: Frame) -> bool {
         match frame {
+            // 멘션 이벤트(채널)는 `events`에 따라 가르고, DM은 그대로 접수한다
+            Frame::Message(message) if !message.direct => {
+                self.on_channel_message(install, message.into()).await
+            }
             Frame::Message(message) => self.on_message(install, message).await,
+            Frame::Post(post) => self.on_post(install, post).await,
+            Frame::Reaction(reaction) => self.on_reaction(install, reaction).await,
             Frame::Button(button) => self.on_button(install, button).await,
             _ => true,
         }
@@ -123,7 +148,7 @@ impl SlackGateway {
         let inbound = Inbound {
             real,
             principal,
-            request: RequestId(request),
+            request: RequestId(request.clone()),
             conversation: Conversation {
                 kind: if message.direct {
                     ConversationKind::Direct
@@ -146,8 +171,21 @@ impl SlackGateway {
             body: json!({"text": strip_mention(&message.text, &install.bot_user)}),
             event: Event::Message,
         };
+        // 인증된 이벤트 원천을 붙인다(일반 직접 트리거의 넘김·승인 증거용 — 민감 DM 트리거는 접수 전에 갈라져 원천을 쓰지 않는다)
+        let source = SlackSource {
+            kind: SourceKind::Message,
+            team: message.team,
+            channel: message.channel,
+            ts: message.ts,
+            thread_ts: message.thread_ts,
+            event_id: message.event_id.unwrap_or(request),
+            reaction: None,
+        };
         // 소유자를 확인한 바로 그 표로 접수한다(그 사이 입구 소유자가 바뀌어도 이 설치의 프로필 밖으로 새지 않는다)
-        self.ingress.admit_with(&routes, inbound).await.settled()
+        self.ingress
+            .admit_sourced(&routes, inbound, Some(source))
+            .await
+            .settled()
     }
 
     /// 버튼 클릭 한 건. 돌려주는 값은 «ack해도 되는가»다 — 판정이 커밋됐거나 영구적으로 처리할 수 없는 클릭만 ack하고,

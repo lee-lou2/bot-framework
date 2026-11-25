@@ -75,6 +75,8 @@ pub struct Http {
     next: u64,
     /// 도구 목록을 모으는 동안 서버가 `list_changed`를 알렸는가
     changed: AtomicBool,
+    /// 지금 보내는 `tools/call`의 전송 제한(호출 한도 + 여유). 다른 요청에는 싣지 않는다.
+    wire_timeout: Option<Duration>,
 }
 
 /// 서버가 말하는 판본들에 받아들이는 구판이 있는가.
@@ -97,6 +99,7 @@ impl Http {
             era: Era::Probe,
             next: 1,
             changed: AtomicBool::new(false),
+            wire_timeout: None,
         }
     }
 
@@ -209,6 +212,7 @@ impl Http {
             headers,
             body: body.into_bytes(),
             allow_private: self.allow_private,
+            timeout: self.wire_timeout,
         };
         self.wire.send(request).await.map_err(|fail| match fail {
             WireFail::Unreached => McpError::Unreached,
@@ -522,12 +526,16 @@ impl Http {
         limit: Duration,
     ) -> Result<Value, McpError> {
         let fields = format!("\"name\":{},\"arguments\":{arguments}", json_quote(name));
-        timeout(
+        // 전송은 호출 한도보다 조금 더 기다린다: 한도는 이쪽의 `timeout`이 먼저 정하고(`Unknown(timeout)`), 전송의 기본 무응답 제한(120초)이 긴 호출을 먼저 끊지 않게 한다
+        self.wire_timeout = Some(limit + AUX_LIMIT);
+        let result = timeout(
             limit,
             self.request("tools/call", &fields, meta, Some(name), params),
         )
         .await
-        .map_err(|_| McpError::Timeout)?
+        .map_err(|_| McpError::Timeout);
+        self.wire_timeout = None;
+        result?
     }
 
     /// (구판) 세션을 끝낸다. 서버가 허용하지 않아도(405) 상관없다. 결과와 무관한 정리라 실패는 무시한다.

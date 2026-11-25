@@ -9,14 +9,17 @@
 //!  "providers": {"assistant": {"kind": "demo"}},
 //!  "egress": {"personal": ["calendar.example:443"]},
 //!  "sandbox": {"srt": {"binary": "/opt/srt/bin/srt", "work_root": "/var/bot/work"}},
+//!  "limits": {"tool_call_max_secs": 300},
 //!  "admin": {"bind": "127.0.0.1:8787"}}
 //! ```
+//! `limits.tool_call_max_secs`: 도구가 `timeout_secs`로 선언할 수 있는 호출 시간 한도(초)의 천장(기본 60·최대 900, `crate::tool_limits`). 활성화 지문에 든다.
 //! `admin`은 관리 화면 설정(`bot_admin::AdminSettings`, docs/admin.md)이고 생략해도 로컬 기본값으로 동작한다.
 //! `providers`(모델 별칭의 실행 방법)·`sandbox`(srt·VM)는 모양만 검사한다 — 실제로 필요한 것은 런타임 역할이다(`execution`).
 //! 모르는 최상위 키는 거절한다. 파일이 없으면 내장 데모 호스트(`demo`)를 쓴다.
 use crate::{
     execution::{self, Provider, Sandbox},
     install::{ServerSpec, Servers, parse_all},
+    tool_limits::HostLimits,
 };
 use bot_admin::AdminSettings;
 use bot_broker::mcp::remote::Remote;
@@ -29,6 +32,10 @@ use std::{
     fmt,
     path::Path,
 };
+
+mod lists;
+
+use lists::{is_egress, profile_map};
 
 const MAX_BYTES: u64 = 1024 * 1024;
 
@@ -61,61 +68,10 @@ pub struct HostFile {
     pub providers: BTreeMap<String, Provider>,
     /// srt·VM 설정(런타임 역할이 쓴다)
     pub sandbox: Sandbox,
+    /// 도구 호출 시간 한도의 천장(`limits` 절). 활성화 지문에 든다.
+    pub limits: HostLimits,
     /// 파일 없이 내장 데모로 만든 것인가
     pub demo: bool,
-}
-
-fn name_list(value: &Value, path: &str) -> Result<BTreeSet<String>, HostFileError> {
-    let Value::Array(items) = value else {
-        return Err(bad(format!("{path}: 문자열 배열이어야 해요")));
-    };
-    items
-        .iter()
-        .map(|item| {
-            item.as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| bad(format!("{path}: 문자열 배열이어야 해요")))
-        })
-        .collect()
-}
-
-fn profile_map(
-    value: &Value,
-    path: &str,
-    check: fn(&str) -> bool,
-) -> Result<BTreeMap<String, BTreeSet<String>>, HostFileError> {
-    let Value::Object(map) = value else {
-        return Err(bad(format!(
-            "{path}: 프로필 이름을 키로 하는 객체여야 해요"
-        )));
-    };
-    map.iter()
-        .map(|(profile, list)| {
-            if !bot_core::id::is_name(profile) {
-                return Err(bad(format!("{path}: 프로필 이름이 올바르지 않아요")));
-            }
-            let items = name_list(list, &format!("{path}.{profile}"))?;
-            if !items.iter().all(|item| check(item)) {
-                return Err(bad(format!(
-                    "{path}.{profile}: 올바르지 않은 항목이 있어요"
-                )));
-            }
-            Ok((profile.clone(), items))
-        })
-        .collect()
-}
-
-/// `host:port` (소문자·숫자·`.`·`-`, 포트 1~5자리)
-fn is_egress(text: &str) -> bool {
-    let Some((host, port)) = text.rsplit_once(':') else {
-        return false;
-    };
-    !host.is_empty()
-        && host
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-'))
-        && (1..=5).contains(&port.len())
-        && port.bytes().all(|b| b.is_ascii_digit())
 }
 
 pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
@@ -149,6 +105,10 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         Some(value) => execution::parse_sandbox(&value).map_err(bad)?,
         None => Sandbox::default(),
     };
+    let limits = match top.remove("limits") {
+        Some(value) => crate::tool_limits::parse(&value).map_err(bad)?,
+        None => HostLimits::default(),
+    };
     let admin = match top.remove("admin") {
         Some(value) => AdminSettings::from_json(&value).map_err(bad)?,
         None => default_admin(),
@@ -157,24 +117,28 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         return Err(bad(format!("알 수 없는 최상위 키예요: {unknown}")));
     }
     Ok(HostFile {
-        catalog: catalog(
-            &gateway,
-            servers
-                .local
-                .keys()
-                .chain(servers.remote.keys())
-                .cloned()
-                .collect(),
-            &servers.remote,
-            models,
-            egress,
-        ),
+        catalog: HostCatalog {
+            tool_call_max_secs: Some(limits.tool_call_max_secs),
+            ..catalog(
+                &gateway,
+                servers
+                    .local
+                    .keys()
+                    .chain(servers.remote.keys())
+                    .cloned()
+                    .collect(),
+                &servers.remote,
+                models,
+                egress,
+            )
+        },
         gateway,
         admin,
         servers: servers.local,
         remote_servers: servers.remote,
         providers,
         sandbox,
+        limits,
         demo: false,
     })
 }
@@ -194,6 +158,8 @@ impl HostFile {
             &self.sandbox,
             revisions,
         );
+        // 도구 호출 시간 한도의 천장도 권한이다(천장을 바꾸면 활성화 사건). 기본 천장이면 지문이 그대로다.
+        let base = crate::tool_limits::bind(base, &self.limits);
         // 수집(OTLP) 설정도 권한이다: 어디로 무엇을(내용·식별자 표기·표본) 내보내는지가 바뀌거나 거두어지면 활성화 사건이라, 옛 설정으로 남은 프로세스가
         // 구판이 되어 그 프로세스의 내보내기 문이 닫힌다(`serve`가 `Exporter::set_gate`로 잇는다). 수집을 쓰지 않는 호스트는 지문이 그대로다.
         Ok(match bot_admin::trace::fingerprint(&self.admin.trace) {
@@ -306,6 +272,7 @@ fn catalog(
             })
             .collect(),
         egress,
+        tool_call_max_secs: None,
     }
 }
 
@@ -342,10 +309,13 @@ pub fn demo(uid: u32) -> HostFile {
         // 내장 데모: 데모 모델은 외부 키·VM이 필요 없다
         providers: BTreeMap::from([("assistant".to_owned(), Provider::Demo)]),
         sandbox: Sandbox::default(),
+        limits: HostLimits::default(),
         demo: true,
     }
 }
 
+#[cfg(test)]
+mod limits_tests;
 #[cfg(test)]
 mod trace_authority_tests;
 

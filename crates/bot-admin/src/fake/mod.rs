@@ -52,6 +52,9 @@ macro_rules! view_deref {
 view_deref!(OwnedCall, CallView);
 view_deref!(OwnedEffect, EffectView);
 
+/// 사전 승인 한 행과 마지막 전환 기록(직전 세대·정지 여부·승인 ID).
+pub type FakePreapproval = (bot_core::grant::PreapprovalRow, Option<(i64, bool, String)>);
+
 #[derive(Default)]
 pub struct Data {
     pub runs: Vec<RunView>,
@@ -67,6 +70,10 @@ pub struct Data {
     /// 같은 식별자로 같은 운영자·같은 판정이 다시 오면 새로 적용하지 않고 `Repeated`다.
     settled: Vec<Settled>,
     next_hold: u64,
+    /// 사전 승인 행과 정지 판정에 필요한 마지막 전환 기록(`bot_core::grant::decide_pause`).
+    pub preapprovals: Vec<FakePreapproval>,
+    /// 정지·재개로 쓴 감사 줄 수(중복 재전달은 늘지 않는다).
+    pub pause_audits: u64,
 }
 
 /// 열린 보류를 가리키는 키. 구판 데이터는 같은 프로필·run·호출 ID 아래 도구와 회신을 따로 보류할 수 있어 종류까지 넣는다.
@@ -530,6 +537,27 @@ impl Fake {
             d.calls.extend([del, list, publish]);
             d.effects.extend([upload, notify]);
             d.runs.extend([root, child, morning, held, dead, other]);
+            use bot_core::grant::PreapprovalRow;
+            let row = |agent: &str, trigger: &str, grant: &str, epoch, paused, used, max| {
+                (
+                    PreapprovalRow {
+                        profile: "personal".to_owned(),
+                        agent: agent.to_owned(),
+                        trigger: trigger.to_owned(),
+                        grant_id: grant.to_owned(),
+                        epoch,
+                        paused,
+                        used_today: used,
+                        max_per_day: max,
+                    },
+                    None,
+                )
+            };
+            // 동작 중 3/24와 정지됨 0/8(중첩 에이전트 ID `main/developer`는 경로에서 한 조각으로 인코딩해 온다)
+            d.preapprovals.extend([
+                row("main", "notify", "g-demo-notify", 0, false, 3, 24),
+                row("main/developer", "digest", "g-demo-digest", 1, true, 0, 8),
+            ]);
             let (owner, personal) = (pid("local:owner"), id(ProfileId, "personal"));
             d.log(
                 Some(&personal),

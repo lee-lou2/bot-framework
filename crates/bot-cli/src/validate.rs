@@ -326,6 +326,7 @@ pub async fn run(settings: &Settings) -> Result<(), String> {
     for line in report {
         println!("{line}");
     }
+    publication.print_grants();
     println!(
         "활성화 판본 {} (프로필 집합 + 호스트 권한 설정)",
         publication

@@ -314,6 +314,7 @@ async fn an_inactive_profile_is_left_alone_and_the_current_revision_is_checked()
             bot_core::profile::Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )

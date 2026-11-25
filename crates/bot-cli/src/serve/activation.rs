@@ -94,42 +94,72 @@ async fn commit_activation(
     prepared: &restore::Prepared,
 ) -> Result<bool, Commit> {
     let local = publication.revision.clone();
-    let profiles = publication.profiles.clone();
-    let seeds = publication.seeds.clone();
-    let schedules = publication.schedules.clone();
+    let grants = &publication.grants;
     let read = read_failed;
-    let (expected, wrote) = match plan {
+    let (mut expected, mut wrote) = match plan {
+        // 명시 활성화(`--activate`: 이때만 `publication.grants`가 비어 있지 않다)가 이미 게시된 같은 집합을 만났다: 아직 발급하지 않은 사전 승인(처음 게시를
+        // `--activate` 없이 했거나 자격 값이 바뀌었다)을 같은 판본으로 맞춰 발급한다. 이미 있는 승인은 ID 그대로다(`replace_granted`가 지문이 같으면 건너뛴다).
+        Activation::Join if !grants.is_empty() => (Some(local.clone()), false),
         // 쓰기는 없지만 역할을 열기 전에 참조가 맞아야 한다
         Activation::Join => return join(store, set, publication, prepared).await,
         Activation::Refuse(message) => return Err(message.into()),
         Activation::Publish => (None, true),
         Activation::Replace(expected) => (Some(expected), true),
     };
-    match store
-        .replace_prepared(
-            expected,
-            local.clone(),
-            profiles,
-            seeds,
-            schedules,
-            prepared.covered().clone(),
-        )
-        .await
-    {
-        Ok(()) => Ok(wrote),
-        Err(Error::Stale) => Err(Commit::Stale),
-        // 그 사이 다른 쪽이 게시했다 — 다시 읽어 같은 집합이면 합류하고 아니면 멈춘다.
-        // 합류도 준비한 목록과 지금의 필수 판본을 대조한다: 이 프로세스의 목록은 그 게시 전에 읽은 것이라, 그 뒤에 옛 프로세스가 접수한 옛 판본의 실행은 빠져 있을 수 있다
-        // (게시한 쪽은 `Stale`을 겪고 다시 준비해 복원했지만 이쪽은 아니다). 빠졌으면 `Stale`로 돌려 목록을 다시 준비한 뒤에만 연다.
-        Err(Error::Conflict) => match store.current().await.map_err(read)? {
-            Some(now) if now == local => join(store, set, publication, prepared).await,
-            _ => Err(String::from("그 사이 저장소의 활성 판본이 바뀌었어요 — 다시 시도하세요").into()),
-        },
-        Err(Error::Invalid) => Err(String::from(
-            "저장소가 판본·기억 시드·예약 정의를 받지 못했어요 — 활성 판본과 기억·예약은 바뀌지 않았어요",
-        )
-        .into()),
-        Err(other) => Err(format!("활성 판본을 게시하지 못했어요: {}", explain(other)).into()),
+    loop {
+        match store
+            .replace_granted(
+                expected.clone(),
+                local.clone(),
+                publication.profiles.clone(),
+                publication.seeds.clone(),
+                publication.schedules.clone(),
+                bot_core::grant::GrantPlan {
+                    prepared: prepared.covered().clone(),
+                    grants: grants.clone(),
+                },
+            )
+            .await
+        {
+            Ok(issued) => {
+                // 운영자가 명시적으로 활성화한 범위를 보여 준다(승인 ID는 감사에도 남았다). 자격 값은 어디에도 없다.
+                for (id, spec) in issued {
+                    eprintln!("사전 승인 발급 {} — {}", id.0, spec.scope_line());
+                }
+                return Ok(wrote);
+            }
+            Err(Error::Stale) => return Err(Commit::Stale),
+            // 그 사이 다른 쪽이 게시했다 — 다시 읽어 같은 집합이면 합류하고 아니면 멈춘다.
+            // 합류도 준비한 목록과 지금의 필수 판본을 대조한다: 이 프로세스의 목록은 그 게시 전에 읽은 것이라, 그 뒤에 옛 프로세스가 접수한 옛 판본의 실행은 빠져 있을 수 있다
+            // (게시한 쪽은 `Stale`을 겪고 다시 준비해 복원했지만 이쪽은 아니다). 빠졌으면 `Stale`로 돌려 목록을 다시 준비한 뒤에만 연다.
+            Err(Error::Conflict) => match store.current().await.map_err(read)? {
+                // 사전 승인이 없는 시작은 같은 집합에 그대로 합류한다
+                Some(now) if now == local && grants.is_empty() => {
+                    return join(store, set, publication, prepared).await;
+                }
+                // 명시 활성화가 첫 게시(또는 교체) 경합에 졌지만 이긴 쪽이 같은 집합이다 — 이긴 쪽이 `--activate`가 아니면 승인을 발급하지 않았다:
+                // 합류만 하지 않고 같은 판본으로 승인을 맞춰 발급한다(한 번만. 그 판본 확인이 또 어긋나면 아래에서 멈춘다).
+                Some(now) if now == local && expected.as_ref() != Some(&local) => {
+                    expected = Some(local.clone());
+                    wrote = false;
+                }
+                _ => {
+                    return Err(String::from(
+                        "그 사이 저장소의 활성 판본이 바뀌었어요 — 다시 시도하세요",
+                    )
+                    .into());
+                }
+            },
+            Err(Error::Invalid) => {
+                return Err(String::from(
+                    "저장소가 판본·기억 시드·예약 정의를 받지 못했어요 — 활성 판본과 기억·예약은 바뀌지 않았어요",
+                )
+                .into());
+            }
+            Err(other) => {
+                return Err(format!("활성 판본을 게시하지 못했어요: {}", explain(other)).into());
+            }
+        }
     }
 }
 

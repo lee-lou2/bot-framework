@@ -5,6 +5,7 @@
 //! 시험은 다중 스레드 런타임에서 돌린다: 오류로 일찍 끝난 트랜잭션의 되돌리기는 풀이 연결을 돌려받을 때 따로 도는 작업이 끝내는데, 단일 스레드면 `TestDb`를 지우는 동기 `psql`이 그 작업을 막아 스키마 삭제가 잠금에서 멈춘다.
 
 use super::*;
+use crate::serve::grants::{self, fixture};
 use bot_core::{
     command::{Accept, Envelope, JsonPayload, Target},
     id::*,
@@ -69,6 +70,15 @@ impl TestDb {
         let db = TestDb { base, name };
         db.connect().await.migrate().await.unwrap();
         Some(db)
+    }
+
+    /// 조회 한 값(`{s}`는 이 스키마 이름으로 바뀐다).
+    fn query(&self, sql: &str) -> String {
+        let out = Command::new("psql")
+            .args([&self.base, "-Atc", &sql.replace("{s}", &self.name)])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
     /// 이 스키마에 붙는 저장소 하나(호스트마다 따로 연다 — 연결 풀이 따로라 서로 다른 프로세스와 같다).
@@ -137,6 +147,7 @@ fn publication(set: &ProfileSet, revision: &str) -> Publication {
             .collect(),
         seeds: Vec::new(),
         schedules: BTreeMap::new(),
+        grants: Vec::new(),
     }
 }
 
@@ -355,4 +366,172 @@ async fn a_different_set_published_meanwhile_still_stops_the_start() {
     // 그 사이 다른 집합이 게시됐다: 합류가 아니므로 멈춘다(준비한 목록과 상관없다).
     let message = c.commit(&plan).await.unwrap_err();
     assert!(message.contains("활성 판본이 바뀌었어요"), "{message}");
+}
+
+/// 사전 승인(`preapproved`)을 선언한 프로필을 읽고 이번 실행(`explicit` = `--activate`)에 맞춘 호스트. 두 번째 값은 선언만 있고 발급하지 않은 승인 수다.
+async fn prepare_granted(
+    db: &TestDb,
+    root: &Path,
+    activation: &str,
+    explicit: bool,
+) -> (Host, usize) {
+    let store = db.connect().await;
+    let registry = Registry::new();
+    let set = fixture::load_into(&registry, root, fixture::NOTIFY);
+    let installed = BTreeMap::from([("demo-agenda".to_owned(), Revision("img-1".into()))]);
+    let mut publication = publication(&set, activation);
+    publication.grants = grants::grants_of(&set, &installed).unwrap();
+    let (publication, unissued) = publication.for_run(explicit);
+    let prepared = restore::prepare(
+        &store,
+        &registry,
+        &set,
+        &publication.profiles,
+        &Limits::default(),
+    )
+    .await
+    .unwrap();
+    let host = Host {
+        store,
+        registry,
+        set,
+        publication,
+        prepared,
+    };
+    (host, unissued)
+}
+
+impl Host {
+    /// 이 실행이 고를 활성화 계획과 확정 결과(`bot serve [--activate]`의 4단계와 같다).
+    async fn start(&mut self, explicit: bool) -> (Activation, bool) {
+        let plan = plan_activation(&self.store, &self.publication, explicit)
+            .await
+            .unwrap();
+        let wrote = self.commit(&plan).await.unwrap();
+        (plan, wrote)
+    }
+}
+
+const ACTIVE_GRANTS: &str = "select count(*) from {s}.bot_grants where state = 'active'";
+const ACTIVE_GRANT_ID: &str = "select id from {s}.bot_grants where state = 'active'";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plain_start_never_issues_a_grant_and_only_an_explicit_activation_does() {
+    let Some(db) = TestDb::open().await else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    // 빈 DB에서 `bot serve`(--activate 없음): 집합은 게시하지만 카드 없는 쓰기를 여는 승인은 발급하지 않는다
+    let (mut plain, unissued) = prepare_granted(&db, root.path(), "act-1", false).await;
+    assert_eq!(unissued, 1, "선언은 있고 발급하지 않았다");
+    assert_eq!(
+        plain.start(false).await,
+        (Activation::Publish, true),
+        "처음 게시"
+    );
+    assert_eq!(
+        db.query("select count(*) from {s}.bot_active_profiles"),
+        "1"
+    );
+    assert_eq!(
+        db.query(ACTIVE_GRANTS),
+        "0",
+        "첫 게시는 승인을 발급하지 않는다"
+    );
+    // 재시작·합류도 발급하지 않는다
+    let (mut again, _) = prepare_granted(&db, root.path(), "act-1", false).await;
+    assert_eq!(again.start(false).await, (Activation::Join, false));
+    assert_eq!(db.query(ACTIVE_GRANTS), "0");
+    // 같은 집합을 운영자가 `--activate`하면 지금 발급한다(새 판본을 게시한 것은 아니다)
+    let (mut explicit, unissued) = prepare_granted(&db, root.path(), "act-1", true).await;
+    assert_eq!(unissued, 0);
+    assert_eq!(explicit.start(true).await, (Activation::Join, false));
+    assert_eq!(db.query(ACTIVE_GRANTS), "1");
+    let id = db.query(ACTIVE_GRANT_ID);
+    assert_eq!(
+        db.query("select count(*) from {s}.bot_audit where action = 'preapproval.issue'"),
+        "1"
+    );
+    // 같은 `--activate`를 되풀이하거나 그냥 재시작해도 ID는 그대로다(발급·철회 감사도 늘지 않는다)
+    let (mut repeat, _) = prepare_granted(&db, root.path(), "act-1", true).await;
+    assert_eq!(repeat.start(true).await, (Activation::Join, false));
+    let (mut restart, _) = prepare_granted(&db, root.path(), "act-1", false).await;
+    assert_eq!(restart.start(false).await, (Activation::Join, false));
+    assert_eq!(db.query(ACTIVE_GRANT_ID), id);
+    assert_eq!(
+        db.query("select count(*) from {s}.bot_audit where action like 'preapproval.%'"),
+        "1"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_first_publish_issues_the_grant_in_the_same_commit() {
+    let Some(db) = TestDb::open().await else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let (mut first, unissued) = prepare_granted(&db, root.path(), "act-1", true).await;
+    assert_eq!(unissued, 0);
+    assert_eq!(first.start(true).await, (Activation::Publish, true));
+    assert_eq!(db.query(ACTIVE_GRANTS), "1");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_activation_that_loses_the_first_publish_race_to_the_same_set_still_issues_the_grant()
+ {
+    let Some(db) = TestDb::open().await else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    // 같은 빈 DB에서 그냥 시작과 `--activate`가 겹친다: 둘 다 «아직 게시된 적 없다»를 읽고 첫 게시를 계획했다
+    let (mut plain, _) = prepare_granted(&db, root.path(), "act-1", false).await;
+    let (mut explicit, _) = prepare_granted(&db, root.path(), "act-1", true).await;
+    let plan_plain = plan_activation(&plain.store, &plain.publication, false)
+        .await
+        .unwrap();
+    let plan_explicit = plan_activation(&explicit.store, &explicit.publication, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        (&plan_plain, &plan_explicit),
+        (&Activation::Publish, &Activation::Publish)
+    );
+    // 그냥 시작이 먼저 게시한다(승인 없음)
+    assert!(plain.commit(&plan_plain).await.unwrap());
+    assert_eq!(db.query(ACTIVE_GRANTS), "0");
+    // `--activate`는 CAS에 졌지만 이긴 쪽이 같은 집합이다: 합류만 하고 끝내지 않고 승인을 발급한다(새 판본을 게시한 것은 아니다)
+    assert!(!explicit.commit(&plan_explicit).await.unwrap());
+    assert_eq!(db.query(ACTIVE_GRANTS), "1");
+    assert_eq!(
+        db.query("select count(*) from {s}.bot_audit where action = 'preapproval.issue'"),
+        "1"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plain_start_that_loses_the_first_publish_race_to_an_explicit_one_leaves_the_grant_alone()
+{
+    let Some(db) = TestDb::open().await else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let (mut plain, _) = prepare_granted(&db, root.path(), "act-1", false).await;
+    let (mut explicit, _) = prepare_granted(&db, root.path(), "act-1", true).await;
+    let plan_plain = plan_activation(&plain.store, &plain.publication, false)
+        .await
+        .unwrap();
+    let plan_explicit = plan_activation(&explicit.store, &explicit.publication, true)
+        .await
+        .unwrap();
+    // `--activate`가 먼저 게시하며 승인을 발급한다
+    assert!(explicit.commit(&plan_explicit).await.unwrap());
+    let id = db.query(ACTIVE_GRANT_ID);
+    // 그냥 시작은 CAS에 지고 합류만 한다: 승인을 발급하지도 지우지도 않는다
+    assert!(!plain.commit(&plan_plain).await.unwrap());
+    assert_eq!(db.query(ACTIVE_GRANTS), "1");
+    assert_eq!(db.query(ACTIVE_GRANT_ID), id);
+    assert_eq!(
+        db.query("select count(*) from {s}.bot_audit where action like 'preapproval.%'"),
+        "1"
+    );
 }

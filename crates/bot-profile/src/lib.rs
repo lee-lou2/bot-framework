@@ -6,6 +6,7 @@
 //! 바깥에 내놓는 것: `load`/`Registry`(검증·교체·`ProfileCatalog`), `HostCatalog`, `Limits`, `Report`,
 //! `SchemaValidator`(`InputValidator`), `from_bundle`, `Registry::restore`(저장한 묶음에서 옛 판본 복원), `FsProfiles`(`ProfileSource`), `Cron`.
 mod activate;
+mod approval;
 mod assemble;
 mod build;
 mod convert;

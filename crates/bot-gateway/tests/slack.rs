@@ -78,6 +78,22 @@ async fn a_dm_threads_under_the_message_and_redelivery_is_one_request() {
     );
     assert_eq!(records[0].conversation, "direct:D1:1700000002.000200");
     assert_eq!(records[0].target, "agent main 질문");
+    // 인증된 이벤트 원천이 같이 간다(넘김·승인 증거의 기준): 두 번째 전달의 event_id가 아니라 처음 접수된 것이다
+    let source = records[0].source.as_ref().expect("DM 글의 원천");
+    assert_eq!(
+        (
+            source.kind,
+            source.channel.as_str(),
+            source.ts.as_str(),
+            source.event_id.as_str()
+        ),
+        (
+            bot_core::slack::SourceKind::Message,
+            "D1",
+            "1700000002.000200",
+            "Ev-E1"
+        )
+    );
 }
 
 #[tokio::test]
@@ -270,6 +286,7 @@ async fn each_profile_gets_its_own_socket_and_routes_only_its_own_bindings() {
         ts: "9.9".into(),
         thread_ts: None,
         files: vec!["F1".into()],
+        event_id: None,
     };
     // work 설치로 온 personal 채널(C1)의 글은 받았다는 표시만 하고 접수하지 않는다
     assert!(
@@ -299,6 +316,7 @@ async fn a_message_is_admitted_under_the_table_that_proved_its_owner() {
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )

@@ -28,6 +28,7 @@ fn tool(class: Risk, needs: &[&str], input: &str) -> Tool {
         destination: None,
         definition: None,
         mcp_name: None,
+        timeout_secs: None,
     }
 }
 
@@ -142,6 +143,7 @@ fn run_context(agent: &str, scope_list: &[&str], text: &str) -> RunContext {
             input: JsonPayload(json!({"text": text}).to_string()),
             attachments: vec![],
             steps: Vec::<Step>::new(),
+            pass_pos: None,
         },
         approver: None,
         trigger: None,

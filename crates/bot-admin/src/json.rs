@@ -19,6 +19,20 @@ pub fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// 사전 승인 한 행: 문자열 4개·정수 3개·불리언 1개(관리 화면과 계약).
+pub fn preapproval(row: &bot_core::grant::PreapprovalRow) -> Value {
+    json!({
+        "profile": row.profile,
+        "agent": row.agent,
+        "trigger": row.trigger,
+        "grant_id": row.grant_id,
+        "epoch": row.epoch,
+        "paused": row.paused,
+        "used_today": row.used_today,
+        "max_per_day": row.max_per_day,
+    })
+}
+
 pub fn ms(t: SystemTime) -> i64 {
     match t.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(d) => i64::try_from(d.as_millis()).unwrap_or(i64::MAX),

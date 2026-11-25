@@ -101,6 +101,7 @@ fn tool(t: &model::Tool) -> Tool {
         destination: t.destination.clone(),
         definition: t.definition.clone(),
         mcp_name: t.mcp_name.clone(),
+        timeout_secs: t.timeout_secs,
     }
 }
 
@@ -120,6 +121,14 @@ fn trigger(t: &model::Trigger) -> Trigger {
         Source::Message { binding } => TriggerSource::Event {
             binding: binding.clone(),
             event: "message".to_owned(),
+        },
+        Source::ThreadReply { binding } => TriggerSource::Event {
+            binding: binding.clone(),
+            event: "thread-reply".to_owned(),
+        },
+        Source::Reaction { binding } => TriggerSource::Event {
+            binding: binding.clone(),
+            event: "reaction".to_owned(),
         },
         Source::Http {
             method,
@@ -156,5 +165,7 @@ fn trigger(t: &model::Trigger) -> Trigger {
         input: t.input.clone(),
         private: t.private,
         target,
+        preapproved: t.preapproved.clone(),
+        human_approval: t.human_approval.clone(),
     }
 }

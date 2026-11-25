@@ -200,6 +200,11 @@ fn parse_tool(
         return None;
     }
     let flag = |key: &str| obj.get(key).and_then(Value::as_bool).unwrap_or(false);
+    // 호출 시간 한도(초): 스키마가 1~900의 정수만 받는다. 선언하지 않으면 `None`(기본 60초)이고 도구 판본도 그대로다.
+    let timeout_secs = obj
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .and_then(|secs| u32::try_from(secs).ok());
     let scopes = strings(obj.get("scopes"));
     let env = strings(obj.get("env"));
     let mut declared = json!({
@@ -225,6 +230,10 @@ fn parse_tool(
     if let Some(given) = &mcp_name {
         declared["name"] = json!(given);
     }
+    // 호출 시간 한도를 선언하면 판본에 든다: 한도를 바꾸면 도구 판본이 달라져 옛 승인이 새 한도에 쓰이지 않는다(선언하지 않은 도구의 판본은 그대로다)
+    if let Some(secs) = timeout_secs {
+        declared["timeout_secs"] = json!(secs);
+    }
     Some(Tool {
         id: ToolId(format!("{skill}.{name}")),
         name,
@@ -242,6 +251,7 @@ fn parse_tool(
         schema: Arc::new(schema?),
         definition,
         mcp_name,
+        timeout_secs,
     })
 }
 

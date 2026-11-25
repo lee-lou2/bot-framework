@@ -2,6 +2,7 @@
 //! 내부 `Fail`은 여기서 `Error`로 바뀐다(DB 오류는 `Unavailable`).
 
 use crate::{
+    active::Extra,
     audit,
     db::{Fail, Store},
 };
@@ -13,6 +14,10 @@ use bot_core::{
     },
     api::ApprovalBlock,
     command::*,
+    grant::{
+        Authority, Evidence, GrantCas, GrantId, GrantPlan, GrantSpec, Granted, PauseOutcome,
+        PreapprovalRow, TriggerKey,
+    },
     id::*,
     intake::{DeliveryKey, DeliveryOutcome, Outbox, Outgoing, RequestKey, RequestState},
     ledger::{
@@ -42,6 +47,10 @@ macro_rules! reply {
 impl RunStore for Store {
     fn accept(&self, command: Accept) -> Reply<'_, RunId> {
         reply!(self.accept_run(command))
+    }
+
+    fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId> {
+        reply!(self.accept_run_with(command, extras))
     }
 
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>> {
@@ -169,7 +178,15 @@ impl ActiveRevisions for Store {
         seeds: Vec<MemorySeed>,
         schedules: BTreeMap<ProfileId, Vec<TriggerSpec>>,
     ) -> Reply<'_, ()> {
-        reply!(self.replace_active(expected, next, profiles, seeds, schedules, None))
+        reply!(async move {
+            let extra = Extra {
+                prepared: None,
+                grants: &[],
+            };
+            self.replace_active(expected, next, profiles, seeds, schedules, extra)
+                .await
+                .map(|_| ())
+        })
     }
 
     fn replace_prepared(
@@ -182,7 +199,31 @@ impl ActiveRevisions for Store {
         prepared: std::collections::BTreeSet<(ProfileId, Revision)>,
     ) -> Reply<'_, ()> {
         reply!(async move {
-            self.replace_active(expected, next, profiles, seeds, schedules, Some(&prepared))
+            let extra = Extra {
+                prepared: Some(&prepared),
+                grants: &[],
+            };
+            self.replace_active(expected, next, profiles, seeds, schedules, extra)
+                .await
+                .map(|_| ())
+        })
+    }
+
+    fn replace_granted(
+        &self,
+        expected: Option<Revision>,
+        next: Revision,
+        profiles: BTreeMap<ProfileId, Revision>,
+        seeds: Vec<MemorySeed>,
+        schedules: BTreeMap<ProfileId, Vec<TriggerSpec>>,
+        plan: GrantPlan,
+    ) -> Reply<'_, Vec<(GrantId, GrantSpec)>> {
+        reply!(async move {
+            let extra = Extra {
+                prepared: Some(&plan.prepared),
+                grants: &plan.grants,
+            };
+            self.replace_active(expected, next, profiles, seeds, schedules, extra)
                 .await
         })
     }
@@ -239,12 +280,39 @@ impl CallLedger for Store {
         reply!(self.call_start(start))
     }
 
+    fn start_with(&self, start: StartCall, authority: Authority) -> Reply<'_, Granted> {
+        reply!(self.call_start_with(start, authority))
+    }
+
+    fn evidence(&self, attempt: Attempt) -> Reply<'_, Option<Evidence>> {
+        reply!(async move { self.call_evidence(&attempt).await })
+    }
+
     fn finish(&self, finish: FinishCall) -> Reply<'_, ()> {
         reply!(self.call_finish(finish))
     }
 
     fn finish_blocked(&self, finish: FinishCall, why: ApprovalBlock) -> Reply<'_, ()> {
         reply!(self.call_finish_with(finish, Some(why)))
+    }
+
+    fn finish_pass(
+        &self,
+        finish: FinishCall,
+        pos: u32,
+        runnable: std::collections::BTreeSet<AgentId>,
+    ) -> Reply<'_, bot_core::pass::PassNext> {
+        reply!(self.call_finish_pass(finish, pos, runnable))
+    }
+}
+
+impl bot_core::slack::BotThreads for Store {
+    fn note(&self, thread: bot_core::slack::BotThread) -> Reply<'_, ()> {
+        reply!(async move { self.thread_note(&thread).await })
+    }
+
+    fn known(&self, thread: bot_core::slack::BotThread) -> Reply<'_, bool> {
+        reply!(async move { self.thread_known(&thread).await })
     }
 }
 
@@ -350,6 +418,11 @@ impl AdminRead for Store {
         let viewer = viewer.clone();
         reply!(async move { self.admin_status(&viewer).await })
     }
+
+    fn preapprovals(&self, viewer: &Viewer) -> Reply<'_, Vec<PreapprovalRow>> {
+        let viewer = viewer.clone();
+        reply!(async move { self.admin_preapprovals(&viewer).await })
+    }
 }
 
 impl AdminAct for Store {
@@ -360,6 +433,16 @@ impl AdminAct for Store {
         verdict: HoldVerdict,
     ) -> Reply<'_, HoldDecision> {
         reply!(async move { self.resolve_hold_run(&actor, &hold, &verdict).await })
+    }
+
+    fn set_pause(
+        &self,
+        actor: PrincipalId,
+        key: TriggerKey,
+        cas: GrantCas,
+        pause: bool,
+    ) -> Reply<'_, PauseOutcome> {
+        reply!(async move { self.pause_run(&actor, &key, &cas, pause).await })
     }
 }
 

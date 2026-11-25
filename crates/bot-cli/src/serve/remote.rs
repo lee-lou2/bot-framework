@@ -6,6 +6,8 @@
 //!   예외는 `https`가 아닌 **루프백 IPv4 리터럴(127.0.0.0/8)** 하나뿐이다(전역 `allow_private`로 넓히지 않는다). IPv6 리터럴은 쓰지 않는다.
 //! - **판정한 호스트가 곧 연결하는 호스트다**: 요청을 `reqwest`가 쓰는 URL 파서로 한 번 풀어 호스트·포트·방식이 판정한 값과 글자 그대로 같을 때만 보낸다
 //!   (파서가 `0x7f000001`·`2130706433`·`127.1`을 127.0.0.1로 읽어 이름 풀이 검사를 건너뛰는 틈을 연결 전에 닫는다).
+//! - **긴 호출은 자기 제한을 가진다**: 요청이 `timeout`을 실으면(`tools/call`, 호출 한도 + 여유) 응답 머리·본문 조각 사이의 무응답 읽기 제한(120초) 대신 그 요청 전체의 제한을 쓴다 —
+//!   서버가 답을 늦게 주는 긴 비스트림 응답이 기본 제한에 먼저 끊기지 않는다. 연결을 맺기 전의 제한(이름 풀이·TCP·TLS, 5초)은 두 경우 모두 그대로다.
 //! - **숨은 재전송이 없다**: 리다이렉트(3xx는 상태 그대로)·재시도·연결 재사용·프록시·압축 해제를 모두 끈다.
 //! - 비밀 머리(`Authorization`)는 `sensitive`로 표시해 어떤 로그에도 값이 나가지 않게 한다. 실패는 분류만 남긴다.
 use bot_broker::{
@@ -29,7 +31,7 @@ use std::{
 
 /// 연결을 맺는 시간(브로커의 협상 한도보다 짧아야 «연결 전 실패»가 시간 초과로 가려지지 않는다)
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// 응답 머리·본문 조각 하나를 기다리는 시간. 호출 전체 시간은 브로커가 정한다.
+/// 응답 머리·본문 조각 하나를 기다리는 기본 시간. 호출 전체 시간은 브로커가 정하고, 긴 호출은 요청이 자기 제한(`WireRequest::timeout`)을 싣는다.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 이름 하나를 풀어 전체를 검사하고 검사한 주소 하나만 돌려준다. 비어 있거나 비공개 주소가 하나라도 있으면 `None`.
@@ -72,14 +74,30 @@ pub struct ReqwestWire {
     strict: Client,
     /// 운영자가 사설망을 명시적으로 연 클라이언트
     open: Client,
+    /// 요청이 자기 제한을 싣는 경우의 클라이언트들(무응답 읽기 제한이 없고 요청마다 전체 제한을 건다. 연결 제한은 같다)
+    strict_timed: Client,
+    open_timed: Client,
 }
 
 impl ReqwestWire {
     pub fn new(resolver: Arc<dyn Resolver>) -> Result<Self, String> {
-        let make = |allow_private| {
-            Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .read_timeout(READ_TIMEOUT)
+        Self::with_read_timeout(resolver, READ_TIMEOUT)
+    }
+
+    /// 기본 무응답 읽기 제한을 정해 만든다(시험이 짧은 값으로 «긴 호출은 기본 제한에 끊기지 않는다»를 확인하는 데 쓴다).
+    #[doc(hidden)]
+    pub fn with_read_timeout(
+        resolver: Arc<dyn Resolver>,
+        read_timeout: Duration,
+    ) -> Result<Self, String> {
+        let make = |allow_private, timed: bool| {
+            let builder = Client::builder().connect_timeout(CONNECT_TIMEOUT);
+            let builder = if timed {
+                builder
+            } else {
+                builder.read_timeout(read_timeout)
+            };
+            builder
                 .pool_max_idle_per_host(0)
                 .retry(reqwest::retry::never())
                 .redirect(Policy::none())
@@ -96,8 +114,10 @@ impl ReqwestWire {
                 })
         };
         Ok(Self {
-            strict: make(false)?,
-            open: make(true)?,
+            strict: make(false, false)?,
+            open: make(true, false)?,
+            strict_timed: make(false, true)?,
+            open_timed: make(true, true)?,
         })
     }
 }
@@ -170,10 +190,11 @@ impl RemoteWire for ReqwestWire {
                 value.set_sensitive(*secret);
                 headers.append(name, value);
             }
-            let client = if request.allow_private {
-                &self.open
-            } else {
-                &self.strict
+            let client = match (request.allow_private, request.timeout.is_some()) {
+                (false, false) => &self.strict,
+                (true, false) => &self.open,
+                (false, true) => &self.strict_timed,
+                (true, true) => &self.open_timed,
             };
             let Some(url) = url_of(&request) else {
                 return Err(WireFail::Unreached);
@@ -181,6 +202,10 @@ impl RemoteWire for ReqwestWire {
             let builder = match request.method {
                 WireMethod::Post => client.post(url).body(request.body),
                 WireMethod::Delete => client.delete(url),
+            };
+            let builder = match request.timeout {
+                Some(limit) => builder.timeout(limit),
+                None => builder,
             };
             let response = builder
                 .headers(headers)
@@ -283,6 +308,7 @@ mod tests {
             headers: Vec::new(),
             body: Vec::new(),
             allow_private: false,
+            timeout: None,
         };
         let same = url_of(&request("api.example", true)).unwrap();
         assert_eq!(same.as_str(), "https://api.example:8443/mcp?a=1");

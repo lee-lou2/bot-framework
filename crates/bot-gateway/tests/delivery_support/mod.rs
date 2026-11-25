@@ -7,7 +7,7 @@ use bot_gateway::{
     ingress::Ingress,
     slack::{SlackGateway, api::SlackApi},
     testing::{
-        ports::{MemoryBroker, MemoryLedger, MemoryOutbox, outgoing},
+        ports::{MemoryBroker, MemoryLedger, MemoryOutbox, MemoryThreads, outgoing},
         slack::FakeSlack,
         *,
     },
@@ -24,6 +24,8 @@ pub struct Rig {
     pub outbox: Arc<MemoryOutbox>,
     pub deliverer: Arc<Deliverer>,
     pub catalog: Arc<TestCatalog>,
+    /// 봇 참여 스레드 증거(확인된 게시가 여기에 남는다)
+    pub threads: Arc<MemoryThreads>,
     gateway: Arc<SlackGateway>,
     ingress: Arc<Ingress>,
 }
@@ -88,13 +90,15 @@ async fn build(
         MemoryPrivate::new(),
     ));
     let api = SlackApi::new(Some(base.unwrap_or(&slack.base)));
+    let threads = MemoryThreads::new();
     let mut gateway = SlackGateway::new(
         ingress.clone(),
         MemoryBroker::new(),
         MemoryLedger::new(),
         secrets,
         api,
-    );
+    )
+    .with_threads(threads.clone());
     if let Some(ttl) = ttl {
         gateway = gateway.with_token_ttl(ttl);
     }
@@ -108,6 +112,7 @@ async fn build(
         outbox,
         deliverer,
         catalog,
+        threads,
         gateway: Arc::new(gateway),
         ingress,
     }

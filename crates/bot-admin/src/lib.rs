@@ -13,6 +13,7 @@ pub mod fence;
 pub mod json;
 pub mod map;
 pub mod port;
+pub mod preapproval;
 pub mod resp;
 pub mod settings;
 pub mod trace;
@@ -241,6 +242,15 @@ pub fn router(cfg: AdminConfig, deps: AdminDeps) -> Option<Router> {
         .route(
             "/v1/admin/holds/{profile}/{run}/{call}/resolve",
             post(api::resolve),
+        )
+        .route("/v1/admin/preapprovals", get(preapproval::list))
+        .route(
+            "/v1/admin/preapprovals/{profile}/{agent}/{trigger}/pause",
+            post(preapproval::pause),
+        )
+        .route(
+            "/v1/admin/preapprovals/{profile}/{agent}/{trigger}/resume",
+            post(preapproval::resume),
         )
         .route("/v1/admin/audit", get(api::audit))
         .route("/v1/admin/audit/verify", get(api::audit_verify))

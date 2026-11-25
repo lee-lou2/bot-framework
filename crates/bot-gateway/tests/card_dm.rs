@@ -337,6 +337,7 @@ async fn a_post_that_slack_refused_for_a_reason_is_unavailable_and_an_unclear_on
         let shown: Value = match &reply {
             Scripted::Json(value) => value.clone(),
             Scripted::Raw { status, body, .. } => json!({"http": status, "body": body}),
+            Scripted::Delayed { body, .. } => body.clone(),
         };
         let (got, posts) = posted_with(reply).await;
         assert_eq!((got, posts), (CardPost::Held, 1), "{shown}");

@@ -4,7 +4,10 @@
 //! 모델 CLI는 예외다: 상류 목적지가 바로 호스트 설정이므로 이미 집은 시도라도 **상류로 나가는 모든 요청 직전**에 같은 판본인지 확인하고
 //! 열린 스트림도 주기적으로 다시 확인해 끊는다(`GuardedUpstream`).
 use bot_core::{
-    command::{Accept, Beat, CallResult, Failure, Finish, Retry, RunOutcome, Step, ToolCall, Turn},
+    command::{
+        Accept, AcceptExtras, Beat, CallResult, Failure, Finish, Retry, RunOutcome, Step, ToolCall,
+        Turn,
+    },
     id::{ApprovalId, Attempt, PrincipalId, RunId},
     intake::{RequestKey, RequestState},
     port::{Broker, Error, Reply, RunStore},
@@ -86,6 +89,11 @@ impl GuardedRuns {
 impl RunStore for GuardedRuns {
     fn accept(&self, command: Accept) -> Reply<'_, RunId> {
         self.inner.accept(command)
+    }
+
+    /// 인증된 원천·넘김 사슬을 덧붙인 접수도 그대로 넘긴다(기본 구현은 덧붙인 것을 버려, 빠지면 사슬이 조용히 사라진다).
+    fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId> {
+        self.inner.accept_with(command, extras)
     }
 
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>> {

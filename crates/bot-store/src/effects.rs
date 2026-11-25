@@ -72,12 +72,67 @@ async fn lock_effect(
     .await?)
 }
 
+/// 사전 승인 호출의 새 쓰기 허가를 확인한다. 거절 사유(고정 낱말)가 있으면 돌려준다. 승인 없는 호출은 늘 통과한다.
+async fn write_refused(
+    tx: &mut crate::db::Tx<'_>,
+    granted: &Option<(String, i64)>,
+    args: &JsonPayload,
+) -> R<Option<crate::authority::Refused>> {
+    let Some((grant, epoch)) = granted else {
+        return Ok(None);
+    };
+    Ok(crate::authority::permit_write(tx, grant, *epoch, args)
+        .await?
+        .err())
+}
+
+/// 감사 판정: 사전 승인 호출이면 승인 ID를 덧붙인다(영수증과 같은 줄에서 짝을 지어 볼 수 있다).
+fn granted_verdict(step: &str, granted: &Option<(String, i64)>) -> String {
+    granted
+        .as_ref()
+        .map_or_else(|| step.to_owned(), |(id, _)| format!("{step};grant={id}"))
+}
+
+/// 새 쓰기 허가를 거절한다: 감사 한 줄만 커밋하고(사용량·효과 행 0) 호출자에게는 wire 분류 오류다
+/// (대상 밖·한도·정지 = denied, 철회·교체·옛 세대 = stale, 형식 오류 = invalid).
+async fn refuse(
+    mut tx: crate::db::Tx<'_>,
+    profile: &str,
+    principal: &str,
+    step: &str,
+    digest: [u8; 32],
+    why: crate::authority::Refused,
+) -> R<EffectPermit> {
+    let mut entry = Entry::new(principal, "effect.refuse", step, why.reason());
+    entry.args = Some(digest);
+    audit::append(&mut tx, profile, &entry).await?;
+    tx.commit().await?;
+    Err(why.error().into())
+}
+
 impl Store {
     pub(crate) async fn effect_request(&self, r: EffectRequest) -> R<EffectPermit> {
         ids_ok(&[&r.call.0, &r.step])?;
         let digest = args_digest(&r.args)?;
         let at = &r.attempt;
         let mut tx = self.pool.begin().await?;
+        // 사전 승인(F1) 호출이면 활성 집합을 먼저 공유 잠금한다(잠금 순서: 활성 집합 → run → 호출 → 효과 → 승인 → 정지 → 사용 → 감사).
+        // 승인 ID는 호출을 시작할 때 한 번 기록되고 바뀌지 않는다.
+        let granted: Option<(String, i64)> = sqlx::query(
+            "select grant_id, grant_epoch from bot_calls where profile = $1 and run = $2 and call = $3",
+        )
+        .bind(&at.profile.0)
+        .bind(&at.run.0)
+        .bind(&r.call.0)
+        .fetch_optional(&mut *tx)
+        .await?
+        .and_then(|row| row.get::<Option<String>, _>("grant_id").zip(row.get::<Option<i64>, _>("grant_epoch")));
+        if granted.is_some() {
+            sqlx::query("select 1 from bot_active where singleton for share")
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(Error::Stale)?;
+        }
         let run = fence(&mut tx, at).await?;
         // 단계는 지금 실행 중인(이 세대가 시작한) 호출 안에서만 만들 수 있다
         let call = lock_call(&mut tx, at, &r.call).await?;
@@ -93,9 +148,13 @@ impl Store {
                 .await?;
         let permit = match lock_effect(&mut tx, at, &r.call, &r.step).await? {
             None => {
+                // 새 외부 쓰기 허가: 사전 승인 호출이면 승인·정지·허용 쌍·하루 한도를 같은 커밋에서 확인하고 사용량을 올린다
+                if let Some(refused) = write_refused(&mut tx, &granted, &r.args).await? {
+                    return refuse(tx, &run.profile, &principal, &r.step, digest, refused).await;
+                }
                 let id: String = sqlx::query_scalar(
-                    "insert into bot_effects (profile, id, run, call, step, args_sha256, generation)
-                     values ($1, 'e-' || gen_random_uuid()::text, $2, $3, $4, $5, $6) returning id",
+                    "insert into bot_effects (profile, id, run, call, step, args_sha256, generation, grant_id)
+                     values ($1, 'e-' || gen_random_uuid()::text, $2, $3, $4, $5, $6, $7) returning id",
                 )
                 .bind(&run.profile)
                 .bind(&run.id)
@@ -103,9 +162,11 @@ impl Store {
                 .bind(&r.step)
                 .bind(digest.as_slice())
                 .bind(at.generation.0 as i64)
+                .bind(granted.as_ref().map(|(id, _)| id.as_str()))
                 .fetch_one(&mut *tx)
                 .await?;
-                let mut entry = Entry::new(&principal, "effect.start", &id, &r.step);
+                let verdict = granted_verdict(&r.step, &granted);
+                let mut entry = Entry::new(&principal, "effect.start", &id, &verdict);
                 entry.args = Some(digest);
                 audit::append(&mut tx, &run.profile, &entry).await?;
                 EffectPermit {
@@ -120,6 +181,13 @@ impl Store {
             }
             Some(row) => {
                 if row.get::<Vec<u8>, _>("args_sha256") != digest {
+                    // 같은 유효한 승인 안에서만 충돌이다: 철회·교체·옛 세대의 승인은 먼저 낡았다고 알린다
+                    if let Some((grant, epoch)) = &granted
+                        && crate::authority::stale(&mut tx, grant, *epoch).await?
+                    {
+                        let stale = crate::authority::Refused::Stale;
+                        return refuse(tx, &run.profile, &principal, &r.step, digest, stale).await;
+                    }
                     return Err(Error::Conflict.into());
                 }
                 let id: String = row.get("id");
@@ -158,20 +226,27 @@ impl Store {
                             && row.get::<Option<String>, _>("resolution").as_deref()
                                 == Some("not_executed") =>
                     {
-                        // 운영자가 미실행을 입증했다: 같은 호출·같은 단계를 현재 세대로 다시 보낸다
+                        // 운영자가 미실행을 입증했다: 같은 호출·같은 단계를 현재 세대로 다시 보낸다(사전 승인 호출이면 새 허가로 센다)
+                        if let Some(refused) = write_refused(&mut tx, &granted, &r.args).await? {
+                            return refuse(tx, &run.profile, &principal, &r.step, digest, refused)
+                                .await;
+                        }
                         sqlx::query(
-                            "update bot_effects set state = 'started', generation = $3, reason = null, resolution = null, updated_ms = bot_now_ms()
+                            "update bot_effects set state = 'started', generation = $3, reason = null, resolution = null, updated_ms = bot_now_ms(),
+                                    grant_id = coalesce($4, grant_id)
                              where profile = $1 and id = $2",
                         )
                         .bind(&run.profile)
                         .bind(&id)
                         .bind(at.generation.0 as i64)
+                        .bind(granted.as_ref().map(|(id, _)| id.as_str()))
                         .execute(&mut *tx)
                         .await?;
+                        let verdict = granted_verdict(&r.step, &granted);
                         audit::append(
                             &mut tx,
                             &run.profile,
-                            &Entry::new(&principal, "effect.restart", &id, &r.step),
+                            &Entry::new(&principal, "effect.restart", &id, &verdict),
                         )
                         .await?;
                         EffectPermit {

@@ -79,6 +79,7 @@ impl BrokerService {
         flow: &Flow,
         class: &Class,
         approval: Option<(Approval, Vec<String>)>,
+        authority: Option<bot_core::grant::Authority>,
     ) -> Result<CallResult, Error> {
         let owner = format!(
             "{}.{}.{}",
@@ -88,19 +89,24 @@ impl BrokerService {
         // (같은 호출 ID로 다시 들어오면 새 판본으로 다시 판정한다) 실행기도 부르지 않는다.
         // 재확인과 커밋 사이의 틈은 원장이 `checked_revision`으로 같은 잠금에서 닫는다.
         self.still_current_local(flow)?;
-        self.parts
-            .ledger
-            .start(StartCall {
-                checked_revision: flow.snapshot.revision.clone(),
-                risk: class.risk,
-                tool_revision: flow.resolved.tool.revision.clone(),
-                attempt: flow.attempt.clone(),
-                call: flow.call.clone(),
-                approval,
-                private_recall: flow.ctx.private_memory_read,
-                owner: owner.clone(),
-            })
-            .await?;
+        let start = StartCall {
+            checked_revision: flow.snapshot.revision.clone(),
+            risk: class.risk,
+            tool_revision: flow.resolved.tool.revision.clone(),
+            attempt: flow.attempt.clone(),
+            call: flow.call.clone(),
+            approval,
+            private_recall: flow.ctx.private_memory_read,
+            owner: owner.clone(),
+        };
+        match authority {
+            None => self.parts.ledger.start(start).await?,
+            // 사전 승인·사람 증거는 시작 커밋 안에서 한 번 더 확인한다. 어긋나면 시작하지 않고 고정 사유로 닫는다
+            Some(authority) => match self.parts.ledger.start_with(start, authority).await? {
+                bot_core::grant::Granted::Started => {}
+                bot_core::grant::Granted::Refused(why) => return self.deny(flow, why).await,
+            },
+        }
         let reply_to = matches!(flow.resolved.tool.destination, Some(Destination::Reply))
             .then(|| flow.ctx.conversation.clone());
         let job = ToolJob {
@@ -127,6 +133,13 @@ impl BrokerService {
                     self.finish(flow, Outcome::Held("effects_unresolved".into()))
                         .await?;
                     return Ok(CallResult::Held(flow.call.clone()));
+                }
+                // «처리하지 않음» 표식(`_meta["bot/pass"]`)은 늘 떼어 낸다. 직접 트리거의 현재 후보 호출이면 해석해 넘기고, 그 밖의 호출은 표식이 없던 것과 같다.
+                let (payload, marker) = super::pass::split(&payload);
+                if let (Some(marker), Some(pos)) = (marker, Self::pass_position(flow)) {
+                    return self
+                        .finish_with_pass(flow, class, payload, marker, pos)
+                        .await;
                 }
                 // 모델이 보는 결과에서 후속 확인 요청(`_meta["bot/wake"]`)은 늘 떼어 낸다. 요청이 있으면 결과와 한 커밋으로 예약한다.
                 let extracted = super::wake::extract(&payload, self.parts.clock.now());

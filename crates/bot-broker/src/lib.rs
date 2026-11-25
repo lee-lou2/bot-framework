@@ -19,6 +19,7 @@ pub mod lines;
 pub mod mcp;
 pub mod model;
 pub mod ports;
+pub mod preapproval;
 pub mod private;
 pub mod proxy;
 pub mod rate;

@@ -10,12 +10,20 @@ use crate::{
 };
 use bot_core::{
     command::{MemorySeed, ScheduleSet, TriggerSpec},
+    grant::{GrantId, GrantSpec},
     id::*,
     port::Error,
 };
 
 use crate::db::Tx;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// 게시와 함께 받는 선택 입력: 준비한 목록 대조(없으면 대조하지 않는다)와 사전 승인 범위.
+#[derive(Clone, Copy)]
+pub(crate) struct Extra<'a> {
+    pub prepared: Option<&'a BTreeSet<(ProfileId, Revision)>>,
+    pub grants: &'a [GrantSpec],
+}
 
 impl Store {
     /// 마지막에 게시된 전체 집합의 판본. 첫 게시 전(행이 없거나 빈 글)에는 None이다.
@@ -39,8 +47,9 @@ impl Store {
         profiles: BTreeMap<ProfileId, Revision>,
         seeds: Vec<MemorySeed>,
         schedules: BTreeMap<ProfileId, Vec<TriggerSpec>>,
-        prepared: Option<&BTreeSet<(ProfileId, Revision)>>,
-    ) -> R<()> {
+        extra: Extra<'_>,
+    ) -> R<Vec<(GrantId, GrantSpec)>> {
+        let Extra { prepared, grants } = extra;
         ids_ok(&[&next.0])?;
         if profiles.iter().any(|(p, r)| !id_ok(&p.0) || !id_ok(&r.0)) {
             return invalid();
@@ -128,6 +137,8 @@ impl Store {
             };
             sync_in(&mut tx, &empty, now).await?;
         }
+        // 사전 승인: 지문이 같으면 ID를 이어 가고, 바뀌었거나 사라졌으면 철회하며(되살아나지 않는다), 처음이거나 바뀌었으면 새 ID를 발급한다(감사 head 잠금보다 먼저)
+        let (issued, grant_notes) = crate::grants::sync_in(&mut tx, grants, &profiles).await?;
         // 시드는 감사 head 잠금보다 먼저 넣는다(잠금 순서). 새로 들어간 것만 감사에 남긴다
         let mut fresh = Vec::new();
         for seed in &seeds {
@@ -146,6 +157,9 @@ impl Store {
         for seed in fresh {
             audit::append(&mut tx, &seed.profile.0, &seed_audit(seed)).await?;
         }
+        for note in &grant_notes {
+            note.write(&mut tx).await?;
+        }
         for gone in removed
             .iter()
             .filter(|p| !profiles.contains_key(&ProfileId((*p).clone())))
@@ -158,7 +172,7 @@ impl Store {
             .await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(issued)
     }
 }
 

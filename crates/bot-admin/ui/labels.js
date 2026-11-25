@@ -18,7 +18,7 @@
   const CALL_ERROR = { denied: "거절됨", timeout: "시간 초과", invalid_result: "결과 형식 오류", outcome_unknown: "결과를 알 수 없음", execution_failed: "실행 실패" };
   const HOLD_REASON = { outcome_unknown: "결과를 알 수 없음", unknown_outcome: "결과를 알 수 없음", owner_lost: "이전 실행 결과 미확인", no_evidence: "실행 여부를 가릴 증거 없음" };
   const CONVERSATION = { direct: "직접 대화", channel: "채널", cli: "CLI", http: "HTTP", scheduled: "예약" };
-  const AUDIT_ACTION = { "approval.decide": "승인 판정", "hold.resolve": "보류 판정", "profile.activate": "프로필 활성화", "tool.call": "도구 호출" };
+  const AUDIT_ACTION = { "approval.decide": "승인 판정", "hold.resolve": "보류 판정", "profile.activate": "프로필 활성화", "tool.call": "도구 호출", "preapproval.pause": "사전 승인 정지", "preapproval.resume": "사전 승인 재개" };
   const AUDIT_VERDICT = { allow: ["허용", "ok", "on"], deny: ["거절", "off", "off"], ok: ["정상", "ok", "on"], confirmed: ["처리됨 확인", "ok", "on"], not_executed: ["미실행 확인", "warn", "held"] };
 
   const fromTable = (t) => (key) => { const m = t[key]; return m ? pill(m[0], m[1], m[2]) : pill(key === null || key === undefined || key === "" ? "-" : "기타", "off"); };

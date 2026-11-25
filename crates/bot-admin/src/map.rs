@@ -331,9 +331,9 @@ pub fn cards(s: &Snapshot) -> Vec<Card> {
     for (bid, b) in &s.bindings {
         let (adapter, detail) = match &b.source {
             Adapter::Cli { account } => ("cli", format!("account {account}")),
-            Adapter::SlackChannel { workspace, channel } => {
-                ("slack", format!("{workspace} #{channel}"))
-            }
+            Adapter::SlackChannel {
+                workspace, channel, ..
+            } => ("slack", format!("{workspace} #{channel}")),
             Adapter::SlackDm { workspace } => ("slack", format!("{workspace} dm")),
             Adapter::Http { endpoint } => ("http", format!("endpoint {endpoint}")),
             Adapter::OpenAi {

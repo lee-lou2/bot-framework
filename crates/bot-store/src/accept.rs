@@ -7,7 +7,7 @@ use crate::{
     db::{R, Store, Tx},
 };
 use bot_core::{
-    command::{Accept, HttpRoute},
+    command::{Accept, AcceptExtras, HttpRoute},
     id::*,
     intake::{RequestKey, RequestState},
     port::Error,
@@ -141,18 +141,38 @@ pub(crate) async fn insert_run(
 impl Store {
     /// 접수한다. 같은 키·같은 입력 해시는 기존 run, 다른 해시는 `Conflict`다.
     pub(crate) async fn accept_run(&self, a: Accept) -> R<RunId> {
+        self.accept_run_with(a, AcceptExtras::default()).await
+    }
+
+    /// `accept_run`과 같되 어댑터가 덧붙인 것을 새 접수에만 같은 커밋에 남긴다: 넘김 사슬(F3)의 사슬과 커서, 인증된 원천(F4 증거).
+    /// 덧붙일 것이 없으면 `accept_run`과 같다. 중복 재전달은 최초 접수의 run으로 수렴한다(덧붙인 것은 최초 것이다).
+    pub(crate) async fn accept_run_with(&self, a: Accept, extras: AcceptExtras) -> R<RunId> {
+        let chain = extras.chain.as_ref();
         let c = check(&a)?;
         let e = &a.event;
         let profile = &e.profile.0;
+        // 어댑터가 인증한 Slack 이벤트는 그 식별로도 한 건이다(바인딩·프로필이 바뀐 뒤의 재전달이 두 번째 실행을 만들지 못한다)
+        let slack_key = extras
+            .source
+            .as_ref()
+            .map(crate::slack_events::key_of)
+            .transpose()?;
         let mut tx = self.begin_authorized().await?;
+        // 이 열이 생기기 전(구판)에 받은 같은 글의 접수 행이 있으면 그 행을 채택해 그 run으로 수렴한다(접수 0)
+        if let (Some(source), Some(key)) = (&extras.source, &slack_key)
+            && let Some(run) = crate::slack_events::adopt_legacy(&mut tx, source, key).await?
+        {
+            tx.commit().await?;
+            return Ok(run);
+        }
         let run: String = sqlx::query_scalar("select gen_random_uuid()::text")
             .fetch_one(&mut *tx)
             .await?;
         // 응답 방식은 최초 접수에서 정해 저장하고 중복 해시에는 넣지 않는다
         let fresh = sqlx::query(
             "insert into bot_requests (profile, binding, principal, request, input_sha256, run,
-                                       http_method, http_path, http_response)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict do nothing",
+                                       http_method, http_path, http_response, slack_key)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) on conflict do nothing",
         )
         .bind(profile)
         .bind(&e.binding.0)
@@ -163,11 +183,22 @@ impl Store {
         .bind(e.http.as_ref().map(|h| h.method.as_str()))
         .bind(e.http.as_ref().map(|h| h.path.as_str()))
         .bind(e.http.as_ref().map(|h| response_str(h.response)))
+        .bind(&slack_key)
         .execute(&mut *tx)
         .await?
         .rows_affected()
             == 1;
         if !fresh {
+            // 같은 Slack 이벤트면 어떤 바인딩·프로필로 다시 와도 첫 접수의 run으로 수렴한다(입력 해시와 상관없이 같은 이벤트다)
+            if let Some(key) = &slack_key
+                && let Some(row) = sqlx::query("select run from bot_requests where slack_key = $1")
+                    .bind(key)
+                    .fetch_optional(&mut *tx)
+                    .await?
+            {
+                tx.rollback().await?;
+                return Ok(RunId(row.get("run")));
+            }
             let row = sqlx::query(
                 "select input_sha256, run, api_endpoint from bot_requests
                  where profile = $1 and binding = $2 and principal = $3 and request = $4",
@@ -192,9 +223,26 @@ impl Store {
         crate::active::guard_active(&mut tx, profile, &a.revision).await?;
         let origin = RunOrigin::from_ingress(&e.conversation.kind, &e.principal);
         insert_run(&mut tx, &a, &c, &run, origin, None, None).await?;
+        if let Some(chain) = chain {
+            crate::pass::store_chain(&mut tx, &a, &run, chain).await?;
+        }
+        crate::evidence::bind_in(&mut tx, &a, &run, &extras).await?;
         let mut entry = Entry::new(&e.principal.0, "run.accept", &run, "accepted");
         entry.args = Some(c.digest);
         audit::append(&mut tx, profile, &entry).await?;
+        if let Some(first) = chain.and_then(|chain| chain.candidates.first()) {
+            audit::append(
+                &mut tx,
+                profile,
+                &Entry::new(
+                    &e.principal.0,
+                    "trigger.select",
+                    &run,
+                    &format!("{}@0", first.trigger),
+                ),
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(RunId(run))
     }

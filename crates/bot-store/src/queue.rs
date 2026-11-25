@@ -135,6 +135,9 @@ pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunConte
             input: JsonPayload(r.get("input")),
             attachments: r.get("attachments"),
             steps,
+            pass_pos: r
+                .get::<Option<i32>, _>("pass_pos")
+                .map(|pos| u32::try_from(pos).unwrap_or(0)),
         },
     })
 }

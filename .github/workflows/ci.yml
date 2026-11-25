@@ -115,6 +115,8 @@ jobs:
         run: scripts/openai-sdk-setup.sh "$RUNNER_TEMP/openai-sdk"
       - name: Verify the npm registry signatures
         run: cd "$RUNNER_TEMP/openai-sdk/node" && npm audit signatures
+      - name: The SDK test sources hold no skip marker and match the expected test list
+        run: python3 -I crates/bot-cli/tests/openai_sdk/sdk_run.py manifest
       - name: Run the SDK suites against the contract stub
         run: |
           sdk="$RUNNER_TEMP/openai-sdk"

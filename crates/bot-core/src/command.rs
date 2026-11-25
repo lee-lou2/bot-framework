@@ -54,6 +54,21 @@ pub struct Accept {
     pub scopes: BTreeSet<String>,
 }
 
+/// 접수 명령에 어댑터가 덧붙이는 것. 인증된 어댑터만 채운다(본문·모델·도구가 만들 수 없다). 비어 있으면 일반 접수다.
+#[derive(Clone, Debug, Default)]
+pub struct AcceptExtras {
+    /// 이번 Slack 이벤트의 인증된 원천(F2·F4 증거 접수)
+    pub source: Option<crate::slack::SlackSource>,
+    /// 직접 도구가 넘길 수 있는 후보 사슬(F3). 첫 후보는 접수의 `target`이다.
+    pub chain: Option<crate::pass::PassChain>,
+}
+
+impl AcceptExtras {
+    pub fn is_empty(&self) -> bool {
+        self.source.is_none() && self.chain.is_none()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolCall {
     pub attempt: Attempt,
@@ -67,6 +82,9 @@ pub enum CallResult {
     Done(JsonPayload),
     Awaiting(ApprovalId),
     Held(CallId),
+    /// F3: 직접 호출이 «처리하지 않음»(`bot/pass`)으로 끝났고 저장소가 호출 결론·커서 전진과 함께 run을 다음 후보(또는 기본 대화)로 되돌렸다.
+    /// 이 시도는 더 쓸 것이 없다(리스를 놓았다).
+    Passed,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +165,8 @@ pub struct Work {
     pub input: JsonPayload,
     pub attachments: Vec<String>,
     pub steps: Vec<Step>,
+    /// F3: 넘김 사슬이 있는 접수의 후보 커서(0이 첫 후보). 사슬이 없으면 None이다. 커서가 후보 수와 같으면 기본 대화 차례다(대상이 에이전트).
+    pub pass_pos: Option<u32>,
 }
 
 /// 결과와 원래 대화로 보낼 답을 한 커밋에 기록한다. 답 순번은 목록 위치다.

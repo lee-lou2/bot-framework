@@ -196,6 +196,18 @@
               "type": "string",
               "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
               "maxLength": 63
+            },
+            "events": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "mention",
+                  "thread_reply",
+                  "reaction"
+                ]
+              }
             }
           },
           "required": [
@@ -234,6 +246,16 @@
             },
             "dm": {
               "const": true
+            },
+            "events": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "dm"
+                ]
+              }
             }
           },
           "required": [

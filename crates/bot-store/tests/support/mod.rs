@@ -6,6 +6,9 @@ pub mod admin;
 pub mod api;
 pub mod cards;
 pub mod delivery;
+pub mod human;
+pub mod pass;
+pub mod preapproval;
 pub mod private;
 pub mod schedule;
 

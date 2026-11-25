@@ -116,6 +116,7 @@ async fn each_model_runs_its_own_agent_and_the_approver_and_team_are_recorded_on
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )

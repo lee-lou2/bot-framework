@@ -221,9 +221,90 @@ impl AdminRead for Fake {
         });
         Box::pin(async move { out })
     }
+
+    /// 운영자 전용. 실제 저장소처럼 승인마다 정지 세대·정지 여부·오늘 사용량을 한 행으로 준다.
+    fn preapprovals(&self, viewer: &Viewer) -> Reply<'_, Vec<bot_core::grant::PreapprovalRow>> {
+        let out = if viewer.operator {
+            Ok(self
+                .lock()
+                .preapprovals
+                .iter()
+                .map(|(row, _)| row.clone())
+                .collect())
+        } else {
+            Err(Error::Denied)
+        };
+        Box::pin(async move { out })
+    }
 }
 
 impl AdminAct for Fake {
+    /// 정지·재개: 승인 ID·정지 세대를 현재와 대조하는 규칙은 `bot_core::grant::decide_pause`로 저장소와 같다.
+    fn set_pause(
+        &self,
+        actor: PrincipalId,
+        key: bot_core::grant::TriggerKey,
+        cas: bot_core::grant::GrantCas,
+        pause: bool,
+    ) -> Reply<'_, bot_core::grant::PauseOutcome> {
+        use bot_core::grant::{PauseDecision, PauseOutcome, PauseState, decide_pause};
+        let mut d = self.lock();
+        let found = d.preapprovals.iter().position(|(row, _)| {
+            (
+                row.profile.as_str(),
+                row.agent.as_str(),
+                row.trigger.as_str(),
+            ) == (
+                key.profile.0.as_str(),
+                key.agent.0.as_str(),
+                key.trigger.as_str(),
+            )
+        });
+        let out = match found {
+            None => Err(Error::Missing),
+            Some(i) => {
+                let (row, last) = d.preapprovals[i].clone();
+                let state = PauseState {
+                    epoch: row.epoch,
+                    paused: row.paused,
+                    last,
+                };
+                match decide_pause(&row.grant_id, &state, &cas, pause) {
+                    PauseDecision::Stale => Err(Error::Stale),
+                    PauseDecision::Repeated => Ok(PauseOutcome {
+                        row,
+                        repeated: true,
+                    }),
+                    PauseDecision::Apply => {
+                        let entry = &mut d.preapprovals[i];
+                        entry.1 = Some((entry.0.epoch, pause, entry.0.grant_id.clone()));
+                        entry.0.epoch += 1;
+                        entry.0.paused = pause;
+                        let row = entry.0.clone();
+                        d.pause_audits += 1;
+                        d.log(
+                            Some(&ProfileId(row.profile.clone())),
+                            &actor,
+                            if pause {
+                                "preapproval.pause"
+                            } else {
+                                "preapproval.resume"
+                            },
+                            &format!("{}/{}", row.agent, row.trigger),
+                            None,
+                            &format!("{}:epoch={}", row.grant_id, row.epoch),
+                        );
+                        Ok(PauseOutcome {
+                            row,
+                            repeated: false,
+                        })
+                    }
+                }
+            }
+        };
+        Box::pin(async move { out })
+    }
+
     /// 판정은 보류 식별자와 대상(프로필·run·호출·단계)을 함께 대조한 뒤 한 번만 적용한다.
     /// - 끝난 같은 식별자: 같은 운영자·같은 판정(종류와 영수증/증거)·같은 대상이면 `Repeated`(새 보류가 생겼어도), 다르면 `Conflict`.
     /// - 열린 보류에 없는 식별자는 `Missing`, 대상이 식별자의 것과 다르면 `Conflict`.

@@ -315,6 +315,7 @@ async fn the_wire_refuses_non_canonical_numeric_hosts_before_any_connection() {
         headers: Vec::new(),
         body: b"{}".to_vec(),
         allow_private: false,
+        timeout: None,
     };
     // reqwest의 URL 파서는 이 표기들을 127.0.0.1로 읽는다: 이름 풀이 검사를 거치지 않고 연결해 버린다
     for host in [

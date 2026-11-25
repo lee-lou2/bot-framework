@@ -10,8 +10,12 @@ use serde_json::Value;
 /// 접수 사건. 트리거 후보를 고르는 기준이다.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
-    /// 사람의 대화 한 건(Slack 글·CLI 채팅). 트리거 `{event: message}`에 대응한다.
+    /// 사람의 대화 한 건(Slack 멘션·DM·CLI 채팅). 트리거 `{event: message}`에 대응한다.
     Message,
+    /// 봇이 참여한 스레드의 사람 답글(Slack). 트리거 `{event: thread-reply}`에 대응한다.
+    ThreadReply,
+    /// 등록 채널 글에 단 반응(Slack). 트리거 `{event: reaction}`에 대응한다.
+    Reaction,
     /// 인증된 HTTP 요청. 트리거 `{http: {method, path}}`에 대응한다.
     Http { method: String, path: String },
 }

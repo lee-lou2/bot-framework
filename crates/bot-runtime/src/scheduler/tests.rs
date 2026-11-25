@@ -489,6 +489,8 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
         input: BTreeMap::new(),
         private: false,
         target: TriggerTarget::Instruction("오늘 일정을 알려줘".into()),
+        preapproved: None,
+        human_approval: None,
     });
     main.triggers.push(Trigger {
         id: "heartbeat".into(),
@@ -506,6 +508,8 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
             tool: bot_core::id::ToolId("agenda.list".into()),
             args: JsonPayload("{}".into()),
         },
+        preapproved: None,
+        human_approval: None,
     });
     main.triggers.push(Trigger {
         id: "on-message".into(),
@@ -518,6 +522,8 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
         input: BTreeMap::new(),
         private: false,
         target: TriggerTarget::Instruction("x".into()),
+        preapproved: None,
+        human_approval: None,
     });
     let snapshot = Snapshot {
         id: ProfileId("personal".into()),

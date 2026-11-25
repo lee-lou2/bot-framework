@@ -8,6 +8,7 @@
     { id: "structure", label: "구조", op: true },
     { id: "runs", label: "실행" },
     { id: "decide", label: "승인·보류" },
+    { id: "preapprovals", label: "사전 승인", op: true },
     { id: "access", label: "권한", op: true },
     { id: "audit", label: "감사", op: true },
     { id: "status", label: "상태", op: true },
@@ -170,6 +171,7 @@
     views.runs = window.BotRuns.create(app, $("view-runs"));
     views.decide = window.BotDecide.create(app, $("view-decide"));
     if (op) {
+      views.preapprovals = window.BotPreapprovals.create(app, $("view-preapprovals"));
       views.access = window.BotAccess.create(app, $("view-access"));
       views.audit = window.BotAudit.create(app, $("view-audit"));
       views.status = window.BotStatus.create(app, $("view-status"));

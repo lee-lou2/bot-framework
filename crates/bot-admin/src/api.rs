@@ -37,11 +37,11 @@ pub(crate) struct St {
     pub extra: crate::Extra,
 }
 
-type S = State<Arc<St>>;
-type V = Extension<Viewer>;
-type R = Result<Response, Fail>;
+pub(crate) type S = State<Arc<St>>;
+pub(crate) type V = Extension<Viewer>;
+pub(crate) type R = Result<Response, Fail>;
 
-const INVALID: Fail = Fail(StatusCode::BAD_REQUEST, "invalid");
+pub(crate) const INVALID: Fail = Fail(StatusCode::BAD_REQUEST, "invalid");
 const DENIED: Fail = Fail(StatusCode::FORBIDDEN, "denied");
 const BODY_MAX: usize = 4096;
 const TEXT_MAX: usize = 512;
@@ -92,7 +92,7 @@ fn token(s: &str) -> Option<&str> {
     good.then_some(s)
 }
 
-fn profile_id(s: &str) -> Option<ProfileId> {
+pub(crate) fn profile_id(s: &str) -> Option<ProfileId> {
     bot_core::id::is_name(s).then(|| ProfileId(s.to_owned()))
 }
 
@@ -132,12 +132,12 @@ fn page(p: &Params) -> Result<Page, Fail> {
     })
 }
 
-fn operator(v: &Viewer) -> Result<(), Fail> {
+pub(crate) fn operator(v: &Viewer) -> Result<(), Fail> {
     if v.operator { Ok(()) } else { Err(DENIED) }
 }
 
 /// 요청 본문: 4 KiB 이하의 JSON 객체이고 허용한 키만 가진다.
-fn body(bytes: &Bytes, allowed: &[&str]) -> Result<Map<String, Value>, Fail> {
+pub(crate) fn body(bytes: &Bytes, allowed: &[&str]) -> Result<Map<String, Value>, Fail> {
     if bytes.len() > BODY_MAX {
         return Err(INVALID);
     }
@@ -154,7 +154,7 @@ fn text(v: Option<&Value>) -> Result<String, Fail> {
     good.then(|| s.to_owned()).ok_or(INVALID)
 }
 
-fn identifier(s: &str) -> Result<String, Fail> {
+pub(crate) fn identifier(s: &str) -> Result<String, Fail> {
     token(s).map(str::to_owned).ok_or(INVALID)
 }
 

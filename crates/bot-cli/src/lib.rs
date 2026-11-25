@@ -18,4 +18,5 @@ pub mod secrets;
 pub mod serve;
 pub mod settings;
 pub mod term;
+pub mod tool_limits;
 pub mod validate;

@@ -90,6 +90,15 @@ impl Sandbox for NoSandbox {
 
 /// 도구 실행기와 그 설치본(쓰는 동안 설치본 사용 잠금을 쥔다). 서버가 없는 호스트는 실행기 없이(설치 판본 조회만) 만든다.
 /// `active`는 이 프로세스의 활성화 판본 확인이다: 원격 서버로 나가는 모든 요청 직전에 다시 확인한다(`GuardedWire`).
+/// 호스트 설정에서 만드는 실행기 설정. 호출 시간 한도의 천장은 `limits.tool_call_max_secs`다: 활성화 때 도구 선언을 대조했고, 복원한 옛 선언은 실행기가 보내기 전에 다시 대조한다.
+/// 선언하지 않은 도구의 호출 한도(60초)는 천장과 상관없다.
+fn runner_config(host: &HostFile) -> RunnerConfig {
+    RunnerConfig {
+        max_call_timeout: Duration::from_secs(u64::from(host.limits.tool_call_max_secs)),
+        ..RunnerConfig::default()
+    }
+}
+
 pub(super) async fn build(
     host: &HostFile,
     settings: &Settings,
@@ -149,7 +158,7 @@ pub(super) async fn build(
             egress_caps,
             remote: host.remote_servers.clone(),
         },
-        RunnerConfig::default(),
+        runner_config(host),
     );
     // 원격 서버가 있으면 전송을 붙인다(연결마다 이름 풀이 결과 전체를 검사하고, 요청마다 활성 판본을 다시 확인한다)
     if !host.remote_servers.is_empty() {
@@ -249,6 +258,26 @@ mod tests {
         assert!(paths.contains(&base));
         assert!(!paths.contains(&dir.path().join("profiles")));
         assert!(paths.iter().all(|path| path.exists()));
+    }
+
+    fn host_with(servers: &str, extra: &str) -> crate::host::HostFile {
+        crate::host::parse(&format!(r#"{{"version": 1, "servers": {servers}{extra}}}"#)).unwrap()
+    }
+
+    #[test]
+    fn the_runner_ceiling_follows_the_host_limits_and_nothing_else_changes() {
+        let default = runner_config(&host_with("{}", ""));
+        assert_eq!(default.max_call_timeout, Duration::from_secs(60));
+        let raised = runner_config(&host_with(
+            "{}",
+            r#", "limits": {"tool_call_max_secs": 300}"#,
+        ));
+        assert_eq!(raised.max_call_timeout, Duration::from_secs(300));
+        // 천장만 올려도 선언하지 않은 도구의 호출 한도·wall은 그대로다
+        for config in [default, raised] {
+            assert_eq!(config.call_timeout, Duration::from_secs(60));
+            assert_eq!(config.wall, Duration::from_secs(300));
+        }
     }
 
     #[test]

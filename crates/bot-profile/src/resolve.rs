@@ -11,6 +11,7 @@ use crate::{
 use bot_core::{
     id::{AgentId, BindingId, PrincipalId},
     profile::{Adapter, forbidden_env_name},
+    slack::SlackEvent,
     state::Risk,
 };
 use serde_json::{Map, Value};
@@ -276,6 +277,7 @@ fn trigger_refs(p: &ProfileParts, agent: &Agent, t: &Trigger, file: &str, issues
         },
         TriggerTarget::Instruction(_) => None,
     };
+    crate::approval::check(p, t, tool.as_deref(), binding, (file, &at), issues);
     if t.private
         && let Some(found) = &tool
     {
@@ -345,14 +347,17 @@ fn binding_of<'a>(
             binding.kind,
             Adapter::SlackChannel { .. } | Adapter::SlackDm { .. }
         ),
+        Source::ThreadReply { .. } | Source::Reaction { .. } => {
+            matches!(binding.kind, Adapter::SlackChannel { .. })
+        }
         Source::Http { .. } => matches!(binding.kind, Adapter::Http { .. }),
         Source::Cron { .. } => true,
     };
     if !ok {
-        let want = if matches!(t.on, Source::Http { .. }) {
-            "http"
-        } else {
-            "slack"
+        let want = match t.on {
+            Source::Http { .. } => "http",
+            Source::ThreadReply { .. } | Source::Reaction { .. } => "slack 채널",
+            _ => "slack",
         };
         issues.error_at(
             "binding-kind-mismatch",
@@ -364,6 +369,28 @@ fn binding_of<'a>(
                 adapter_name(&binding.kind)
             ),
         );
+    } else if let Adapter::SlackChannel { events, .. } = &binding.kind {
+        // 트리거의 사건을 이 바인딩이 받아야 한다: `events`에 그 종류가 없으면 트리거는 영영 불리지 않는다
+        let needs = match &t.on {
+            Source::Message { .. } => Some(SlackEvent::Mention),
+            Source::ThreadReply { .. } => Some(SlackEvent::ThreadReply),
+            Source::Reaction { .. } => Some(SlackEvent::Reaction),
+            _ => None,
+        };
+        if let Some(need) = needs.filter(|need| !events.contains(need)) {
+            issues.error_at(
+                "event-not-enabled",
+                file,
+                at,
+                format!(
+                    "바인딩 `{}`은 `events`에 `{}`가 없어 이 트리거의 사건(`{}`)을 받지 못해요 — profile.yaml의 바인딩에 `events: [.., {}]`를 더하세요",
+                    id.0,
+                    need.as_str(),
+                    need.trigger_event(),
+                    need.as_str()
+                ),
+            );
+        }
     }
     Some(binding)
 }
@@ -476,7 +503,9 @@ fn cron_principal(
             ),
         );
     }
-    match (approver, tool.is_some_and(|tool| needs_approval(p, tool))) {
+    // 운영자가 사전 승인한 트리거(`preapproved`)는 이 트리거에 한해 사람 approver를 생략할 수 있다
+    let asks = tool.is_some_and(|tool| needs_approval(p, tool)) && t.preapproved.is_none();
+    match (approver, asks) {
         (None, true) => issues.error_at(
             "approver-required",
             file,

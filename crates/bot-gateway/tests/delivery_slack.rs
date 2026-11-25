@@ -511,3 +511,83 @@ async fn the_test_helper_counts_a_post_only_when_the_sender_would_confirm_it() {
     // 502에 ok:true를 돌려줘도 응답 본문은 기록되지만 성공으로 세지 않는다
     assert!(!slack.calls("chat.postMessage").last().unwrap().succeeded());
 }
+
+/// F2: 확인된 채널 게시(영수증)는 «봇이 이 스레드에 참여했다»는 증거로 남는다 — 스레드 안의 회신은 그 루트, 최상위 글은 글 자신. 확인되지 않은 게시·DM·첨부만 있는
+/// 최상위 글은 남기지 않는다.
+#[tokio::test]
+async fn a_confirmed_channel_post_is_recorded_as_thread_evidence() {
+    let rig = fresh().await;
+    // 스레드 안의 회신: 루트는 그 스레드
+    to_channel(&rig, 1, json!({"text": "회신"}));
+    rig.deliverer.tick().await.unwrap();
+    let notes = rig.threads.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let n = &notes[0];
+    assert_eq!(
+        (
+            n.profile.0.as_str(),
+            n.binding.0.as_str(),
+            n.team.as_str(),
+            n.bot.as_str(),
+            n.channel.as_str(),
+            n.root_ts.as_str()
+        ),
+        ("personal", "team", "T1", "UBOT", "C1", THREAD)
+    );
+
+    // 스레드 없이 채널에 올린 최상위 글: 그 글의 ts가 루트다(그 아래로 사람 답글이 달린다)
+    let mut top = outgoing(
+        "personal",
+        2,
+        "team",
+        "slack:home/U1",
+        bot_core::state::Conversation {
+            kind: bot_core::state::ConversationKind::Channel,
+            id: "C1".into(),
+            thread: None,
+        },
+        &json!({"text": "공지"}).to_string(),
+    );
+    top.call = bot_core::id::CallId("reply-2".into());
+    rig.outbox.push(top);
+    rig.deliverer.tick().await.unwrap();
+    let roots: Vec<String> = rig.threads.notes().into_iter().map(|n| n.root_ts).collect();
+    assert_eq!(roots.len(), 2);
+    assert_eq!(roots[0], THREAD);
+    assert_ne!(roots[1], THREAD, "{roots:?}");
+    assert!(roots[1].contains('.'), "{roots:?}");
+
+    // DM 회신·확인되지 않은 게시(Slack가 거절)는 남기지 않는다
+    rig.outbox.push(outgoing(
+        "personal",
+        3,
+        "direct",
+        "slack:home/U1",
+        direct("D1"),
+        &json!({"text": "DM"}).to_string(),
+    ));
+    rig.deliverer.tick().await.unwrap();
+    rig.slack.script(
+        "chat.postMessage",
+        Scripted::Json(json!({"ok": false, "error": "channel_not_found"})),
+    );
+    to_channel(&rig, 4, json!({"text": "거절될 글"}));
+    rig.deliverer.tick().await.unwrap();
+    assert_eq!(rig.threads.notes().len(), 2);
+}
+
+/// 증거를 기록하지 못해도(저장소 장애) 이미 보낸 회신의 결과는 그대로 확정이다.
+#[tokio::test]
+async fn a_failed_evidence_write_does_not_change_the_delivery_outcome() {
+    let rig = fresh().await;
+    rig.threads.fail_writes(true);
+    to_channel(&rig, 1, json!({"text": "회신"}));
+    rig.deliverer.tick().await.unwrap();
+    assert_eq!(posts(&rig).len(), 1);
+    assert!(
+        settled(&rig)[0].starts_with("confirmed"),
+        "{:?}",
+        settled(&rig)
+    );
+    assert!(rig.threads.notes().is_empty());
+}

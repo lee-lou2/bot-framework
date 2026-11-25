@@ -62,6 +62,7 @@ fn api_profile_as(
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )
@@ -218,6 +219,7 @@ async fn the_reason_follows_what_changed_between_the_pinned_revision_and_now() {
                 Adapter::SlackChannel {
                     workspace: "home".into(),
                     channel: "ops".into(),
+                    events: bot_core::slack::default_channel_events(),
                 },
                 "main",
             ),

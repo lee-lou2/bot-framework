@@ -384,3 +384,74 @@ impl ActiveRevisions for MemoryActive {
         Box::pin(std::future::ready(result))
     }
 }
+
+/// 봇 참여 스레드 증거 저장소(F2). 시험이 기록을 읽고 읽기 실패를 만든다.
+#[derive(Default)]
+pub struct MemoryThreads {
+    inner: Mutex<ThreadsInner>,
+}
+
+#[derive(Default)]
+struct ThreadsInner {
+    known: std::collections::BTreeSet<String>,
+    notes: Vec<bot_core::slack::BotThread>,
+    fail_reads: bool,
+    fail_writes: bool,
+}
+
+fn thread_text(t: &bot_core::slack::BotThread) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        t.profile.0, t.binding.0, t.team, t.bot, t.channel, t.root_ts
+    )
+}
+
+impl MemoryThreads {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// 지금까지 기록하려고 한 스레드들(중복 포함, 기록 순서)
+    pub fn notes(&self) -> Vec<bot_core::slack::BotThread> {
+        self.inner.lock().unwrap().notes.clone()
+    }
+
+    /// 읽기(`known`)가 `Unavailable`로 실패하게 한다(저장소 장애).
+    pub fn fail_reads(&self, on: bool) {
+        self.inner.lock().unwrap().fail_reads = on;
+    }
+
+    /// 쓰기(`note`)가 실패하게 한다.
+    pub fn fail_writes(&self, on: bool) {
+        self.inner.lock().unwrap().fail_writes = on;
+    }
+
+    /// 이미 기록된 것으로 만든다(전환 전 열린 스레드를 증거로 채운 것처럼).
+    pub fn seed(&self, thread: &bot_core::slack::BotThread) {
+        self.inner.lock().unwrap().known.insert(thread_text(thread));
+    }
+}
+
+impl bot_core::slack::BotThreads for MemoryThreads {
+    fn note(&self, thread: bot_core::slack::BotThread) -> bot_core::port::Reply<'_, ()> {
+        let mut inner = self.inner.lock().unwrap();
+        let result = if inner.fail_writes {
+            Err(bot_core::port::Error::Unavailable)
+        } else {
+            inner.known.insert(thread_text(&thread));
+            inner.notes.push(thread);
+            Ok(())
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn known(&self, thread: bot_core::slack::BotThread) -> bot_core::port::Reply<'_, bool> {
+        let inner = self.inner.lock().unwrap();
+        let result = if inner.fail_reads {
+            Err(bot_core::port::Error::Unavailable)
+        } else {
+            Ok(inner.known.contains(&thread_text(&thread)))
+        };
+        Box::pin(std::future::ready(result))
+    }
+}

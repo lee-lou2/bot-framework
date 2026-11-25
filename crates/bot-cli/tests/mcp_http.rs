@@ -216,6 +216,7 @@ async fn plain_http_to_anything_but_a_loopback_literal_is_refused_before_any_con
         headers: Vec::new(),
         body: b"{}".to_vec(),
         allow_private,
+        timeout: None,
     };
     // 평문 http: 루프백이 아닌 리터럴·이름은 전역 사설망 허용으로도 열리지 않는다
     for (host, allow_private) in [

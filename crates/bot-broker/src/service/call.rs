@@ -1,4 +1,8 @@
-use super::{BrokerService, gate::Gate};
+use super::{
+    BrokerService,
+    authority::{Verdict, waivable},
+    gate::Gate,
+};
 use crate::approver::{approver_for, openai};
 use crate::{
     classify::{classify, risk_code},
@@ -144,6 +148,7 @@ impl BrokerService {
             Ok(CallResult::Done(_)) => "done",
             Ok(CallResult::Awaiting(_)) => "awaiting",
             Ok(CallResult::Held(_)) => "held",
+            Ok(CallResult::Passed) => "passed",
             Err(Error::Denied) => "denied",
             Err(_) => "failed",
         };
@@ -376,11 +381,30 @@ impl BrokerService {
             flow.ctx.private_memory_read,
         );
         note.risk = Some(class.risk);
-        let approval = match self.gate(&flow, &class, pointer).await? {
+        // F1·F4: 사전 승인된 정적 직접 호출이나 지정한 사람의 증거로 승인될 수 있는 직접 호출이면 이 권한으로 시작한다
+        let mut authority = match self.authority_for(&flow, &class, pointer.is_some()).await {
+            Verdict::None => None,
+            Verdict::Use(authority) => Some(authority),
+            Verdict::Deny(why) => return self.deny(&flow, why).await,
+        };
+        let approval = match self
+            .gate(&flow, &class, pointer, authority.as_ref())
+            .await?
+        {
             Gate::Go(approval) => approval.map(|boxed| *boxed),
             Gate::Return(result) => return Ok(result),
         };
-        self.execute(&flow, &class, approval).await
+        // 카드 승인을 소비하는 호출은 권한을 함께 쓰지 못한다: 사람 증거는 쓰지 않고, 사전 승인된 호출은 카드로 대신하지 않는다
+        if approval.is_some() {
+            match authority.take() {
+                Some(bot_core::grant::Authority::Grant { .. }) => {
+                    return self.deny(&flow, bot_core::grant::reason::STALE).await;
+                }
+                Some(bot_core::grant::Authority::Human { .. }) | None => {}
+            }
+        }
+        debug_assert!(authority.is_none() || waivable(&class) || !class.needs_approval());
+        self.execute(&flow, &class, approval, authority).await
     }
 
     /// 단독 감사 한 줄(상태 전이가 없는 거절·실패).

@@ -57,6 +57,7 @@ fn tool(server: &str, class: Risk, scopes: BTreeSet<String>) -> Tool {
         destination: None,
         definition: None,
         mcp_name: None,
+        timeout_secs: None,
     }
 }
 
@@ -138,6 +139,8 @@ pub fn personal() -> Snapshot {
             tool: ToolId("agenda.list".into()),
             args: JsonPayload("{}".into()),
         },
+        preapproved: None,
+        human_approval: None,
     };
     let skills = || BTreeMap::from([("agenda".to_owned(), agenda())]);
     let mut s = snapshot(
@@ -225,6 +228,8 @@ pub fn work() -> Snapshot {
         input: BTreeMap::new(),
         private: false,
         target: TriggerTarget::Instruction("handle".into()),
+        preapproved: None,
+        human_approval: None,
     };
     let mut s = snapshot(
         "work",
@@ -245,6 +250,7 @@ pub fn work() -> Snapshot {
                     source: Adapter::SlackChannel {
                         workspace: "home".into(),
                         channel: "planning".into(),
+                        events: bot_core::slack::default_channel_events(),
                     },
                 },
             ),

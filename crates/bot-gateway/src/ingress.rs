@@ -12,11 +12,12 @@ use crate::{
     trigger,
 };
 use bot_core::{
-    command::{Accept, Envelope, HttpRoute, JsonPayload, Target},
+    command::{Accept, AcceptExtras, Envelope, HttpRoute, JsonPayload, Target},
     id::{PrincipalId, ProfileId, Revision, RunId},
     intake::{PrivateCall, PrivateIntake, RequestKey},
     port::{Error, RunStore},
     profile::{ProfileCatalog, ResponseMode, Snapshot, TriggerSource, TriggerTarget},
+    slack::SlackSource,
     trace::{NoopTracer, Tracer, now_nano},
 };
 use serde_json::Value;
@@ -253,6 +254,16 @@ impl Ingress {
     /// 이미 고른 라우팅 표로 접수한다. 인증과 접수가 같은 표를 쓰게 해, 그 사이에 입구 소유자가 바뀌어도
     /// 인증한 프로필과 다른 프로필로 접수되지 않는다.
     pub async fn admit_with(&self, routes: &Routes, inbound: Inbound) -> Admission {
+        self.admit_sourced(routes, inbound, None).await
+    }
+
+    /// `admit_with`에 어댑터가 인증한 Slack 이벤트 원천을 덧붙인다(F2·F4). 원천이 있는 접수만 넘김 후보 사슬(F3)을 만든다.
+    pub async fn admit_sourced(
+        &self,
+        routes: &Routes,
+        inbound: Inbound,
+        source: Option<SlackSource>,
+    ) -> Admission {
         let started = now_nano();
         let Some(route) = routes.find(&inbound.real) else {
             return Admission::Ignored;
@@ -270,7 +281,7 @@ impl Ingress {
             Real::Http { .. } | Real::HttpModel { .. } => "http",
         };
         let mut seen = Seen::default();
-        let admission = self.admit_inner(routes, inbound, &mut seen).await;
+        let admission = self.admit_inner(routes, inbound, &mut seen, source).await;
         observe::record_intake(
             &*self.tracer,
             &Intake {
@@ -291,7 +302,13 @@ impl Ingress {
         admission
     }
 
-    async fn admit_inner(&self, routes: &Routes, inbound: Inbound, seen: &mut Seen) -> Admission {
+    async fn admit_inner(
+        &self,
+        routes: &Routes,
+        inbound: Inbound,
+        seen: &mut Seen,
+        source: Option<SlackSource>,
+    ) -> Admission {
         let Some(route) = routes.find(&inbound.real) else {
             return Admission::Ignored;
         };
@@ -345,8 +362,10 @@ impl Ingress {
                 None => return Admission::Rejected(Rejection::Invalid),
             },
             None => match &inbound.event {
-                Event::Http { .. } => return Admission::Rejected(Rejection::NoRoute),
-                Event::Message => {
+                Event::Http { .. } | Event::Reaction => {
+                    return Admission::Rejected(Rejection::NoRoute);
+                }
+                Event::Message | Event::ThreadReply => {
                     let text = inbound
                         .body
                         .get("text")
@@ -365,10 +384,16 @@ impl Ingress {
                 }
             },
         };
-        self.accept(&route, key, inbound, body_text, plan, scopes)
+        // 인증된 Slack 이벤트의 직접 도구 트리거만 «처리하지 않음»을 넘길 수 있다: 접수가 후보와 기본 대화를 고정한다
+        let chain = source
+            .as_ref()
+            .and_then(|_| chain::pass_chain(&route, &inbound, &envelope, &plan, &scopes));
+        let extras = AcceptExtras { source, chain };
+        self.accept(&route, key, inbound, body_text, plan, scopes, extras)
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn accept(
         &self,
         route: &Route<'_>,
@@ -377,6 +402,7 @@ impl Ingress {
         body_text: String,
         plan: Plan,
         scopes: BTreeSet<String>,
+        extras: AcceptExtras,
     ) -> Admission {
         // 에이전트 실행은 `run` 스코프가 있어야 시작한다. 도구 직접 호출의 스코프는 브로커가 도구마다 확인한다.
         if matches!(plan.target, Target::Agent { .. }) && !scopes.contains("run") {
@@ -389,7 +415,7 @@ impl Ingress {
                 path: path.clone(),
                 response: plan.respond.into(),
             }),
-            Event::Message => None,
+            Event::Message | Event::ThreadReply | Event::Reaction => None,
         };
         let command = Accept {
             approver: approver_of(&inbound.principal),
@@ -407,7 +433,12 @@ impl Ingress {
                 body: JsonPayload(body_text),
             },
         };
-        match self.store.accept(command).await {
+        let accepted = if extras.is_empty() {
+            self.store.accept(command).await
+        } else {
+            self.store.accept_with(command, extras).await
+        };
+        match accepted {
             Ok(run) => Admission::Accepted {
                 run,
                 respond: plan.respond,
@@ -505,6 +536,7 @@ fn rejection_of(error: Error) -> Rejection {
 }
 
 mod api;
+mod chain;
 pub use api::{ApiInbound, ApiRelease, ApiVerdict, CHAT_PATH};
 
 #[cfg(test)]

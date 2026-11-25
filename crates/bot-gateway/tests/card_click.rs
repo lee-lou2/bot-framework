@@ -28,6 +28,7 @@ fn channel_only() -> bot_gateway::testing::Fixture {
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )
@@ -352,6 +353,7 @@ fn channel_only_without_owner() -> bot_gateway::testing::Fixture {
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )

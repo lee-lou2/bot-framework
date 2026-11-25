@@ -28,7 +28,9 @@ impl From<&Adapter> for Entrance {
             Adapter::Cli { account } => Entrance::Cli {
                 account: account.clone(),
             },
-            Adapter::SlackChannel { workspace, channel } => Entrance::SlackChannel {
+            Adapter::SlackChannel {
+                workspace, channel, ..
+            } => Entrance::SlackChannel {
                 workspace: workspace.clone(),
                 channel: channel.clone(),
             },

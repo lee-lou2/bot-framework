@@ -238,6 +238,11 @@ impl Session {
 
 /// 도구가 결과 `_meta`에 후속 확인을 요청하는 키.
 pub const WAKE_KEY: &str = "bot/wake";
+/// 직접 호출한 도구가 «이 이벤트를 처리하지 않았다»고 알리는 키(F3). 일반 Slack 직접 트리거의 성공 결과에서만 해석한다(`service::pass`).
+pub const PASS_KEY: &str = "bot/pass";
+/// 넘김 표식과 함께 `_meta`에 다른 항목이 왔다는 표지(F3). 다른 항목의 내용은 검사·보관하지 않고 버리되, 표식이 «다른 지시와 함께 온 것»임을 `payload`에 남겨
+/// 브로커가 `invalid_pass`로 닫게 한다(표식 말고 남는 것이 있으면 유효하지 않다). 표식이 없는 결과에는 싣지 않는다.
+pub const EXTRA_KEY: &str = "bot/extra";
 
 /// 검증을 마친 도구 결과.
 #[derive(Debug, Eq, PartialEq)]
@@ -248,6 +253,10 @@ pub struct Output {
     /// 결과 최상위 `_meta["bot/wake"]`(도구가 요청하는 한 번짜리 후속 확인). 다른 `_meta` 항목은 버린다. 브로커가 선언·권한을
     /// 확인한 뒤 모델에게 가기 전에 제거하고 예약으로 옮긴다.
     pub wake: Option<Value>,
+    /// 결과 최상위 `_meta["bot/pass"]`(값은 그대로: 불리언 `true`인지는 브로커가 호출 맥락과 함께 판정한다). 모델에게 가기 전에 제거한다.
+    pub pass: Option<Value>,
+    /// `_meta`에 후속 확인(`bot/wake`)·넘김(`bot/pass`) 말고 다른 항목이 있었다(내용은 버린다). 넘김 표식이 있을 때만 `payload`에 표지로 남는다.
+    pub meta_extra: bool,
 }
 
 /// `{content:[{type:"text",text}], isError?, structuredContent?}`만 받는다.
@@ -282,6 +291,15 @@ pub fn parse_result(value: &Value) -> Result<Output, &'static str> {
             .and_then(Value::as_object)
             .and_then(|meta| meta.get(WAKE_KEY))
             .cloned(),
+        pass: obj
+            .get("_meta")
+            .and_then(Value::as_object)
+            .and_then(|meta| meta.get(PASS_KEY))
+            .cloned(),
+        meta_extra: obj
+            .get("_meta")
+            .and_then(Value::as_object)
+            .is_some_and(|meta| meta.keys().any(|key| key != WAKE_KEY && key != PASS_KEY)),
     })
 }
 
@@ -307,9 +325,18 @@ pub fn payload(output: &Output) -> Option<String> {
     if let Some(structured) = &output.structured {
         map.insert("structuredContent".into(), structured.clone());
     }
-    if let Some(wake) = &output.wake {
+    if output.wake.is_some() || output.pass.is_some() {
         let mut meta = Map::new();
-        meta.insert(WAKE_KEY.into(), wake.clone());
+        if let Some(wake) = &output.wake {
+            meta.insert(WAKE_KEY.into(), wake.clone());
+        }
+        if let Some(pass) = &output.pass {
+            meta.insert(PASS_KEY.into(), pass.clone());
+            // 표식과 다른 `_meta` 항목이 함께 왔다: 내용은 버리지만 «표식만 온 것이 아니다»는 남겨 `invalid_pass`로 닫게 한다
+            if output.meta_extra {
+                meta.insert(EXTRA_KEY.into(), Value::Bool(true));
+            }
+        }
         map.insert("_meta".into(), Value::Object(meta));
     }
     canonicalize(&Value::Object(map))

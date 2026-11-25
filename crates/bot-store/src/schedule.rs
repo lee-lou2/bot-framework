@@ -158,6 +158,31 @@ impl Store {
         {
             return Err(Error::Denied.into());
         }
+        // 사전 승인(F1): 이 트리거에 활성 승인이 있으면 정지 상태를 확인하고 새 run을 그 승인과 정지 세대에 묶는다.
+        // 정지 중이면 이 발생은 건너뛴다(커서만 앞으로 가고 run은 없다 — 재개 뒤 새 발생부터 받는다).
+        let grant = crate::grants::binding_in(&mut tx, profile, agent, trigger, at).await?;
+        if matches!(grant, crate::grants::Binding::Paused) {
+            sqlx::query("update bot_schedule_cursors set cursor_ms = greatest(cursor_ms, $4) where profile = $1 and agent = $2 and trigger = $3")
+                .bind(profile)
+                .bind(agent)
+                .bind(trigger)
+                .bind(at)
+                .execute(&mut *tx)
+                .await?;
+            audit::append(
+                &mut tx,
+                profile,
+                &Entry::new(
+                    "system",
+                    "schedule.occurrence",
+                    &format!("{agent}/{trigger}@{at}"),
+                    "skip:trigger_paused",
+                ),
+            )
+            .await?;
+            tx.commit().await?;
+            return Err(Error::Stale.into());
+        }
         let serial = spec.beat.then(|| format!("beat:{agent}:{trigger}"));
         let pending: Option<String> = match &serial {
             Some(key) => {
@@ -189,6 +214,9 @@ impl Store {
                     serial.as_deref(),
                 )
                 .await?;
+                if let crate::grants::Binding::Bound { grant, epoch } = &grant {
+                    crate::grants::bind_run(&mut tx, profile, &run, grant, *epoch).await?;
+                }
                 (run, "accepted")
             }
         };

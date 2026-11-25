@@ -268,6 +268,11 @@ pub trait AdminRead: Send + Sync {
     fn verify_audit(&self, viewer: &Viewer) -> Reply<'_, AuditCheck>;
     /// 운영자 전용.
     fn status(&self, viewer: &Viewer) -> Reply<'_, Vec<ProfileStatus>>;
+    /// 운영자 전용. 활성 사전 승인과 정지 상태·오늘(UTC) 사용량을 한 스냅숏으로 읽는다. 기본 구현은 지원하지 않는다.
+    fn preapprovals(&self, viewer: &Viewer) -> Reply<'_, Vec<crate::grant::PreapprovalRow>> {
+        let _ = viewer;
+        Box::pin(async { Err(crate::port::Error::Unavailable) })
+    }
 }
 
 /// 보류 대상. 단일 쓰기는 `effect`가 없고 호출 전체를 가리킨다.
@@ -303,4 +308,18 @@ pub trait AdminAct: Send + Sync {
         hold: HoldRef,
         verdict: HoldVerdict,
     ) -> Reply<'_, HoldDecision>;
+
+    /// 트리거의 사전 승인을 정지(`pause`)하거나 재개한다. `cas`의 승인 ID·정지 세대를 현재와 대조해 상태 변경과 감사를 한 커밋에 쓴다.
+    /// 이미 그 상태인 같은 세대의 요청과 직전 성공 명령의 재전달은 `repeated`다(변경·감사 0). 승인이 교체됐거나 세대가 어긋나면 `Stale`,
+    /// 대상이 없으면 `Missing`. 기본 구현은 지원하지 않는다.
+    fn set_pause(
+        &self,
+        actor: PrincipalId,
+        key: crate::grant::TriggerKey,
+        cas: crate::grant::GrantCas,
+        pause: bool,
+    ) -> Reply<'_, crate::grant::PauseOutcome> {
+        let _ = (actor, key, cas, pause);
+        Box::pin(async { Err(crate::port::Error::Unavailable) })
+    }
 }

@@ -30,6 +30,7 @@ fn channel(channel: &str) -> Adapter {
     Adapter::SlackChannel {
         workspace: "home".into(),
         channel: channel.into(),
+        events: bot_core::slack::default_channel_events(),
     }
 }
 
@@ -241,7 +242,7 @@ fn candidates_are_sorted_and_equal_orders_are_rejected() {
 fn rejects_unsupported_events_unknown_bindings_and_reserved_http_paths() {
     let mut odd = event_trigger("odd", "team", tool_target("a.b", "{}"));
     if let TriggerSource::Event { event, .. } = &mut odd.on {
-        *event = "reaction".into();
+        *event = "edited".into();
     }
     let p = profile("p")
         .binding("team", channel("planning"), "main")

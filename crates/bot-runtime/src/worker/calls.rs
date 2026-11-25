@@ -95,6 +95,8 @@ impl Worker {
             match result {
                 Ok(CallResult::Done(payload)) => return Ok(Called::Done(payload)),
                 Ok(CallResult::Awaiting(_) | CallResult::Held(_)) => return Ok(Called::Parked),
+                // 넘김: 저장소가 호출 결론·커서 전진과 함께 run을 다음 후보(또는 기본 대화)로 되돌렸다 — 이 시도는 더 쓸 것이 없다
+                Ok(CallResult::Passed) => return Ok(Called::Parked),
                 Err(Error::Denied) => return Err(CallError::Denied),
                 Err(Error::Missing) => return Err(CallError::Missing),
                 Err(Error::Invalid) => return Err(CallError::Invalid),

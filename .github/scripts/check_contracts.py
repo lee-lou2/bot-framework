@@ -145,6 +145,61 @@ def check_workflows():
         raise ValueError("CI workflow hardening:\n" + "\n".join(problems))
 
 
+SDK_JOB = "openai-sdk"
+SDK_RUNNERS = ("sdk_run.py", "run_stub.sh", "run_node_stub.sh", "check_runners.sh")
+RAW_RUNNER = re.compile(r"-m\s+unittest\b|\bnode\s+--test\b|\bpytest\b")
+SWALLOW = re.compile(r"\|\||(?<!\|)\|(?!\|)|;\s*(?:true\b|:)")
+
+
+def sdk_job_problems(text):
+    """The official-SDK job must run the source check (`sdk_run.py manifest`) and the three runners — the ones that refuse skipped, missing and untouched tests — through steps that cannot be skipped or have their failure ignored:
+    no `if`/`continue-on-error`/`shell` on the job or on those steps, no pipe or `|| true` after a runner, and no way around the runners (raw `unittest`, `node --test`, `pytest`)."""
+    try:
+        workflow = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return ["not valid YAML"]
+    job = (workflow.get("jobs") or {}).get(SDK_JOB) if isinstance(workflow, dict) else None
+    if not isinstance(job, dict):
+        return [f"job `{SDK_JOB}` is missing"]
+    problems = []
+    for key in ("if", "continue-on-error", "defaults"):
+        if key in job:
+            problems.append(f"job {SDK_JOB}: `{key}` could skip the job or ignore its failure")
+    steps = [step for step in job.get("steps") or [] if isinstance(step, dict)]
+    for runner in SDK_RUNNERS:
+        owners = [step for step in steps if runner in str(step.get("run", ""))]
+        if not owners:
+            problems.append(f"job {SDK_JOB}: no step runs `{runner}`")
+        for step in owners:
+            for key in ("if", "continue-on-error", "shell"):
+                if key in step:
+                    problems.append(f"job {SDK_JOB}: the step running `{runner}` has `{key}`")
+            for line in str(step.get("run", "")).splitlines():
+                if runner in line and SWALLOW.search(line):
+                    problems.append(f"job {SDK_JOB}: `{line.strip()[:70]}` swallows the runner's exit code")
+    if any(RAW_RUNNER.search(str(step.get("run", ""))) for step in steps):
+        problems.append(f"job {SDK_JOB}: run the SDK tests only through the runners, not `unittest`, `node --test` or `pytest` directly")
+    return problems
+
+
+def check_sdk_job():
+    folder = Path(".github/workflows")
+    holders = []
+    for path in sorted([*folder.glob("*.yml"), *folder.glob("*.yaml")]):
+        text = path.read_text(encoding="utf-8")
+        try:
+            workflow = yaml.safe_load(text)
+        except yaml.YAMLError:
+            continue
+        if isinstance(workflow, dict) and SDK_JOB in (workflow.get("jobs") or {}):
+            holders.append((path, text))
+    if len(holders) != 1:
+        raise ValueError(f"exactly one workflow must hold the `{SDK_JOB}` job (found {len(holders)})")
+    problems = sdk_job_problems(holders[0][1])
+    if problems:
+        raise ValueError(f"{holders[0][0]}:\n" + "\n".join(problems))
+
+
 def toolchain_problems(text):
     """What `rust-toolchain.toml` lacks to pin one compiler for CI and the release gate (empty when it is fine)."""
     try:
@@ -344,6 +399,7 @@ def main():
     check_workflows()
     check_toolchain()
     check_sdk_pins()
+    check_sdk_job()
 
 
 if __name__ == "__main__":

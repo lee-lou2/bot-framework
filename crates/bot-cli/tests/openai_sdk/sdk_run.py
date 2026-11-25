@@ -101,6 +101,29 @@ def check_proxy(summary, schemas, partial):
     return problems
 
 
+# ---- 시험 소스에 있으면 안 되는 «건너뛰기» 표지 --------------------------------------------------------------------------------------------------------
+FORBIDDEN = {
+    "python": re.compile(r"@(?:unittest\.)?(?:skip\w*|expectedFailure)\b|\.skipTest\(|\braise\s+(?:unittest\.)?SkipTest\b"),
+    "node": re.compile(r"\b(?:test|it|describe|suite)\.(?:skip|todo|only)\(|\{[^{}]*\b(?:skip|todo|only)\s*:|\bt\.(?:skip|todo)\("),
+}
+COMMENT = {"python": re.compile(r"^\s*#"), "node": re.compile(r"^\s*//")}
+
+
+def forbidden_problems(kind, file, text):
+    """필수 시험 소스에 skip·todo·only·예상된 실패가 있으면(실행 결과가 아니라 소스에서) 그 줄을 알린다. 실행기가 같은 것을 결과로도 잡지만, 소스에서 먼저 막아 둔다."""
+    return [f"{kind} {file}:{n}: 건너뛰기 표지는 필수 시험에 둘 수 없다: {line.strip()[:80]}"
+            for n, line in enumerate(text.splitlines(), 1) if not COMMENT[kind].match(line) and FORBIDDEN[kind].search(line)]
+
+
+def source_problems():
+    problems = []
+    for path in sorted(PY_DIR.glob("test_*.py")):
+        problems += forbidden_problems("python", path.name, path.read_text(encoding="utf-8"))
+    for path in sorted(NODE_DIR.glob("*.test.mjs")):
+        problems += forbidden_problems("node", path.name, path.read_text(encoding="utf-8"))
+    return problems
+
+
 # ---- 소스에서 뽑는 시험 이름 ---------------------------------------------------------------------------------------------------------------------------
 
 def python_names(path):
@@ -248,7 +271,7 @@ def main(argv):
             path = pathlib.Path(opts.get("--expected") or HERE / "expected.json")
             path.write_text(json.dumps({**expected, **source}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
             return 0
-        return finish(sum(len(v) for kind in source.values() for v in kind.values()), manifest_problems(expected, source))
+        return finish(sum(len(v) for kind in source.values() for v in kind.values()), manifest_problems(expected, source) + source_problems())
     print(__doc__, file=sys.stderr)
     return 2
 

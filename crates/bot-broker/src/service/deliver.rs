@@ -57,6 +57,7 @@ pub fn deliver_tool() -> Tool {
         destination: None,
         definition: None,
         mcp_name: None,
+        timeout_secs: None,
     }
 }
 
@@ -212,7 +213,7 @@ impl BrokerService {
             .limiter
             .admit(&flow.attempt.profile, &flow.ctx.principal)
             .map_err(|_| Error::Unavailable)?;
-        let approval = match self.gate(&flow, &class, pointer).await? {
+        let approval = match self.gate(&flow, &class, pointer, None).await? {
             Gate::Go(approval) => approval,
             Gate::Return(result) => return Ok(result),
         };

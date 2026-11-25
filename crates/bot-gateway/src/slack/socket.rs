@@ -171,7 +171,7 @@ async fn connect_once(
                     }
                     // hello로 앱을 확인하기 전에는 처리하지도 ack하지도 않는다(Slack이 확인된 연결로 다시 보낸다)
                     _ if !saw_hello => tracing::warn!("hello 전에 프레임이 왔어요 — 처리하지 않아요"),
-                    Frame::Message(_) | Frame::Button(_) => {
+                    Frame::Message(_) | Frame::Post(_) | Frame::Reaction(_) | Frame::Button(_) => {
                         let (handler, ack_tx, limit) = (handler.clone(), ack_tx.clone(), limit.clone());
                         let Ok(permit) = limit.try_acquire_owned() else {
                             tracing::warn!("처리 중인 이벤트가 너무 많아요 — ack하지 않아 다시 받아요");

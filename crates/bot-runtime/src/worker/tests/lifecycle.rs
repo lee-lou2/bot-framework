@@ -75,6 +75,32 @@ async fn a_tool_target_runs_one_call_with_a_fixed_id_and_records_the_tool_result
     );
 }
 
+/// F3: 넘김 사슬이 있는 접수는 후보마다 호출 ID가 다르고(첫 후보는 기존 ID), «넘김» 결과는 run을 종결하지 않고 다음 시도로 돌려보낸다.
+#[tokio::test]
+async fn a_candidate_in_a_pass_chain_gets_its_own_call_id_and_a_pass_leaves_the_run_unfinished() {
+    for (pos, id) in [(0, "r1:tool"), (1, "r1:tool:1"), (2, "r1:tool:2")] {
+        let r = rig(ScriptedModel::new(vec![]));
+        r.broker.script(Ok(CallResult::Passed));
+        let mut ctx = direct_run("r1", "agenda.list");
+        ctx.work.pass_pos = Some(pos);
+        assert_eq!(r.worker.execute(ctx).await, Outcome::Parked);
+        assert_eq!(r.broker.calls()[0].call.0, id, "후보 {pos}");
+        let state = lock(&r.runs.state);
+        assert!(
+            state.finished.is_empty() && state.failed.is_empty(),
+            "넘김은 run의 종결·실패 보고가 아니다(저장소가 한 커밋으로 처리한다)"
+        );
+    }
+    // 사슬이 없는 접수는 기존과 같다
+    let r = rig(ScriptedModel::new(vec![]));
+    r.broker.script(done(r#"{"events":[]}"#));
+    assert_eq!(
+        r.worker.execute(direct_run("r1", "agenda.list")).await,
+        Outcome::Succeeded
+    );
+    assert_eq!(r.broker.calls()[0].call.0, "r1:tool");
+}
+
 #[tokio::test]
 async fn a_tool_target_failure_maps_to_a_fixed_code_and_an_approval_wait_parks() {
     for (error, expected) in [

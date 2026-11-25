@@ -78,11 +78,13 @@
     return state.req;
   }
   const get = (path, o) => request("GET", path, o);
-  // 바꾸는 요청: 403 csrf면 /me를 다시 받아 한 번만 다시 보낸다.
-  function post(path, body) {
-    return request("POST", path, { body }).catch((e) => {
+  // 바꾸는 요청: 403 csrf면 /me를 다시 받아 한 번만 다시 보낸다(첫 요청은 CSRF 검사에서 막혀 실행되지 않았다).
+  // o(선택): { signal } — 응답이 오지 않을 때 호출하는 쪽이 끊을 수 있게 한다.
+  function post(path, body, o) {
+    const signal = o && o.signal;
+    return request("POST", path, { body, signal }).catch((e) => {
       if (!(e instanceof ApiError) || e.status !== 403 || e.word !== "csrf") throw e;
-      return me(true).then(() => request("POST", path, { body }));
+      return me(true).then(() => request("POST", path, { body, signal }));
     });
   }
   const q = (params) => {

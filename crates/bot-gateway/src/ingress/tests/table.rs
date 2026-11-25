@@ -113,6 +113,7 @@ async fn a_failed_active_set_is_built_once_not_per_request() {
                 Adapter::SlackChannel {
                     workspace: "home".into(),
                     channel: "ghost".into(),
+                    events: bot_core::slack::default_channel_events(),
                 },
                 "main",
             )

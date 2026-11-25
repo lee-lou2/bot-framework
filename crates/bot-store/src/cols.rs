@@ -19,7 +19,7 @@ pub(crate) const RUNS: &str = concat!(
     "state, wait_kind, wait_child, generation, claim_epoch, attempts, lease_owner, ",
     "lease_until_ms, not_before_ms, cancel_requested, serial_key, private_memory_read, ",
     "private, keep_generation, result, error, created_ms, updated_ms, finished_ms, ",
-    "private_started_ms, quiet, wake_depth, run_origin, claim_set"
+    "private_started_ms, quiet, wake_depth, run_origin, claim_set, pass_pos"
 );
 
 /// `bot_calls`의 모든 열(정의 순서).

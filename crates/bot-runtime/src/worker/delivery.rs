@@ -68,7 +68,7 @@ fn settled(result: Result<CallResult, Error>) -> Result<Flow, Error> {
         // 저장소가 이미 끝냈다: 등록한 영수증이든 미발송(수신자 철회·소유자 거절) 영수증이든 워커가 다시 끝내지 않는다
         CallResult::Done(_) => Flow::Delivered,
         // 승인 대기·보류: 저장소가 run을 멈췄다
-        CallResult::Awaiting(_) | CallResult::Held(_) => Flow::Parked,
+        CallResult::Awaiting(_) | CallResult::Held(_) | CallResult::Passed => Flow::Parked,
     })
 }
 

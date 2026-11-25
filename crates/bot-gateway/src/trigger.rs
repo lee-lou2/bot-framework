@@ -42,15 +42,25 @@ fn conditions_hold(trigger: &Trigger, envelope: &Value) -> bool {
     })
 }
 
-fn applies(trigger: &Trigger, binding: &BindingId, event: &Event) -> bool {
+/// 이 사건을 받는 트리거의 `on.event` 이름. HTTP 사건은 이름이 없다.
+fn event_name(event: &Event) -> Option<&'static str> {
+    match event {
+        Event::Message => Some("message"),
+        Event::ThreadReply => Some("thread-reply"),
+        Event::Reaction => Some("reaction"),
+        Event::Http { .. } => None,
+    }
+}
+
+pub fn applies(trigger: &Trigger, binding: &BindingId, event: &Event) -> bool {
     match (&trigger.on, event) {
         (
             TriggerSource::Event {
                 binding: on,
                 event: name,
             },
-            Event::Message,
-        ) => on == binding && name == "message",
+            Event::Message | Event::ThreadReply | Event::Reaction,
+        ) => on == binding && Some(name.as_str()) == event_name(event),
         (
             TriggerSource::Http {
                 binding: on,
@@ -78,6 +88,21 @@ pub fn select<'a>(
     triggers.iter().find(|bound| {
         applies(&bound.trigger, binding, event) && conditions_hold(&bound.trigger, envelope)
     })
+}
+
+/// `select`와 같은 규칙으로 맞는 트리거를 **모두** order 순으로 돌려준다. 첫 번째가 `select`의 답이다(F3 넘김 후보 목록).
+pub fn select_all<'a>(
+    triggers: &'a [BoundTrigger],
+    binding: &BindingId,
+    event: &Event,
+    envelope: &Value,
+) -> Vec<&'a BoundTrigger> {
+    triggers
+        .iter()
+        .filter(|bound| {
+            applies(&bound.trigger, binding, event) && conditions_hold(&bound.trigger, envelope)
+        })
+        .collect()
 }
 
 /// 도구 호출 인자를 만든다: 고정 args + 입력 매핑. 경로가 없거나 고정 args와 키가 겹치거나 args가 객체가 아니면 None.

@@ -293,7 +293,7 @@ fn collect_triggers(
                 let (binding_id, http) = match &trigger.on {
                     TriggerSource::Cron { .. } => continue,
                     TriggerSource::Event { binding, event } => {
-                        if event != "message" {
+                        if !matches!(event.as_str(), "message" | "thread-reply" | "reaction") {
                             return Err(RoutesError(format!(
                                 "{}/{}: 지원하지 않는 이벤트 {event}",
                                 profile.0, trigger.id

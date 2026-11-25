@@ -25,6 +25,11 @@ pub trait ProfileSource: Send + Sync {
 
 pub trait RunStore: Send + Sync {
     fn accept(&self, command: Accept) -> Reply<'_, RunId>;
+    /// 어댑터가 인증한 원천·넘김 사슬(`AcceptExtras`)을 접수와 한 커밋에 남긴다. 덧붙일 것이 없으면 `accept`다.
+    /// 기본 구현은 덧붙인 것을 저장하지 않고 일반 접수로 처리한다(덧붙임은 증거와 후보를 늘릴 뿐이라 빠져도 더 허용하는 일은 없다).
+    fn accept_with(&self, command: Accept, _extras: AcceptExtras) -> Reply<'_, RunId> {
+        self.accept(command)
+    }
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>>;
     /// 준비된 작업을 점유할 때 같은 트랜잭션에 현재 호스트 활성 집합을 기록한다.
     /// 리스 만료 인계 시 이전·현재 집합이 모두 있고 다를 때만 시도 횟수를 유지한다.

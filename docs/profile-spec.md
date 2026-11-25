@@ -115,7 +115,7 @@ policy:
 ```
 
 - **profile.yaml**에서 id는 폴더명, timezone은 IANA 시간대, model은 호스트 모델 별칭이다. roles는 허용 스코프, members는 검증된 신원과 역할이다. secrets에는 허용할 도구 자격 이름만 적는다. policy.scopes는 전체 상한, agents는 지정한 경로의 추가 제한, approve는 승인이 필요한 write 스코프다. irreversible은 항상 승인받는다.
-- **bindings**는 외부 입구를 한 에이전트에 연결한다. CLI의 account는 호스트가 OS 사용자에 연결한 별칭이다. Slack은 `{id: team, adapter: slack, workspace: home, channel: planning, agent: main}`, HTTP는 `{id: inbox, adapter: http, endpoint: reminders, agent: main}`처럼 쓴다. 별칭은 호스트에 등록한 실제 워크스페이스·채널·인증된 HTTP 입구를 가리킨다. 활성 프로필 전체에서 같은 입구를 두 번 쓸 수 없다.
+- **bindings**는 외부 입구를 한 에이전트에 연결한다. CLI의 account는 호스트가 OS 사용자에 연결한 별칭이다. Slack은 `{id: team, adapter: slack, workspace: home, channel: planning, agent: main}`(받을 사건을 고르려면 `events`, [아래](#slack-채널-이벤트-고르기)), HTTP는 `{id: inbox, adapter: http, endpoint: reminders, agent: main}`처럼 쓴다. 별칭은 호스트에 등록한 실제 워크스페이스·채널·인증된 HTTP 입구를 가리킨다. 활성 프로필 전체에서 같은 입구를 두 번 쓸 수 없다.
 - **rules.md → AGENT.md** 순으로 부모에서 자식까지 지침을 합친다. 조상과 현재 역할의 skills·knowledge만 보인다. 지식 검색은 profile/knowledge와 루트부터 현재 에이전트까지의 knowledge에서만 한다. 한 요청에 최대 8개 문서·합계 32 KiB를 읽고 출처를 붙인다. AGENT.md 첫 YAML front matter의 선택 필드 `description`은 부모가 위임 대상에게서 기대할 일을 보여 주는 한 줄이다. 생략하면 해당 역할의 폴더 이름을 쓴다. `model: assistant`로 역할 모델을 바꿀 수 있다. 생략하면 부모, 루트는 프로필 모델을 쓴다. 스킬 이름 충돌은 오류다. env.yaml은 비비밀 문자열 지도이며 자식 값이 우선한다. 셸 치환과 호스트 환경 상속은 없다.
 - **memory/**는 최초 기동용 기억이다. 경로·내용 해시로 한 번 등록한다. 각 항목에 owner와 visibility(private 기본, profile은 명시적 공유)를 기록한다. 시드 Markdown의 YAML front matter에는 owner가 필수이고 visibility를 생략하면 private이다. 검색은 프로필·에이전트 범위에서 현재 요청자에게 보이는 행만 읽는다. 모델은 회상한 기억 본문을 출처가 표시된 사용자 입력의 참고 자료로 받는다. private은 본인 DM·CLI에서만, 채널·HTTP·예약은 profile만 읽는다. 위임한 자식도 같은 요청자와 대화 종류를 유지한다. 실행 중 생성한 기억의 owner는 인증된 요청자로 고정한다. 수정·삭제는 소유자만 가능하며 profile로 공유할 때는 소유자가 대상·내용을 승인 카드에서 확인해야 한다.
 
@@ -158,7 +158,7 @@ triggers:
     target: {tool: agenda.list, args: {}}
 ```
 
-triggers.yaml의 on은 5필드 cron, `{event: message, binding: team}`, `{http: {method: POST, path: /agenda}, binding: inbox}` 중 하나다. cron은 서비스 주체를 지정하며 승인 대상 도구라면 trigger의 approver에 등록된 사람 신원을 지정한다. 이벤트와 HTTP는 바인딩에서 검증한 주체를 그대로 쓴다. target은 고정 도구와 인자 또는 소유 에이전트에 보낼 `{instruction: "..."}`다. 이벤트 본문은 별도 입력으로 검증한다.
+triggers.yaml의 on은 5필드 cron, `{event: message, binding: team}`(Slack 채널 바인딩은 `thread-reply`·`reaction`도), `{http: {method: POST, path: /agenda}, binding: inbox}` 중 하나다. cron은 서비스 주체를 지정하며 승인 대상 도구라면 trigger의 approver에 등록된 사람 신원을 지정한다. 이벤트와 HTTP는 바인딩에서 검증한 주체를 그대로 쓴다. target은 고정 도구와 인자 또는 소유 에이전트에 보낼 `{instruction: "..."}`다. 이벤트 본문은 별도 입력으로 검증한다.
 
 ## OpenAI 모델 바인딩
 
@@ -218,7 +218,77 @@ triggers:
 
 같은 바인딩·사건(HTTP는 method/path)의 후보를 order 오름차순으로 검사해 첫 일치 하나만 접수한다. order는 기본 0이고 같은 후보군에서 같은 순위는 검증 오류다. match는 점 경로와 리터럴 값의 동등 비교를 모두 만족해야 한다. 생략하면 항상 일치한다. input은 도구 인자명에서 봉투의 점 경로를 가리킨다. 경로가 없거나 타입이 맞지 않거나 고정 args와 키가 겹치면 호출하지 않는다. 식·셸·템플릿은 평가하지 않는다.
 
+### Slack 채널 이벤트 고르기
+
+채널 바인딩의 `events`가 그 채널에서 받을 사건을 정한다. 생략하면 `[mention]`(기존 동작)이다. 명시하면 비어 있지 않고 중복이 없어야 하며, 선언을 바꾸면 활성화 판본이 바뀐다.
+
+```yaml
+bindings:
+  - {id: team, adapter: slack, workspace: home, channel: planning, agent: main,
+     events: [mention, thread_reply, reaction]}
+```
+
+| events 값 | 트리거 `on.event` | 받는 것 | 본문 필드 |
+|---|---|---|---|
+| `mention` | `message` | 등록 채널에서 봇을 멘션한 글 | `text` |
+| `thread_reply` | `thread-reply` | 봇 참여가 증명된 스레드의 사람 답글 | `text`, `channel`, `ts`, `thread_ts` |
+| `reaction` | `reaction` | 등록 채널의 메시지에 사람이 단 반응 | `reaction`, `channel`, `item_ts`, `item_user` |
+
+DM 바인딩에는 `events: [dm]`만 쓸 수 있고 생략과 같다. CLI·HTTP 바인딩에는 `events`가 없다. 트리거의 `on.event`를 바인딩이 받지 않으면(`event-not-enabled`) 활성화를 거절하고, `thread-reply`·`reaction` 트리거는 채널 바인딩에만 달 수 있다(`binding-kind-mismatch`). 이벤트는 요청자(글쓴이·반응한 사람)가 프로필 멤버일 때만 접수한다. 수신 요건과 Slack 앱 설정은 [Slack 입구](gateway.md#slack-입구)에 있다.
+
+```yaml
+triggers:
+  - id: ack
+    "on": {event: reaction, binding: team}
+    match: {body.reaction: white_check_mark}
+    target: {tool: reports.ack}
+    input: {item: body.item_ts}
+```
+
+### 처리하지 않은 이벤트 넘기기
+
+Slack 이벤트에 직접 도구 트리거가 여럿 일치하면 접수가 일치한 직접 트리거를 order 순으로 **후보**로 고정한다. 에이전트 지시 트리거를 처음 만나면 그것이 기본 대화가 되고 뒤는 닿지 않는다. 지시 트리거가 없으면 기본 대화는 원래 바인딩의 에이전트가 받는 사건 입력이다: 멘션·답글은 글 그대로이고, 반응은 검증한 반응 이름과 글 ts만 담은 고정 형식이다. 기본 대화는 에이전트 실행이라 요청자에게 `run` 스코프가 있어야 하며(사슬을 만들 때와 마지막 후보가 넘길 때 현재 판본에서 다시 확인한다), 없으면 마지막 후보가 넘겨도 대화 없이 조용히 끝난다. 도구가 `_meta["bot/pass"]: true`로 «처리하지 않음»을 돌려주면 다음 후보로, 마지막 후보도 넘기면 기본 대화로 간다([표식 규칙](plugins.md#처리하지-않은-이벤트-넘기기-botpass)). 넘김은 다음 후보에 승인·쓰기 허가·멤버 권한을 주지 않는다 — 후보마다 현재 권한과 활성 판본을 다시 확인한다. 일반 결과(오류 포함)는 첫 일치에서 끝나며 다음 후보를 부르지 않는다. 처리한 도구 또는 기본 대화만 사용자에게 답한다. 선택·넘김 감사에는 후보 트리거 ID와 위치만 남는다(`trigger.select`·`call.pass`·`trigger.next`). 민감 DM(private) 트리거는 넘길 수 없다.
+
 HTTP response 기본값 accepted는 커밋 후 202와 request_id를 준다. `{mode: sync}`는 고정 형식 `{status, body}`의 도구 결과를 HTTP 상태와 본문으로 사용한다. 대기 기한을 넘기면 202로 전환한다. 같은 인증 주체가 Location의 `/{endpoint}/_requests/{id}`를 GET하면 최초 접수 때 저장한 방식으로 결과를 받는다. 프로필을 나중에 바꿔도 같은 요청의 응답 방식은 유지된다. 상태는 허용된 최종 응답 코드, 본문은 크기가 제한된 JSON이다.
+
+## 사전 승인한 정적 호출과 지정한 사람의 승인
+
+위험한 도구를 사람 없이 정해진 시각에 한정해 쓰려면, 운영자가 범위를 정해 **활성화할 때** 사전 승인한다. 모델 없이 고정 도구와 고정 인자로 직접 시작하는 `cron` 트리거에만 붙인다.
+
+```yaml
+- id: notify
+  "on": {cron: "0 9 * * *"}
+  principal: "service:reporter"
+  target: {tool: reports.notify, args: {report: daily}}
+  preapproved:
+    max_per_day: 24
+    targets:
+      - {operation: post, target: "channel:reports"}
+```
+
+- `max_per_day`는 1..=65535다. `targets`는 비어 있지 않은 중복 없는 `{operation, target}` 목록(최대 64)이다. `operation`은 고정 작업 종류, `target`은 운영자가 정한 정확한 대상 ID나 자격의 **이름**이다. 와일드카드·접두어·URL·공백·자격 값은 쓸 수 없다. 여러 대상에 쓰려면 각각 열거한다.
+- `input` 매핑·템플릿·`instruction`·`private`·`beat`·`human_approval`과 함께 쓰거나 이벤트·HTTP 트리거에 쓰면 `invalid_preapproval`이다. 도구가 `effects: true`가 아니면(모든 쓰기가 `effect.request`를 거친다고 보증할 수 없다) `preapproval_unenforceable`이다. 승인이 필요한 도구라도 이 트리거에 한해 사람 `approver`를 생략할 수 있다. 서비스 주체의 멤버십·스코프·정책·자격·설치·egress 검증은 그대로다.
+- 승인 ID는 운영자의 명시적 활성화(`bot serve --activate`)에서만 발급·갱신·철회하고 범위를 한 줄로 보여 준다. 처음 게시를 `--activate` 없이 하거나 그냥 재시작·합류하면 승인을 만들지도 지우지도 않는다(승인이 없으면 호출은 `preapproval_stale`로 닫힌다). 같은 집합을 `--activate`로 다시 시작하면 아직 없는 승인을 지금 발급한다. 승인은 프로필·에이전트·트리거, 트리거 원천·주체·실행 스코프, 도구 ID, 설치한 실행물 판본, 고정 인자의 JCS SHA-256, 정렬된 허용 쌍, 상한, 대상 매핑(선언한 자격 이름·선택 환경·egress·목적지)의 지문에 묶인다. 하나라도 바뀌면 옛 ID는 즉시 효력을 잃고 새 활성화가 새 ID를 발급한다. 같은 집합에 합류하거나 재시작하면 기존 ID를 읽는다. 설정을 과거 판본으로 되돌려도 철회된 ID는 살아나지 않고 새 ID가 나온다. 선언을 지우면 철회한다. **한계:** 목적지를 바꿀 때는 자격 이름을 바꿔 새 승인을 받는다 — 같은 이름의 값 교체는 감지하지 않는다(지문에는 자격 이름만 들어가고 값은 보지 않는다). 값은 비밀 보관소에 쓸 수 있는 운영자만 바꿀 수 있어 이 경계 밖이다.
+- 이 승인은 접수한 그 발생의 직접 호출 하나에만 쓴다. 모델·위임한 자식·wake·사용자 예약·다른 트리거·이벤트 본문 속 트리거 ID는 물려받지 못한다. 호출을 시작할 때와 새 쓰기 허가마다 활성 집합·승인 ID·정지·권한·claim을 다시 대조한다.
+- 승인 호출의 **모든 쓰기**는 `effect.request{step,args:{operation,target,params}}`를 쓴다. `(operation, target)`이 허용 쌍과 정확히 같아야 하고 `params`(객체)에 자격을 뺀 쓰기 내용이 든다. 새 외부 쓰기(새 `send:true`)를 허가할 때마다 UTC 하루 한도를 한 번 쓴다. 읽기 점검·재전달·상태 조회는 0회, 운영자 미실행 판정 뒤 다시 보내기는 1회다. 한도·정지·허용 쌍 밖은 `denied`, 철회·교체·옛 정지 세대는 `stale`, 모양이 다르면 `invalid`, 같은 단계의 다른 지문은 `conflict`이고 어느 쪽도 발송은 0이다. 자정에 밀린 쓰기는 자동으로 다시 보내지 않는다.
+- 트리거는 관리 화면·API로 정지·재개한다([관리 API](admin.md#사전-승인-관리)). 정지는 재기동·재배포 뒤에도 이어진다. 발생은 **예정 시각**으로 판정한다: 마지막 정지·재개 전환보다 앞서 예정된 발생(정지 중에 예정됐거나, 밀려서 재개 뒤에 접수되는 발생)은 건너뛰고(감사 한 줄) 재개 뒤에 예정된 새 발생부터 받는다. 재개해도 정지 전에 시작한 호출의 새 허가는 되살아나지 않는다.
+
+지정한 사람의 메시지나 반응이 승인 한 단계를 대신하게 하려면 직접 도구 이벤트 트리거에 `human_approval`을 둔다.
+
+```yaml
+- id: confirm
+  "on": {binding: team, event: reaction}
+  match: {body.reaction: white_check_mark}
+  input: {item: body.item_ts}
+  target: {tool: reports.notify}
+  human_approval:
+    approvers: ["slack:work/U123"]
+```
+
+- `human_approval`은 멘션·DM 메시지(`on.event: message`), 봇이 참여한 스레드의 답글(`thread-reply`), 반응(`reaction`, 행위자는 반응한 사람) 트리거에 쓴다. 아무 이벤트나 승인이 되지 않도록 **정확한 확인 문구나 이모지를 `match`로 고정해야 한다**: 메시지·답글은 `match: {body.text: <문구>}`, 반응은 `match: {body.reaction: <이모지>}`(비어 있지 않은 문자열). 없거나 다른 필드만 고정하면 `invalid_human_approval`이다.
+- `approvers`는 이 바인딩 워크스페이스의 Slack 사람 신원이며 프로필 멤버여야 한다(중복·서비스·HTTP 키·로컬 신원·메시지 작성 대상은 안 된다). `invalid_human_approval`로 거절한다.
+- 입구가 인증한 **이번** 이벤트의 행위자만 증거가 된다. 증거는 접수와 같은 커밋에 첫 후보의 트리거·바인딩·이벤트 ID와 함께 run에 묶이고, 호출을 시작하는 커밋에서 승인 소비와 함께 정확히 한 번 쓴다(증거 ID·원본 이벤트·주체·도구·인자 지문이 같은 커밋에 남는다). 같은 이벤트를 다른 후보·run·재전달이 다시 쓸 수 없다. 지금·고정 판본이 모두 그 사람을 지정하고 멤버여야 하며, 어긋나면 증거는 쓰이지 않고(`human_approval_mismatch`) 기존 카드 규칙을 따른다.
+- 모델·위임·넘김(PASS)으로 이어진 다른 후보는 이 증거를 쓰지 못한다. 민감 회상 뒤 확인·private 트리거·소유자 전용 승인 같은 독립적인 요건은 대신하지 않는다.
 
 ## 검증과 변경
 
@@ -275,7 +345,7 @@ BOT_HOST_CONFIG는 CLI가 읽는 JSON이다. gateway 키는 게이트웨이가 �
 
 **YAML과 스키마.** 앵커·별칭·태그·다중 문서·중복 키·복합 키·무한대·NaN, 깊이 32·항목 2만 개 초과를 거절한다. 평문은 YAML 1.2 코어 스키마로 읽어 `yes/no/on/off`는 문자열이고 키는 글자 그대로 문자열이다. 번들 스키마로 검증한다. cron은 5칸 표현과 `@hourly`·`@daily`·`@midnight`·`@weekly`·`@monthly`·`@yearly`·`@annually`, 일·요일 칸의 `?`를 받으며 `bot_core::cron::Cron`(검증과 스케줄러 공용)이 정규 5칸으로 바꾼다. AGENT.md의 front matter는 [agent.schema.json](../schemas/v1/agent.schema.json)의 `model`, `description`(한 줄 200자 이하, 상속하지 않으며 생략하면 경로의 마지막 이름), `builtin`(모델 실행기의 읽기 전용 내장 도구 `read`·`grep`·`glob`, 기본은 빈 목록, 상속하지 않으며 중복·미등록은 거절)만 받는다. 도구 input은 [plugins.md](plugins.md)의 어휘만 받으며, pattern은 `\d \w \s \b`·인라인 플래그·lookaround 없이 엔진마다 같게 읽히는 문법만 쓴다. 쓸 수 없는 키워드·패턴은 활성화를 거절한다.
 
-**참조와 충돌.** 활성화 전에 다음을 거절한다: id≠폴더명, 대소문자까지 정확하지 않은 IANA 시간대, 알 수 없는 역할·스코프(특히 `policy.approve` 오타), 같은 신원·바인딩 id·입구(활성 프로필 전체), 없는 에이전트·바인딩·도구, 호스트 내장 도구 ID `memory.share`·`schedule.create`·`schedule.list`·`schedule.cancel`·`schedule.deliver` 선언(정확히 이 ID들만 예약하며 `memory`·`schedule` 스킬의 다른 도구나 다른 스킬의 `share`·`create`는 허용, 새·복원 프로필 공통), 도구 `env` 이름이 그 도구를 부르는 에이전트의 상속 env.yaml에 없음(`env-missing`, 부모·자식 모두 호출할 수 있으면 둘 다 본다)·로더·셸·프록시·호스트 예약 이름(`env-reserved`)·비밀 환경 이름과 충돌(`env-secret-conflict`)·중복이나 잘못된 이름(스키마), 보이지 않는 스킬 이름 충돌, profile.yaml에 없는 비밀 이름, 기억 시드 owner가 멤버가 아님, cron 주체가 서비스가 아니거나 도구 스코프가 없음, 승인 대상 도구의 cron에 approver가 없음(승인자는 `local:*`·`slack:*` 사람 신원만, `service:*`·`http:*`는 불가), 같은 후보군의 같은 order, private 트리거가 DM 바인딩이 아니거나 일반 트리거보다 뒤이거나 승인 대상 도구 또는 다단계(`effects: true`) 도구를 부름(승인 카드·단계 영수증에 민감한 본문이 남음), `input`과 고정 args의 키 충돌·스키마에 없는 인자·빠진 필수 인자·args 단독 호출의 스키마 위반, `sync` 응답인데 도구 대상이 아님. 호스트 등록부 대조(미등록 서버·모델·입구 별칭, egress 상한)는 활성화 때만 한다. 같은 바이트의 판본은 호스트가 바뀌어도 같고, 옛 판본 복원은 구조·참조만 다시 확인한다.
+**참조와 충돌.** 활성화 전에 다음을 거절한다: id≠폴더명, 대소문자까지 정확하지 않은 IANA 시간대, 알 수 없는 역할·스코프(특히 `policy.approve` 오타), 같은 신원·바인딩 id·입구(활성 프로필 전체), 없는 에이전트·바인딩·도구, 호스트 내장 도구 ID `memory.share`·`schedule.create`·`schedule.list`·`schedule.cancel`·`schedule.deliver` 선언(정확히 이 ID들만 예약하며 `memory`·`schedule` 스킬의 다른 도구나 다른 스킬의 `share`·`create`는 허용, 새·복원 프로필 공통), 도구 `env` 이름이 그 도구를 부르는 에이전트의 상속 env.yaml에 없음(`env-missing`, 부모·자식 모두 호출할 수 있으면 둘 다 본다)·로더·셸·프록시·호스트 예약 이름(`env-reserved`)·비밀 환경 이름과 충돌(`env-secret-conflict`)·중복이나 잘못된 이름(스키마), 보이지 않는 스킬 이름 충돌, profile.yaml에 없는 비밀 이름, 기억 시드 owner가 멤버가 아님, cron 주체가 서비스가 아니거나 도구 스코프가 없음, 승인 대상 도구의 cron에 approver가 없음(승인자는 `local:*`·`slack:*` 사람 신원만, `service:*`·`http:*`는 불가), 같은 후보군의 같은 order, private 트리거가 DM 바인딩이 아니거나 일반 트리거보다 뒤이거나 승인 대상 도구 또는 다단계(`effects: true`) 도구를 부름(승인 카드·단계 영수증에 민감한 본문이 남음), `input`과 고정 args의 키 충돌·스키마에 없는 인자·빠진 필수 인자·args 단독 호출의 스키마 위반, `sync` 응답인데 도구 대상이 아님. 호스트 등록부 대조(미등록 서버·모델·입구 별칭, egress 상한, 도구 호출 시간 한도의 천장 `tool-timeout-over-cap`)는 활성화 때만 한다. 같은 바이트의 판본은 호스트가 바뀌어도 같고, 옛 판본 복원은 구조·참조만 다시 확인한다.
 
 **권한 계산.** 멤버의 스코프는 역할 스코프의 합집합 ∩ `policy.scopes`, 실행의 스코프는 그 값 ∩ 에이전트의 `scopes`(부모 상한 ∩ `policy.agents`)다. 도구는 필요한 스코프 전체가 들어 있어야 한다. 승인이 필요한 도구는 irreversible, 스코프가 `policy.approve`에 있는 write다. 수신자를 인자로 정하는 `destination`은 스냅샷의 `Tool.class`가 이미 irreversible로 올라간 값이며(선언 등급은 도구 판본 해시에 남는다), reply 목적지는 선언 그대로다. 기억 시드의 등록 해시(sha256)는 CLI가 owner·visibility·본문을 길이 구분한 UTF-8로 계산해야 소유자 변경이 반영된다.
 

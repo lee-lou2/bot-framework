@@ -59,6 +59,7 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
         .source = Adapter::SlackChannel {
         workspace: "other".into(),
         channel: "lobby".into(),
+        events: bot_core::slack::default_channel_events(),
     };
     assert_eq!(
         asks(&moved),

@@ -178,6 +178,8 @@ fn only_text_results_in_the_expected_shape_are_accepted() {
             texts: vec!["a".into(), "b".into()],
             structured: None,
             wake: None,
+            pass: None,
+            meta_extra: false,
         }
     );
     assert_eq!(
@@ -198,6 +200,45 @@ fn only_text_results_in_the_expected_shape_are_accepted() {
     }
 }
 
+/// 넘김 표식과 함께 온 다른 `_meta` 항목(후속 확인이 아닌 것)은 내용을 버리되 «표식만 온 것이 아니다»는 남긴다 — 그래야 브로커가 `invalid_pass`로 닫는다.
+/// 표식이 없는 결과의 다른 `_meta`는 지금까지처럼 조용히 버린다.
+#[test]
+fn a_pass_marker_with_other_meta_keeps_a_flag_and_other_meta_is_dropped_without_a_marker() {
+    let parse = |meta: Value| {
+        parse_result(&json!({"content": [], "isError": false, "_meta": meta})).unwrap()
+    };
+    // 표식만: 표지 없음
+    let alone = parse(json!({"bot/pass": true}));
+    assert!(!alone.meta_extra);
+    assert_eq!(
+        payload(&alone).unwrap(),
+        r#"{"_meta":{"bot/pass":true},"content":[],"isError":false}"#
+    );
+    // 표식 + 다른 항목(무엇이든): 내용은 없고 표지만 남는다
+    for other in [
+        json!({"bot/pass": true, "x": 1}),
+        json!({"bot/pass": true, "bot/other": {"secret": "s"}}),
+        json!({"bot/pass": true, "bot/extra": false}),
+    ] {
+        let out = parse(other.clone());
+        assert!(out.meta_extra, "{other}");
+        let text = payload(&out).unwrap();
+        assert_eq!(
+            text, r#"{"_meta":{"bot/extra":true,"bot/pass":true},"content":[],"isError":false}"#,
+            "{other}"
+        );
+    }
+    // 표식이 없으면 다른 항목은 버리고 표지도 싣지 않는다(후속 확인만 남는다)
+    let none = parse(json!({"x": 1}));
+    assert!(none.meta_extra);
+    assert_eq!(payload(&none).unwrap(), r#"{"content":[],"isError":false}"#);
+    let wake = parse(json!({"bot/wake": {"at": "2999-01-01T00:00:00Z"}, "x": 1}));
+    assert_eq!(
+        payload(&wake).unwrap(),
+        r#"{"_meta":{"bot/wake":{"at":"2999-01-01T00:00:00Z"}},"content":[],"isError":false}"#
+    );
+}
+
 #[test]
 fn the_model_facing_payload_has_a_fixed_canonical_shape() {
     let out = Output {
@@ -205,6 +246,8 @@ fn the_model_facing_payload_has_a_fixed_canonical_shape() {
         texts: vec!["hi\n".into()],
         structured: Some(json!({"b": 1, "a": [1.5]})),
         wake: None,
+        pass: None,
+        meta_extra: false,
     };
     assert_eq!(
         payload(&out).unwrap(),
@@ -215,6 +258,8 @@ fn the_model_facing_payload_has_a_fixed_canonical_shape() {
         texts: vec![],
         structured: Some(json!({"n": 1e300})),
         wake: None,
+        pass: None,
+        meta_extra: false,
     };
     assert!(payload(&unsafe_number).is_none());
     assert_eq!(

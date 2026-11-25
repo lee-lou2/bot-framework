@@ -303,6 +303,10 @@ impl PrivateGate {
         let outcome = match self.parts.runner.run(job).await {
             // 도구가 오류로 끝났다고 알려도(`isError`) 일부 효과가 났을 수 있다: 성공으로 적지 않고 보류한다.
             Ok(Ran::Done(payload)) if reports_error(&payload.0) => PrivateOutcome::Held,
+            // 민감 DM 전용 도구가 «처리하지 않음» 표식을 돌려줬다: 넘길 곳이 없다(본문은 일반 run·감사·모델로 가지 않는다). 실패로 닫고 다시 실행하지 않는다.
+            Ok(Ran::Done(payload)) if crate::service::pass::carries_marker(&payload.0) => {
+                PrivateOutcome::Held
+            }
             Ok(Ran::Done(_)) => PrivateOutcome::Completed,
             // 서버가 실행 전에 확정적으로 거절했다(잘못된 요청·인자): 외부 효과가 없다.
             Ok(Ran::Rejected | Ran::Refused(_)) => PrivateOutcome::Rejected,

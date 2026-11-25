@@ -106,6 +106,34 @@ fn remote_tool(
     }
 }
 
+/// 도구의 실효 호출 시간 한도(선언 또는 기본 60초)가 호스트 천장을 넘으면 활성화를 거절한다. 천장만 올려도 선언하지 않은 도구는 계속 60초다.
+fn timeout_cap(
+    host: &HostCatalog,
+    id: &str,
+    tool: &bot_core::profile::Tool,
+    file: &str,
+    issues: &mut Issues,
+) {
+    let (cap, secs) = (host.tool_call_cap(), tool.call_secs());
+    if secs <= cap {
+        return;
+    }
+    let fix = if tool.timeout_secs.is_some() {
+        format!(
+            "도구의 `timeout_secs`를 {cap} 이하로 줄이거나 호스트 설정의 `limits.tool_call_max_secs`를 {secs} 이상으로 올리세요"
+        )
+    } else {
+        format!(
+            "`timeout_secs`를 선언하지 않으면 기본 {secs}초가 적용돼요 — 이 도구에 {cap} 이하의 `timeout_secs`를 선언하거나 호스트 설정의 `limits.tool_call_max_secs`를 {secs} 이상으로 올리세요"
+        )
+    };
+    issues.error(
+        "tool-timeout-over-cap",
+        file,
+        format!("{id}: 호출 시간 한도 {secs}초가 호스트 천장 {cap}초를 넘어요. {fix}"),
+    );
+}
+
 pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
     let profile = snap.id.0.as_str();
     let mut models: BTreeSet<&str> = BTreeSet::from([snap.model.as_str()]);
@@ -144,7 +172,9 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                     format!("호스트에 등록하지 않은 CLI 계정이에요: {account}"),
                 );
             }
-            Adapter::SlackChannel { workspace, channel } => match host.slack.get(workspace) {
+            Adapter::SlackChannel {
+                workspace, channel, ..
+            } => match host.slack.get(workspace) {
                 None => issues.error_at(
                     "unknown-workspace",
                     "profile.yaml",
@@ -228,6 +258,7 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
             if let Some(target) = host.remote_servers.get(&tool.server) {
                 remote_tool(host, profile, id.0.as_str(), tool, target, &file, issues);
             }
+            timeout_cap(host, id.0.as_str(), tool, &file, issues);
             let kept = host.effective_egress(profile, &tool.egress);
             if kept.len() < tool.egress.len() {
                 let dropped: Vec<&String> = tool.egress.difference(&kept).collect();

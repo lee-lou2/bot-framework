@@ -156,6 +156,21 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "api_runs",
         include_str!("../migrations/0019_api_runs.sql"),
     ),
+    (
+        20,
+        "pass_and_threads",
+        include_str!("../migrations/0020_pass_and_threads.sql"),
+    ),
+    (
+        21,
+        "preapproval",
+        include_str!("../migrations/0021_preapproval.sql"),
+    ),
+    (
+        22,
+        "slack_events",
+        include_str!("../migrations/0022_slack_events.sql"),
+    ),
 ];
 
 fn migrator() -> Migrator {

@@ -31,6 +31,7 @@ pub fn tool(class: Risk, scopes: &[&str]) -> Tool {
         destination: None,
         definition: None,
         mcp_name: None,
+        timeout_secs: None,
     }
 }
 
@@ -71,6 +72,7 @@ pub fn run_context(
             input: JsonPayload("{}".into()),
             attachments: vec![],
             steps: vec![],
+            pass_pos: None,
         },
         approver: Some(principal),
         trigger: None,
@@ -183,6 +185,7 @@ impl SnapshotBuilder {
                 source: Adapter::SlackChannel {
                     workspace: "home".into(),
                     channel: "planning".into(),
+                    events: bot_core::slack::default_channel_events(),
                 },
             },
         );
@@ -329,6 +332,8 @@ impl SnapshotBuilder {
                     tool: ToolId(tool.into()),
                     args: JsonPayload("{}".into()),
                 },
+                preapproved: None,
+                human_approval: None,
             });
         self
     }
@@ -363,6 +368,8 @@ impl SnapshotBuilder {
                     tool: ToolId("agenda.list".into()),
                     args: JsonPayload("{}".into()),
                 },
+                preapproved: None,
+                human_approval: None,
             });
         self
     }

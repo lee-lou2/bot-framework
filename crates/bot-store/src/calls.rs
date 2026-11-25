@@ -331,7 +331,25 @@ impl Store {
     }
 
     /// 현재 세대·취소·private 플래그와 승인을 잠금 안에서 대조하고 단 한 번 시작한다.
+    /// 사전 승인이 묶인 run의 직접 호출은 이 길로 시작할 수 없다(`call_start_with`만 시작한다).
     pub(crate) async fn call_start(&self, s: StartCall) -> R<()> {
+        self.start_inner(s, None).await.map(|_| ())
+    }
+
+    /// `call_start`에 사전 승인(F1)·지정한 사람의 증거(F4)를 같은 잠금 안에서 더해 확인한다. 확인에 실패하면 아무것도 쓰지 않고 고정 사유를 돌려준다.
+    pub(crate) async fn call_start_with(
+        &self,
+        s: StartCall,
+        authority: bot_core::grant::Authority,
+    ) -> R<bot_core::grant::Granted> {
+        self.start_inner(s, Some(&authority)).await
+    }
+
+    async fn start_inner(
+        &self,
+        s: StartCall,
+        authority: Option<&bot_core::grant::Authority>,
+    ) -> R<bot_core::grant::Granted> {
         let at = &s.attempt;
         ids_ok(&[&s.owner, &s.checked_revision.0])?;
         let mut tx = self.begin_authorized().await?;
@@ -352,6 +370,29 @@ impl Store {
         if flagged && !s.private_recall {
             return Err(Error::Conflict.into()); // 판정한 뒤 다른 실행이 private 기억을 조회했다
         }
+        // 사전 승인·사람 증거: 같은 잠금 안에서 승인 ID·지문·정지·증거를 확인한다(실패하면 아무것도 쓰지 않는다)
+        let mark = match crate::authority::check_start(
+            &mut tx,
+            &run,
+            &call,
+            &s,
+            pointer.is_some(),
+            authority,
+        )
+        .await?
+        {
+            Ok(mark) => mark,
+            Err(why) if authority.is_none() => {
+                // 사전 승인이 묶인 직접 호출을 권한 없이 시작하려 했다: 그 자리에서 거절로 닫는다
+                crate::authority::deny_in(&mut tx, &run, &call, why).await?;
+                tx.commit().await?;
+                return Err(Error::Denied.into());
+            }
+            Err(why) => {
+                tx.rollback().await?;
+                return Ok(bot_core::grant::Granted::Refused(why));
+            }
+        };
         // 호출에 승인이 연결돼 있으면 그 승인을 내야 시작한다(인자를 비워 승인 소비를 건너뛰지 못한다)
         crate::approvals::require_presented(&mut tx, pointer.as_ref(), s.approval.is_some())
             .await?;
@@ -364,7 +405,8 @@ impl Store {
         }
         sqlx::query(
             "update bot_calls set state = 'started', started_generation = $4, owner = $5, started_ms = bot_now_ms(),
-                    updated_ms = bot_now_ms(), risk = $6, tool_revision = $7, approval = coalesce($8, approval)
+                    updated_ms = bot_now_ms(), risk = $6, tool_revision = $7, approval = coalesce($8, approval),
+                    grant_id = $9, grant_epoch = $10
              where profile = $1 and run = $2 and call = $3",
         )
         .bind(&at.profile.0)
@@ -375,6 +417,8 @@ impl Store {
         .bind(risk_str(s.risk))
         .bind(&s.tool_revision.0)
         .bind(approved)
+        .bind(mark.grant.as_ref().map(|(id, _)| id.as_str()))
+        .bind(mark.grant.as_ref().map(|(_, epoch)| *epoch))
         .execute(&mut *tx)
         .await?;
         let principal: String =
@@ -383,11 +427,12 @@ impl Store {
                 .bind(&run.id)
                 .fetch_one(&mut *tx)
                 .await?;
+        let verdict = mark.verdict(&verdict);
         let mut entry = Entry::new(&principal, "call.start", &s.call.0, &verdict);
         entry.args = Some(to32(call.get("args_sha256"))?);
         audit::append(&mut tx, &run.profile, &entry).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(bot_core::grant::Granted::Started)
     }
 
     /// 호출을 닫는다. 열린 호출은 거절(Blocked)로만, 시작한 호출(같은 세대 또는 옛 세대)은 어느 결과로나,

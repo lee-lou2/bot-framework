@@ -1,5 +1,7 @@
 //! Slack 시험 공용 조립: 가짜 Slack 서버·메모리 포트·합성 프로필.
 #![allow(dead_code)]
+pub mod events;
+
 use bot_core::profile::Adapter;
 use bot_gateway::{
     active::ActiveCheck,
@@ -7,7 +9,7 @@ use bot_gateway::{
     ingress::Ingress,
     slack::{SlackError, SlackGateway, api::SlackApi},
     testing::{
-        ports::{MemoryBroker, MemoryLedger},
+        ports::{MemoryBroker, MemoryLedger, MemoryThreads},
         slack::FakeSlack,
         *,
     },
@@ -32,6 +34,7 @@ pub fn personal() -> Fixture {
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )
@@ -54,6 +57,7 @@ pub fn work() -> Fixture {
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "ops".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )
@@ -76,6 +80,7 @@ pub struct Rig {
     pub private: Arc<MemoryPrivate>,
     pub broker: Arc<MemoryBroker>,
     pub ledger: Arc<MemoryLedger>,
+    pub threads: Arc<MemoryThreads>,
     pub gateway: Arc<SlackGateway>,
     pub ingress: Arc<Ingress>,
     pub stop: CancellationToken,
@@ -138,13 +143,15 @@ pub async fn rig_full(
         ingress = ingress.with_active(active);
     }
     let ingress = Arc::new(ingress);
+    let threads = MemoryThreads::new();
     let mut gateway = SlackGateway::new(
         ingress.clone(),
         broker.clone(),
         ledger.clone(),
         secrets,
         SlackApi::new(Some(&slack.base)),
-    );
+    )
+    .with_threads(threads.clone());
     if let Some(ttl) = ttl {
         gateway = gateway.with_token_ttl(ttl);
     }
@@ -157,6 +164,7 @@ pub async fn rig_full(
         private,
         broker,
         ledger,
+        threads,
         gateway,
         ingress,
         stop,

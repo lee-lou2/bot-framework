@@ -15,7 +15,7 @@ use crate::{
     json::parse,
     mcp::{self, McpError, Session, remote::Remote, wire::RemoteWire},
     ports::{Ran, ToolJob, ToolRunner},
-    proxy::{Connector, LOCAL_HOST, LocalService, Proxy, ProxyConfig, Resolver},
+    proxy::{Connector, LOCAL_HOST, LocalService, Proxy, Resolver},
     resolve::HostPort,
     sandbox::{Limits, Process, ProxyEndpoint, Sandbox, SandboxSpec},
     sys::Entropy,
@@ -50,32 +50,6 @@ pub struct HostRegistry {
     pub remote: BTreeMap<String, Remote>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct RunnerConfig {
-    /// `initialize`와 `tools/list` 각각의 제한.
-    pub handshake_timeout: Duration,
-    pub call_timeout: Duration,
-    pub terminate_timeout: Duration,
-    pub max_result_bytes: usize,
-    /// 운영자가 사설망 접속을 명시적으로 열었을 때만 true.
-    pub allow_private_egress: bool,
-    /// 샌드박스 전체 수명 상한.
-    pub wall: Duration,
-}
-
-impl Default for RunnerConfig {
-    fn default() -> Self {
-        Self {
-            handshake_timeout: Duration::from_secs(10),
-            call_timeout: Duration::from_secs(60),
-            terminate_timeout: Duration::from_secs(10),
-            max_result_bytes: 256 * 1024,
-            allow_private_egress: false,
-            wall: Duration::from_secs(300),
-        }
-    }
-}
-
 pub struct Deps {
     pub sandbox: Arc<dyn Sandbox>,
     pub secrets: Arc<dyn SecretStore>,
@@ -93,7 +67,11 @@ pub struct McpRunner {
     wire: Option<Arc<dyn RemoteWire>>,
 }
 
+mod config;
 mod remote;
+
+use config::Budget;
+pub use config::{RunnerConfig, TIMEOUT_OVER_CAP};
 
 fn kind_name(kind: &ConversationKind) -> &'static str {
     match kind {
@@ -204,6 +182,11 @@ impl McpRunner {
     async fn execute(&self, job: ToolJob) -> Ran {
         let started = tokio::time::Instant::now();
         let tool = &job.tool.tool;
+        // 이 도구의 시간 예산. 실효 호출 한도(선언 또는 기본 60초)가 지금 호스트 천장을 넘으면(천장을 내렸거나 복원한 옛 선언) 아무것도 시작하지 않고 거절한다.
+        let budget = match self.cfg.budget(tool) {
+            Ok(budget) => budget,
+            Err(why) => return Ran::Refused(why),
+        };
         // 승인이 묶은 설치 판본이 지금 등록부와 같아야 한다.
         let Some(image) = self.host.servers.get(&tool.server).cloned() else {
             return Ran::NotSent;
@@ -219,7 +202,7 @@ impl McpRunner {
         }
         // 원격 서버는 샌드박스 없이 브로커가 직접 연결한다
         if let Some(remote) = self.host.remote.get(&tool.server) {
-            return self.execute_remote(&job, remote).await;
+            return self.execute_remote(&job, remote, budget).await;
         }
         // 샌드박스가 이 서버를 실행할 수 있어야 한다(상태 볼륨을 요구하는데 지원하지 않으면 자격을 풀기 전에 시작하지 않는다).
         if self.deps.sandbox.admit(&tool.server, &image).is_err() {
@@ -297,8 +280,7 @@ impl McpRunner {
                 return Ran::NotSent;
             }
             let password = hex(&raw);
-            let mut proxy_cfg = ProxyConfig::new(policy, "bot".into(), password.clone());
-            proxy_cfg.allow_private = self.cfg.allow_private_egress;
+            let mut proxy_cfg = self.cfg.proxy(policy, password.clone(), budget);
             // 프록시 암호도 이 호출이 쓰는 자격이다(결과와 단계 보고 검사에 함께 쓴다)
             credentials.push(password.clone().into_bytes());
             if via_proxy {
@@ -349,13 +331,11 @@ impl McpRunner {
             egress: endpoint.take(),
             egress_hosts: hosts,
             effects: tool.effects && effect_channel.is_none(),
-            limits: Limits {
-                wall: self.cfg.wall,
-            },
+            limits: Limits { wall: budget.wall },
         };
         // 시작부터 쓰기·응답까지 절대 기한 하나로 묶는다. 어느 단계에서 막혀도(쓰기가 막혀 타이머에 못 닿는 경우 포함) 기한이 끝나면
         // 프로세스 그룹과 프록시를 닫고 "호출을 보냈는가"로 정산한다.
-        let ran = match timeout(self.cfg.wall, self.deps.sandbox.spawn(spec)).await {
+        let ran = match timeout(budget.wall, self.deps.sandbox.spawn(spec)).await {
             Ok(Ok(process)) => {
                 let Process {
                     stdio,
@@ -363,10 +343,10 @@ impl McpRunner {
                     handle,
                 } = process;
                 let sent = AtomicBool::new(false);
-                let remaining = self.cfg.wall.saturating_sub(started.elapsed());
+                let remaining = budget.wall.saturating_sub(started.elapsed());
                 let ran = match timeout(
                     remaining,
-                    self.drive(&job, stdio, effects, &credentials, &sent),
+                    self.drive(&job, stdio, effects, &credentials, &sent, budget.call),
                 )
                 .await
                 {
@@ -413,6 +393,7 @@ impl McpRunner {
         effects: Option<crate::sandbox::Pipe>,
         credentials: &[Vec<u8>],
         sent: &AtomicBool,
+        call_limit: Duration,
     ) -> Ran {
         let mut session = Session::new(stdio);
         let limit = self.cfg.handshake_timeout;
@@ -454,7 +435,7 @@ impl McpRunner {
             .send_call(&job.tool.name, &job.args, &meta(job))
             .await
         {
-            Ok(id) => session.await_result(id, self.cfg.call_timeout).await,
+            Ok(id) => session.await_result(id, call_limit).await,
             Err(_) => Err(McpError::Io),
         };
         if let Some((stop, task)) = channel {
@@ -497,12 +478,12 @@ impl McpRunner {
             }
         }
         // 후속 확인 요청도 모델에게 가는 글을 담을 수 있으니 같은 검사(크기·자격 노출·정규화)를 받는다.
-        if let Some(wake) = &output.wake {
-            let Some(text) = canonicalize(wake) else {
+        for marker in [&output.wake, &output.pass].into_iter().flatten() {
+            let Some(text) = canonicalize(marker) else {
                 return Ran::Blocked("result_shape");
             };
             size += text.len();
-            if structured_blocked(wake, credentials) {
+            if structured_blocked(marker, credentials) {
                 return Ran::Blocked("result_credential");
             }
         }

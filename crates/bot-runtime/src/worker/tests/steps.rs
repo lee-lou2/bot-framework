@@ -2,6 +2,7 @@
 
 use super::fakes::*;
 use crate::{
+    host::Models,
     model::{
         CallEnd, ModelError, ModelRequest, ModelRunner, ModelStep, PendingCall, RunnerKind,
         StepFuture,
@@ -13,6 +14,15 @@ use crate::{
 };
 use bot_core::{command::*, id::*, port::Error, state::Visibility};
 use std::sync::Arc;
+
+/// 어떤 별칭에도 실행기가 없는 구성.
+struct NoModels;
+
+impl Models for NoModels {
+    fn runner(&self, _: &ProfileId, _: &str) -> Option<Arc<dyn ModelRunner>> {
+        None
+    }
+}
 
 fn plan(run: &str, calls: &[(&str, &str, &str)]) -> Step {
     let planned = Planned {

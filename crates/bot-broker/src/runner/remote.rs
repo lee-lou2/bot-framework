@@ -38,7 +38,12 @@ fn meta_members(job: &ToolJob) -> String {
 }
 
 impl McpRunner {
-    pub(super) async fn execute_remote(&self, job: &ToolJob, remote: &Remote) -> Ran {
+    pub(super) async fn execute_remote(
+        &self,
+        job: &ToolJob,
+        remote: &Remote,
+        budget: Budget,
+    ) -> Ran {
         let tool = &job.tool.tool;
         if tool.effects || !tool.secrets.is_empty() || !tool.env.is_empty() {
             return Ran::NotSent;
@@ -84,8 +89,8 @@ impl McpRunner {
         let mut http = Http::new(wire, remote.clone(), bearer, self.cfg.allow_private_egress);
         let sent = AtomicBool::new(false);
         let ran = match timeout(
-            self.cfg.wall,
-            self.drive_remote(job, &mut http, &credentials, &sent),
+            budget.wall,
+            self.drive_remote(job, &mut http, &credentials, &sent, budget.call),
         )
         .await
         {
@@ -104,6 +109,7 @@ impl McpRunner {
         http: &mut Http,
         credentials: &[Vec<u8>],
         sent: &AtomicBool,
+        call_limit: Duration,
     ) -> Ran {
         let limit = self.cfg.handshake_timeout;
         if let Err(error) = http.connect(limit).await {
@@ -141,7 +147,7 @@ impl McpRunner {
                 &job.args,
                 &meta_members(job),
                 params,
-                self.cfg.call_timeout,
+                call_limit,
             )
             .await;
         match result {

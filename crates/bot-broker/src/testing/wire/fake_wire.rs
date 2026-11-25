@@ -40,6 +40,8 @@ pub struct FakeWire {
     pub targets: Mutex<Vec<(bool, String, u16, bool)>>,
     /// 받은 요청의 비밀 머리 값들(어디에 실렸는지 검사하려고)
     pub secret_values: Mutex<Vec<String>>,
+    /// 받은 요청마다 (RPC 메서드, 요청이 싣은 전송 제한)
+    pub timeouts: Mutex<Vec<(String, Option<std::time::Duration>)>>,
     /// 서버가 요청을 처리한 직후 부르는 함수(인자는 RPC 메서드): 호출이 진행되는 도중에 세상이 바뀌는 상황을 만든다.
     pub after_request: Mutex<Option<AfterRequest>>,
 }
@@ -52,6 +54,7 @@ impl FakeWire {
             lose: Mutex::new(None),
             targets: Mutex::new(Vec::new()),
             secret_values: Mutex::new(Vec::new()),
+            timeouts: Mutex::new(Vec::new()),
             after_request: Mutex::new(None),
         }
     }
@@ -90,6 +93,7 @@ impl RemoteWire for FakeWire {
                 body: String::from_utf8_lossy(&request.body).into_owned(),
             };
             let rpc = rpc_request.rpc();
+            lock(&self.timeouts).push((rpc.clone(), request.timeout));
             let answer = self.server.handle(rpc_request);
             if let Some(hook) = lock(&self.after_request).as_ref() {
                 hook(&rpc);

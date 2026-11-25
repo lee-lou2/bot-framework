@@ -16,6 +16,38 @@ pub struct Message {
     pub thread_ts: Option<String>,
     /// 첨부 파일 ID(내려받지 않는다)
     pub files: Vec<String>,
+    /// 이 이벤트를 전한 Slack 이벤트 ID(재전달에 같다)
+    pub event_id: Option<String>,
+}
+
+/// 채널(공개 `message.channels`·비공개 `message.groups`)의 글 한 건. 사람의 글도 봇의 글도 담고, 무엇으로 받을지(스레드 답글인지)·자기 봇의 글인지는
+/// 설치를 아는 처리기가 정한다. 수정·삭제·참여 알림 같은 시스템 글은 담지 않는다.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Post {
+    pub team: String,
+    pub channel: String,
+    /// 보낸 사용자 ID. 앱·시스템 글에는 없을 수 있다.
+    pub user: Option<String>,
+    /// 사람이 쓴 글인가(앱·봇 글이 아니다). 파일이 붙은 글·스레드 방송 글은 사람의 글이다.
+    pub human: bool,
+    pub text: String,
+    pub ts: String,
+    pub thread_ts: Option<String>,
+    pub files: Vec<String>,
+    pub event_id: Option<String>,
+}
+
+/// 채널 글에 단 반응(`reaction_added`, `item.type = message`). 행위자는 `user`, 대상은 `channel`의 `item_ts` 글이다.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Reaction {
+    pub team: String,
+    pub channel: String,
+    pub item_ts: String,
+    pub user: String,
+    pub reaction: String,
+    /// 반응 대상 글의 작성자(행위자와 다를 수 있다)
+    pub item_user: Option<String>,
+    pub event_id: String,
 }
 
 /// 메시지 속 버튼 클릭
@@ -35,6 +67,8 @@ pub enum Frame {
     Hello(Option<String>),
     Disconnect(String),
     Message(Message),
+    Post(Post),
+    Reaction(Reaction),
     Button(Button),
     /// 다루지 않는 이벤트(받았다는 표시만 한다)
     Ignored,
@@ -63,15 +97,39 @@ fn text(value: &Value) -> Option<String> {
     value.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
 }
 
+/// 앱·봇이 보낸 글인가: `bot_id`·`app_id`가 있거나 `bot_message` 하위 유형이다(하나만 있어도 앱 글이다).
+fn from_app(event: &Value) -> bool {
+    event["bot_id"].is_string()
+        || event["app_id"].is_string()
+        || event["subtype"].as_str() == Some("bot_message")
+}
+
+/// `thread_ts`: 생략이면 `Ok(None)`, 비어 있지 않은 문자열이면 `Ok(Some)`. 그 밖(숫자·`null`·객체·빈 글)은 모양이 틀린 것이라 `Err` — 없는 것으로 보고 검사를 건너뛰지 않는다.
+fn thread_of(event: &Value) -> Result<Option<String>, ()> {
+    match event.get("thread_ts") {
+        None => Ok(None),
+        Some(Value::String(ts)) if !ts.is_empty() => Ok(Some(ts.clone())),
+        Some(_) => Err(()),
+    }
+}
+
 /// Events API 본문(`{team_id, event: {...}}`). 사람이 쓴 글만 `Message`가 된다.
 pub fn parse_event(payload: &Value) -> Frame {
     let event = &payload["event"];
     let kind = event["type"].as_str();
+    if kind == Some("reaction_added") {
+        return parse_reaction(payload);
+    }
     if !matches!(kind, Some("app_mention" | "message")) {
         return Frame::Ignored;
     }
+    if kind == Some("message")
+        && matches!(event["channel_type"].as_str(), Some("channel" | "group"))
+    {
+        return parse_post(payload);
+    }
     // 앱·봇이 보낸 글(자기 글 포함)은 대화 루프를 막으려고 받지 않는다
-    if event["bot_id"].is_string() || event["subtype"].as_str() == Some("bot_message") {
+    if from_app(event) {
         return Frame::Ignored;
     }
     let (Some(team), Some(channel), Some(user), Some(ts)) = (
@@ -82,6 +140,13 @@ pub fn parse_event(payload: &Value) -> Frame {
     ) else {
         return Frame::Ignored;
     };
+    // 글·스레드 ts는 채널 글과 같은 검사를 받는다: 잘못된 ts는 요청 ID·대화 주소로 쓰이기 전에 버린다
+    let Ok(thread_ts) = thread_of(event) else {
+        return Frame::Ignored;
+    };
+    if !ts_ok(&ts) || thread_ts.as_deref().is_some_and(|t| !ts_ok(t)) {
+        return Frame::Ignored;
+    }
     let direct = match kind {
         Some("message") => {
             // DM의 일반 글만. 수정·삭제·참여 알림 같은 시스템 글은 제외하고 파일이 붙은 글은 받는다
@@ -108,13 +173,101 @@ pub fn parse_event(payload: &Value) -> Frame {
         user,
         text: event["text"].as_str().unwrap_or_default().to_owned(),
         ts,
-        thread_ts: text(&event["thread_ts"]),
-        files: event["files"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|file| text(&file["id"]))
-            .collect(),
+        thread_ts,
+        files: file_ids(event),
+        event_id: text(&payload["event_id"]),
+    })
+}
+
+fn file_ids(event: &Value) -> Vec<String> {
+    event["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|file| text(&file["id"]))
+        .collect()
+}
+
+/// Slack ts 모양(`초.마이크로초`)인가. 잘못된 ts는 작업을 만들지 않는다.
+fn ts_ok(ts: &str) -> bool {
+    crate::schedule_routes::is_ts(ts)
+}
+
+/// 채널 글. 일반 글·파일 글·스레드 방송 글과 앱 글(`bot_message`)만 담고(자기 봇 글을 증거로 읽으려면 앱 글도 필요하다) 수정·삭제 같은 나머지는 버린다.
+fn parse_post(payload: &Value) -> Frame {
+    let event = &payload["event"];
+    let subtype = event["subtype"].as_str();
+    if !matches!(
+        subtype,
+        None | Some("file_share" | "thread_broadcast" | "bot_message")
+    ) {
+        return Frame::Ignored;
+    }
+    let (Some(team), Some(channel), Some(ts)) = (
+        text(&payload["team_id"]),
+        text(&event["channel"]),
+        text(&event["ts"]),
+    ) else {
+        return Frame::Ignored;
+    };
+    let Ok(thread_ts) = thread_of(event) else {
+        return Frame::Ignored;
+    };
+    if !ts_ok(&ts) || thread_ts.as_deref().is_some_and(|t| !ts_ok(t)) {
+        return Frame::Ignored;
+    }
+    let user = text(&event["user"]);
+    let app = from_app(event);
+    Frame::Post(Post {
+        team,
+        channel,
+        human: !app && user.is_some(),
+        user,
+        text: event["text"].as_str().unwrap_or_default().to_owned(),
+        ts,
+        thread_ts,
+        files: file_ids(event),
+        event_id: text(&payload["event_id"]),
+    })
+}
+
+/// 반응 이름: 소문자·숫자와 `_`·`+`·`-`·`:`만, 100자 이하(`white_check_mark`·`+1`·`thumbsup::skin-tone-2`). Slack의 이모지 이름 규칙이고, 그 밖의 글자가 든 이름은 받지 않는다
+/// (이름은 트리거 조건·기본 에이전트 입력에 그대로 실린다).
+fn reaction_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'+' | b'-' | b':')
+        })
+}
+
+fn parse_reaction(payload: &Value) -> Frame {
+    let event = &payload["event"];
+    let item = &event["item"];
+    if item["type"].as_str() != Some("message") {
+        return Frame::Ignored;
+    }
+    let (Some(team), Some(channel), Some(item_ts), Some(user), Some(reaction), Some(event_id)) = (
+        text(&payload["team_id"]),
+        text(&item["channel"]),
+        text(&item["ts"]),
+        text(&event["user"]),
+        text(&event["reaction"]),
+        text(&payload["event_id"]),
+    ) else {
+        return Frame::Ignored;
+    };
+    if !ts_ok(&item_ts) || !reaction_ok(&reaction) {
+        return Frame::Ignored;
+    }
+    Frame::Reaction(Reaction {
+        team,
+        channel,
+        item_ts,
+        user,
+        reaction,
+        item_user: text(&event["item_user"]),
+        event_id,
     })
 }
 
@@ -153,151 +306,4 @@ pub fn reconnect_delay_ms(attempt: u32) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn events(event: &str) -> String {
-        format!(
-            r#"{{"type":"events_api","envelope_id":"E1","payload":{{"team_id":"T1","event_id":"Ev1","event":{event}}}}}"#
-        )
-    }
-
-    fn message(frame: Frame) -> Message {
-        match frame {
-            Frame::Message(m) => m,
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn hello_disconnect_and_garbage() {
-        assert_eq!(parse_socket(r#"{"type":"hello"}"#).0, Frame::Hello(None));
-        assert_eq!(
-            parse_socket(r#"{"type":"hello","connection_info":{"app_id":"A1"}}"#).0,
-            Frame::Hello(Some("A1".into()))
-        );
-        let (frame, ack) = parse_socket(r#"{"type":"disconnect","reason":"refresh_requested"}"#);
-        assert_eq!(
-            (frame, ack),
-            (Frame::Disconnect("refresh_requested".into()), None)
-        );
-        assert_eq!(parse_socket("not json").0, Frame::Invalid);
-        assert_eq!(
-            parse_socket(r#"{"type":"slash_commands"}"#).0,
-            Frame::Ignored
-        );
-    }
-
-    #[test]
-    fn a_channel_mention_keeps_its_team_thread_and_files() {
-        let raw = events(
-            r#"{"type":"app_mention","user":"U1","text":"<@UB> 안녕","ts":"10.1","channel":"C1","files":[{"id":"F1"},{"id":"F2"},{"name":"no id"}]}"#,
-        );
-        let (frame, ack) = parse_socket(&raw);
-        assert_eq!(ack.as_deref(), Some("E1"));
-        let m = message(frame);
-        assert_eq!(
-            (m.team.as_str(), m.channel.as_str(), m.direct),
-            ("T1", "C1", false)
-        );
-        assert_eq!(
-            (m.user.as_str(), m.ts.as_str(), m.thread_ts),
-            ("U1", "10.1", None)
-        );
-        assert_eq!(m.files, ["F1", "F2"]);
-        let inside = events(
-            r#"{"type":"app_mention","user":"U1","text":"x","ts":"11.1","thread_ts":"10.1","channel":"C1"}"#,
-        );
-        assert_eq!(
-            message(parse_socket(&inside).0).thread_ts.as_deref(),
-            Some("10.1")
-        );
-    }
-
-    #[test]
-    fn only_plain_human_dms_become_direct_messages() {
-        let dm = events(
-            r#"{"type":"message","channel_type":"im","user":"U1","text":"질문","ts":"1.1","channel":"D1"}"#,
-        );
-        let m = message(parse_socket(&dm).0);
-        assert!(m.direct);
-        assert_eq!(m.channel, "D1");
-        let with_file = events(
-            r#"{"type":"message","subtype":"file_share","channel_type":"im","user":"U1","ts":"1.2","channel":"D1","files":[{"id":"F9"}]}"#,
-        );
-        assert_eq!(message(parse_socket(&with_file).0).files, ["F9"]);
-        for ignored in [
-            // 수정·삭제 같은 시스템 글
-            r#"{"type":"message","subtype":"message_changed","channel_type":"im","channel":"D1","user":"U1","ts":"1"}"#,
-            // 채널의 일반 글(멘션이 아니면 받지 않는다)
-            r#"{"type":"message","channel_type":"channel","user":"U1","text":"x","ts":"1.3","channel":"C1"}"#,
-            // 앱·봇이 보낸 글
-            r#"{"type":"message","channel_type":"im","user":"U9","bot_id":"B1","text":"x","ts":"1.4","channel":"D1"}"#,
-            r#"{"type":"message","subtype":"bot_message","channel_type":"im","user":"U9","text":"x","ts":"1.5","channel":"D1"}"#,
-            // 보낸 사람·글 ID를 알 수 없음
-            r#"{"type":"message","channel_type":"im","text":"x","ts":"1.6","channel":"D1"}"#,
-            // DM에서의 app_mention은 message로 받으므로 건너뛴다
-            r#"{"type":"app_mention","user":"U1","text":"x","ts":"1.7","channel":"D1"}"#,
-            r#"{"type":"reaction_added","user":"U1","reaction":"x"}"#,
-        ] {
-            assert_eq!(
-                parse_socket(&events(ignored)).0,
-                Frame::Ignored,
-                "{ignored}"
-            );
-        }
-    }
-
-    #[test]
-    fn events_without_a_team_are_ignored() {
-        let raw = r#"{"type":"events_api","envelope_id":"E5","payload":{"event":{"type":"app_mention","user":"U1","text":"x","ts":"1.1","channel":"C1"}}}"#;
-        let (frame, ack) = parse_socket(raw);
-        assert_eq!((frame, ack.as_deref()), (Frame::Ignored, Some("E5")));
-        let empty = r#"{"type":"events_api","envelope_id":"E6","payload":{"team_id":"","event":{"type":"app_mention","user":"U1","text":"x","ts":"1.1","channel":"C1"}}}"#;
-        assert_eq!(parse_socket(empty).0, Frame::Ignored);
-    }
-
-    #[test]
-    fn button_clicks_use_the_installation_team_not_the_clickers() {
-        let raw = r#"{"type":"interactive","envelope_id":"E2","payload":{"type":"block_actions",
-            "team":{"id":"T7"},"user":{"id":"U2","team_id":"TFOREIGN"},"channel":{"id":"C1"},
-            "message":{"ts":"12.5"},"actions":[{"action_id":"bot_approve","value":"nonce-1"}]}}"#;
-        let (frame, ack) = parse_socket(raw);
-        assert_eq!(ack.as_deref(), Some("E2"));
-        assert_eq!(
-            frame,
-            Frame::Button(Button {
-                team: "T7".into(),
-                channel: "C1".into(),
-                user: "U2".into(),
-                message_ts: "12.5".into(),
-                action_id: "bot_approve".into(),
-                value: "nonce-1".into(),
-            })
-        );
-        // 사용자 소속만 있고 설치 워크스페이스가 없으면 모호해서 버린다. 컨테이너의 채널·글 ID는 대신 쓴다
-        let only_user = r#"{"type":"interactive","payload":{"type":"block_actions","user":{"id":"U2","team_id":"T1"},
-            "channel":{"id":"C1"},"actions":[{"action_id":"bot_approve","value":"n"}]}}"#;
-        assert_eq!(parse_socket(only_user).0, Frame::Ignored);
-        let container = r#"{"type":"interactive","payload":{"type":"block_actions","team":{"id":"T7"},"user":{"id":"U2"},
-            "container":{"channel_id":"C9","message_ts":"3.3"},"actions":[{"action_id":"bot_deny","value":"n"}]}}"#;
-        match parse_socket(container).0 {
-            Frame::Button(b) => {
-                assert_eq!((b.channel.as_str(), b.message_ts.as_str()), ("C9", "3.3"))
-            }
-            other => panic!("{other:?}"),
-        }
-        // 버튼이 아닌 인터랙션
-        let other = r#"{"type":"interactive","payload":{"type":"view_submission"}}"#;
-        assert_eq!(parse_socket(other).0, Frame::Ignored);
-    }
-
-    #[test]
-    fn reconnect_backoff_doubles_up_to_thirty_seconds() {
-        assert_eq!(reconnect_delay_ms(0), 1000);
-        assert_eq!(reconnect_delay_ms(3), 4000);
-        for attempt in [30, 55, 64, 1_000, u32::MAX] {
-            assert_eq!(reconnect_delay_ms(attempt), 30_000, "{attempt}");
-        }
-    }
-}
+mod tests;

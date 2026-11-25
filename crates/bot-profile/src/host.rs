@@ -28,6 +28,8 @@ pub struct HostCatalog {
     /// 원격(Streamable HTTP) 서버 별칭 → 접속 대상 `host:port`(`servers`에도 있다). 그 서버의 도구는 선언한 egress에 이 대상이 있어야 하고(운영자 상한 안에서),
     /// 단계 원장(`effects`)·`secrets`·`env`를 쓸 수 없다(원격 서버에는 전달할 길이 없다).
     pub remote_servers: BTreeMap<String, String>,
+    /// 도구 호출 시간 한도의 천장(초, 호스트 `limits.tool_call_max_secs`). 없으면 기본 60초다. 도구의 실효 한도(선언 또는 기본 60초)가 이 값을 넘으면 활성화를 거절한다.
+    pub tool_call_max_secs: Option<u32>,
 }
 
 impl HostCatalog {
@@ -49,6 +51,12 @@ impl HostCatalog {
             cli_accounts: set(&["owner", "team"]),
             ..Self::default()
         }
+    }
+
+    /// 도구 호출 시간 한도의 천장(초).
+    pub fn tool_call_cap(&self) -> u32 {
+        self.tool_call_max_secs
+            .unwrap_or(bot_core::profile::DEFAULT_TOOL_CALL_SECS)
     }
 
     pub fn allows_model(&self, profile: &str, alias: &str) -> bool {

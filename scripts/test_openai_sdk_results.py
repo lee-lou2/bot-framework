@@ -152,6 +152,54 @@ class Manifest(unittest.TestCase):
             self.assertEqual(set(scopes["python"]) | set(scopes["node"]), set(scopes["all"]), f"{profile}: 합집합이 all이어야 한다")
 
 
+class Source(unittest.TestCase):
+    """A skip marker in the required test sources is refused by name and line, before anything runs."""
+
+    def found(self, kind, text):
+        return run.forbidden_problems(kind, "x", textwrap.dedent(text))
+
+    def test_every_python_way_to_skip_or_excuse_a_failure_is_found(self):
+        for line in ("@unittest.skip('x')", "@unittest.skipIf(True, 'x')", "@unittest.skipUnless(False, 'x')", "@unittest.expectedFailure", "@skip('x')", "self.skipTest('x')", "raise unittest.SkipTest('x')", "raise SkipTest"):
+            self.assertTrue(self.found("python", f"class A(unittest.TestCase):\n    {line}\n    def test_a(self): pass\n"), line)
+
+    def test_every_node_way_to_skip_or_focus_is_found(self):
+        for line in ("test.skip('a', () => {});", "test.todo('a');", "test.only('a', () => {});", "it.skip('a', () => {});", "describe.only('a', () => {});", "test('a', { skip: true }, () => {});",
+                     "test('a', { todo: 'later' }, () => {});", "test('a', { only: true }, () => {});", "t.skip('x');", "t.todo('x');"):
+            self.assertTrue(self.found("node", line + "\n"), line)
+
+    def test_ordinary_tests_and_words_inside_comments_or_strings_are_not_flagged(self):
+        self.assertEqual(self.found("python", "class A(unittest.TestCase):\n    # @unittest.skip would be refused\n    def test_a(self):\n        self.assertTrue(True, 'skipped')\n"), [])
+        self.assertEqual(self.found("node", "// test.skip is refused\ntest('a', wired(async () => { assert.ok(true); }));\nconst skipped = 1;\n"), [])
+
+    def test_the_problem_names_the_file_and_the_line(self):
+        found = run.forbidden_problems("node", "main.test.mjs", "test('a', () => {});\ntest.skip('b', () => {});\n")
+        self.assertEqual(len(found), 1)
+        self.assertIn("main.test.mjs:2", found[0])
+
+    def test_the_real_required_test_sources_hold_no_skip_marker(self):
+        self.assertEqual(run.source_problems(), [])
+
+    def test_the_manifest_mode_itself_fails_on_a_skip_marker_and_names_it(self):
+        """`sdk_run.py manifest`(CI·`check_runners.sh`가 부르는 모드)가 소스 검사를 실제로 연결하고 있다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "test_x.py").write_text("import unittest\nclass X(unittest.TestCase):\n    @unittest.skip('x')\n    def test_a(self): pass\n")
+            expected = Path(tmp) / "expected.json"
+            expected.write_text('{"suites": {"main": {"python": ["test_x.py"], "node": []}}, "schemas": {}, "python": {"test_x.py": ["X.test_a"]}, "node": {}}')
+            out = Path(tmp) / "out.txt"
+            with unittest.mock.patch.object(run, "PY_DIR", Path(tmp)), unittest.mock.patch.object(run, "NODE_DIR", Path(tmp) / "none"), open(out, "w") as stdout, \
+                    open(os.devnull, "w") as quiet, unittest.mock.patch("sys.stdout", stdout), unittest.mock.patch("sys.stderr", quiet):
+                code = run.main(["manifest", "--expected", str(expected)])
+            self.assertEqual(code, 1)
+            self.assertIn("test_x.py:3", out.read_text())
+
+    def test_the_manifest_command_reports_a_skip_marker_in_a_synthetic_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "test_x.py").write_text("import unittest\nclass X(unittest.TestCase):\n    @unittest.skip('x')\n    def test_a(self): pass\n")
+            with unittest.mock.patch.object(run, "PY_DIR", Path(tmp)), unittest.mock.patch.object(run, "NODE_DIR", Path(tmp)):
+                found = run.source_problems()
+        self.assertTrue(said(found, "test_x.py:3"), found)
+
+
 class Executed(unittest.TestCase):
     """The runner really runs a synthetic folder and refuses the broken ones (no SDK involved)."""
 

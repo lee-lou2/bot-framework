@@ -197,6 +197,35 @@ async fn the_tool_result_is_discarded_even_when_it_echoes_the_input() {
     assert!(dumps.iter().all(|d| !d.contains(SENTINEL)));
 }
 
+/// F3: 민감 DM 전용 도구가 «처리하지 않음» 표식을 돌려줘도 넘길 곳이 없다 — 실패(보류)로 닫고, 도구는 한 번만 돌고, 원문은 어디에도 남지 않는다.
+#[tokio::test]
+async fn a_pass_marker_on_the_private_path_closes_as_held_and_hands_nothing_on() {
+    let marker = r#"{"_meta":{"bot/pass":true},"content":[],"isError":false}"#;
+    let echoing = format!(
+        "{{\"_meta\":{{\"bot/pass\":true}},\"content\":[{{\"text\":\"{SENTINEL}\",\"type\":\"text\"}}],\"isError\":false}}"
+    );
+    for (n, result) in [marker.to_owned(), echoing].into_iter().enumerate() {
+        let r = rig(true);
+        r.runner
+            .script(crate::ports::Ran::Done(bot_core::command::JsonPayload(
+                result,
+            )));
+        receive(&r, standard(&format!("req-{n}"))).await.unwrap();
+        assert_eq!(r.ledger.outcomes(), ["held"], "표식은 실패로 닫는다 (#{n})");
+        assert_eq!(r.runner.jobs().len(), 1, "다음 실행 0 (#{n})");
+        let dumps = [
+            format!("{:?}", r.ledger.stored()),
+            format!("{:?}", r.audit.entries()),
+            format!("{:?}", r.tracer.spans()),
+            format!("{:?}", r.ledger.phases()),
+        ];
+        assert!(dumps.iter().all(|d| !d.contains(SENTINEL)), "{dumps:?}");
+        // 재전달이 도구를 다시 돌리지 않는다
+        let _ = receive(&r, standard(&format!("req-{n}"))).await;
+        assert_eq!(r.runner.jobs().len(), 1, "재전달 뒤에도 한 번 (#{n})");
+    }
+}
+
 #[tokio::test]
 async fn a_redelivery_never_runs_the_tool_twice_and_a_changed_body_conflicts() {
     let r = rig(true);

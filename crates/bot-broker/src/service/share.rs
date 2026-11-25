@@ -52,6 +52,7 @@ pub fn share_tool() -> Tool {
         destination: None,
         definition: None,
         mcp_name: None,
+        timeout_secs: None,
     }
 }
 
@@ -286,7 +287,7 @@ impl BrokerService {
             .admit(&flow.attempt.profile, &flow.ctx.principal)
             .map_err(|_| Self::limited())?;
         let class = share_class();
-        let approval = match self.gate(&flow, &class, pointer).await? {
+        let approval = match self.gate(&flow, &class, pointer, None).await? {
             Gate::Go(approval) => approval,
             Gate::Return(result) => return Ok(result),
         };

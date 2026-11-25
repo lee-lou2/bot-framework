@@ -202,6 +202,12 @@
         },
         "beat": {
           "type": "boolean"
+        },
+        "preapproved": {
+          "type": "object"
+        },
+        "human_approval": {
+          "type": "object"
         }
       },
       "required": [

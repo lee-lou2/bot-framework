@@ -125,11 +125,41 @@ pub trait CallLedger: Send + Sync {
     /// 세대·취소·private 플래그·승인 대조와 시작 기록은 같은 커밋이다.
     /// memory.share는 여기서 거절한다. 승인과 공유를 함께 커밋하는 MemoryStore::share를 사용한다.
     fn start(&self, start: StartCall) -> Reply<'_, ()>;
+    /// `start`와 같되 사전 승인(F1)이나 지정한 사람의 증거(F4)를 같은 커밋에서 확인한다. 확인에 실패하면 아무것도 쓰지 않고
+    /// `Granted::Refused(고정 사유)`를 돌려준다(호출을 닫는 것은 호출자의 몫이다). 이 권한을 모르는 구현은 거절한다(기본 구현).
+    /// 사전 승인이 묶인 run의 직접 호출은 `start`로 시작할 수 없다(권한을 건너뛰지 못한다).
+    fn start_with(
+        &self,
+        start: StartCall,
+        authority: crate::grant::Authority,
+    ) -> Reply<'_, crate::grant::Granted> {
+        let _ = (start, authority);
+        Box::pin(async { Err(crate::port::Error::Denied) })
+    }
+    /// 이 run의 접수 때 묶은 증거(루트 run만). 없으면 None. 읽기 전용이다. 기본 구현은 없다고 답한다.
+    fn evidence(&self, attempt: Attempt) -> Reply<'_, Option<crate::grant::Evidence>> {
+        let _ = attempt;
+        Box::pin(async { Ok(None) })
+    }
     fn finish(&self, finish: FinishCall) -> Reply<'_, ()>;
     /// 승인 경로 때문에 호출을 `Outcome::Blocked`로 닫고 그 이유(`ApprovalBlock`)를 호출 기록에 함께 남긴다. 조회(`ApiRuns::lookup`)가 이 저장된 판정으로 `ApprovalBlocked`를 알린다.
     /// 이유를 저장하지 않는 구현은 이유를 버리고 `finish`로 닫는다(기본 구현).
     fn finish_blocked(&self, finish: FinishCall, _why: crate::api::ApprovalBlock) -> Reply<'_, ()> {
         self.finish(finish)
+    }
+    /// F3: 직접 호출이 «처리하지 않음»으로 끝났다. `finish.outcome`은 `Done`(표식을 뗀 결과)이어야 한다. 호출 결론·커서 전진(`pos` → 다음 후보 또는 기본 대화)·감사를
+    /// 한 커밋에 기록하고 run을 대기열로 되돌린다. 쓰기 단계·보류·승인·회신이 이미 있거나 커서가 `pos`가 아니면 아무것도 쓰지 않고 `PassNext::Refused`/`Stale`이다.
+    /// 사슬을 저장하지 않는 구현은 `Unavailable`이다(기본 구현).
+    ///
+    /// `runnable`은 **지금**(현재 판본과 실행이 고정한 판본 둘 다에서) 요청자가 `run`을 쓸 수 있는 에이전트들이다. 마지막 후보가 넘겨 기본 대화(에이전트)로 갈 때 그 에이전트가
+    /// 이 집합에 있고 접수가 고정한 스코프에도 `run`이 있어야 시작한다 — 아니면 대화 없이 run을 조용히 끝낸다(접수 뒤에 역할에서 `run`만 철회돼도 기본 대화가 시작되지 않는다).
+    fn finish_pass(
+        &self,
+        _finish: FinishCall,
+        _pos: u32,
+        _runnable: std::collections::BTreeSet<AgentId>,
+    ) -> Reply<'_, crate::pass::PassNext> {
+        Box::pin(async { Err(crate::port::Error::Unavailable) })
     }
 }
 

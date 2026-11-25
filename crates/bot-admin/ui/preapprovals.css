@@ -1,0 +1,16 @@
+/* 사전 승인 탭(운영자 전용): 정지·재개 카드와 오늘 사용량 막대. 카드·버튼·알약은 승인 탭과 같은 모양을 쓴다. 움직임은 transform·opacity만. */
+.pcards { grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); }
+.pcard { border-left-color: var(--good); }
+.pcard.is-paused { border-left-color: var(--warn); }
+.pc-help { margin: 0; color: var(--ink-3); font-size: 13px; }
+.pc-use { display: grid; gap: 6px; }
+.pc-use-t { margin: 0; color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+.meter { height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.meter > i { display: block; width: calc(var(--pct, 0) * 1%); height: 100%; border-radius: inherit; background: var(--accent); }
+.meter.is-full > i { background: var(--warn); }
+.pc-sum { margin: 0; padding: var(--s2) var(--s3); border-radius: var(--r-sm); background: var(--warn-wash); color: var(--warn-ink); font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+/* 긴급 정지는 한눈에 띄게(채운 빨강). 재개는 두 번 눌러야 하는 쪽이라 평소엔 테두리만이고 확인 중에만 채운다(.btn.danger.is-armed). */
+.btn.stop { background: var(--bad-solid); border-color: var(--bad-solid); color: var(--on-bad); box-shadow: none; backdrop-filter: none; }
+/* 기본 `.btn:hover:not(:disabled)`가 더 구체적이라, 호버 규칙이 없으면 마우스를 올릴 때 배경이 회색으로 덮여 흰 글씨가 안 보인다. */
+@media (hover: hover) { .btn.stop:hover:not(:disabled) { background: var(--bad-solid); border-color: var(--bad-solid); filter: brightness(1.08); } }
+.ac-note.is-ok { background: var(--good-wash); color: var(--good-ink); }

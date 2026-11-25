@@ -35,7 +35,9 @@ pub struct Binding {
 pub fn entrance(kind: &Adapter) -> String {
     match kind {
         Adapter::Cli { account } => format!("cli:{account}"),
-        Adapter::SlackChannel { workspace, channel } => {
+        Adapter::SlackChannel {
+            workspace, channel, ..
+        } => {
             format!("slack:{workspace}:channel:{channel}")
         }
         Adapter::SlackDm { workspace } => format!("slack:{workspace}:dm"),
@@ -88,6 +90,8 @@ pub struct Tool {
     pub definition: Option<String>,
     /// tools.yaml `name`(서버가 내세우는 도구 이름). 생략했거나 도구 id와 같으면 `None`이다.
     pub mcp_name: Option<String>,
+    /// tools.yaml `timeout_secs`(호출 시간 한도, 초). 생략하면 `None`(기본 60초).
+    pub timeout_secs: Option<u32>,
 }
 
 impl Tool {
@@ -120,6 +124,14 @@ pub enum Source {
     Message {
         binding: BindingId,
     },
+    /// 봇이 참여한 스레드의 사람 답글(`on.event: thread-reply`, 바인딩 `events`의 `thread_reply`)
+    ThreadReply {
+        binding: BindingId,
+    },
+    /// 등록 채널의 반응(`on.event: reaction`, 바인딩 `events`의 `reaction`)
+    Reaction {
+        binding: BindingId,
+    },
     Http {
         method: String,
         path: String,
@@ -134,6 +146,8 @@ impl Source {
         match self {
             Self::Cron { .. } => None,
             Self::Message { binding } => Some(format!("message:{}", binding.0)),
+            Self::ThreadReply { binding } => Some(format!("thread-reply:{}", binding.0)),
+            Self::Reaction { binding } => Some(format!("reaction:{}", binding.0)),
             Self::Http {
                 method,
                 path,
@@ -146,7 +160,10 @@ impl Source {
     pub fn binding(&self) -> Option<&BindingId> {
         match self {
             Self::Cron { .. } => None,
-            Self::Message { binding } | Self::Http { binding, .. } => Some(binding),
+            Self::Message { binding }
+            | Self::ThreadReply { binding }
+            | Self::Reaction { binding }
+            | Self::Http { binding, .. } => Some(binding),
         }
     }
 }
@@ -177,6 +194,10 @@ pub struct Trigger {
     pub matches: Vec<Match>,
     /// 도구 인자 이름 → 봉투의 점 경로
     pub input: BTreeMap<String, String>,
+    /// 운영자가 활성화 때 사전 승인한 정적 호출(cron 고정 도구)
+    pub preapproved: Option<bot_core::grant::Preapproval>,
+    /// 지정한 사람의 메시지·반응으로 승인하는 직접 도구 트리거
+    pub human_approval: Option<bot_core::grant::HumanApproval>,
 }
 
 #[derive(Clone, Debug)]

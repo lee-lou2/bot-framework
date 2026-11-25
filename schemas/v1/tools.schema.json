@@ -60,6 +60,11 @@
         "effects": {
           "type": "boolean"
         },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900
+        },
         "destination": {
           "oneOf": [
             {

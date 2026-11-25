@@ -336,6 +336,8 @@ async fn tools_call(
         Ok(CallResult::Done(payload)) => (mcp_result(&payload.0), None),
         Ok(CallResult::Awaiting(_)) => (notice("approval_pending"), Some(ParkReason::Approval)),
         Ok(CallResult::Held(_)) => (notice("held"), Some(ParkReason::Held)),
+        // 넘김(`bot/pass`)은 호스트가 직접 시작한 호출에서만 일어난다 — 모델의 호출에는 오지 않는다
+        Ok(CallResult::Passed) => (notice("unavailable"), None),
         Err(error) => {
             let word = refuse::word(shared, session, asked, &error, limited).await;
             // 표식을 쓰는 동안 세션이 회수됐으면 결과를 돌려주지 않는다(표식은 멱등이라 남아도 된다).

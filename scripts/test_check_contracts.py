@@ -429,6 +429,87 @@ class SdkPins(unittest.TestCase):
         self.assertIn("schema/pin.json", str(caught.exception))
 
 
+SDK_GOOD = f"""\
+name: Synthetic
+on: [push]
+permissions:
+  contents: read
+jobs:
+  openai-sdk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@{SHA} # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Sources
+        run: python3 -I crates/bot-cli/tests/openai_sdk/sdk_run.py manifest
+      - name: Run
+        run: |
+          crates/bot-cli/tests/openai_sdk/run_stub.sh "$py"
+          crates/bot-cli/tests/openai_sdk/run_node_stub.sh "$py" "$node"
+      - name: Broken examples
+        run: crates/bot-cli/tests/openai_sdk/check_runners.sh "$py" "$node"
+"""
+
+
+def sdk_job(text):
+    return checker.sdk_job_problems(text)
+
+
+class SdkJob(unittest.TestCase):
+    def test_a_job_that_runs_all_three_runners_plainly_passes(self):
+        self.assertEqual(sdk_job(SDK_GOOD), [])
+
+    def test_a_missing_job_or_a_missing_runner_is_named(self):
+        self.assertTrue(any("is missing" in p for p in sdk_job(SDK_GOOD.replace("openai-sdk:", "other:"))))
+        for runner in checker.SDK_RUNNERS:
+            found = sdk_job(SDK_GOOD.replace(runner, "something_else.sh"))
+            self.assertTrue(any(f"no step runs `{runner}`" in p for p in found), (runner, found))
+
+    def test_a_condition_or_a_continue_on_error_on_the_job_or_a_runner_step_is_refused(self):
+        self.assertTrue(any("`if`" in p for p in sdk_job(swap("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    if: false\n", SDK_GOOD))))
+        self.assertTrue(any("`continue-on-error`" in p for p in sdk_job(swap("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    continue-on-error: true\n", SDK_GOOD))))
+        for key in ("if: always() && false", "continue-on-error: true", "shell: bash {0}"):
+            found = sdk_job(swap("      - name: Broken examples\n", f"      - name: Broken examples\n        {key}\n", SDK_GOOD))
+            self.assertTrue(any("check_runners.sh" in p and key.split(":")[0] in p for p in found), (key, found))
+
+    def test_a_pipe_or_an_or_true_after_a_runner_swallows_its_exit_code_and_is_refused(self):
+        for tail in (" || true", " | tee out.log", "; true", " ; :"):
+            found = sdk_job(swap('run_stub.sh "$py"', f'run_stub.sh "$py"{tail}', SDK_GOOD))
+            self.assertTrue(any("swallows" in p for p in found), (tail, found))
+
+    def test_running_the_sdk_tests_without_the_runners_is_refused(self):
+        for raw in ("python -m unittest discover -s py", "node --test main.test.mjs", "pytest py"):
+            found = sdk_job(swap("      - name: Broken examples\n", f"      - name: Raw\n        run: {raw}\n      - name: Broken examples\n", SDK_GOOD))
+            self.assertTrue(any("only through the runners" in p for p in found), (raw, found))
+
+    def test_the_repositorys_own_workflow_keeps_every_rule(self):
+        holders = [p for p in sorted((ROOT / ".github/workflows").glob("*.yml")) if "openai-sdk:" in p.read_text(encoding="utf-8")]
+        self.assertEqual(len(holders), 1)
+        self.assertEqual(sdk_job(holders[0].read_text(encoding="utf-8")), [])
+
+    def test_exactly_one_workflow_must_hold_the_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / ".github/workflows"
+            folder.mkdir(parents=True)
+            cwd = Path.cwd()
+            try:
+                import os
+
+                os.chdir(tmp)
+                with self.assertRaises(ValueError) as none:
+                    checker.check_sdk_job()
+                (folder / "a.yml").write_text(SDK_GOOD)
+                (folder / "b.yml").write_text(SDK_GOOD)
+                with self.assertRaises(ValueError) as two:
+                    checker.check_sdk_job()
+            finally:
+                os.chdir(cwd)
+        self.assertIn("found 0", str(none.exception))
+        self.assertIn("found 2", str(two.exception))
+
+
 class Entry(unittest.TestCase):
     def test_the_script_runs_every_check(self):
         with (
@@ -437,9 +518,10 @@ class Entry(unittest.TestCase):
             mock.patch.object(checker, "check_workflows") as workflows,
             mock.patch.object(checker, "check_toolchain") as toolchain,
             mock.patch.object(checker, "check_sdk_pins") as sdk_pins,
+            mock.patch.object(checker, "check_sdk_job") as sdk_job,
         ):
             checker.main()
-        for called in (files, examples, workflows, toolchain, sdk_pins):
+        for called in (files, examples, workflows, toolchain, sdk_pins, sdk_job):
             called.assert_called_once_with()
 
 

@@ -29,6 +29,7 @@ use bot_core::{
     ledger::{CallLedger, PrivateLedger},
     port::{Broker, EffectJournal, Error, Reply, RunStore},
     profile::{ActiveRevisions, Adapter, ProfileBundles, ProfileCatalog},
+    slack::BotThreads,
     trace::Tracer,
 };
 use bot_gateway::{
@@ -183,13 +184,17 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     }
     // Slack 설치 검사(토큰·팀·앱 중복)도 열기 전에 끝낸다
     let slack_gateway = if slack {
-        let gateway = Arc::new(SlackGateway::new(
-            ingress.clone(),
-            deps.decisions.clone(),
-            deps.store.clone() as Arc<dyn CallLedger>,
-            deps.secrets.clone(),
-            SlackApi::new(deps.slack_base.as_deref()),
-        ));
+        let gateway = Arc::new(
+            SlackGateway::new(
+                ingress.clone(),
+                deps.decisions.clone(),
+                deps.store.clone() as Arc<dyn CallLedger>,
+                deps.secrets.clone(),
+                SlackApi::new(deps.slack_base.as_deref()),
+            )
+            // 봇이 참여한 스레드의 증거(F2 `thread_reply`)는 같은 저장소에 둔다
+            .with_threads(deps.store.clone() as Arc<dyn BotThreads>),
+        );
         gateway.plan().await.map_err(|e| e.to_string())?;
         Some(gateway)
     } else {

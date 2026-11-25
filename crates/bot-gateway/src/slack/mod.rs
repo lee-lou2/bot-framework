@@ -11,8 +11,10 @@ pub mod api;
 pub mod blocks;
 pub mod cards;
 pub mod creds;
+mod events;
 pub mod frame;
 mod handle;
+mod human;
 pub mod send;
 pub mod socket;
 
@@ -22,6 +24,7 @@ use bot_core::{
     id::ProfileId,
     ledger::CallLedger,
     port::{Broker, SecretStore},
+    slack::BotThreads,
 };
 use creds::{BotCheck, Credentials};
 use socket::Installation;
@@ -53,6 +56,8 @@ pub struct SlackGateway {
     secrets: Arc<dyn SecretStore>,
     creds: Arc<Credentials>,
     api: SlackApi,
+    /// 봇이 참여한 스레드의 증거 저장소(없으면 `thread_reply`는 증거를 확인할 수 없어 어떤 답글도 받지 않는다)
+    threads: Option<Arc<dyn BotThreads>>,
 }
 
 impl SlackGateway {
@@ -75,7 +80,15 @@ impl SlackGateway {
             secrets,
             creds,
             api,
+            threads: None,
         }
+    }
+
+    /// 스레드 증거 저장소를 붙인다(F2 `thread_reply`): 회신 발송 영수증과 인증된 자기 봇 글을 기록하고, 답글은 이 증거가 있는 스레드에서만 받는다.
+    #[must_use]
+    pub fn with_threads(mut self, threads: Arc<dyn BotThreads>) -> Self {
+        self.threads = Some(threads);
+        self
     }
 
     /// 시험 전용: 봇 토큰을 보관소에서 다시 읽는 간격을 줄인다(교체한 토큰이 다음 발송에 확인되는지 보려고).
@@ -95,7 +108,11 @@ impl SlackGateway {
 
     /// 회신 발송기(같은 자격·같은 API 클라이언트를 쓴다)
     pub fn sender(&self) -> send::SlackSender {
-        send::SlackSender::new(self.api.clone(), self.creds.clone())
+        let sender = send::SlackSender::new(self.api.clone(), self.creds.clone());
+        match &self.threads {
+            Some(threads) => sender.with_threads(threads.clone()),
+            None => sender,
+        }
     }
 
     /// 소켓으로 받을 설치 목록을 만들고 모두 검사한다: 자격을 읽을 수 있는지, 토큰이 설정한 워크스페이스의 것인지,

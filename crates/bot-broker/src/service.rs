@@ -6,11 +6,13 @@
 //! 승인 대기 중에는 아무것도 실행하지 않고 `Awaiting`을 돌려준다. 승인 뒤 run이 같은 호출 ID로
 //! 다시 들어오면 그때 현재 정책으로 다시 판정하고 승인을 소비해 실행한다.
 
+mod authority;
 mod call;
 mod decide;
 mod deliver;
 mod exec;
 mod gate;
+pub(crate) mod pass;
 pub mod preflight;
 mod route;
 pub(crate) mod schedule;

@@ -17,6 +17,7 @@ fn routes_for(host: &str) -> HostRoutes {
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )
@@ -26,6 +27,7 @@ fn routes_for(host: &str) -> HostRoutes {
             Adapter::SlackChannel {
                 workspace: "other".into(),
                 channel: "planning".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )
@@ -57,6 +59,7 @@ fn routes_for(host: &str) -> HostRoutes {
             Adapter::SlackChannel {
                 workspace: "home".into(),
                 channel: "ops".into(),
+                events: bot_core::slack::default_channel_events(),
             },
             "main",
         )

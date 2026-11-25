@@ -9,6 +9,7 @@ use crate::{
 use bot_core::{
     id::{AgentId, BindingId, PrincipalId},
     profile::{Adapter, ApprovalRoute, Policy},
+    slack::{SlackEvent, default_channel_events},
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -194,6 +195,24 @@ fn parse_approvers(value: Option<&Value>) -> BTreeMap<PrincipalId, ApprovalRoute
         .collect()
 }
 
+/// 채널 바인딩의 `events`. 스키마가 값(`mention`·`thread_reply`·`reaction`)·중복·빈 목록을 이미 거른다. 생략하면 멘션만(기존 동작).
+fn channel_events(obj: &Map<String, Value>) -> BTreeSet<SlackEvent> {
+    let parsed: BTreeSet<SlackEvent> = obj
+        .get("events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(SlackEvent::parse)
+        .filter(|event| *event != SlackEvent::Dm)
+        .collect();
+    if parsed.is_empty() {
+        default_channel_events()
+    } else {
+        parsed
+    }
+}
+
 fn parse_bindings(
     value: Option<&Value>,
     limits: &Limits,
@@ -234,6 +253,7 @@ fn parse_bindings(
             ("slack", false, _) => Adapter::SlackChannel {
                 workspace: text(obj, "workspace").to_owned(),
                 channel: text(obj, "channel").to_owned(),
+                events: channel_events(obj),
             },
             (_, _, true) => Adapter::OpenAi {
                 endpoint: text(obj, "endpoint").to_owned(),

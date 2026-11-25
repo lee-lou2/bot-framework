@@ -35,6 +35,18 @@ fn the_pure_ui_rules_pass_their_node_tests() {
                 passed.is_some_and(|n| n >= 1),
                 "통과한 시험이 없다:\n{stdout}"
             );
+            // 파일을 지우거나 이름을 바꿔 조용히 빠지지 않게, 핵심 시험의 이름을 출력에서 찾는다.
+            for must in [
+                "the first confirmation pins the step",
+                "pause sends exactly the approval id and epoch the screen saw",
+                "resume needs a second press",
+                "a second click while the first request is in flight sends nothing",
+                "the tab exists only for operators",
+                "the audit tab names the pre-approval pause and resume actions",
+                "every button variant that paints its own background has a hover rule that keeps it",
+            ] {
+                assert!(stdout.contains(must), "빠진 화면 시험: {must}");
+            }
         }
         Err(e)
             if e.kind() == ErrorKind::NotFound

@@ -289,6 +289,37 @@ async fn pagination_is_followed_to_the_end_and_an_endless_list_is_an_error() {
     assert_eq!(endless.count("tools/list"), MAX_PAGES);
 }
 
+/// 긴 호출이 전송의 기본 무응답 제한(120초)에 먼저 끊기지 않게, `tools/call`만 호출 한도보다 조금 긴 전송 제한을 싣는다. 협상·목록·정리 요청은 싣지 않는다.
+#[tokio::test]
+async fn only_the_call_request_carries_a_transport_limit_a_little_longer_than_the_call_limit() {
+    for era in [Era::Modern, Era::Legacy] {
+        let fake = server(era);
+        let (mut http, wire) = client(&fake, None);
+        http.connect(LIMIT).await.unwrap();
+        http.tools(LIMIT).await.unwrap();
+        http.call("get", "{}", "", Vec::new(), Duration::from_secs(900))
+            .await
+            .unwrap();
+        http.close().await;
+        let seen = wire.timeouts.lock().unwrap().clone();
+        let calls: Vec<_> = seen.iter().filter(|(rpc, _)| rpc == "tools/call").collect();
+        assert_eq!(calls.len(), 1, "{seen:?}");
+        assert_eq!(
+            calls[0].1,
+            Some(Duration::from_secs(900) + AUX_LIMIT),
+            "호출 한도 + 여유"
+        );
+        assert!(
+            seen.iter()
+                .filter(|(rpc, _)| rpc != "tools/call")
+                .all(|(_, limit)| limit.is_none()),
+            "협상·목록·정리에는 싣지 않는다: {seen:?}"
+        );
+        // 호출이 끝난 뒤 보내는 요청에는 남지 않는다
+        assert!(http.wire_timeout.is_none());
+    }
+}
+
 #[tokio::test]
 async fn redirects_hangs_losses_and_unreachable_servers_are_classified_without_resending() {
     // 3xx는 따라가지 않고 상태로 돌려준다(호출은 한 번뿐)

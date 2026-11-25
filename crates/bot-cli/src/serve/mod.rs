@@ -8,6 +8,7 @@ mod admin;
 pub mod claude;
 mod decide;
 mod gateway;
+mod grants;
 mod guard;
 mod models;
 mod quiesce;
@@ -105,13 +106,15 @@ pub struct Publication {
     /// 프로필별 정적 예약(cron 트리거) 정의. 판본 교체와 같은 커밋으로 게시한다 — 새 판본에서 사라진 트리거는 그 시각에 닫히고
     /// 전환 전 발생은 따라잡는다. 트리거가 없는 프로필은 넣지 않는다(없는 키는 빈 정의).
     pub schedules: BTreeMap<ProfileId, Vec<TriggerSpec>>,
+    /// 사전 승인(`preapproved`)을 선언한 정적 트리거마다 승인 ID에 묶을 범위. 명시적 활성화와 같은 커밋으로 발급·철회한다(합류는 쓰지 않는다).
+    pub grants: Vec<bot_core::grant::GrantSpec>,
 }
 
 /// 활성화 판본 계산의 버전. **게시하는 내용이 달라지면 올린다**(판본 계산이나 `replace`에 함께 올리는 것 — 예: 정적 예약 정의). 같은
 /// 프로필 집합이라도 옛 코드가 게시한 판본과 달라져, 업그레이드 뒤 첫 `--activate`가 한 번 교체해 새 내용을 올린다 — 같은 판본으로
 /// 보여 `Join`에 지나치면 새 게시 내용(예약 정의)이 저장소에 없는 채로 남는다.
-/// v1: 예약 정의를 판본과 함께 올리지 않던 때. v2: 정적 예약 정의를 같은 커밋에 올린다.
-const ACTIVATION_VERSION: &[u8] = b"bot-active-v2\0";
+/// v1: 예약 정의를 판본과 함께 올리지 않던 때. v2: 정적 예약 정의를 같은 커밋에 올린다. v3: 사전 승인(`preapproved`)을 같은 커밋에 발급·철회한다.
+const ACTIVATION_VERSION: &[u8] = b"bot-active-v3\0";
 
 /// 프로필 집합 판본과 매핑 지문을 묶는다(각 조각 길이를 앞에 붙여 경계를 옮길 수 없다).
 pub fn activation_revision(set: &Revision, mapping: &[u8; 32]) -> Revision {
@@ -124,6 +127,25 @@ pub fn activation_revision(set: &Revision, mapping: &[u8; 32]) -> Revision {
 }
 
 impl Publication {
+    /// 이번 실행이 `--activate`(`explicit`)인가에 맞춘다. 사전 승인은 운영자의 명시적 활성화에서만 발급·갱신·철회한다 — 그냥 시작(첫 게시·재시작·합류)은
+    /// 승인을 건드리지 않고 이미 발급된 ID를 읽을 뿐이다(빈 DB에서 `bot serve`만 해도 카드 없는 쓰기가 열리면 안 된다). 돌려주는 수는 선언만 있고 발급하지 않은 승인이다.
+    #[must_use]
+    pub fn for_run(mut self, explicit: bool) -> (Self, usize) {
+        if explicit {
+            return (self, 0);
+        }
+        let unissued = self.grants.len();
+        self.grants.clear();
+        (self, unissued)
+    }
+
+    /// 사전 승인 범위를 한 줄씩 보여 준다(`bot validate`). `--activate`가 승인 ID를 발급할 때 같은 범위가 묶인다.
+    pub fn print_grants(&self) {
+        for grant in &self.grants {
+            println!("사전 승인 범위 {}", grant.scope_line());
+        }
+    }
+
     /// `revisions`는 호스트 `servers`의 설치 판본(별칭 → 판본)이다.
     pub fn of(
         set: &ProfileSet,
@@ -131,8 +153,10 @@ impl Publication {
         revisions: &BTreeMap<String, Revision>,
     ) -> Result<Self, String> {
         let authority = host.authority_fingerprint(revisions)?;
+        let grants = grants::grants_of(set, revisions)?;
         Ok(Self {
             revision: activation_revision(set.revision(), &authority),
+            grants,
             profiles: set
                 .active()
                 .iter()
@@ -248,7 +272,14 @@ pub async fn run_with(
             explain(e.into_core())
         )
     })?;
-    let publication = Publication::of(&loaded.set, &loaded.host, &revisions)?;
+    let (publication, unissued) =
+        Publication::of(&loaded.set, &loaded.host, &revisions)?.for_run(explicit);
+    if unissued > 0 {
+        tracing::info!(
+            count = unissued,
+            "사전 승인 선언은 --activate로 명시 활성화해야 발급·갱신돼요(이미 발급한 승인은 그대로 읽어요)"
+        );
+    }
     let plan = plan_activation(&store, &publication, explicit).await?;
     // 판본 복원: 새 집합의 묶음을 먼저 보관하고(활성 집합이 보일 때 묶음이 이미 있어야 한다), 진행 중 작업이 고정한 옛 판본을 묶음에서 복원해 등록한다.
     // 역할을 열기 전·판본을 게시하기 전에 끝내므로 실패하면 활성 판본·실행·대기 카드는 그대로다. 복원한 판본은 `restored`가 이 함수가 끝날 때까지 쥔다(등록은 약한 참조).

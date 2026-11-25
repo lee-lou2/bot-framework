@@ -43,6 +43,7 @@ fn tool_decl(needs: &[&str]) -> Tool {
         destination: None,
         definition: None,
         mcp_name: None,
+        timeout_secs: None,
     }
 }
 
@@ -135,6 +136,7 @@ fn base(run: &str, generation: u64, target: Target, kind: ConversationKind) -> R
             input: JsonPayload(json!({"text": "오늘 일정 알려줘"}).to_string()),
             attachments: vec![],
             steps: vec![],
+            pass_pos: None,
         },
         approver: None,
         trigger: None,
@@ -588,13 +590,4 @@ fn rig_full(models: Arc<dyn Models>, cfg: WorkerConfig, relays: Arc<dyn Relays>)
 
 pub(super) fn rig(model: Arc<dyn ModelRunner>) -> Rig {
     rig_with(model, config())
-}
-
-/// 어떤 별칭에도 실행기가 없는 구성.
-pub(super) struct NoModels;
-
-impl Models for NoModels {
-    fn runner(&self, _: &ProfileId, _: &str) -> Option<Arc<dyn ModelRunner>> {
-        None
-    }
 }

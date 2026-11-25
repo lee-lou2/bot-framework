@@ -57,6 +57,11 @@ pub enum Scripted {
         retry_after: Option<u64>,
         body: String,
     },
+    /// `delay`만큼 뜸을 들인 뒤 이 JSON으로 답한다(시간 초과 시험).
+    Delayed {
+        delay: std::time::Duration,
+        body: Value,
+    },
 }
 
 enum Push {
@@ -76,6 +81,8 @@ struct Shared {
     hello_app: Mutex<Option<String>>,
     team: Mutex<String>,
     bot_user: Mutex<String>,
+    /// 사용자 ID → `users.info`의 `user` 객체에 덧씌울 필드(시험이 «봇이다»·«비활성이다»를 정한다)
+    users: Mutex<HashMap<String, Value>>,
     counter: AtomicU64,
     base: Mutex<String>,
     ws_url: Mutex<String>,
@@ -156,6 +163,10 @@ async fn api(
     // 응답을 먼저 정하고 기록한다(기록에 응답이 함께 남는다). 기록은 응답을 내보내기 전에 끝난다.
     let (response, reply, status) = match scripted {
         Some(Scripted::Json(value)) => (axum::Json(value.clone()).into_response(), value, 200),
+        Some(Scripted::Delayed { delay, body }) => {
+            tokio::time::sleep(delay).await;
+            (axum::Json(body.clone()).into_response(), body, 200)
+        }
         Some(Scripted::Raw {
             status,
             retry_after,
@@ -201,6 +212,18 @@ fn default_reply(shared: &Shared, method: &str, request: &Value) -> Value {
         },
         "chat.postMessage" => json!({"ok": true, "channel": request["channel"],
             "ts": format!("1700000000.{n:06}")}),
+        // 기본은 활성 사람 계정이다. 시험이 `set_user`로 필드를 덧씌운다(봇·비활성·모양이 이상한 응답)
+        "users.info" => {
+            let id = request["user"].as_str().unwrap_or_default();
+            let mut user = json!({"id": id, "team_id": shared.team.lock().unwrap().clone(),
+                "deleted": false, "is_bot": false, "is_app_user": false});
+            if let (Some(base), Some(Value::Object(over))) =
+                (user.as_object_mut(), shared.users.lock().unwrap().get(id))
+            {
+                base.extend(over.clone());
+            }
+            json!({"ok": true, "user": user})
+        }
         // 업로드 완료는 올라간 파일들을 되돌려 준다
         "files.completeUploadExternal" => {
             let files: Vec<Value> = request["files"]
@@ -288,6 +311,7 @@ impl FakeSlack {
             hello_app: Mutex::new(Some("A1".into())),
             team: Mutex::new("T1".into()),
             bot_user: Mutex::new("UBOT".into()),
+            users: Mutex::default(),
             counter: AtomicU64::new(0),
             base: Mutex::default(),
             ws_url: Mutex::default(),
@@ -361,6 +385,15 @@ impl FakeSlack {
 
     pub fn set_hello_app(&self, app: Option<&str>) {
         *self.shared.hello_app.lock().unwrap() = app.map(str::to_owned);
+    }
+
+    /// 이 사용자의 `users.info` 응답에 덧씌울 필드를 정한다(다시 부르면 바꾼다). 예: `{"is_bot": true}`·`{"deleted": true}`.
+    pub fn set_user(&self, id: &str, fields: Value) {
+        self.shared
+            .users
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), fields);
     }
 
     pub fn set_auth(&self, team: &str, bot_user: &str) {
@@ -442,4 +475,37 @@ pub fn button_frame(
     json!({"type": "interactive", "envelope_id": envelope, "payload": {
         "type": "block_actions", "team": {"id": team}, "user": {"id": user}, "channel": {"id": channel},
         "message": {"ts": message_ts}, "actions": [{"action_id": action, "value": value}]}})
+}
+
+/// `events_api` 프레임(채널 글: `message.channels`). `thread_ts`가 있으면 스레드 안의 글이다.
+pub fn post_frame(
+    envelope: &str,
+    (team, channel): (&str, &str),
+    user: &str,
+    ts: &str,
+    thread_ts: Option<&str>,
+    text: &str,
+) -> Value {
+    let mut event = json!({"type": "message", "channel_type": "channel", "user": user,
+        "text": text, "ts": ts, "channel": channel});
+    if let Some(root) = thread_ts {
+        event["thread_ts"] = json!(root);
+    }
+    json!({"type": "events_api", "envelope_id": envelope, "payload": {
+        "team_id": team, "event_id": format!("Ev-{envelope}"), "event": event}})
+}
+
+/// `events_api` 프레임(채널 글에 단 반응: `reaction_added`)
+pub fn reaction_frame(
+    envelope: &str,
+    (team, channel): (&str, &str),
+    user: &str,
+    item_ts: &str,
+    reaction: &str,
+    item_user: &str,
+) -> Value {
+    json!({"type": "events_api", "envelope_id": envelope, "payload": {
+        "team_id": team, "event_id": format!("Ev-{envelope}"),
+        "event": {"type": "reaction_added", "user": user, "reaction": reaction, "item_user": item_user,
+            "item": {"type": "message", "channel": channel, "ts": item_ts}, "event_ts": "9999999999.000100"}}})
 }

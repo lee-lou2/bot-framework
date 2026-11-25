@@ -74,7 +74,10 @@ impl ScheduleRoutes for HostRoutes {
             .bindings
             .get(&target.binding)
             .ok_or(Error::Denied)?;
-        let Adapter::SlackChannel { workspace, channel } = &binding.source else {
+        let Adapter::SlackChannel {
+            workspace, channel, ..
+        } = &binding.source
+        else {
             return Err(Error::Denied);
         };
         // 호스트 등록부의 실제 팀·채널

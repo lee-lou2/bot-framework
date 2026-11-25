@@ -83,6 +83,7 @@ fn builtin(id: &str, class: Risk, schema: &str) -> Tool {
         destination: None,
         definition: None,
         mcp_name: None,
+        timeout_secs: None,
     }
 }
 
@@ -448,7 +449,7 @@ impl BrokerService {
             &flow.snapshot.policy.approve,
             flow.ctx.private_memory_read,
         );
-        let approval = match self.gate(&flow, &class, pointer).await? {
+        let approval = match self.gate(&flow, &class, pointer, None).await? {
             Gate::Go(approval) => approval,
             Gate::Return(result) => return Ok(result),
         };

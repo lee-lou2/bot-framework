@@ -61,8 +61,10 @@ impl BrokerService {
         flow: &Flow,
         class: &Class,
         pointer: Option<ApprovalId>,
+        authority: Option<&bot_core::grant::Authority>,
     ) -> Result<Gate, Error> {
-        if !class.needs_approval() {
+        // 사전 승인·사람 증거는 승인 한 단계(`Irreversible`·`Policy`)만 대신한다. 독립적인 요건(민감 회상 뒤 확인 등)은 그대로 카드로 간다
+        if !class.needs_approval() || authority.is_some() && super::authority::waivable(class) {
             return Ok(Gate::Go(None));
         }
         let Some(approver) = flow.approver.as_ref() else {

@@ -190,6 +190,8 @@ impl ModelSession {
             // 승인 nonce는 모델에 주지 않는다. 승인은 승인자가 다른 길로 한다.
             CallResult::Awaiting(_) => format!("{{\"v\":1,\"id\":{id},\"state\":\"awaiting\"}}"),
             CallResult::Held(_) => format!("{{\"v\":1,\"id\":{id},\"state\":\"held\"}}"),
+            // 넘김은 호스트가 직접 시작한 호출에서만 일어난다 — 도구의 효과 채널에는 오지 않는다
+            CallResult::Passed => return Err(Error::Unavailable),
         })
     }
 

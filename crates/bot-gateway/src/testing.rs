@@ -9,11 +9,16 @@ use bot_core::trace::{SpanRecord, Tracer};
 pub use catalog::TestCatalog;
 
 use bot_core::{
-    command::{Accept, Beat, Failure, Finish, HttpRoute, JsonPayload, Retry, Step, Target, Turn},
+    command::{
+        Accept, AcceptExtras, Beat, Failure, Finish, HttpRoute, JsonPayload, Retry, Step, Target,
+        Turn,
+    },
     id::*,
     intake::{PrivateCall, PrivateIntake, RequestKey, RequestState},
+    pass::PassChain,
     port::{Error, ProfileSecrets, Reply, RunStore, SecretStore, SecretValue},
     profile::*,
+    slack::SlackSource,
     state::{RunContext, RunState},
 };
 use std::{
@@ -155,7 +160,18 @@ pub fn event_trigger(id: &str, binding: &str, target: TriggerTarget) -> Trigger 
         input: BTreeMap::new(),
         private: false,
         target,
+        preapproved: None,
+        human_approval: None,
     }
+}
+
+/// 다른 사건 이름(`thread-reply`·`reaction`)을 받는 사건 트리거
+pub fn event_trigger_on(id: &str, binding: &str, event: &str, target: TriggerTarget) -> Trigger {
+    let mut trigger = event_trigger(id, binding, target);
+    if let TriggerSource::Event { event: name, .. } = &mut trigger.on {
+        *name = event.into();
+    }
+    trigger
 }
 
 /// HTTP 트리거(`on: {http: {method, path}, binding}`)
@@ -179,6 +195,8 @@ pub fn http_trigger(
         input: BTreeMap::new(),
         private: false,
         target,
+        preapproved: None,
+        human_approval: None,
     }
 }
 
@@ -213,6 +231,10 @@ pub struct Accepted {
     pub http: Option<String>,
     /// 접수 때 저장한 HTTP 경로·응답 방식(조회가 돌려준다)
     pub route: Option<HttpRoute>,
+    /// 어댑터가 덧붙인 인증된 Slack 이벤트 원천
+    pub source: Option<SlackSource>,
+    /// 접수가 남긴 넘김 후보 사슬
+    pub chain: Option<PassChain>,
 }
 
 /// 같은 키·같은 내용은 기존 run, 다른 내용은 충돌인 메모리 저장소. 접수 순서와 결과를 시험이 직접 만진다.
@@ -278,6 +300,10 @@ impl MemoryStore {
 
 impl RunStore for MemoryStore {
     fn accept(&self, command: Accept) -> Reply<'_, RunId> {
+        self.accept_with(command, AcceptExtras::default())
+    }
+
+    fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId> {
         let key = RequestKey {
             profile: command.event.profile.clone(),
             binding: command.event.binding.clone(),
@@ -316,6 +342,8 @@ impl RunStore for MemoryStore {
             ),
             http: route.clone(),
             route: command.event.http.clone(),
+            source: extras.source,
+            chain: extras.chain,
         };
         let mut inner = self.inner.lock().unwrap();
         let result = if let Some(error) = inner.fail_next.take() {

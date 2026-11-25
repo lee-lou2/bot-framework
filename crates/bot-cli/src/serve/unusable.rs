@@ -137,6 +137,7 @@ mod tests {
             destination: None,
             definition: None,
             mcp_name: None,
+            timeout_secs: None,
         }
     }
 

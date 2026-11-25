@@ -4,7 +4,7 @@
 use super::{Flow, Outcome, Worker, calls::Called, control::Control, interrupted, span::RunSpan};
 use bot_core::{
     command::{Beat, Failure, Finish, Retry, RunOutcome, Target},
-    id::CallId,
+    pass::direct_call_id,
     port::Error,
     state::{ConversationKind, RunContext},
 };
@@ -66,7 +66,8 @@ impl Worker {
         if let Some(flow) = interrupted(control) {
             return flow;
         }
-        let call = CallId(format!("{}:tool", ctx.attempt.run.0));
+        // 넘김 사슬이 있는 접수는 후보마다 호출 ID가 다르다(첫 후보는 기존 ID라 사슬이 없는 접수와 같다)
+        let call = direct_call_id(&ctx.attempt.run, ctx.work.pass_pos.unwrap_or(0));
         match self
             .call_tool(Some(control.released()), &ctx.attempt, &call, tool, args)
             .await

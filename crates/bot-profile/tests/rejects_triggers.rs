@@ -147,7 +147,7 @@ fn rejects_trigger_mistakes() {
         (
             "지원하지 않는 이벤트",
             event(
-                "  - id: chat\n    \"on\": {event: reaction, binding: team}\n    target: {instruction: x}\n",
+                "  - id: chat\n    \"on\": {event: edited, binding: team}\n    target: {instruction: x}\n",
             ),
             "unsupported-event",
         ),

@@ -27,6 +27,9 @@ pub struct WireRequest {
     pub body: Vec<u8>,
     /// 운영자가 사설망을 명시적으로 열었을 때(`RunnerConfig::allow_private_egress`)만 true. 루프백 `http` 예외와는 무관하다.
     pub allow_private: bool,
+    /// 이 요청을 맺은 뒤 응답이 끝날 때까지 기다릴 수 있는 시간. 없으면 전송의 기본(응답 머리·본문 조각 사이의 무응답 제한)을 쓴다. 긴 호출(`tools/call`)이 서버가 답을
+    /// 늦게 주는 비스트림 응답에서 기본 제한에 먼저 끊기지 않게 하는 값이다. 연결을 맺기 전의 제한(이름 풀이·TCP·TLS)은 이 값과 무관하게 유지한다.
+    pub timeout: Option<std::time::Duration>,
 }
 
 /// 진단 출력에는 머리 이름만 싣는다(값에 자격이 들 수 있다).
@@ -40,6 +43,7 @@ impl std::fmt::Debug for WireRequest {
             .field("port", &self.port)
             .field("headers", &names)
             .field("body_len", &self.body.len())
+            .field("timeout", &self.timeout)
             .finish_non_exhaustive()
     }
 }
