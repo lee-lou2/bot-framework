@@ -117,3 +117,26 @@ pub(crate) fn card(payload: &JsonPayload, nonce: &str) -> R<String> {
     }
     Ok(canonical_text)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bot_core::attachments::{pack_answers, split};
+
+    #[test]
+    fn packed_inline_attachments_pass_store_answer_validation() {
+        let raw = "결론이에요.\n\n<첨부 이름=\"근거.md\">\n## 상세\n- 1건\n</첨부>";
+        let (body, files) = split(raw);
+        let (packed, truncated) = pack_answers(&files, 15);
+        assert!(!truncated);
+        assert!(
+            answer(&JsonPayload(
+                serde_json::json!({ "text": body }).to_string()
+            ))
+            .is_ok()
+        );
+        for payload in &packed {
+            assert!(answer(payload).is_ok());
+        }
+    }
+}

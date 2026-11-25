@@ -19,11 +19,12 @@ use crate::{
     model::{DoneCall, Exchange, ModelError, ModelRunner, ModelStep, RunnerKind, Session},
 };
 use bot_core::{
+    attachments,
     command::{Failure, Finish, JsonPayload, RunOutcome, Step, TokenUsage},
     id::Generation,
     port::Error,
     profile::Snapshot,
-    state::RunContext,
+    state::{ConversationKind, RunContext},
     trace::{key, now_nano},
 };
 use serde_json::json;
@@ -31,27 +32,53 @@ use std::{collections::HashSet, sync::Arc, time::SystemTime};
 
 /// 대화로 보내는 답의 글자 수 상한
 const MAX_ANSWER_CHARS: usize = 12_000;
+/// 본문 뒤에 붙일 수 있는 첨부 회신 문서 수 상한(저장소 답 상한 16에서 본문 1건 제외)
+const MAX_ATTACHMENT_ANSWERS: usize = 15;
 /// 실행기가 차례마다 남기는 불투명 공급자 상태(체크포인트에 그대로 적는다)의 크기 상한
 const MAX_STATE_BYTES: usize = 256 * 1024;
 
-/// 최종 답을 끝맺는다. 호스트 상한(`MAX_ANSWER_CHARS`)을 넘어 실제로 잘렸으면 계량의 `truncated`로 같은 커밋에 남긴다(조용히 자르지 않는다).
+/// 푸시 대화(Slack 채널·DM)의 루트 실행만 `<첨부>` 블록을 본문과 파일 첨부 회신으로 나눈다.
+/// 위임 자식은 부모 모델이 원문을 그대로 읽어야 하고, CLI·HTTP는 파일 업로드 경로가 없어 원문을 유지한다.
+fn splits_attachments(ctx: &RunContext) -> bool {
+    ctx.root == ctx.attempt.run
+        && matches!(
+            ctx.conversation.kind,
+            ConversationKind::Channel | ConversationKind::Direct
+        )
+}
+
+/// 최종 답을 끝맺는다. 호스트 상한(`MAX_ANSWER_CHARS`·첨부 상한)을 넘어 실제로 잘렸으면 계량의 `truncated`로 같은 커밋에 남긴다(조용히 자르지 않는다).
 /// `outcome`은 실행기가 아는 계량이다. `usage_whole`은 그 사용량이 이 run 전체의 합인가다(Loop는 첫 claim의 실행, Step은 `step_usage`가 합을 낸 경우): 아니면
 /// (다시 집은 run·합을 알 수 없는 실행) 실행기가 보고한 사용량을 버린다.
-fn answer(text: &str, mut outcome: RunOutcome, usage_whole: bool) -> Flow {
+fn answer(ctx: &RunContext, text: &str, mut outcome: RunOutcome, usage_whole: bool) -> Flow {
     let text = text.trim();
     if text.is_empty() {
         return Flow::Fail(Failure::Permanent("empty_answer"));
     }
-    let clipped: String = text.chars().take(MAX_ANSWER_CHARS).collect();
-    outcome.truncated |= clipped.len() < text.len();
+    let (body, files) = if splits_attachments(ctx) {
+        attachments::split(text)
+    } else {
+        (text.to_owned(), Vec::new())
+    };
+    let body = body.trim();
+    if body.is_empty() {
+        return Flow::Fail(Failure::Permanent("empty_answer"));
+    }
+    let clipped: String = body.chars().take(MAX_ANSWER_CHARS).collect();
+    outcome.truncated |= clipped.len() < body.len();
+    let (extra, extra_truncated) = attachments::pack_answers(&files, MAX_ATTACHMENT_ANSWERS);
+    outcome.truncated |= extra_truncated;
     if !usage_whole {
         outcome.usage = None;
     }
-    let payload = JsonPayload(json!({ "text": clipped }).to_string());
+    let primary = JsonPayload(json!({ "text": clipped }).to_string());
+    let mut answers = Vec::with_capacity(1 + extra.len());
+    answers.push(primary.clone());
+    answers.extend(extra);
     Flow::Done(
         Finish {
-            result: payload.clone(),
-            answers: vec![payload],
+            result: primary,
+            answers,
         },
         outcome,
     )
@@ -162,7 +189,7 @@ impl Worker {
         self.model_span(span, 0, &alias, started, &result);
         match result {
             Ok(ModelStep::Final { text, outcome, .. }) => {
-                answer(&text, outcome, ctx.attempt.generation == Generation(1))
+                answer(ctx, &text, outcome, ctx.attempt.generation == Generation(1))
             }
             // 자기 순환을 가진 실행기는 최종 답만 돌려준다
             Ok(ModelStep::Calls { .. }) => Flow::Fail(Failure::Permanent("invalid_model_output")),
@@ -219,6 +246,7 @@ impl Worker {
                                 ctx.attempt.generation == Generation(1),
                             );
                             return answer(
+                                ctx,
                                 &text,
                                 RunOutcome {
                                     usage: total,

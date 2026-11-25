@@ -182,3 +182,80 @@ async fn a_body_that_is_not_a_verified_conversation_fails_closed_on_an_api_root(
     );
     assert!(lock(&model.requests).is_empty(), "모델은 부르지 않았다");
 }
+
+#[tokio::test]
+async fn inline_attachment_blocks_become_separate_file_answers_only_on_root_push_conversations() {
+    use bot_core::state::ConversationKind;
+    use serde_json::Value;
+
+    let reply = "핵심 요약이에요.\n\n※ 상세는 첨부 파일에 있어요.\n\n<첨부 이름=\"근거.md\">\n## 상세\n- 1건\n</첨부>";
+
+    // 채널·DM 루트 실행(Loop·Step 모두): 본문과 첨부 회신이 따로 쌓인다
+    for (kind, step_runner) in [
+        (ConversationKind::Channel, false),
+        (ConversationKind::Direct, false),
+        (ConversationKind::Channel, true),
+    ] {
+        let model: Arc<dyn ModelRunner> = if step_runner {
+            ScriptedModel::new(vec![say(reply)])
+        } else {
+            Cli::new(reply, Default::default())
+        };
+        let r = rig(model);
+        assert_eq!(
+            r.worker.execute(in_kind(agent_run("r1"), kind)).await,
+            Outcome::Succeeded
+        );
+        let finished = lock(&r.runs.state).finished.remove(0);
+        let result: Value = serde_json::from_str(&finished.result.0).unwrap();
+        assert_eq!(
+            result["text"],
+            "핵심 요약이에요.\n\n※ 상세는 첨부 파일에 있어요."
+        );
+        assert_eq!(finished.answers.len(), 2);
+        assert_eq!(finished.answers[0], finished.result);
+        let attach: Value = serde_json::from_str(&finished.answers[1].0).unwrap();
+        assert!(attach.get("text").is_none());
+        let files = attach["attachments"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["name"], "근거.md");
+        assert_eq!(files[0]["type"], "text/plain");
+        assert!(files[0]["data"].as_str().is_some_and(|d| !d.is_empty()));
+    }
+
+    // 본문은 짧고 첨부가 12,000자를 넘어도 본문 상한에 잘리지 않는다
+    let long_attach = format!(
+        "요약이에요.\n\n<첨부 이름=\"큰근거.md\">\n{}\n</첨부>",
+        "가".repeat(15_000)
+    );
+    let r = rig(Cli::new(&long_attach, Default::default()));
+    assert_eq!(
+        r.worker
+            .execute(in_kind(agent_run("r-long"), ConversationKind::Channel))
+            .await,
+        Outcome::Succeeded
+    );
+    assert_eq!(lock(&r.runs.state).outcomes, vec![RunOutcome::default()]);
+    assert_eq!(lock(&r.runs.state).finished[0].answers.len(), 2);
+
+    // 위임 자식 실행(채널 위여도): 부모 모델이 원문을 그대로 읽어야 하므로 떼어내지 않는다
+    let r = rig(Cli::new(reply, Default::default()));
+    let mut child = in_kind(agent_run("r-child"), ConversationKind::Channel);
+    child.root = RunId("r-parent".into());
+    assert_eq!(r.worker.execute(child).await, Outcome::Succeeded);
+    let finished = lock(&r.runs.state).finished.remove(0);
+    assert_eq!(finished.answers.len(), 1);
+    assert!(finished.result.0.contains("<첨부"));
+
+    // CLI·HTTP(OpenAI API) 대화: 파일 업로드 경로가 없으므로 원문을 그대로 남긴다
+    for kind in [ConversationKind::Cli, ConversationKind::Http] {
+        let r = rig(Cli::new(reply, Default::default()));
+        assert_eq!(
+            r.worker.execute(in_kind(agent_run("r-pull"), kind)).await,
+            Outcome::Succeeded
+        );
+        let finished = lock(&r.runs.state).finished.remove(0);
+        assert_eq!(finished.answers.len(), 1);
+        assert!(finished.result.0.contains("<첨부"));
+    }
+}

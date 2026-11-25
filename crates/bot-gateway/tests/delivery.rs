@@ -435,6 +435,52 @@ async fn attachments_use_the_upload_flow_and_only_the_last_call_publishes() {
 }
 
 #[tokio::test]
+async fn split_inline_attachments_post_markdown_first_and_upload_files_to_the_same_thread() {
+    let rig = rig().await;
+    let raw = "**결론**이에요.\n\n※ 상세는 첨부 파일에 있어요.\n\n<첨부 이름=\"근거.md\">\n## 표\n| 항목 | 값 |\n|---|---|\n| A | 1 |\n</첨부>";
+    let (body, files) = bot_core::attachments::split(raw);
+    let (packed, truncated) = bot_core::attachments::pack_answers(&files, 15);
+    assert!(!truncated);
+    assert_eq!(packed.len(), 1);
+
+    to_channel(&rig, 1, json!({"text": body}));
+    to_channel(
+        &rig,
+        2,
+        serde_json::from_str::<serde_json::Value>(&packed[0].0).unwrap(),
+    );
+    assert_eq!(rig.deliverer.tick().await.unwrap(), 2);
+
+    // 첫 번째 회신은 마크다운 본문(`chat.postMessage`)으로 올라가고 `<첨부>` 원문이 남지 않는다
+    let posted = posts(&rig);
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0].body["thread_ts"], THREAD);
+    assert_eq!(posted[0].body["blocks"][0]["type"], "markdown");
+    let md = posted[0].body["blocks"][0]["text"].as_str().unwrap();
+    assert_eq!(md, "**결론**이에요.\n\n※ 상세는 첨부 파일에 있어요.");
+    assert!(!md.contains("<첨부"));
+
+    // 두 번째 회신은 같은 스레드에 별도 파일(`근거.md`)로 올라간다(`initial_comment` 없음)
+    let slot = &rig.slack.calls("files.getUploadURLExternal")[0].body;
+    let expected = "## 표\n| 항목 | 값 |\n|---|---|\n| A | 1 |";
+    assert_eq!(slot["filename"], "근거.md");
+    assert_eq!(slot["length"], expected.len().to_string());
+    assert_eq!(rig.slack.uploads(), [expected.as_bytes().to_vec()]);
+    let done = &rig.slack.calls("files.completeUploadExternal")[0].body;
+    assert_eq!(done["channel_id"], "C1");
+    assert_eq!(done["thread_ts"], THREAD);
+    assert!(done.get("initial_comment").is_none());
+    assert!(
+        done["files"]
+            .as_str()
+            .unwrap()
+            .contains("\"title\":\"근거.md\"")
+    );
+    assert_eq!(settled(&rig).len(), 2);
+    assert!(settled(&rig).iter().all(|s| s.starts_with("confirmed:C1:")));
+}
+
+#[tokio::test]
 async fn only_its_own_conversation_kinds_are_claimed() {
     let rig = rig().await;
     for (seq, kind) in [

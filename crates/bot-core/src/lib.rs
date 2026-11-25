@@ -2,6 +2,7 @@
 //! 예정 수락 시험: preserves_run_identity, prevents_cross_profile_lookup.
 pub mod admin;
 pub mod api;
+pub mod attachments;
 pub mod canon;
 pub mod cards;
 pub mod cli;
