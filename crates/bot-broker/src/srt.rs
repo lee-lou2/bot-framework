@@ -5,16 +5,18 @@
 //! - 네트워크: srt의 허용 도메인은 우리 허용 목록(선언 ∩ 운영자 상한)과 같게 두고, srt의 프록시가 내보내는 연결은
 //!   브로커가 연 `CONNECT` 프록시(호출 전용 자격, 주소 검사)를 거치게 한다(`parentProxy`). 허용할 곳이 없으면 네트워크는 0이다.
 //! - 파일: 읽기는 운영자가 정한 곳(홈·프로필·데이터·비밀 폴더)과 작업 루트를 막고 이 호출의 작업 폴더·서버 설치 폴더만 다시 연다.
-//!   쓰기는 이 호출의 작업 폴더뿐이다(srt가 늘 쓰기 가능으로 두는 `/tmp/claude`도 `denyWrite`로 막는다).
+//!   쓰기는 이 호출의 작업 폴더뿐이다(srt가 늘 쓰기 가능으로 두는 `/tmp/claude`도 `denyWrite`로 막는다). 읽기도 막는다: macOS는 `denyRead`로 막히고,
+//!   Linux의 srt는 이 폴더를 다시 붙이므로 `bwrap` 대리 실행 파일이 샌드박스 안에서 빈 읽기 전용 tmpfs로 덮는다(`overlay`).
 //!   설정 파일(프록시 자격 포함)은 작업 폴더 밖에 0600으로 둔다.
 //! - 환경: **srt 런처의 환경은 호스트가 고정한다**(`PATH`·`CLAUDE_CODE_TMPDIR`뿐). 도구가 선언한 자격은 이름이 무엇이든
 //!   런처 환경에 두지 않고, 고정 이름의 운반 변수(`BOT_CARRY_<번호>`)로 넘긴 뒤 격리된 자식 안에서 선언한 이름으로 옮겨 단다.
 //!   그래서 선언한 이름이 런처의 동작(`PATH`·`NODE_OPTIONS` 등)을 바꿀 수 없다. 로더·셸·srt 자신의 변수 이름은 아예 거절한다.
-//! - 종료: 프로세스 그룹 전체를 끝내고 사라진 것을 확인한 뒤에야 성공한다. 조회가 실패하면 "사라짐"이 아니라 "모름"이다.
+//! - 종료: 프로세스 그룹 전체를 끝내고 사라진 것을 확인한 뒤에야 성공한다(좀비만 남은 그룹은 사라진 것으로 본다). 조회가 실패하면 "사라짐"이 아니라 "모름"이다.
 //!   `reap`은 종료를 증명할 기록이 없으면(다른 호스트·손상·메타 폴더 읽기 실패) 성공하지 않는다.
 //! - 아직 지원하지 않는 것: 표준 입출력 밖 통로(FD)는 srt가 주지 않으므로 단계 원장 채널은 프록시 경유(`effects_via_proxy`)로 한다.
 
 mod env;
+mod overlay;
 mod tools;
 
 use crate::{
@@ -111,6 +113,9 @@ pub struct SrtSandbox {
     tools: Tools,
     entropy: Arc<dyn Entropy>,
     live: Arc<Mutex<HashMap<String, Live>>>,
+    /// Linux의 실제 `bwrap`(srt가 부를 것). 있으면 호출마다 대리 실행 파일을 만들어 srt가 그것을 부르게 한다: 공용 임시 폴더를 샌드박스 안에서 비워 덮는다.
+    /// 다른 운영체제는 `None`이다(`overlay`).
+    real_bwrap: Option<PathBuf>,
 }
 
 /// srt 설정 JSON. 순수 함수라 시험으로 정책을 직접 확인한다.
@@ -176,11 +181,13 @@ impl SrtSandbox {
             return Err(Error::Unavailable);
         }
         private_dir(&cfg.work_root).map_err(|_| Error::Unavailable)?;
+        let real_bwrap = overlay::locate(std::env::consts::OS, &cfg.path);
         let sandbox = Self {
             cfg: Arc::new(cfg),
             tools,
             entropy,
             live: Arc::default(),
+            real_bwrap,
         };
         private_dir(&sandbox.meta_dir()).map_err(|_| Error::Unavailable)?;
         sandbox.purge_old_tombstones();
@@ -214,6 +221,7 @@ impl SrtSandbox {
     fn settle(meta_dir: &Path, name: &str, work: &Path) {
         let _ = std::fs::remove_dir_all(work);
         let _ = std::fs::remove_file(meta_dir.join(format!("{name}.json")));
+        let _ = std::fs::remove_file(meta_dir.join(format!("{name}.bwrap")));
         let _ = write_private(&meta_dir.join(format!("{name}.done")), "done\n");
         let _ = std::fs::remove_file(meta_dir.join(format!("{name}.pid")));
     }
@@ -271,8 +279,14 @@ impl SrtSandbox {
         private_dir(&meta_dir)
             .and_then(|_| private_dir(&work))
             .map_err(|_| Error::Unavailable)?;
-        let text = settings(&spec, &work, &server.install_dir, &self.cfg).to_string();
-        write_private(&settings_path, &text).map_err(|_| Error::Unavailable)?;
+        let mut value = settings(&spec, &work, &server.install_dir, &self.cfg);
+        if let Some(real) = &self.real_bwrap {
+            let launcher = meta_dir.join(format!("{name}.bwrap"));
+            overlay::write_launcher(&launcher, real).map_err(|_| Error::Unavailable)?;
+            let launcher = std::path::absolute(launcher).map_err(|_| Error::Unavailable)?;
+            value["bwrapPath"] = json!(launcher.display().to_string());
+        }
+        write_private(&settings_path, &value.to_string()).map_err(|_| Error::Unavailable)?;
         // 띄우기 전에 의도를 먼저 적는다. 띄운 뒤 그룹 번호를 채우기 전에 죽으면 종료를 증명할 수 없는 기록이 남는다.
         write_private(&meta, &format!("pending\n{}\n", work.display()))
             .map_err(|_| Error::Unavailable)?;

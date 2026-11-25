@@ -162,11 +162,10 @@ async fn a_private_dm_reaches_only_the_designated_tool_in_the_srt_sandbox_and_le
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "lock"))
         .expect("설치본 사용 잠금 파일");
+    // 같은 파일을 끝난 뒤에도 가리키도록 미리 열어 둔다(`stop`이 임시 폴더를 지우면 이름으로는 다시 열 수 없다)
+    let probe = File::open(&lock).unwrap();
     assert!(
-        matches!(
-            File::open(&lock).unwrap().try_lock(),
-            Err(TryLockError::WouldBlock)
-        ),
+        matches!(probe.try_lock(), Err(TryLockError::WouldBlock)),
         "접수가 도는 동안에는 설치본의 배타 잠금을 잡을 수 없어야 해요"
     );
     // 일반 run은 만들어지지 않았고 저장소의 어떤 표에도 원문이 없다
@@ -219,7 +218,7 @@ async fn a_private_dm_reaches_only_the_designated_tool_in_the_srt_sandbox_and_le
     rig.stop().await;
     // 끝난 뒤에는 잠금이 풀린다
     assert!(
-        File::open(&lock).unwrap().try_lock().is_ok(),
+        probe.try_lock().is_ok(),
         "종료 뒤에는 설치본의 배타 잠금을 잡을 수 있어야 해요"
     );
 }

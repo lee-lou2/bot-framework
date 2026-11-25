@@ -2,6 +2,8 @@ use super::*;
 use tokio::time::sleep;
 
 mod env;
+mod overlay;
+mod probe;
 mod reap;
 mod state;
 use crate::{

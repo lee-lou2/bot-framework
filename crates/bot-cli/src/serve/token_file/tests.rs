@@ -21,6 +21,14 @@ fn id_of(path: &Path) -> Id {
     (meta.dev(), meta.ino())
 }
 
+/// 같은 이름에 다른 파일을 놓는다. 지우고 다시 만들면 Linux 파일시스템은 방금 지운 inode 번호를 곧바로 다시 써서 «다른 파일»이 같은 (장치, inode)로
+/// 보인다 — 새 파일을 먼저 만들어 옛 파일 위로 옮겨 놓아 두 inode가 겹치지 않게 한다.
+fn replace(path: &Path, text: &str) {
+    let staged = path.with_file_name(format!("replacement-{}", std::process::id()));
+    std::fs::write(&staged, text).unwrap();
+    std::fs::rename(&staged, path).unwrap();
+}
+
 fn chmod(path: &Path, mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
@@ -194,8 +202,7 @@ fn a_file_swapped_in_after_publishing_is_never_deleted_by_the_old_publisher() {
     let mut claim = TokenFile::claim(&path, uid()).unwrap();
     claim.publish("mine").unwrap();
     claim.finalize();
-    std::fs::remove_file(&path).unwrap();
-    std::fs::write(&path, "남이 둔 파일").unwrap();
+    replace(&path, "남이 둔 파일");
     drop(claim);
     assert_eq!(read(&path), "남이 둔 파일");
 }
@@ -206,8 +213,7 @@ fn a_file_that_replaced_a_never_existing_one_survives_a_failed_start() {
     let path = dir.path().join("token");
     let mut claim = TokenFile::claim(&path, uid()).unwrap();
     claim.publish("dead-token").unwrap();
-    std::fs::remove_file(&path).unwrap();
-    std::fs::write(&path, "운영자가 둔 파일\n").unwrap();
+    replace(&path, "운영자가 둔 파일\n");
     drop(claim);
     assert_eq!(read(&path), "운영자가 둔 파일\n");
     assert_eq!(residue(dir.path()), Vec::<String>::new());
@@ -265,8 +271,7 @@ fn a_commit_discards_only_the_backup_that_is_still_the_recorded_original() {
     claim.publish("new").unwrap();
     // 그 사이 운영자가 보관본을 같은 이름의 다른 파일로 바꿨다
     let backup = backup_in(dir.path());
-    std::fs::remove_file(&backup).unwrap();
-    std::fs::write(&backup, "운영자의 다른 파일\n").unwrap();
+    replace(&backup, "운영자의 다른 파일\n");
     claim.finalize();
     assert_eq!(
         read(&backup),

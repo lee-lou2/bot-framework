@@ -153,14 +153,12 @@ fn restart_after(dir: &Path, ending: Ending, meddling: Meddling) -> Result<(), S
     let meddle = || match meddling {
         Meddling::Nothing => {}
         Meddling::ReplacedTarget => {
-            std::fs::remove_file(&path).unwrap();
-            std::fs::write(&path, "운영자가 바꾼 파일\n").unwrap();
+            replace(&path, "운영자가 바꾼 파일\n");
         }
         Meddling::DeletedBackup => std::fs::remove_file(backup_in(dir)).unwrap(),
         Meddling::SwappedBackup => {
             let backup = backup_in(dir);
-            std::fs::remove_file(&backup).unwrap();
-            std::fs::write(backup, "운영자의 다른 파일\n").unwrap();
+            replace(&backup, "운영자의 다른 파일\n");
         }
     };
     match ending {
