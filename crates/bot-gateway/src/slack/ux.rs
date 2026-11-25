@@ -19,7 +19,7 @@ use bot_core::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -33,6 +33,7 @@ const FAIL: &str = "x";
 
 const POLL_EVERY: Duration = Duration::from_millis(750);
 const WATCH_LIMIT: Duration = Duration::from_secs(30 * 60);
+const MAX_SEEN_RUNS: usize = 2048;
 
 const STEPS: [&str; 4] = ["요청 확인", "맥락 파악", "답 작성", "전송"];
 const STOP_NOTE: &str = "버튼이 안 보이면 이 스레드에서 저를 멘션하고 \"중단해줘\"라고 보내도 돼요";
@@ -153,25 +154,29 @@ fn stop_card_blocks(
     (blocks, format!("{title} — {doing}"))
 }
 
-/// `RunProgress`를 진행 카드 문구·중단 카드 단계로 바꾼다(순수).
-fn describe_progress(progress: &RunProgress, elapsed_s: u64) -> (usize, String, String) {
+/// `RunProgress`를 진행 카드 문구(`None`이면 카드 미표시)·중단 카드 단계로 바꾼다(순수).
+fn describe_progress(progress: &RunProgress, elapsed_s: u64) -> (usize, Option<String>, String) {
     if progress.cancel_requested {
-        return (2, "중단하고 있어요".into(), "중단하는 중".into());
+        return (2, Some("중단하고 있어요".into()), "중단하는 중".into());
     }
     if progress.waiting_approval {
         return match &progress.active_tool {
             Some(tool) => (
                 2,
-                format!("승인을 기다리고 있어요 ({tool})"),
+                Some(format!("승인을 기다리고 있어요 ({tool})")),
                 format!("도구({tool}) 승인 대기 중"),
             ),
-            None => (2, "승인을 기다리고 있어요".into(), "승인 대기 중".into()),
+            None => (
+                2,
+                Some("승인을 기다리고 있어요".into()),
+                "승인 대기 중".into(),
+            ),
         };
     }
     if let Some(tool) = &progress.active_tool {
         return (
             2,
-            format!("도구 실행 중: {tool}"),
+            Some(format!("도구 실행 중: {tool}")),
             format!("도구({tool}) 실행 중"),
         );
     }
@@ -179,28 +184,34 @@ fn describe_progress(progress: &RunProgress, elapsed_s: u64) -> (usize, String, 
         let short = agent.rsplit('/').next().unwrap_or(agent);
         return (
             2,
-            format!("{short} 역할에서 작업하고 있어요"),
+            Some(format!("{short} 역할에서 작업하고 있어요")),
             format!("{short} 역할에서 작업 중"),
         );
     }
     match progress.state {
-        RunState::Ready => (0, "요청을 확인했어요".into(), "순서를 기다리는 중".into()),
+        RunState::Ready => (0, None, "순서를 기다리는 중".into()),
         RunState::Retry => (
             2,
-            "잠시 막혀서 다시 시도하고 있어요".into(),
+            Some("잠시 막혀서 다시 시도하고 있어요".into()),
             "막혀서 다시 시도하는 중".into(),
         ),
         RunState::Waiting => (
             2,
-            "하위 작업을 기다리고 있어요".into(),
+            Some("하위 작업을 기다리고 있어요".into()),
             "하위 작업 대기 중".into(),
         ),
-        RunState::Leased if elapsed_s >= 15 => {
-            (2, "깊이 생각하고 있어요".into(), "깊이 생각하는 중".into())
-        }
-        RunState::Leased => (2, "답을 만들고 있어요".into(), "답을 만드는 중".into()),
+        RunState::Leased if elapsed_s >= 15 => (
+            2,
+            Some("깊이 생각하고 있어요".into()),
+            "깊이 생각하는 중".into(),
+        ),
+        RunState::Leased => (
+            2,
+            Some("답을 만들고 있어요".into()),
+            "답을 만드는 중".into(),
+        ),
         RunState::Succeeded | RunState::Dead | RunState::Cancelled => {
-            (3, "마무리하고 있어요".into(), "마무리 중".into())
+            (3, None, "마무리 중".into())
         }
     }
 }
@@ -242,15 +253,47 @@ struct ActiveRun {
     st: Mutex<RunUxState>,
 }
 
+#[derive(Default)]
+struct SeenRuns {
+    set: HashSet<RunId>,
+    order: VecDeque<RunId>,
+}
+
+impl SeenRuns {
+    /// 처음 보는 run이면 기록하고 `true`, 이미 추적했거나 진행 중인 run이면 `false`.
+    fn claim(&mut self, run: RunId) -> bool {
+        if !self.set.insert(run.clone()) {
+            return false;
+        }
+        self.order.push_back(run);
+        while self.order.len() > MAX_SEEN_RUNS {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        true
+    }
+}
+
+#[derive(Default)]
+struct ThreadStream {
+    /// 현재 열려 있는 진행 스트림 `(run, ts)`
+    open: Option<(RunId, String)>,
+    /// 최종 회신이 시작되었거나 끝난 run — 뒤늦은 폴링이 답글 뒤에 카드를 다시 열지 못하게 막는다.
+    closed_for: Option<RunId>,
+}
+
 /// Slack 진행 상태(`chat.startStream` · 👀/✅)와 스레드 중단 제어기.
 pub struct SlackUx {
     creds: Arc<Credentials>,
     runs: Arc<dyn RunStore>,
     admin: Arc<dyn RunAdmin>,
+    /// 같은 run(`app_mention` + `message.channels` 중복 수신 등)이 두 번 추적되지 않게 막는 집합
+    seen: Mutex<SeenRuns>,
     /// `(channel, thread_ts)` → 현재 추적 중인 run
     active: Mutex<HashMap<(String, String), Arc<ActiveRun>>>,
-    /// `(channel, thread_ts)` → 열려 있는 진행 스트림 메시지 `ts`
-    streams: Mutex<HashMap<(String, String), String>>,
+    /// `(channel, thread_ts)` → 스레드별 직렬화된 진행 스트림 상태
+    streams: Mutex<HashMap<(String, String), Arc<tokio::sync::Mutex<ThreadStream>>>>,
 }
 
 impl SlackUx {
@@ -263,6 +306,7 @@ impl SlackUx {
             creds,
             runs,
             admin,
+            seen: Mutex::new(SeenRuns::default()),
             active: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
         }
@@ -270,6 +314,48 @@ impl SlackUx {
 
     fn key(channel: &str, thread_ts: &str) -> (String, String) {
         (channel.to_owned(), thread_ts.to_owned())
+    }
+
+    fn stream_slot(&self, channel: &str, thread_ts: &str) -> Arc<tokio::sync::Mutex<ThreadStream>> {
+        let key = Self::key(channel, thread_ts);
+        self.streams
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_default()
+            .clone()
+    }
+
+    fn existing_stream_slot(
+        &self,
+        channel: &str,
+        thread_ts: &str,
+    ) -> Option<Arc<tokio::sync::Mutex<ThreadStream>>> {
+        let key = Self::key(channel, thread_ts);
+        self.streams
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+    }
+
+    fn prune_stream_slot(&self, channel: &str, thread_ts: &str) {
+        let key = Self::key(channel, thread_ts);
+        let mut map = self.streams.lock().unwrap_or_else(|e| e.into_inner());
+        let removable = map.get(&key).is_some_and(|slot| {
+            Arc::strong_count(slot) == 1 && slot.try_lock().is_ok_and(|g| g.open.is_none())
+        });
+        if removable {
+            map.remove(&key);
+        }
+    }
+
+    fn remove_active(&self, info: &TrackedRun) {
+        let mut map = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let key = Self::key(&info.channel, &info.thread_ts);
+        if map.get(&key).is_some_and(|cur| cur.info.run == info.run) {
+            map.remove(&key);
+        }
     }
 
     fn active_by_thread(&self, channel: &str, thread_ts: &str) -> Option<Arc<ActiveRun>> {
@@ -290,7 +376,14 @@ impl SlackUx {
     }
 
     /// 접수된 Slack 요청의 진행 추적 시작(비동기 백그라운드 작업으로 돌려 ack를 늦추지 않는다).
-    pub fn track(self: &Arc<Self>, info: TrackedRun) {
+    /// 같은 `run`에 대한 중복 호출(`app_mention`과 `message.channels` 동시 수신 등)은 무시하고 `false`를 돌려준다.
+    pub fn track(self: &Arc<Self>, info: TrackedRun) -> bool {
+        {
+            let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+            if !seen.claim(info.run.clone()) {
+                return false;
+            }
+        }
         let entry = Arc::new(ActiveRun {
             info,
             started: Instant::now(),
@@ -312,28 +405,37 @@ impl SlackUx {
         tokio::spawn(async move {
             ux.watch_run(entry).await;
         });
+        true
     }
 
     async fn watch_run(self: Arc<Self>, active: Arc<ActiveRun>) {
         let info = &active.info;
+        // 재시작 뒤 이미 끝난 run의 재전달이면 반응·상태 카드를 띄우지 않는다.
+        if let Ok(Some(progress)) = self
+            .runs
+            .progress(info.profile.clone(), info.run.clone())
+            .await
+            && matches!(
+                progress.state,
+                RunState::Succeeded | RunState::Dead | RunState::Cancelled
+            )
+        {
+            self.remove_active(info);
+            return;
+        }
         self.react(&info.profile, &info.workspace, &info.channel, &info.msg_ts, EYES)
             .await;
-        let mut last_card = "요청을 확인했어요".to_owned();
-        self.set_status(
-            &info.profile,
-            &info.workspace,
-            &info.channel,
-            &info.thread_ts,
-            &last_card,
-            &info.team,
-            &info.user,
-        )
-        .await;
 
+        let mut last_card: Option<String> = None;
         let mut final_state = RunState::Dead;
         let deadline = Instant::now() + WATCH_LIMIT;
+        let mut first = true;
         while Instant::now() < deadline {
-            tokio::time::sleep(POLL_EVERY).await;
+            if first {
+                first = false;
+            } else {
+                tokio::time::sleep(POLL_EVERY).await;
+            }
             let Ok(Some(progress)) = self
                 .runs
                 .progress(info.profile.clone(), info.run.clone())
@@ -355,31 +457,35 @@ impl SlackUx {
                 final_state = progress.state;
                 break;
             }
-            if card_text != last_card {
+            if let Some(card_text) = card_text
+                && last_card.as_deref() != Some(card_text.as_str())
+            {
                 self.set_status(
                     &info.profile,
                     &info.workspace,
                     &info.channel,
                     &info.thread_ts,
+                    &info.run,
                     &card_text,
                     &info.team,
                     &info.user,
                 )
                 .await;
-                last_card = card_text;
+                last_card = Some(card_text);
             }
         }
 
         // 정리: 진행 카드를 먼저 치우고, 활성 목록에서 뺀 뒤, 결과 반응·중단 카드를 마무리한다.
-        self.clear_stream(&info.profile, &info.workspace, &info.channel, &info.thread_ts)
-            .await;
-        {
-            let mut map = self.active.lock().unwrap_or_else(|e| e.into_inner());
-            let key = Self::key(&info.channel, &info.thread_ts);
-            if map.get(&key).is_some_and(|cur| cur.info.run == info.run) {
-                map.remove(&key);
-            }
-        }
+        self.clear_stream_for_run(
+            &info.profile,
+            &info.workspace,
+            &info.channel,
+            &info.thread_ts,
+            &info.run,
+        )
+        .await;
+        self.remove_active(info);
+        self.prune_stream_slot(&info.channel, &info.thread_ts);
 
         match final_state {
             RunState::Succeeded => {
@@ -416,21 +522,13 @@ impl SlackUx {
         }
     }
 
-    /// 회신 게시 직전(`SlackSender`)이나 종료 시 열려 있는 진행 스트림 카드를 닫고 지운다.
-    pub async fn clear_stream(
+    async fn close_and_delete_stream(
         &self,
         profile: &ProfileId,
         workspace: &str,
         channel: &str,
-        thread_ts: &str,
+        ts: &str,
     ) {
-        let key = Self::key(channel, thread_ts);
-        let ts = self
-            .streams
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&key);
-        let Some(ts) = ts else { return };
         let Some(token) = self.creds.bot_token(profile, workspace).await else {
             return;
         };
@@ -446,38 +544,104 @@ impl SlackUx {
             .await;
     }
 
+    /// 회신 게시 직전(`SlackSender`)에 열려 있는 진행 스트림 카드를 닫고 지운다.
+    /// `mark_closed`가 참이면(최종 회신) 진행 중이던 run이 답글 뒤에 새 카드를 다시 열지 못하게 잠근다.
+    pub async fn clear_stream(
+        &self,
+        profile: &ProfileId,
+        workspace: &str,
+        channel: &str,
+        thread_ts: &str,
+        mark_closed: bool,
+    ) {
+        let active_run = self
+            .active_by_thread(channel, thread_ts)
+            .map(|a| a.info.run.clone());
+        let slot = if mark_closed && active_run.is_some() {
+            Some(self.stream_slot(channel, thread_ts))
+        } else {
+            self.existing_stream_slot(channel, thread_ts)
+        };
+        let Some(slot) = slot else { return };
+        let mut guard = slot.lock().await;
+        let open = guard.open.take();
+        if mark_closed
+            && let Some(run) = open.as_ref().map(|(r, _)| r.clone()).or(active_run)
+        {
+            guard.closed_for = Some(run);
+        }
+        if let Some((_, ts)) = open {
+            self.close_and_delete_stream(profile, workspace, channel, &ts)
+                .await;
+        }
+    }
+
+    async fn clear_stream_for_run(
+        &self,
+        profile: &ProfileId,
+        workspace: &str,
+        channel: &str,
+        thread_ts: &str,
+        run: &RunId,
+    ) {
+        let Some(slot) = self.existing_stream_slot(channel, thread_ts) else {
+            return;
+        };
+        let mut guard = slot.lock().await;
+        let ts = if guard.open.as_ref().is_some_and(|(r, _)| r == run) {
+            guard.closed_for = Some(run.clone());
+            guard.open.take().map(|(_, ts)| ts)
+        } else {
+            if guard.open.is_none() {
+                guard.closed_for = Some(run.clone());
+            }
+            None
+        };
+        if let Some(ts) = ts {
+            self.close_and_delete_stream(profile, workspace, channel, &ts)
+                .await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn set_status(
         &self,
         profile: &ProfileId,
         workspace: &str,
         channel: &str,
         thread_ts: &str,
+        run: &RunId,
         status: &str,
         team_id: &str,
         user_id: &str,
     ) {
         if status.is_empty() {
-            self.clear_stream(profile, workspace, channel, thread_ts)
+            self.clear_stream_for_run(profile, workspace, channel, thread_ts, run)
                 .await;
             return;
         }
         let Some(token) = self.creds.bot_token(profile, workspace).await else {
             return;
         };
-        let key = Self::key(channel, thread_ts);
-        let current = self
-            .streams
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .cloned();
+        let slot = self.stream_slot(channel, thread_ts);
+        let mut guard = slot.lock().await;
+        if guard.closed_for.as_ref() == Some(run) {
+            return;
+        }
+        // 같은 스레드에 이전 run의 열린 카드가 남아 있으면 먼저 지운다.
+        if guard.open.as_ref().is_some_and(|(r, _)| r != run)
+            && let Some((_, old_ts)) = guard.open.take()
+        {
+            self.close_and_delete_stream(profile, workspace, channel, &old_ts)
+                .await;
+        }
         let chunk = json!({
             "type": "task_update",
             "id": "status",
             "title": status,
             "status": "in_progress"
         });
-        match current {
+        match guard.open.as_ref().map(|(_, ts)| ts.clone()) {
             Some(ts) => {
                 let body = json!({"channel": channel, "ts": ts, "chunks": [chunk]});
                 match self
@@ -487,10 +651,7 @@ impl SlackUx {
                 {
                     Raw::Ok(_) => {}
                     _ => {
-                        self.streams
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .remove(&key);
+                        guard.open = None;
                         let del = json!({"channel": channel, "ts": ts});
                         let _ = self
                             .creds
@@ -517,10 +678,7 @@ impl SlackUx {
                     .await
                     && let Some(ts) = val["ts"].as_str()
                 {
-                    self.streams
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(key, ts.to_owned());
+                    guard.open = Some((run.clone(), ts.to_owned()));
                 }
             }
         }
@@ -864,40 +1022,72 @@ mod tests {
 
     #[test]
     fn describe_progress_prioritizes_cancel_approval_tool_and_agent() {
-        let base = RunProgress {
-            state: RunState::Leased,
+        let ready = RunProgress {
+            state: RunState::Ready,
             cancel_requested: false,
             active_agent: None,
             active_tool: None,
             waiting_approval: false,
         };
-        assert_eq!(describe_progress(&base, 3).1, "답을 만들고 있어요");
-        assert_eq!(describe_progress(&base, 20).1, "깊이 생각하고 있어요");
+        assert_eq!(describe_progress(&ready, 0).1, None);
+        let base = RunProgress {
+            state: RunState::Leased,
+            ..ready
+        };
+        assert_eq!(
+            describe_progress(&base, 3).1.as_deref(),
+            Some("답을 만들고 있어요")
+        );
+        assert_eq!(
+            describe_progress(&base, 20).1.as_deref(),
+            Some("깊이 생각하고 있어요")
+        );
         let with_agent = RunProgress {
             active_agent: Some("main/proxy".into()),
             ..base.clone()
         };
         assert_eq!(
-            describe_progress(&with_agent, 5).1,
-            "proxy 역할에서 작업하고 있어요"
+            describe_progress(&with_agent, 5).1.as_deref(),
+            Some("proxy 역할에서 작업하고 있어요")
         );
         let with_tool = RunProgress {
             active_tool: Some("proxy-stats.usage-chart".into()),
             ..with_agent.clone()
         };
         assert_eq!(
-            describe_progress(&with_tool, 5).1,
-            "도구 실행 중: proxy-stats.usage-chart"
+            describe_progress(&with_tool, 5).1.as_deref(),
+            Some("도구 실행 중: proxy-stats.usage-chart")
         );
         let waiting = RunProgress {
             waiting_approval: true,
             ..with_tool.clone()
         };
-        assert!(describe_progress(&waiting, 5).1.contains("승인을 기다리고"));
+        assert!(
+            describe_progress(&waiting, 5)
+                .1
+                .as_deref()
+                .is_some_and(|s| s.contains("승인을 기다리고"))
+        );
         let cancelling = RunProgress {
             cancel_requested: true,
             ..waiting
         };
-        assert_eq!(describe_progress(&cancelling, 5).1, "중단하고 있어요");
+        assert_eq!(
+            describe_progress(&cancelling, 5).1.as_deref(),
+            Some("중단하고 있어요")
+        );
+    }
+
+    #[test]
+    fn seen_runs_deduplicates_duplicate_events_and_bounds_size() {
+        let mut seen = SeenRuns::default();
+        assert!(seen.claim(RunId("r1".into())));
+        assert!(!seen.claim(RunId("r1".into())));
+        assert!(seen.claim(RunId("r2".into())));
+        for i in 0..MAX_SEEN_RUNS {
+            assert!(seen.claim(RunId(format!("fill-{i}"))));
+        }
+        assert!(seen.set.len() <= MAX_SEEN_RUNS);
+        assert!(seen.claim(RunId("r1".into())));
     }
 }

@@ -464,8 +464,14 @@ impl Sender for SlackSender {
                 .map_or(item.destination.id.as_str(), |(_, channel)| channel);
             let thread = item.destination.thread.as_deref();
             if let (Some(ux), Some(thread)) = (&self.ux, thread) {
-                ux.clear_stream(&item.key.profile, workspace, channel, thread)
-                    .await;
+                ux.clear_stream(
+                    &item.key.profile,
+                    workspace,
+                    channel,
+                    thread,
+                    body.approval.is_none(),
+                )
+                .await;
             }
             let delivery = match (body.attachments.is_empty(), &body.approval) {
                 (true, _) => self.post(&token, channel, thread, body).await,
