@@ -395,6 +395,24 @@ async fn routes_private_dm_before_queue() {
 }
 
 #[tokio::test]
+async fn private_pass_uses_distinct_request_id_for_normal_dm() {
+    let mut private = event_trigger("secure", "direct", tool_target("inbox.receive", "{}"));
+    private.private = true;
+    private.private_pass = true;
+    private.input.insert("text".into(), "body.text".into());
+    let rig = rig(base().trigger("main", private));
+
+    rig.private.pass_next();
+    assert_eq!(
+        rig.ingress.admit(slack_dm("U1", "D1.100.1", "안녕?")).await,
+        accepted("run-1")
+    );
+    let record = &rig.store.accepted()[0];
+    assert_eq!(record.key.request.0, "D1.100.1:pass");
+    assert_eq!(record.target, "agent main 안녕?");
+}
+
+#[tokio::test]
 async fn a_store_outage_is_not_settled_so_the_source_redelivers() {
     let rig = rig(base());
     rig.store.fail_next(Error::Unavailable);

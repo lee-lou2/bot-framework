@@ -13,7 +13,7 @@ use crate::{
 };
 use bot_core::{
     command::{Accept, AcceptExtras, Envelope, HttpRoute, JsonPayload, Target},
-    id::{PrincipalId, ProfileId, Revision, RunId},
+    id::{PrincipalId, ProfileId, RequestId, Revision, RunId},
     intake::{PrivateCall, PrivateDecision, PrivateIntake, RequestKey},
     port::{Error, RunStore},
     profile::{ProfileCatalog, ResponseMode, Snapshot, TriggerSource, TriggerTarget},
@@ -347,7 +347,7 @@ impl Ingress {
                 seen.route = Some((method.clone(), path.clone()));
             }
         }
-        let key = RequestKey {
+        let mut key = RequestKey {
             profile: profile.clone(),
             binding: route.binding_id.clone(),
             principal: inbound.principal.clone(),
@@ -362,6 +362,9 @@ impl Ingress {
                     Ok(PrivateDecision::Consumed) => return Admission::Private,
                     Err(rejection) => return Admission::Rejected(rejection),
                     Ok(PrivateDecision::Pass) => {
+                        // 민감 DM 입구가 이미 원 요청 ID(`key.request`)로 `bot_requests`에 private 행을 커밋했으므로
+                        // 일반 대화로 넘길 때는 충돌하지 않는 요청 ID를 쓴다(Slack 이벤트 중복 제거는 `slack_key`가 지킨다).
+                        key.request = RequestId(format!("{}:pass", key.request.0));
                         let text = inbound
                             .body
                             .get("text")

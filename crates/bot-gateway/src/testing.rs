@@ -434,6 +434,7 @@ pub struct MemoryPrivate {
 struct PrivateInner {
     received: BTreeMap<String, (String, String, String)>,
     fail_next: Option<Error>,
+    pass_next: bool,
 }
 
 impl MemoryPrivate {
@@ -455,6 +456,10 @@ impl MemoryPrivate {
     pub fn fail_next(&self, error: Error) {
         self.inner.lock().unwrap().fail_next = Some(error);
     }
+
+    pub fn pass_next(&self) {
+        self.inner.lock().unwrap().pass_next = true;
+    }
 }
 
 impl PrivateIntake for MemoryPrivate {
@@ -468,7 +473,11 @@ impl PrivateIntake for MemoryPrivate {
                 call.args.0,
                 call.agent.0,
             ));
-            Ok(PrivateDecision::Consumed)
+            if std::mem::take(&mut inner.pass_next) {
+                Ok(PrivateDecision::Pass)
+            } else {
+                Ok(PrivateDecision::Consumed)
+            }
         };
         Box::pin(std::future::ready(result))
     }
