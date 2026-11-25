@@ -19,6 +19,7 @@ use std::{
 };
 
 pub use control::Control;
+#[allow(unused_imports)]
 pub use http::{Reply, call, send_and_hang_up};
 #[allow(unused_imports)]
 pub use plan::{ERROR_BODY, text_turn};
