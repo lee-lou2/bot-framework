@@ -238,7 +238,7 @@ impl SlackUx {
         let body = json!({"channel": channel, "timestamp": ts, "name": name});
         let _ = self
             .creds
-            .call("reactions.add", &token, Body::Json(&body))
+            .call_passive("reactions.add", &token, Body::Json(&body))
             .await;
     }
 
@@ -256,7 +256,7 @@ impl SlackUx {
         let body = json!({"channel": channel, "timestamp": ts, "name": name});
         let _ = self
             .creds
-            .call("reactions.remove", &token, Body::Json(&body))
+            .call_passive("reactions.remove", &token, Body::Json(&body))
             .await;
     }
 

@@ -370,12 +370,12 @@ impl SlackUx {
         let stop_body = json!({"channel": channel, "ts": ts, "markdown_text": ""});
         let _ = self
             .creds
-            .call("chat.stopStream", &token, Body::Json(&stop_body))
+            .call_passive("chat.stopStream", &token, Body::Json(&stop_body))
             .await;
         let del_body = json!({"channel": channel, "ts": ts});
         let _ = self
             .creds
-            .call("chat.delete", &token, Body::Json(&del_body))
+            .call_passive("chat.delete", &token, Body::Json(&del_body))
             .await;
     }
 
@@ -479,7 +479,7 @@ impl SlackUx {
                 let body = json!({"channel": channel, "ts": ts, "chunks": [chunk]});
                 match self
                     .creds
-                    .call("chat.appendStream", &token, Body::Json(&body))
+                    .call_passive("chat.appendStream", &token, Body::Json(&body))
                     .await
                 {
                     Raw::Ok(_) => {}
@@ -488,7 +488,7 @@ impl SlackUx {
                         let del = json!({"channel": channel, "ts": ts});
                         let _ = self
                             .creds
-                            .call("chat.delete", &token, Body::Json(&del))
+                            .call_passive("chat.delete", &token, Body::Json(&del))
                             .await;
                     }
                 }
@@ -507,7 +507,7 @@ impl SlackUx {
                 }
                 if let Raw::Ok(val) = self
                     .creds
-                    .call("chat.startStream", &token, Body::Json(&body))
+                    .call_passive("chat.startStream", &token, Body::Json(&body))
                     .await
                     && let Some(ts) = val["ts"].as_str()
                 {

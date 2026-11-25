@@ -140,6 +140,11 @@ impl Credentials {
         raw
     }
 
+    /// 장식 호출(반응·진행 스트림)용 Slack Web API 호출. 실패해도 핵심 발송·카드 전달의 토큰 기억을 건드리지 않는다.
+    pub async fn call_passive(&self, method: &str, token: &str, body: Body<'_>) -> Raw {
+        self.api.call(method, token, body).await
+    }
+
     /// 확인된 봇 토큰(`check_bot`). 못 읽거나 확인하지 못하거나 다른 팀의 것이면 `None`이다.
     pub async fn bot_token(&self, profile: &ProfileId, workspace: &str) -> Option<Arc<String>> {
         match self.check_bot(profile, workspace).await {
