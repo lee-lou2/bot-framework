@@ -26,7 +26,8 @@ pub struct HostCatalog {
 }
 
 impl HostCatalog {
-    /// README 5분 시작의 호스트: 합성 일정 서버, 로컬 데모 모델, CLI 계정 `owner`.
+    /// README 5분 시작의 호스트: 합성 일정 서버, 로컬 데모 모델. 예시 프로필 `examples/profiles/`의 둘을 맞춰 둔다 —
+    /// 개인 비서 `personal`(CLI 계정 `owner`)과 팀 템플릿 `team`(CLI 계정 `team`). 입구 별칭은 활성 프로필 전체에서 하나뿐이라 계정이 따로다.
     pub fn demo() -> Self {
         let set = |items: &[&str]| {
             items
@@ -36,8 +37,11 @@ impl HostCatalog {
         };
         Self {
             servers: set(&["demo-agenda"]),
-            models: BTreeMap::from([("personal".to_owned(), set(&["assistant"]))]),
-            cli_accounts: set(&["owner"]),
+            models: BTreeMap::from([
+                ("personal".to_owned(), set(&["assistant"])),
+                ("team".to_owned(), set(&["assistant"])),
+            ]),
+            cli_accounts: set(&["owner", "team"]),
             ..Self::default()
         }
     }

@@ -283,16 +283,18 @@ pub fn load(path: &Path) -> Result<HostFile, HostFileError> {
     parse(&text)
 }
 
-/// README 5분 시작의 호스트: 합성 일정 서버·로컬 데모 모델, CLI 계정 `owner`는 이 프로세스를 실행한 OS 사용자.
+/// README 5분 시작의 호스트: 합성 일정 서버·로컬 데모 모델, CLI 계정 `owner`(예시 `personal`)와 `team`(예시 `team`)은 모두 이 프로세스를 실행한 OS 사용자.
 pub fn demo(uid: u32) -> HostFile {
     let mut gateway = HostConfig::default();
-    gateway.cli.accounts.insert(
-        "owner".into(),
-        CliAccount {
-            os_user: None,
-            uid: Some(uid),
-        },
-    );
+    for alias in ["owner", "team"] {
+        gateway.cli.accounts.insert(
+            alias.into(),
+            CliAccount {
+                os_user: None,
+                uid: Some(uid),
+            },
+        );
+    }
     let mut catalog = HostCatalog::demo();
     catalog.cli_accounts = gateway.cli.accounts.keys().cloned().collect();
     HostFile {
@@ -385,6 +387,34 @@ mod tests {
         assert!(root.ends_with("examples/servers/demo-agenda"), "{root:?}");
         // 별칭은 서버 설치와 무관하게 호스트 목록에 있다
         assert!(fallback.catalog.servers.contains("demo-agenda"));
+    }
+
+    #[test]
+    fn the_demo_host_knows_both_example_profiles() {
+        // 예시 폴더의 개인 비서(personal, 계정 owner)와 팀 템플릿(team, 계정 team)이 같은 내장 데모 호스트로 함께 검증된다
+        let host = demo(501);
+        let accounts: Vec<&str> = host
+            .gateway
+            .cli
+            .accounts
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(accounts, ["owner", "team"]);
+        assert!(
+            host.gateway
+                .cli
+                .accounts
+                .values()
+                .all(|a| a.uid == Some(501))
+        );
+        assert_eq!(
+            host.catalog.cli_accounts,
+            ["owner", "team"].map(String::from).into()
+        );
+        for profile in ["personal", "team"] {
+            assert!(host.catalog.allows_model(profile, "assistant"), "{profile}");
+        }
     }
 
     #[test]

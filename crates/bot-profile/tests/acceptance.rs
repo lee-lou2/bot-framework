@@ -139,9 +139,10 @@ fn validates_personal_example() {
         set.bundle(&personal())
             .is_some_and(|b| b.starts_with(b"BOTPROFILE1\n"))
     );
+    // 예시 폴더에는 개인 비서(personal)와 팀 템플릿(team)이 함께 있다
     let shown = set.render();
     assert!(
-        shown.starts_with("검증 통과: 프로필 1개\npersonal 판본 "),
+        shown.starts_with("검증 통과: 프로필 2개\npersonal 판본 "),
         "{shown}"
     );
     assert!(

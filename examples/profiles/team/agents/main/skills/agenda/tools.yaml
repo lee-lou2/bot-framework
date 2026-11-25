@@ -1,0 +1,20 @@
+version: 1
+server: demo-agenda            # 운영자가 호스트에 설치해 둔 서버의 별칭
+tools:
+  - id: list                   # 도구 ID는 agenda.list(스킬 이름 + 도구 이름)
+    class: read                # read는 승인 없이 부른다
+    scopes: [calendar.read]    # 이 스코프를 가진 실행만 부를 수 있다
+    env: [TEAM_TIMEZONE]       # env.yaml의 설정을 이 도구에 전달한다
+    secrets: {}                # 실제 도구라면 {환경변수 이름: profile.yaml secrets의 비밀 이름}
+    egress: []                 # 실제 도구라면 접속할 외부 호스트:포트 목록
+    input: {type: object, properties: {}, additionalProperties: false}
+  - id: delete
+    class: irreversible        # 되돌릴 수 없는 도구는 호출마다 사람이 승인해야 한다
+    scopes: [calendar.delete]
+    secrets: {}
+    egress: []
+    input:
+      type: object
+      required: [event]
+      properties: {event: {type: string}}
+      additionalProperties: false

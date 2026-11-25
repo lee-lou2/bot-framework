@@ -188,7 +188,9 @@ pub async fn run_with(
     let loaded = load(settings)?;
     check_entrances(loaded.set.active().clone(), &loaded.host)?;
     if loaded.host.demo {
-        eprintln!("BOT_HOST_CONFIG가 없어 내장 데모 호스트를 써요(CLI 계정 owner = 지금 사용자)");
+        eprintln!(
+            "BOT_HOST_CONFIG가 없어 내장 데모 호스트를 써요(CLI 계정 owner·team = 지금 사용자)"
+        );
     }
     // 저장소가 받지 못할 시드가 있으면 아무것도 쓰기 전에 멈춘다(시드 거절이 활성 판본 교체 뒤에 드러나지 않게)
     let seed_problems: Vec<String> = loaded

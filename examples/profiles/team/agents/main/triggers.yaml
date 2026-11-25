@@ -1,0 +1,9 @@
+version: 1
+triggers:
+  # 평일 아침 팀 요약. 이 폴더의 에이전트(main)에게 지시문을 보낸다. 승인이 필요 없는 형태다:
+  # 서비스 주체 standup은 digest 역할(읽기만)이라 일정 삭제 같은 승인 대상 도구는 부를 수 없다.
+  - id: standup
+    "on": {cron: "0 9 * * 1-5"}        # 평일 09:00, 프로필 시간대(Asia/Seoul)
+    principal: "service:standup"
+    target:
+      instruction: "평일 아침 팀 요약을 만들어 줘. agenda로 오늘 일정을 확인하고, 어제 남은 일과 오늘 위험을 한 줄씩 덧붙여 세 문장 안에 정리해. 읽기만 하고 아무것도 바꾸지 마."

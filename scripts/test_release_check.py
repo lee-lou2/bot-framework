@@ -162,8 +162,14 @@ class StrictRunsCargoTest(unittest.TestCase):
         done = self.run_with_recorder("--strict")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("cargo-called require=1 url=set", done.stdout)
+        self.assertIn("+ cargo test --workspace --locked --no-fail-fast", done.stdout, "첫 실패에서 멈추지 않는다")
         for secret in ("nobody-quokka", "127.0.0.1:1"):
             self.assertNotIn(secret, everything(done))
+
+    def test_a_failing_test_run_still_fails_the_step_even_though_it_does_not_stop_at_the_first_failure(self):
+        done = run_with_recorder(self, "--strict", then="exit 101")
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertRegex(done.stdout, r"실패\s+test\b")
 
     def test_without_strict_the_database_stays_optional_for_the_tests(self):
         done = self.run_with_recorder()

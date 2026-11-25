@@ -30,6 +30,8 @@ bot serve --role all
 
 개인 비서 프로필은 일정 도구의 권한과 입력을 선언하고, 별도 MCP 서버가 합성 일정으로 응답합니다. [예시 프로필](examples/profiles/personal) · [데모 도구 서버](examples/servers/demo-agenda)
 
+팀 프로필 템플릿은 팀 리드 아래에 개발·디자인·기획·운영 에이전트를 나눈 복사용 예시이고, 같은 준비로 `bot chat --profile team "오늘 일정 알려줘"`를 해 볼 수 있습니다. [팀 예시 프로필](examples/profiles/team) · [팀 템플릿 안내](docs/team-template.md)
+
 [전체 구조](docs/architecture.md) · [프로필 작성](docs/profile-spec.md) · [보안](docs/security.md) · [장애 복구](docs/reliability.md) · [MCP 도구](docs/plugins.md) · [관리·관측](docs/admin.md) · [게이트웨이](docs/gateway.md) · [배포 점검](docs/release.md) · [로드맵](docs/roadmap.md)
 
 ## 라이선스

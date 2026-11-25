@@ -223,7 +223,9 @@ pub async fn run(settings: &Settings) -> Result<(), String> {
     }
     let publication = crate::serve::Publication::of(&loaded.set, &loaded.host, &revisions)?;
     if loaded.host.demo {
-        println!("BOT_HOST_CONFIG가 없어 내장 데모 호스트를 써요(CLI 계정 owner = 지금 사용자)");
+        println!(
+            "BOT_HOST_CONFIG가 없어 내장 데모 호스트를 써요(CLI 계정 owner·team = 지금 사용자)"
+        );
     }
     println!("{}", loaded.set.render());
     for line in report {

@@ -7,14 +7,29 @@ use std::{
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
 pub const BOT: &str = env!("CARGO_BIN_EXE_bot");
 
+/// 시험이 쓰는 예시 프로필 폴더: 저장소의 `examples/profiles` 중 `personal`만 담은 사본(프로세스마다 한 번 만든다).
+/// 예시 폴더에는 팀 템플릿 `team`도 있지만 그것은 내장 데모 호스트가 아는 예시이고, 이 시험들이 직접 쓰는 호스트 설정(`models`·CLI 계정)은
+/// `personal`만 허용한다. 사본은 `CARGO_TARGET_TMPDIR` 아래에 두므로 `cargo clean`이 치운다.
 pub fn examples() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/profiles")
+    static COPY: OnceLock<PathBuf> = OnceLock::new();
+    COPY.get_or_init(|| {
+        let dir =
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("examples-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/profiles/personal");
+        copy_dir(&source, &dir.join("personal"));
+        dir
+    })
+    .clone()
 }
 
 pub fn bot(envs: &[(&str, &str)], args: &[&str]) -> std::process::Output {

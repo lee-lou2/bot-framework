@@ -249,7 +249,9 @@ step_test() {
     echo "BOT_TEST_DATABASE_URL이 없어 PostgreSQL 시험은 건너뛴다(시험이 스스로 건너뜀)."
     note="PostgreSQL 시험은 건너뜀(BOT_TEST_DATABASE_URL 없음)"
   fi
-  x cargo test --workspace --locked
+  # 첫 실패에서 멈추지 않는다: 뒤의 크레이트·시험 파일도 돌려 실패를 한 번에 모두 보인다(CI에서 실패가 하나만 보이고 나머지는 돌지 않던 일을 막는다).
+  # 판정은 그대로다: 실패가 하나라도 있으면 cargo가 0이 아닌 코드로 끝나 이 단계는 실패다.
+  x cargo test --workspace --locked --no-fail-fast
 }
 
 # 필수 통합 시험: 실제 claude CLI·srt 도구 샌드박스·Apple container 모델 VM·합성 비밀 쓸어 보기(표준 오류·감사·저장소·수집기에 합성 비밀 0).
@@ -286,6 +288,7 @@ bot-cli vm_serve
 bot-cli private_serve
 bot-cli tool_secrets
 bot-cli split_roles
+bot-cli team_template
 bot-cli secret_sweep
 '
 
