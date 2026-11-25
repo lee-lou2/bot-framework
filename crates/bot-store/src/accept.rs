@@ -288,6 +288,86 @@ impl Store {
             http,
         }))
     }
+
+    /// run 트리의 진행 요약(Slack 상태 카드·중단 확인용). 본문·인자 없이 상태·하위 에이전트·도구명만 읽는다.
+    pub(crate) async fn progress_of(
+        &self,
+        profile: &ProfileId,
+        run: &RunId,
+    ) -> R<Option<bot_core::intake::RunProgress>> {
+        let mut tx = self.begin_authorized().await?;
+        let rows = sqlx::query(
+            "select id, agent, state, wait_kind, cancel_requested, depth
+             from bot_runs
+             where profile = $1 and root = $2
+             order by depth asc, updated_ms desc",
+        )
+        .bind(&profile.0)
+        .bind(&run.0)
+        .fetch_all(&mut *tx)
+        .await?;
+        let Some(root) = rows.iter().find(|r| text(r, "id") == run.0) else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let state = state_from(&text(root, "state"))?;
+        let cancel_requested: bool = root.get("cancel_requested");
+        let terminal = matches!(
+            state,
+            bot_core::state::RunState::Succeeded
+                | bot_core::state::RunState::Dead
+                | bot_core::state::RunState::Cancelled
+        );
+        let mut active_agent = None;
+        let mut active_tool = None;
+        let mut waiting_approval = root
+            .get::<Option<String>, _>("wait_kind")
+            .as_deref()
+            == Some("approval");
+        if !terminal {
+            // 가장 깊은 활성 자식 에이전트
+            for r in rows.iter().rev() {
+                if text(r, "id") == run.0 {
+                    continue;
+                }
+                let st = text(r, "state");
+                if matches!(st.as_str(), "ready" | "leased" | "waiting" | "retry") {
+                    active_agent = Some(text(r, "agent"));
+                    if r.get::<Option<String>, _>("wait_kind").as_deref() == Some("approval") {
+                        waiting_approval = true;
+                    }
+                    break;
+                }
+            }
+            let call = sqlx::query(
+                "select c.tool, c.state
+                 from bot_calls c
+                 join bot_runs r on r.profile = c.profile and r.id = c.run
+                 where c.profile = $1 and r.root = $2
+                   and c.state in ('started', 'pending', 'approved')
+                 order by case c.state when 'pending' then 0 when 'started' then 1 else 2 end, c.updated_ms desc
+                 limit 1",
+            )
+            .bind(&profile.0)
+            .bind(&run.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(call) = call {
+                active_tool = Some(text(&call, "tool"));
+                if text(&call, "state") == "pending" {
+                    waiting_approval = true;
+                }
+            }
+        }
+        tx.rollback().await?;
+        Ok(Some(bot_core::intake::RunProgress {
+            state,
+            cancel_requested,
+            active_agent,
+            active_tool,
+            waiting_approval,
+        }))
+    }
 }
 
 use crate::db::text;

@@ -5,13 +5,15 @@ use super::{
     api::Body,
     blocks::{APPROVE, DENY, resolved_blocks},
     cards::is_the_card,
-    frame::{Button, Frame, Message},
+    frame::{Button, Frame, Message, StopRequested},
     socket::Installation,
+    ux::{STOP_CONFIRM, STOP_CONTINUE, TrackedRun, is_stop_phrase},
 };
 use crate::{
     entrance::Real,
     identity,
     inbound::{Event, Inbound, valid_request_id},
+    ingress::Admission,
     observe,
     reply::parse_card,
 };
@@ -110,8 +112,29 @@ impl SlackGateway {
             Frame::Post(post) => self.on_post(install, post).await,
             Frame::Reaction(reaction) => self.on_reaction(install, reaction).await,
             Frame::Button(button) => self.on_button(install, button).await,
+            Frame::StopRequested(req) => {
+                self.on_stop_requested(install, req).await;
+                true
+            }
             _ => true,
         }
+    }
+
+    async fn on_stop_requested(&self, install: &Installation, req: StopRequested) {
+        if req.team != install.team {
+            return;
+        }
+        let Some(ux) = &self.ux else { return };
+        let routes = self.ingress.routes().ok();
+        let snapshot = routes.as_ref().and_then(|r| r.snapshot(&install.profile));
+        ux.on_stop_requested(
+            install,
+            snapshot.map(|v| &**v),
+            &req.channel,
+            &req.thread_ts,
+            &req.user,
+        )
+        .await;
     }
 
     async fn on_message(&self, install: &Installation, message: Message) -> bool {
@@ -145,9 +168,28 @@ impl SlackGateway {
         if !valid_request_id(&request) {
             return true;
         }
+        let stripped = strip_mention(&message.text, &install.bot_user);
+        let thread_ts = message
+            .thread_ts
+            .clone()
+            .unwrap_or_else(|| message.ts.clone());
+        if is_stop_phrase(&stripped)
+            && let Some(ux) = &self.ux
+            && ux
+                .on_stop_mention(
+                    install,
+                    routes.snapshot(&install.profile).map(|v| &**v),
+                    &message.channel,
+                    &thread_ts,
+                    &message.user,
+                )
+                .await
+        {
+            return true;
+        }
         let inbound = Inbound {
             real,
-            principal,
+            principal: principal.clone(),
             request: RequestId(request.clone()),
             conversation: Conversation {
                 kind: if message.direct {
@@ -156,41 +198,66 @@ impl SlackGateway {
                     ConversationKind::Channel
                 },
                 id: message.channel.clone(),
-                thread: Some(
-                    message
-                        .thread_ts
-                        .clone()
-                        .unwrap_or_else(|| message.ts.clone()),
-                ),
+                thread: Some(thread_ts.clone()),
             },
             attachments: message
                 .files
                 .iter()
                 .map(|id| format!("slack:{}/{id}", install.alias))
                 .collect(),
-            body: json!({"text": strip_mention(&message.text, &install.bot_user)}),
+            body: json!({"text": stripped}),
             event: Event::Message,
         };
         // 인증된 이벤트 원천을 붙인다(일반 직접 트리거의 넘김·승인 증거용 — 민감 DM 트리거는 접수 전에 갈라져 원천을 쓰지 않는다)
         let source = SlackSource {
             kind: SourceKind::Message,
-            team: message.team,
-            channel: message.channel,
-            ts: message.ts,
+            team: message.team.clone(),
+            channel: message.channel.clone(),
+            ts: message.ts.clone(),
             thread_ts: message.thread_ts,
             event_id: message.event_id.unwrap_or(request),
             reaction: None,
         };
         // 소유자를 확인한 바로 그 표로 접수한다(그 사이 입구 소유자가 바뀌어도 이 설치의 프로필 밖으로 새지 않는다)
-        self.ingress
+        let admission = self
+            .ingress
             .admit_sourced(&routes, inbound, Some(source))
-            .await
-            .settled()
+            .await;
+        if let (Some(ux), Admission::Accepted { run, .. }) = (&self.ux, &admission) {
+            ux.track(TrackedRun {
+                profile: install.profile.clone(),
+                workspace: install.alias.clone(),
+                team: message.team,
+                channel: message.channel,
+                thread_ts,
+                msg_ts: message.ts,
+                user: message.user,
+                principal,
+                run: run.clone(),
+            });
+        }
+        admission.settled()
     }
 
     /// 버튼 클릭 한 건. 돌려주는 값은 «ack해도 되는가»다 — 판정이 커밋됐거나 영구적으로 처리할 수 없는 클릭만 ack하고,
     /// 일시 실패(저장소·브로커 장애)는 ack하지 않는다. 판정을 커밋한 뒤 카드 갱신만 실패한 경우는 ack다.
     async fn on_button(&self, install: &Installation, button: Button) -> bool {
+        if matches!(button.action_id.as_str(), STOP_CONFIRM | STOP_CONTINUE) {
+            if button.team == install.team
+                && let Some(ux) = &self.ux
+            {
+                let routes = self.ingress.routes().ok();
+                let snapshot = routes.as_ref().and_then(|r| r.snapshot(&install.profile));
+                ux.on_stop_button(
+                    install,
+                    snapshot.map(|v| &**v),
+                    &button,
+                    button.action_id == STOP_CONFIRM,
+                )
+                .await;
+            }
+            return true;
+        }
         let started = now_nano();
         let principal = identity::slack(&install.alias, &button.user);
         let click = self.decide_click(install, &button).await;

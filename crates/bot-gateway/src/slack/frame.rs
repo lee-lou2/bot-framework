@@ -61,6 +61,15 @@ pub struct Button {
     pub value: String,
 }
 
+/// Slack Agent 화면의 중단 버튼(`agent_session_stopped`)
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StopRequested {
+    pub team: String,
+    pub channel: String,
+    pub thread_ts: String,
+    pub user: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Frame {
     /// 연결된 Slack 앱 ID(`connection_info.app_id`)
@@ -70,6 +79,7 @@ pub enum Frame {
     Post(Post),
     Reaction(Reaction),
     Button(Button),
+    StopRequested(StopRequested),
     /// 다루지 않는 이벤트(받았다는 표시만 한다)
     Ignored,
     Invalid,
@@ -119,6 +129,9 @@ pub fn parse_event(payload: &Value) -> Frame {
     let kind = event["type"].as_str();
     if kind == Some("reaction_added") {
         return parse_reaction(payload);
+    }
+    if kind == Some("agent_session_stopped") {
+        return parse_stop_requested(payload);
     }
     if !matches!(kind, Some("app_mention" | "message")) {
         return Frame::Ignored;
@@ -268,6 +281,29 @@ fn parse_reaction(payload: &Value) -> Frame {
         reaction,
         item_user: text(&event["item_user"]),
         event_id,
+    })
+}
+
+fn parse_stop_requested(payload: &Value) -> Frame {
+    let event = &payload["event"];
+    let (Some(team), Some(channel), Some(thread_ts)) = (
+        text(&payload["team_id"]),
+        text(&event["channel"]).or_else(|| text(&event["channel_id"])),
+        text(&event["thread_ts"]),
+    ) else {
+        return Frame::Ignored;
+    };
+    if !ts_ok(&thread_ts) {
+        return Frame::Ignored;
+    }
+    let user = text(&event["user"])
+        .or_else(|| text(&event["user_id"]))
+        .unwrap_or_default();
+    Frame::StopRequested(StopRequested {
+        team,
+        channel,
+        thread_ts,
+        user,
     })
 }
 

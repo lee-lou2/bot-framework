@@ -19,7 +19,7 @@ use bot_core::{
         PreapprovalRow, TriggerKey,
     },
     id::*,
-    intake::{DeliveryKey, DeliveryOutcome, Outbox, Outgoing, RequestKey, RequestState},
+    intake::{DeliveryKey, DeliveryOutcome, Outbox, Outgoing, RequestKey, RequestState, RunProgress},
     ledger::{
         ApprovalState, CallLedger, CallRecord, Decision, FinishCall, OpenApproval, PrivateLedger,
         PrivateOutcome, PrivatePermit, PrivateRequest, PrivateStart, StartCall, StoredApproval,
@@ -55,6 +55,10 @@ impl RunStore for Store {
 
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>> {
         reply!(async move { self.status_of(&key).await })
+    }
+
+    fn progress(&self, profile: ProfileId, run: RunId) -> Reply<'_, Option<RunProgress>> {
+        reply!(async move { self.progress_of(&profile, &run).await })
     }
 
     fn claim(&self) -> Reply<'_, Option<RunContext>> {

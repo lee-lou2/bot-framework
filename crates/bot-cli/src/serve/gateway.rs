@@ -27,7 +27,7 @@ use bot_core::{
     id::Revision,
     intake::{Outbox, PrivateCall, PrivateDecision, PrivateIntake},
     ledger::{CallLedger, PrivateLedger},
-    port::{Broker, EffectJournal, Error, Reply, RunStore},
+    port::{Broker, EffectJournal, Error, Reply, RunAdmin, RunStore},
     profile::{ActiveRevisions, Adapter, ProfileBundles, ProfileCatalog},
     slack::BotThreads,
     trace::Tracer,
@@ -193,7 +193,12 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
                 SlackApi::new(deps.slack_base.as_deref()),
             )
             // 봇이 참여한 스레드의 증거(F2 `thread_reply`)는 같은 저장소에 둔다
-            .with_threads(deps.store.clone() as Arc<dyn BotThreads>),
+            .with_threads(deps.store.clone() as Arc<dyn BotThreads>)
+            // Slack 진행 상태(👀/✅ · `chat.startStream`)와 스레드 중단(버튼 · "중단해줘")
+            .with_ux(
+                deps.store.clone() as Arc<dyn RunStore>,
+                deps.store.clone() as Arc<dyn RunAdmin>,
+            ),
         );
         gateway.plan().await.map_err(|e| e.to_string())?;
         Some(gateway)

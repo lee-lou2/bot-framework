@@ -17,13 +17,14 @@ mod handle;
 mod human;
 pub mod send;
 pub mod socket;
+pub mod ux;
 
 use crate::ingress::Ingress;
 use api::SlackApi;
 use bot_core::{
     id::ProfileId,
     ledger::CallLedger,
-    port::{Broker, SecretStore},
+    port::{Broker, RunAdmin, RunStore, SecretStore},
     slack::BotThreads,
 };
 use creds::{BotCheck, Credentials};
@@ -58,6 +59,8 @@ pub struct SlackGateway {
     api: SlackApi,
     /// 봇이 참여한 스레드의 증거 저장소(없으면 `thread_reply`는 증거를 확인할 수 없어 어떤 답글도 받지 않는다)
     threads: Option<Arc<dyn BotThreads>>,
+    /// 진행 상태(👀/✅ · `chat.startStream`)와 스레드 중단 제어기(생략하면 장식 호출 없음)
+    ux: Option<Arc<ux::SlackUx>>,
 }
 
 impl SlackGateway {
@@ -81,6 +84,7 @@ impl SlackGateway {
             creds,
             api,
             threads: None,
+            ux: None,
         }
     }
 
@@ -88,6 +92,17 @@ impl SlackGateway {
     #[must_use]
     pub fn with_threads(mut self, threads: Arc<dyn BotThreads>) -> Self {
         self.threads = Some(threads);
+        self
+    }
+
+    /// Slack 진행 상태(👀/✅ · 스트림 상태 카드)와 스레드 중단(버튼·"중단해줘") 제어기를 붙인다.
+    #[must_use]
+    pub fn with_ux(mut self, runs: Arc<dyn RunStore>, admin: Arc<dyn RunAdmin>) -> Self {
+        self.ux = Some(Arc::new(ux::SlackUx::new(
+            self.creds.clone(),
+            runs,
+            admin,
+        )));
         self
     }
 
@@ -109,8 +124,12 @@ impl SlackGateway {
     /// 회신 발송기(같은 자격·같은 API 클라이언트를 쓴다)
     pub fn sender(&self) -> send::SlackSender {
         let sender = send::SlackSender::new(self.api.clone(), self.creds.clone());
-        match &self.threads {
+        let sender = match &self.threads {
             Some(threads) => sender.with_threads(threads.clone()),
+            None => sender,
+        };
+        match &self.ux {
+            Some(ux) => sender.with_ux(ux.clone()),
             None => sender,
         }
     }

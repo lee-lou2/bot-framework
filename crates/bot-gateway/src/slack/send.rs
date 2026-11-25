@@ -46,6 +46,8 @@ pub struct SlackSender {
     creds: Arc<Credentials>,
     /// 확인된 게시를 «봇이 이 스레드에 참여했다»는 증거로 남기는 곳(F2 `thread_reply`). 없으면 남기지 않는다.
     threads: Option<Arc<dyn BotThreads>>,
+    /// 진행 스트림 카드를 게시 직전에 치우는 제어기(없으면 생략)
+    ux: Option<Arc<super::ux::SlackUx>>,
 }
 
 impl SlackSender {
@@ -54,12 +56,19 @@ impl SlackSender {
             api,
             creds,
             threads: None,
+            ux: None,
         }
     }
 
     #[must_use]
     pub fn with_threads(mut self, threads: Arc<dyn BotThreads>) -> Self {
         self.threads = Some(threads);
+        self
+    }
+
+    #[must_use]
+    pub fn with_ux(mut self, ux: Arc<super::ux::SlackUx>) -> Self {
+        self.ux = Some(ux);
         self
     }
 
@@ -454,6 +463,10 @@ impl Sender for SlackSender {
             let channel = split_route(&item.destination.id)
                 .map_or(item.destination.id.as_str(), |(_, channel)| channel);
             let thread = item.destination.thread.as_deref();
+            if let (Some(ux), Some(thread)) = (&self.ux, thread) {
+                ux.clear_stream(&item.key.profile, workspace, channel, thread)
+                    .await;
+            }
             let delivery = match (body.attachments.is_empty(), &body.approval) {
                 (true, _) => self.post(&token, channel, thread, body).await,
                 (false, None) => self.upload(&token, channel, thread, body).await,

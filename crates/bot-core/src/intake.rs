@@ -22,6 +22,19 @@ pub struct RequestState {
     pub http: Option<HttpRoute>,
 }
 
+/// 진행 중인 run 트리의 비민감 요약(Slack 진행 표시·중단 카드용). 본문·인자·결과는 싣지 않는다.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunProgress {
+    pub state: RunState,
+    pub cancel_requested: bool,
+    /// 위임된 활성 하위 에이전트(예: `main/proxy`). 루트가 직접 실행 중이면 `None`.
+    pub active_agent: Option<String>,
+    /// 현재 실행 중이거나 승인 대기 중인 도구 이름(예: `proxy-stats.usage-chart`).
+    pub active_tool: Option<String>,
+    /// 도구 승인 대기 상태인가.
+    pub waiting_approval: bool,
+}
+
 /// body/args를 로그·일반 큐·승인 카드·모델에 보관하지 않는다.
 pub struct PrivateCall {
     pub key: RequestKey,

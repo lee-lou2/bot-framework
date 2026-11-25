@@ -410,3 +410,34 @@ fn reconnect_backoff_doubles_up_to_thirty_seconds() {
         assert_eq!(reconnect_delay_ms(attempt), 30_000, "{attempt}");
     }
 }
+
+#[test]
+fn agent_session_stopped_parses_channel_thread_and_user() {
+    let raw = events(
+        r#"{"type":"agent_session_stopped","channel":"C1","thread_ts":"1700000000.000100","user":"U9"}"#,
+    );
+    assert_eq!(
+        parse_socket(&raw).0,
+        Frame::StopRequested(StopRequested {
+            team: "T1".into(),
+            channel: "C1".into(),
+            thread_ts: "1700000000.000100".into(),
+            user: "U9".into(),
+        })
+    );
+    let alt = events(
+        r#"{"type":"agent_session_stopped","channel_id":"C2","thread_ts":"1700000000.000200","user_id":"U8"}"#,
+    );
+    assert_eq!(
+        parse_socket(&alt).0,
+        Frame::StopRequested(StopRequested {
+            team: "T1".into(),
+            channel: "C2".into(),
+            thread_ts: "1700000000.000200".into(),
+            user: "U8".into(),
+        })
+    );
+    // 잘못된 thread_ts는 버린다
+    let bad = events(r#"{"type":"agent_session_stopped","channel":"C1","thread_ts":"bad"}"#);
+    assert_eq!(parse_socket(&bad).0, Frame::Ignored);
+}

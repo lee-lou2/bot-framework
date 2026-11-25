@@ -11,11 +11,13 @@ use super::{
     handle::mentions_bot,
     human::{Actor, NOT_HUMAN},
     socket::Installation,
+    ux::{TrackedRun, is_stop_phrase},
 };
 use crate::{
     entrance::Real,
     identity,
     inbound::{Event, Inbound, valid_request_id},
+    ingress::Admission,
     routes::Routes,
     trigger,
 };
@@ -144,6 +146,22 @@ impl SlackGateway {
             return true;
         }
         let text = super::handle::strip_mention(&msg.text, &install.bot_user);
+        let thread_ts = msg.thread_ts.clone().unwrap_or_else(|| msg.ts.clone());
+        if matches!(pick, Pick::Mention)
+            && is_stop_phrase(&text)
+            && let Some(ux) = &self.ux
+            && ux
+                .on_stop_mention(
+                    install,
+                    routes.snapshot(&install.profile).map(|v| &**v),
+                    &msg.channel,
+                    &thread_ts,
+                    &msg.user,
+                )
+                .await
+        {
+            return true;
+        }
         let (event, kind, body) = match &pick {
             Pick::Mention => (Event::Message, SourceKind::Message, json!({"text": text})),
             Pick::Reply(root) => (
@@ -157,12 +175,12 @@ impl SlackGateway {
                 team: msg.team.clone(),
                 channel: msg.channel.clone(),
             },
-            principal,
+            principal: principal.clone(),
             request: RequestId(request.clone()),
             conversation: Conversation {
                 kind: ConversationKind::Channel,
                 id: msg.channel.clone(),
-                thread: Some(msg.thread_ts.clone().unwrap_or_else(|| msg.ts.clone())),
+                thread: Some(thread_ts.clone()),
             },
             attachments: msg
                 .files
@@ -174,18 +192,34 @@ impl SlackGateway {
         };
         let source = SlackSource {
             kind,
-            team: msg.team,
-            channel: msg.channel,
-            ts: msg.ts,
+            team: msg.team.clone(),
+            channel: msg.channel.clone(),
+            ts: msg.ts.clone(),
             thread_ts: msg.thread_ts,
             event_id: msg.event_id.unwrap_or(request),
             reaction: None,
         };
         // 소유자를 확인한 바로 그 표로 접수한다(그 사이 입구 소유자가 바뀌어도 이 설치의 프로필 밖으로 새지 않는다)
-        self.ingress
+        let admission = self
+            .ingress
             .admit_sourced(&routes, inbound, Some(source))
-            .await
-            .settled()
+            .await;
+        if matches!(pick, Pick::Mention)
+            && let (Some(ux), Admission::Accepted { run, .. }) = (&self.ux, &admission)
+        {
+            ux.track(TrackedRun {
+                profile: install.profile.clone(),
+                workspace: install.alias.clone(),
+                team: msg.team,
+                channel: msg.channel,
+                thread_ts,
+                msg_ts: msg.ts,
+                user: msg.user,
+                principal,
+                run: run.clone(),
+            });
+        }
+        admission.settled()
     }
 
     /// 채널의 글 한 건(`message.channels`·`message.groups`). 자기 봇의 글은 스레드 증거로만 기록하고, 사람의 글은 접수 판정으로 보낸다.

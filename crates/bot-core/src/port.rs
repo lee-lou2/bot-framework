@@ -2,7 +2,7 @@
 use crate::{
     command::*,
     id::*,
-    intake::{RequestKey, RequestState},
+    intake::{RequestKey, RequestState, RunProgress},
     state::*,
 };
 use std::{future::Future, path::Path, pin::Pin};
@@ -31,6 +31,10 @@ pub trait RunStore: Send + Sync {
         self.accept(command)
     }
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>>;
+    /// run 트리의 현재 진행 요약(하위 에이전트·실행 중인 도구·승인 대기 여부). 기본 구현은 `None`.
+    fn progress(&self, _profile: ProfileId, _run: RunId) -> Reply<'_, Option<RunProgress>> {
+        Box::pin(async { Ok(None) })
+    }
     /// 준비된 작업을 점유할 때 같은 트랜잭션에 현재 호스트 활성 집합을 기록한다.
     /// 리스 만료 인계 시 이전·현재 집합이 모두 있고 다를 때만 시도 횟수를 유지한다.
     /// 같은 집합 또는 이전 기록 부재는 한 번 차감한다. 집합 조회 오류는 쓰기 없이 실패한다.

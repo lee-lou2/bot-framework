@@ -177,6 +177,8 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
             // 유예 + 정리 시간은 serve의 종료 대기(`SHUTDOWN_WAIT`)보다 짧아야 한다
             grace: GRACE,
             cleanup: CLEANUP,
+            // 중단 요청을 빠르게 감지하도록 heartbeat를 3초로 둔다(리스 30초 대비 충분한 여유)
+            heartbeat: std::time::Duration::from_secs(3),
             ..WorkerConfig::default()
         },
     )
