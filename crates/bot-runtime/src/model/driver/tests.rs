@@ -40,6 +40,7 @@ impl Parser for Collect {
                 input_tokens: 1,
                 output_tokens: 2,
             },
+            outcome: Default::default(),
         })
     }
 }
@@ -241,6 +242,12 @@ fn classify_maps_statuses_and_phrases_to_fixed_codes() {
         ("read ECONNRESET", None, ("network", true)),
         ("Invalid API key", Some(401), ("model_error", false)),
         ("", None, ("model_error", false)),
+        // 공급자의 출력 토큰 상한(CLI 2.1.331 문구): 다시 해도 같으므로 일시 실패가 아니다
+        (
+            "API Error: Claude's response exceeded the 128000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
+            None,
+            ("output_limit", false),
+        ),
     ] {
         assert_eq!(classify(message, status), want, "{message} {status:?}");
     }

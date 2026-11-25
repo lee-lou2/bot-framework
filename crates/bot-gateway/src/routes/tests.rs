@@ -8,7 +8,9 @@ fn host() -> HostConfig {
         "slack": {"workspaces": {"home": {
             "team_id": "T1", "dm": true, "bot_token": "bot-token", "app_token": "app-token",
             "channels": {"planning": "C1", "ops": "C2", "planning-copy": "C1"}}}},
-        "http": {"endpoints": {"inbox": {"issuer": "i", "audience": "a", "key": "k"}}}
+        "http": {"endpoints": {
+            "inbox": {"issuer": "i", "audience": "a", "key": "k"},
+            "openai": {"kind": "openai", "keys": {"build": {"secret": "build-key", "subject": "build"}}}}}
     }"#,
     )
     .unwrap()
@@ -431,4 +433,108 @@ fn a_dm_binding_needs_the_operator_to_open_dm_entrances() {
         .err()
         .unwrap();
     assert!(err.0.contains("DM 입구를 열지 않았어요"), "{err}");
+}
+
+fn model(endpoint: &str, model: &str) -> Adapter {
+    Adapter::OpenAi {
+        endpoint: endpoint.into(),
+        model: model.into(),
+        approvers: Default::default(),
+    }
+}
+
+#[test]
+fn an_openai_model_is_an_entrance_of_its_own_and_one_alias_serves_several_models() {
+    let personal = profile("personal")
+        .binding("assistant", model("openai", "assistant"), "main")
+        .binding("helper", model("openai", "helper"), "main")
+        .binding(
+            "inbox",
+            Adapter::Http {
+                endpoint: "inbox".into(),
+            },
+            "main",
+        )
+        .build();
+    let routes = build(vec![personal]).unwrap();
+    let p = ProfileId("personal".into());
+    let real = |model: &str| Real::HttpModel {
+        endpoint: "openai".into(),
+        model: model.into(),
+    };
+    assert_eq!(
+        routes.find(&real("assistant")).unwrap().binding_id.0,
+        "assistant"
+    );
+    assert_eq!(routes.find(&real("helper")).unwrap().binding_id.0, "helper");
+    assert!(
+        routes.find(&real("other")).is_none(),
+        "모델 이름은 정확히 일치한다"
+    );
+    assert_eq!(routes.openai_profile("openai"), Some(&p));
+    assert_eq!(
+        routes.openai_profile("inbox"),
+        None,
+        "웹훅 입구는 OpenAI 표에 없다"
+    );
+    let models: Vec<&str> = routes
+        .openai_models("openai")
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(models, ["assistant", "helper"], "모델 이름 순");
+    // 웹훅 입구와 OpenAI 모델은 서로의 표를 건드리지 않는다
+    assert_eq!(routes.http_owner("inbox").unwrap().binding.0, "inbox");
+    assert!(routes.http_owner("openai").is_none());
+}
+
+#[test]
+fn an_openai_alias_may_belong_to_one_profile_only() {
+    let one = profile("personal")
+        .binding("assistant", model("openai", "assistant"), "main")
+        .build();
+    let two = profile("work")
+        .binding("helper", model("openai", "helper"), "main")
+        .build();
+    let error = build(vec![one, two])
+        .err()
+        .expect("두 프로필이 한 별칭을 나눠 쓴다");
+    let text = error.to_string();
+    assert!(
+        text.contains("personal/assistant")
+            && text.contains("work/helper")
+            && text.contains("openai"),
+        "{text}"
+    );
+    assert!(text.contains("프로필 하나만"), "{text}");
+}
+
+#[test]
+fn the_same_model_name_in_two_profiles_is_a_conflict_too() {
+    let one = profile("personal")
+        .binding("assistant", model("openai", "assistant"), "main")
+        .build();
+    let two = profile("work")
+        .binding("assistant", model("openai", "assistant"), "main")
+        .build();
+    assert!(build(vec![one, two]).is_err());
+}
+
+#[test]
+fn an_openai_model_on_an_alias_the_host_did_not_open_is_refused_by_name() {
+    let snapshot = profile("personal")
+        .binding("assistant", model("elsewhere", "assistant"), "main")
+        .build();
+    let text = build(vec![snapshot])
+        .err()
+        .expect("호스트에 없는 입구")
+        .to_string();
+    assert!(
+        text.contains("personal/assistant") && text.contains("elsewhere"),
+        "{text}"
+    );
+    // 웹훅 입구 별칭을 OpenAI 모델의 입구로 쓸 수 없다(종류가 다르다)
+    let wrong_kind = profile("personal")
+        .binding("assistant", model("inbox", "assistant"), "main")
+        .build();
+    assert!(build(vec![wrong_kind]).is_err());
 }

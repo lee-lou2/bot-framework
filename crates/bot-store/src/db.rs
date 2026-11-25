@@ -151,6 +151,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "card_jobs",
         include_str!("../migrations/0018_card_jobs.sql"),
     ),
+    (
+        19,
+        "api_runs",
+        include_str!("../migrations/0019_api_runs.sql"),
+    ),
 ];
 
 fn migrator() -> Migrator {

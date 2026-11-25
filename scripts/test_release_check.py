@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from testing_repo import GitShim, PUBLIC, Repo, everything  # noqa: E402
+from testing_repo import GitShim, PUBLIC, Repo, committed, everything  # noqa: E402
 
 TERM = "quokka"
 GITLEAKS = shutil.which("gitleaks")
@@ -23,13 +23,6 @@ needs_gitleaks = unittest.skipUnless(GITLEAKS, "gitleaks가 있어야 한다(관
 def aws_key():
     """A synthetic access key built at run time so that this file holds no key-shaped literal."""
     return "AK" + "IA" + "QZ7K3M2WXY5LT4NB"
-
-
-def committed(case, message="work"):
-    repo = Repo(case)
-    repo.write("a.txt", "fine\n")
-    repo.commit(message, env=PUBLIC)
-    return repo
 
 
 class Steps(unittest.TestCase):
@@ -430,148 +423,6 @@ class Gitleaks(unittest.TestCase):
         done = repo.gate("--only", "secrets-tree")
         self.assertEqual(done.returncode, 1, done.stdout)
         self.assertIn("하나도 없다", done.stdout)
-
-
-class Integration(unittest.TestCase):
-    """필수 통합 시험 단계. `cargo`와 실제 도구(claude·srt·container·node·psql)를 기록 대역으로 바꿔, 환경이 없으면 실패하고 건너뜀 표지·통과 0건·시험 실패를
-    그냥 지나치지 않으며 필수 모드로 돌리는지 본다(실제 VM·모델 호출은 없다)."""
-
-    CARGO = """#!/bin/sh
-echo "cargo-called $*"
-# 단계는 시험 출력을 파일로 받아 요약만 찍는다: 대역이 본 환경은 따로 남긴다
-echo "$* env claude=$BOT_CLAUDE_CANARY srt=$BOT_SRT_CANARY container=$BOT_CONTAINER_CANARY db=$BOT_TEST_REQUIRE_DB node=$BOT_REQUIRE_NODE" >> "$SHIM_LOG"
-case "$SHIM_MODE" in
-  skip) case "$*" in *claude_route*) echo "skipped: claude CLI not found" ;; esac ;;
-  korean) case "$*" in *private_serve*) echo "srt 또는 python3가 없어 건너뜀" ;; esac ;;
-  zero) case "$*" in *private_serve*) echo "test result: ok. 0 passed; 0 failed; 0 ignored"; exit 0 ;; esac ;;
-  fail) case "$*" in *vm_serve*) echo "test result: FAILED. 0 passed; 1 failed"; exit 101 ;; esac ;;
-esac
-echo "test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out"
-"""
-
-    def shims(self, *, missing=(), container_up=True, image_present=True):
-        shim = Path(tempfile.mkdtemp(prefix="gate-shim-"))
-        self.addCleanup(lambda: shutil.rmtree(shim, ignore_errors=True))
-        bodies = {
-            "psql": "#!/bin/sh\nexit 0\n",
-            "claude": "#!/bin/sh\nexit 0\n",
-            "srt": "#!/bin/sh\nexit 0\n",
-            "node": "#!/bin/sh\nexit 0\n",
-            "python3": f'#!/bin/sh\nexec "{sys.executable}" "$@"\n',
-            "container": '#!/bin/sh\ncase "$1 $2" in\n  "system status") exit %d ;;\n  "image inspect") exit %d ;;\nesac\nexit 0\n'
-            % (0 if container_up else 1, 0 if image_present else 1),
-            "cargo": self.CARGO,
-        }
-        for name, body in bodies.items():
-            if name in missing:
-                continue
-            (shim / name).write_text(body)
-            (shim / name).chmod(0o755)
-        return shim
-
-    def run_step(self, *args, mode="", only="integration", shim=None, extra=None, image="img@sha256:" + "0" * 64):
-        shim = shim or self.shims()
-        repo = committed(self)
-        handle, name = tempfile.mkstemp(prefix="gate-shim-log-")
-        os.close(handle)
-        self.log = Path(name)
-        # 호출마다 자기 파일을 지운다(`lambda: self.log…`는 정리 때의 마지막 값만 봐서, 한 시험이 `run_step`을 여러 번 부르면 앞의 파일이 임시 폴더에 남았다)
-        self.addCleanup(self.log.unlink, missing_ok=True)
-        env = {
-            "BOT_TEST_DATABASE_URL": "postgres://nobody-quokka@127.0.0.1:1/none",
-            "PATH": f"{shim}:/usr/bin:/bin",
-            "SHIM_MODE": mode,
-            "SHIM_LOG": str(self.log),
-            **({"BOT_MODEL_IMAGE": image} if image else {}),
-            **(extra or {}),
-        }
-        return repo.gate(*args, "--only", only, env=env)
-
-    def test_it_is_a_named_step(self):
-        self.assertIn("integration", committed(self).gate("--list").stdout.split())
-
-    def test_every_integration_test_runs_in_required_mode_and_the_step_passes(self):
-        done = self.run_step("--strict")
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        for target in ("claude_route", "srt_canary", "container_firewall", "vm_serve", "private_serve", "secret_sweep", "tool_secrets"):
-            self.assertRegex(done.stdout, rf"통과\s+{target}: 2건", target)
-        # (머리말의 `cargo --version` 호출도 기록되니 시험 호출만 본다)
-        seen = [line for line in self.log.read_text().splitlines() if " --test " in line]
-        # 관문이 돌려야 하는 시험 목록은 스크립트의 `INTEGRATION_TESTS`다(다른 역할이 줄을 더해도 이 시험이 깨지지 않는다). 목록의 모든 파일을 순서대로
-        # 돌려야 하고, 처음 필수로 정한 20개 파일은 목록에서 빠질 수 없다.
-        script = Path(__file__).with_name("release-check.sh").read_text(encoding="utf-8")
-        listed = re.search(r"^INTEGRATION_TESTS='\n(.*?)^'$", script, re.S | re.M)
-        self.assertIsNotNone(listed, "INTEGRATION_TESTS 목록을 찾지 못했다")
-        expected = [line.split()[1] for line in listed.group(1).splitlines() if line.strip()]
-        self.assertEqual([re.search(r" --test (\S+)", line).group(1) for line in seen], expected, seen)
-        required = (
-            "claude_canary srt_canary cli_started cli_resume cli_refusal container_canary container_anchor container_claude "
-            "container_firewall claude_route claude_wiring claude_stale claude_attempts claude_schedule claude_shutdown "
-            "vm_serve private_serve tool_secrets split_roles secret_sweep"
-        ).split()
-        self.assertEqual(sorted(set(required) - set(expected)), [], "필수 통합 시험이 목록에서 빠졌다")
-        for line in seen:
-            self.assertTrue(
-                line.endswith("env claude=required srt=required container=required db=1 node=1"),
-                f"필수 모드가 아니다: {line}",
-            )
-            self.assertIn("-- --nocapture --test-threads=1", line)
-        self.assertTrue(any("--features testing --test claude_canary" in line for line in seen))
-        for hidden in ("nobody-quokka", "127.0.0.1:1", "0" * 64):
-            self.assertNotIn(hidden, everything(done), "주소·이미지 참조는 출력하지 않는다")
-
-    def test_a_skip_marker_in_any_test_output_fails_the_step_and_names_the_file(self):
-        for mode, target in (("skip", "claude_route"), ("korean", "private_serve")):
-            done = self.run_step("--strict", mode=mode)
-            self.assertEqual(done.returncode, 1, done.stdout)
-            self.assertRegex(done.stdout, rf"실패\s+{target}: 건너뜀 표지 1건", mode)
-
-    def test_a_file_where_no_test_ran_or_a_test_failed_fails_the_step(self):
-        done = self.run_step("--strict", mode="zero")
-        self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertRegex(done.stdout, r"실패\s+private_serve: 시험이 하나도 돌지 않았다")
-        done = self.run_step("--strict", mode="fail")
-        self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertRegex(done.stdout, r"실패\s+vm_serve \(종료 코드 101\)")
-
-    def test_a_missing_environment_fails_before_any_test_runs(self):
-        cases = {
-            "claude": "claude",
-            "srt": "srt",
-            "node": "node",
-            "container": "container",
-        }
-        for tool, word in cases.items():
-            done = self.run_step("--strict", shim=self.shims(missing=(tool,)))
-            self.assertEqual(done.returncode, 1, (tool, done.stdout))
-            self.assertIn(f"필요한 도구가 없다: {word}", done.stdout)
-            self.assertNotIn("cargo-called", done.stdout, tool)
-        done = self.run_step("--strict", shim=self.shims(container_up=False))
-        self.assertEqual(done.returncode, 1)
-        self.assertIn("container 서비스가 꺼져 있다", done.stdout)
-        done = self.run_step("--strict", shim=self.shims(image_present=False))
-        self.assertEqual(done.returncode, 1)
-        self.assertIn("로컬에 없다", done.stdout)
-        for image in ("", "name:tag-only"):
-            done = self.run_step("--strict", image=image)
-            self.assertEqual(done.returncode, 1, image)
-            self.assertIn("BOT_MODEL_IMAGE", done.stdout)
-            self.assertNotIn("cargo-called", done.stdout)
-        done = self.run_step("--strict", extra={"BOT_TEST_DATABASE_URL": ""})
-        self.assertEqual(done.returncode, 1)
-        self.assertIn("BOT_TEST_DATABASE_URL이 없다", done.stdout)
-        self.assertNotIn("cargo-called", done.stdout)
-
-    def test_a_full_run_without_strict_shows_the_step_as_a_skip_and_strict_never_skips_it(self):
-        repo = committed(self)
-        # 안쪽 관문이 자체 시험을 또 돌리지 않게 표지를 준다(시험이 시험을 다시 부르는 순환 방지 — 관문이 자체 시험을 돌릴 때 거는 값과 같다)
-        env = {"PATH": f"{self.shims()}:/usr/bin:/bin", "RELEASE_CHECK_IN_SELFTEST": "1"}
-        done = repo.gate(env=env)
-        self.assertRegex(done.stdout, r"건너뜀\s+integration\s+\d+s\s+공개 직전\(--strict\)에만 돈다")
-        self.assertNotIn("+ cargo test --locked -p bot-broker", done.stdout)
-        # 같은 설정으로 --strict --only를 주면 건너뛰지 않고 돈다(대역이 모두 있어 통과한다)
-        done = self.run_step("--strict")
-        self.assertEqual(done.returncode, 0, done.stdout)
 
 
 class Environment(unittest.TestCase):

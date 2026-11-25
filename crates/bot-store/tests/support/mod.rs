@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod admin;
+pub mod api;
 pub mod cards;
 pub mod delivery;
 pub mod private;
@@ -420,6 +421,7 @@ pub fn open_approval(approval: Approval) -> OpenApproval {
         approval,
         reasons: vec!["irreversible".into()],
         card: JsonPayload(card),
+        delivery: None,
     }
 }
 

@@ -288,7 +288,9 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
             usage: Usage {
                 input_tokens: 164,
                 output_tokens: 12
-            }
+            },
+            // 가짜 CLI의 결과에는 요청별 스트림 이벤트가 없어 실측으로 확인할 수 없다(총합만으로는 모든 요청이 보고됐는지 모른다)
+            outcome: RunOutcome::default(),
         }
     );
 

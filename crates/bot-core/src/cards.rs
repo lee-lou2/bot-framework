@@ -9,6 +9,7 @@
 //! 확정한 영수증은 `StoredApproval::delivery`로 읽는다(클릭 대조용).
 
 use crate::{
+    api::ApprovalBlock,
     command::JsonPayload,
     id::{ApprovalId, BindingId, Generation, PrincipalId, ProfileId, Revision},
     intake::NotSentReason,
@@ -74,6 +75,20 @@ pub struct CardReceipt {
     pub binding: BindingId,
 }
 
+/// HTTP(OpenAI 호환) 출처 실행의 카드가 «원래 요청»에서 이어받은 고정 증거. 채널 출처의 카드에는 없다.
+/// 전달 바인딩(`CardJob::binding`)·지정된 사람(`CardJob::owner`)은 승인 경로가 정하고, 이 값들은 그 경로를 접수 때 고정한 것과 다시 맞춰 보는 데 쓴다.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CardOrigin {
+    /// 원래 API 모델 바인딩(위임 자식이어도 루트의 것).
+    pub binding: BindingId,
+    /// 요청한 HTTP 주체. 승인자와 다르다.
+    pub requester: PrincipalId,
+    /// 접수 때 고정한 프로필 판본.
+    pub revision: Revision,
+    /// 접수 때 호스트가 확인한 전달 설치(Slack `team_id`). 첫 카드 발송 전 현재 설치와 같아야 한다.
+    pub team: Option<String>,
+}
+
 pub trait CardOutbox: Send + Sync {
     /// 전달 작업을 리스로 점유한다. `sending` 불명 작업은 자동으로 다시 잡지 않는다(오래되면 저장소가 닫는다).
     fn claim(&self, limit: u32) -> Reply<'_, Vec<CardJob>>;
@@ -81,4 +96,13 @@ pub trait CardOutbox: Send + Sync {
     fn begin(&self, nonce: ApprovalId, checked_revision: Revision) -> Reply<'_, ()>;
     /// 결과를 기록한다(`Posted`면 카드를 열고 공개 안내 한 줄, 아니면 닫는다). 같은 정산의 재전달은 같은 결과다.
     fn settle(&self, nonce: ApprovalId, outcome: CardOutcome) -> Reply<'_, ()>;
+    /// 이 카드가 이어받은 원래 요청의 고정 증거. HTTP(OpenAI 호환) 출처 카드에만 `Some`이다(기본 구현은 없음).
+    fn origin(&self, _nonce: ApprovalId) -> Reply<'_, Option<CardOrigin>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// 올리기 전에 승인 경로가 어긋났음을 알았다(승인 지정·사람 멤버 철회, 전달 경로·설치·바인딩 재지정): 카드를 올리지 않고 작업과 승인을 닫으며
+    /// 저장된 판정(`ApprovalBlock`)을 남긴다. 조회가 이 낱말로 «도구가 실행되지 않았다»를 알린다. 이 구분을 모르는 구현은 전달 실패로 정산한다(기본 구현).
+    fn block(&self, nonce: ApprovalId, _why: ApprovalBlock) -> Reply<'_, ()> {
+        self.settle(nonce, CardOutcome::Unavailable)
+    }
 }

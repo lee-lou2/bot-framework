@@ -9,6 +9,7 @@ use crate::{
     handover,
 };
 use bot_core::{
+    api::ApiOrigin,
     command::{Beat, Failure, JsonPayload, Retry, Step, Turn, Work},
     id::*,
     port::Error,
@@ -70,8 +71,10 @@ async fn pick(tx: &mut Tx<'_>) -> R<Option<Cand>> {
 pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunContext> {
     let r = sqlx::query(&format!(
         "select {}, x.private_memory_read as tree_private, x.agent as root_agent,
-                x.trigger as root_trigger, x.run_origin as root_origin
+                x.trigger as root_trigger, x.run_origin as root_origin,
+                q.api_endpoint as root_api_endpoint, q.api_model as root_api_model
          from bot_runs r join bot_runs x on x.profile = r.profile and x.id = r.root
+              left join bot_requests q on q.profile = x.profile and q.run = x.id and q.api_endpoint is not null
          where r.profile = $1 and r.id = $2",
         crate::cols::prefixed(crate::cols::RUNS, "r")
     ))
@@ -110,6 +113,12 @@ pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunConte
             id: r.get("conv_id"),
             thread,
         },
+        binding: BindingId(r.get("binding")),
+        // 인증된 OpenAI 호환 입구의 접수 원장이 보증한 루트의 출처(위임 자식도 같다). 본문·레거시 webhook의 필드는 증거가 아니다
+        api: r
+            .get::<Option<String>, _>("root_api_endpoint")
+            .zip(r.get::<Option<String>, _>("root_api_model"))
+            .map(|(endpoint, model)| ApiOrigin { endpoint, model }),
         scopes: scopes.into_iter().collect::<BTreeSet<_>>(),
         private_memory_read: r.get("tree_private"),
         approver: r.get::<Option<String>, _>("approver").map(PrincipalId),

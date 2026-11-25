@@ -45,6 +45,7 @@ impl ModelRunner for Slow {
             Ok(ModelStep::Final {
                 text: "끝".into(),
                 usage: Default::default(),
+                outcome: Default::default(),
             })
         })
     }
@@ -390,6 +391,7 @@ impl ModelRunner for Peek {
             Ok(ModelStep::Final {
                 text: "답".into(),
                 usage: Default::default(),
+                outcome: Default::default(),
             })
         })
     }

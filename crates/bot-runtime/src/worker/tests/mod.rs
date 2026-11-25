@@ -5,6 +5,7 @@ mod delivery;
 mod fake_ledger;
 mod fakes;
 mod lifecycle;
+mod outcome;
 mod session;
 mod shutdown;
 mod steps;

@@ -7,6 +7,8 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+pub mod openai;
+
 pub struct Temp(pub PathBuf);
 
 impl Temp {

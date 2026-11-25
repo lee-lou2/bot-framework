@@ -106,6 +106,45 @@ pub fn final_turn(message: &str, text: &str) -> Vec<Vec<u8>> {
     ]
 }
 
+/// 출력 토큰 상한(`max_tokens`)에서 끊긴 응답: 글 일부를 내다가 멈춘다. 실제 CLI는 이를 부분 글이 아니라 오류로 끝낸다.
+pub fn cut_turn(message: &str, text: &str) -> Vec<Vec<u8>> {
+    let mut chunks = final_turn(message, text);
+    let delta = chunks.len() - 2;
+    chunks[delta] = event(
+        "message_delta",
+        r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":4}}"#,
+    );
+    chunks
+}
+
+/// 공급자가 사용량을 보고하지 않은 응답: 시작 메시지와 끝 이벤트에서 `usage`를 뺀다(CLI는 이를 0으로 채워 낸다).
+pub fn unreported(chunks: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let text = String::from_utf8(chunk).expect("SSE는 UTF-8");
+            let lines: Vec<String> = text
+                .lines()
+                .map(|line| {
+                    let Some(data) = line.strip_prefix("data: ") else {
+                        return line.to_owned();
+                    };
+                    let mut event: serde_json::Value = serde_json::from_str(data).expect("JSON");
+                    if let Some(message) = event.get_mut("message").and_then(|m| m.as_object_mut())
+                    {
+                        message.remove("usage");
+                    }
+                    if let Some(object) = event.as_object_mut() {
+                        object.remove("usage");
+                    }
+                    format!("data: {event}")
+                })
+                .collect();
+            (lines.join("\n") + "\n\n").into_bytes()
+        })
+        .collect()
+}
+
 /// 다음 모델 요청에 이 응답을 준다.
 pub fn script(upstream: &FakeUpstream, chunks: Vec<Vec<u8>>) {
     let refs: Vec<&[u8]> = chunks.iter().map(Vec::as_slice).collect();

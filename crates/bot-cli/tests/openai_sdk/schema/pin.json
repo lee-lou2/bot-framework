@@ -1,0 +1,13 @@
+{
+  "openapi": {
+    "repo": "https://github.com/openai/openai-openapi",
+    "commit": "498c71ddf6f1c45b983f972ccabca795da211a3e",
+    "path": "openapi.yaml",
+    "sha256": "6a6c681b182002de4ad335fa80214158f2d8f383a418f865c87876c3ed67cad9",
+    "subset_sha256": "2bb41042a72de3468c86fc36dc78cee6314579eeb1a639401985878e50de0f57"
+  },
+  "sdk": {
+    "python": "openai==2.29.0",
+    "node": "openai@6.29.0"
+  }
+}

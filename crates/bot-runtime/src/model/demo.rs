@@ -40,6 +40,7 @@ fn say(text: impl Into<String>) -> ModelStep {
     ModelStep::Final {
         text: text.into(),
         usage: Usage::default(),
+        outcome: Default::default(),
     }
 }
 

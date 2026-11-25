@@ -1,9 +1,12 @@
 //! 시험·데모 보조: 합성 프로필 스냅샷 조립기와 메모리 가짜 저장소. 운영 빌드에는 넣지 않는다(`testing` 기능).
+pub mod api;
 pub mod cards;
+pub mod catalog;
 pub mod ports;
 pub mod slack;
 
 use bot_core::trace::{SpanRecord, Tracer};
+pub use catalog::TestCatalog;
 
 use bot_core::{
     command::{Accept, Beat, Failure, Finish, HttpRoute, JsonPayload, Retry, Step, Target, Turn},
@@ -92,6 +95,31 @@ impl Fixture {
         self
     }
 
+    /// 에이전트를 하나 더 둔다(`main`과 같은 모양, 스코프만 다르다)
+    pub fn agent(mut self, id: &str, scopes: &[&str]) -> Self {
+        let mut agent = self
+            .snapshot
+            .agents
+            .get(&self.snapshot.root)
+            .expect("루트 에이전트가 있어야 해요")
+            .clone();
+        agent.scopes = scopes.iter().map(|s| s.to_string()).collect();
+        // 트리거는 선언한 에이전트만 소유한다
+        agent.triggers = Vec::new();
+        self.snapshot.agents.insert(AgentId(id.into()), agent);
+        self
+    }
+
+    /// 에이전트가 가진 스코프(에이전트 상한)
+    pub fn agent_scopes(mut self, agent: &str, scopes: &[&str]) -> Self {
+        self.snapshot
+            .agents
+            .get_mut(&AgentId(agent.into()))
+            .expect("에이전트가 있어야 해요")
+            .scopes = scopes.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
     pub fn policy_scopes(mut self, scopes: &[&str]) -> Self {
         self.snapshot.policy.scopes = scopes.iter().map(|s| s.to_string()).collect();
         self
@@ -112,59 +140,7 @@ impl Fixture {
     }
 }
 
-pub fn catalog(
-    snapshots: impl IntoIterator<Item = Arc<Snapshot>>,
-) -> Arc<BTreeMap<ProfileId, Arc<Snapshot>>> {
-    Arc::new(snapshots.into_iter().map(|s| (s.id.clone(), s)).collect())
-}
-
-type ActiveSet = Arc<BTreeMap<ProfileId, Arc<Snapshot>>>;
-
-/// 활성 집합을 시험이 통째로 바꿀 수 있는 ProfileCatalog
-pub struct TestCatalog {
-    active: Mutex<Arc<BTreeMap<ProfileId, Arc<Snapshot>>>>,
-    /// `active()`를 n번 부른 뒤 이 집합으로 바꾼다(요청 처리 도중 교체 흉내)
-    flip: Mutex<Option<(usize, ActiveSet)>>,
-}
-
-impl TestCatalog {
-    pub fn new(snapshots: impl IntoIterator<Item = Arc<Snapshot>>) -> Arc<Self> {
-        Arc::new(Self {
-            active: Mutex::new(catalog(snapshots)),
-            flip: Mutex::new(None),
-        })
-    }
-
-    /// `active()`가 `calls`번 불린 다음부터 이 집합이 활성이 된다.
-    pub fn flip_after(&self, calls: usize, snapshots: impl IntoIterator<Item = Arc<Snapshot>>) {
-        *self.flip.lock().unwrap() = Some((calls, catalog(snapshots)));
-    }
-
-    /// 새 집합으로 한 번에 교체한다.
-    pub fn replace(&self, snapshots: impl IntoIterator<Item = Arc<Snapshot>>) {
-        *self.active.lock().unwrap() = catalog(snapshots);
-    }
-}
-
-impl ProfileCatalog for TestCatalog {
-    fn active(&self) -> Arc<BTreeMap<ProfileId, Arc<Snapshot>>> {
-        let mut flip = self.flip.lock().unwrap();
-        if let Some((remaining, next)) = flip.as_mut() {
-            if *remaining == 0 {
-                *self.active.lock().unwrap() = next.clone();
-                *flip = None;
-            } else {
-                *remaining -= 1;
-            }
-        }
-        drop(flip);
-        self.active.lock().unwrap().clone()
-    }
-
-    fn lookup(&self, profile: &ProfileId, _: &Revision) -> Option<Arc<Snapshot>> {
-        self.active().get(profile).cloned()
-    }
-}
+pub use catalog::catalog;
 
 /// 사건 트리거(`on: {event: message, binding}`)
 pub fn event_trigger(id: &str, binding: &str, target: TriggerTarget) -> Trigger {
@@ -487,6 +463,14 @@ impl MemorySecrets {
         })
     }
 
+    /// 값을 지운다(운영자가 보관소에서 자격을 없앤 것을 흉내 낸다: 이후 `resolve`는 `Missing`이다).
+    pub fn remove(&self, profile: &str, name: &str) {
+        self.values
+            .lock()
+            .unwrap()
+            .remove(&(profile.to_owned(), name.to_owned()));
+    }
+
     /// 값을 바꾼다(운영자가 보관소의 토큰을 교체한 것을 흉내 낸다).
     pub fn set(&self, profile: &str, name: &str, value: &[u8]) {
         self.values
@@ -542,6 +526,17 @@ impl RecordingTracer {
             .into_iter()
             .filter(|s| s.name == name)
             .collect()
+    }
+
+    /// 이름이 `name`인 스팬이 `count`개 이상 기록될 때까지(최대 5초) 기다린다. 스팬은 응답을 보낸 **뒤에** 기록될 수 있어, 응답이 도착했다고 바로 세면 흔들린다.
+    pub async fn until_named(&self, name: &str, count: usize) -> bool {
+        for _ in 0..500 {
+            if self.named(name).len() >= count {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        self.named(name).len() >= count
     }
 }
 

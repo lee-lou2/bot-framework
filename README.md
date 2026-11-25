@@ -2,6 +2,8 @@
 
 프로필에 에이전트, 도구, 승인 규칙을 선언하면 같은 봇과 대화하고 작업을 예약할 수 있습니다. 한 호스트에서 `bot serve --role all`로 시작하세요. 역할을 따로 띄울 때는 `gateway`, `scheduler`, `worker`, `admin` 중 하나를 지정합니다. 워커가 브로커를 함께 실행합니다.
 
+OpenAI 호환 HTTP 입구를 구성하면 공식 Python·Node SDK의 `base_url`을 `http://127.0.0.1:8788/v1`로 바꾸고 발급받은 API 키로 에이전트에 요청할 수 있습니다. `models.list()`로 호출할 모델을 찾고 `chat.completions.create()`로 대화합니다. [SDK 연결 예시](docs/gateway.md#openai-호환-api) · [모델 바인딩 설정](docs/profile-spec.md#openai-모델-바인딩)
+
 ## 로컬 데모 시작
 
 예시는 외부 계정 없이 로컬 데모 모델과 합성 일정 서버를 씁니다. rustup, Node.js와 npm, Python 3, 실행 중인 PostgreSQL을 준비합니다. rustup은 저장소에 고정된 Rust 1.98.1과 Cargo를 사용합니다. Linux에서는 `bubblewrap`, `socat`, `ripgrep`도 설치합니다. 저장소 루트에서 실행하세요.

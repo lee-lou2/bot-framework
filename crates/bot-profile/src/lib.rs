@@ -18,6 +18,7 @@ mod layout;
 pub mod limits;
 mod model;
 mod names;
+mod openai;
 mod parse;
 mod profile;
 pub mod registry;

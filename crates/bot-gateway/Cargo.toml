@@ -27,3 +27,5 @@ tracing.workspace = true
 [dev-dependencies]
 bot-gateway = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+# 가짜 시계(`start_paused`)로 기다림·기한 시험을 결정적으로 돌린다
+tokio = { workspace = true, features = ["test-util"] }

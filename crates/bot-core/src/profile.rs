@@ -111,10 +111,103 @@ pub struct Binding {
 
 #[derive(Clone, Debug)]
 pub enum Adapter {
-    Cli { account: String },
-    SlackChannel { workspace: String, channel: String },
-    SlackDm { workspace: String },
-    Http { endpoint: String },
+    Cli {
+        account: String,
+    },
+    SlackChannel {
+        workspace: String,
+        channel: String,
+    },
+    SlackDm {
+        workspace: String,
+    },
+    /// 기존 웹훅 입구(호스트 `kind: webhook`). 모양은 OpenAI 변형이 생기기 전과 같다.
+    Http {
+        endpoint: String,
+    },
+    /// OpenAI 호환 모델 바인딩: 호스트 별칭 `endpoint`(`kind: openai`)가 호출자에게 보이는 공개 모델 이름 `model` 하나.
+    /// 모델을 고르면 이 바인딩의 에이전트가 요청을 직접 받는다(트리거는 이 바인딩을 가리킬 수 없다).
+    /// `approvers`: HTTP 주체(`http:<endpoint>/<sub>`) → 일반 도구의 인간 승인 경로. 없는 주체의 승인 필요 도구는 실행하지 않는다.
+    OpenAi {
+        endpoint: String,
+        model: String,
+        approvers: BTreeMap<PrincipalId, ApprovalRoute>,
+    },
+}
+
+/// 프로필이 OpenAI 모델 바인딩의 HTTP 주체마다 정한 인간 승인 경로. HTTP 키·메시지는 승인할 수 없고, 승인은 지정한 사람만 한다.
+/// 승인자 지정은 HTTP 주체의 권한을 올리지 않는다.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApprovalRoute {
+    /// 본인 인증된 관리 화면에서 승인한다. `person`은 프로필 멤버인 `local:*` 신원이다.
+    Local { person: PrincipalId },
+    /// 같은 프로필·같은 Slack 설치(워크스페이스)의 채널 바인딩 `binding`으로 설치를 확인하고, 카드는 `person`의 DM 하나로 보낸다.
+    /// `person`은 프로필 멤버인 `slack:<워크스페이스>/<사용자>` 신원이다.
+    Slack {
+        person: PrincipalId,
+        binding: BindingId,
+    },
+}
+
+impl ApprovalRoute {
+    /// 승인할 사람(프로필 멤버)
+    pub fn person(&self) -> &PrincipalId {
+        match self {
+            Self::Local { person } | Self::Slack { person, .. } => person,
+        }
+    }
+}
+
+impl Snapshot {
+    /// OpenAI 모델 바인딩 `binding`을 통해 인증된 HTTP 주체 `requester`의 일반 도구 승인 경로. 한 스냅숏 안에서만 정한다.
+    /// 다음이 모두 맞을 때만 돌려준다 — 바인딩이 OpenAI 모델이고, 요청자가 이 프로필의 HTTP 멤버이고, 매핑이 있고,
+    /// 승인할 사람이 이 프로필의 인간 멤버이고, Slack이면 전달 바인딩이 같은 프로필의 같은 워크스페이스 채널 바인딩이다.
+    /// 어긋나면 None(승인 경로 없음)이라 미승인 도구는 실행하지 않는다. 호출하는 쪽은 고정한 판본과 현재 판본 모두에서 같은 값인지 대조한다.
+    pub fn approval_route(
+        &self,
+        binding: &BindingId,
+        requester: &PrincipalId,
+    ) -> Option<ApprovalRoute> {
+        let Adapter::OpenAi {
+            endpoint,
+            approvers,
+            ..
+        } = &self.bindings.get(binding)?.source
+        else {
+            return None;
+        };
+        let from_endpoint = requester
+            .0
+            .strip_prefix("http:")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(alias, _)| alias == endpoint);
+        if !from_endpoint || !self.members.contains_key(requester) {
+            return None;
+        }
+        let route = approvers.get(requester)?;
+        let person = route.person();
+        if !person.is_human() || !self.members.contains_key(person) {
+            return None;
+        }
+        match route {
+            ApprovalRoute::Local { .. } => person.0.starts_with("local:").then(|| route.clone()),
+            ApprovalRoute::Slack {
+                binding: delivery, ..
+            } => {
+                let workspace = person
+                    .0
+                    .strip_prefix("slack:")?
+                    .split_once('/')
+                    .map(|(workspace, _)| workspace)?;
+                match &self.bindings.get(delivery)?.source {
+                    Adapter::SlackChannel { workspace: w, .. } if w == workspace => {
+                        Some(route.clone())
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -223,6 +316,16 @@ pub trait ProfileBundles: Send + Sync {
         profile: &ProfileId,
         revision: &Revision,
     ) -> crate::port::Reply<'_, Option<Vec<u8>>>;
+    /// 이 묶음을 처음 보관한 시각(Unix 밀리초). 보관한 적이 없으면 None이다. `/v1/models`의 `created`처럼 요청마다 바뀌면 안 되는 값에 쓴다.
+    /// 기본 구현은 모른다고 답한다(기록을 가진 저장소가 덮는다). 값을 지어내지 않는다.
+    fn created_ms(
+        &self,
+        profile: &ProfileId,
+        revision: &Revision,
+    ) -> crate::port::Reply<'_, Option<i64>> {
+        let _ = (profile, revision);
+        Box::pin(async { Ok(None) })
+    }
     /// 이번에 게시·합류할 집합(`target`: 프로필 → 판본)의 프로필 ID들이 고정한 (프로필, 판본) 전체를 한 스냅숏에서 읽는다 — `target`의 현재 쌍과,
     /// 그 ID들의 살아 있는 참조: 끝나지 않은 실행, 재개할 수 있는 dead letter, 대기·승인 미소비 카드의 실행, 정적 cron의 열린 구간과 커서가 끝에 이르지 않은 닫힌 구간,
     /// 활성 사용자 예약의 생성 실행. 집합에서 빠진 프로필의 참조는 읽지 않고, 아무 작업도 참조하지 않는 옛 판본은 «지금 DB의 활성 판본»이라는 이유만으로 넣지 않는다.

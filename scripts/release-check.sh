@@ -258,7 +258,8 @@ step_test() {
 # 이 시험들은 환경이 없으면 스스로 «건너뛰고 통과»하므로 통과만으로는 돌았는지 알 수 없다. 그래서 필수 모드(*_CANARY=required)로 돌려 환경이 없으면 실패하게 하고,
 # 시험이 하나도 안 돌았거나(통과 0건) 출력에 건너뜀 표지(`skipped:`·«건너뜀»·«건너뛴다»)가 하나라도 있으면 실패로 센다(건너뜀 0).
 # 로컬 전용이다: CI에는 Apple container와 실제 claude가 없다(CI의 도구 샌드박스 단계는 따로 필수 모드로 돈다). 공개 직전(--strict)에는 반드시 돈다.
-# 한 줄에 `패키지 시험파일 [기능]`. 도구가 없으면 «건너뛰고 통과»할 수 있는 시험 파일(`*_CANARY`·`have_srt`·`skipped:`)은 모두 여기에 있어야 한다 —
+# 한 줄에 `패키지 시험파일 [기능] [ignored=N]`. `#[ignore]`된 시험은 돌지 않은 시험이라 통과가 아니다: 실제 ignored 수가 N(생략하면 0)과 **같아야** 한다 — 소스의 `#[ignore]` 수와 목록의 N은 selftest가 대조한다.
+# 도구가 없으면 «건너뛰고 통과»할 수 있는 시험 파일(`*_CANARY`·`have_srt`·`skipped:`)은 모두 여기에 있어야 한다 —
 # 빠지면 그 파일은 관문이 돌았는지 알 수 없다. 대조는 `scripts/test_integration_list.py`(selftest)가 소스를 훑어 한다.
 INTEGRATION_TESTS='
 bot-broker claude_canary testing
@@ -267,6 +268,8 @@ bot-runtime cli_started
 bot-runtime cli_resume
 bot-runtime cli_refusal
 bot-runtime cli_credentials
+bot-runtime cli_chat
+bot-runtime cli_usage
 bot-runtime cli_instructions
 bot-runtime cli_memory
 bot-runtime container_canary
@@ -289,9 +292,10 @@ bot-cli serve_restore_set
 bot-cli vm_serve
 bot-cli private_serve
 bot-cli tool_secrets
-bot-cli split_roles
+bot-cli split_roles ignored=1
 bot-cli team_template
 bot-cli secret_sweep
+bot-cli openai_compat
 '
 
 step_integration() {
@@ -326,17 +330,42 @@ step_integration() {
     note="모델 이미지가 로컬에 없다"
     return 1
   fi
+  # 공식 OpenAI SDK(Python 2.29.0·Node 6.29.0) 시험 환경: 해시·잠금 고정 설치, 공식 OpenAPI 스키마(커밋·sha256)와 SDK 판본 확인. 이미 맞게 설치돼 있으면 내려받지 않는다(오프라인 재사용).
+  # 저장소에는 설치하지 않는다 — 빌드 폴더 밑에만 둔다.
+  sdk_dir=${BOT_OPENAI_SDK_DIR:-${CARGO_TARGET_DIR:-$PWD/target}/openai-sdk}
+  case "$sdk_dir" in
+    /*) ;;
+    *)
+      echo "BOT_OPENAI_SDK_DIR는 절대 경로여야 한다: $sdk_dir"
+      note="BOT_OPENAI_SDK_DIR가 절대 경로가 아니다"
+      return 1
+      ;;
+  esac
+  if ! x "${RELEASE_CHECK_SDK_SETUP:-$here/openai-sdk-setup.sh}" "$sdk_dir"; then
+    note="공식 OpenAI SDK 시험 환경을 만들지 못했다"
+    return 1
+  fi
+  export BOT_OPENAI_SDK_DIR=$sdk_dir
   # 필수 모드: 환경이 없으면 시험이 건너뛰지 않고 실패한다
-  export BOT_CLAUDE_CANARY=required BOT_SRT_CANARY=required BOT_CONTAINER_CANARY=required BOT_REQUIRE_NODE=1
+  export BOT_CLAUDE_CANARY=required BOT_SRT_CANARY=required BOT_CONTAINER_CANARY=required BOT_REQUIRE_NODE=1 BOT_OPENAI_CANARY=required
   local pkg target features out code passed skips files=0 total=0 bad=0
-  while read -r pkg target features; do
+  local rest word allowed ignored
+  while read -r pkg target rest; do
     [ -n "$pkg" ] || continue
+    features='' allowed=0
+    for word in $rest; do
+      case "$word" in
+        ignored=[0-9]*) allowed=${word#ignored=} ;;
+        *) features="${features:+$features }$word" ;;
+      esac
+    done
     out="$work/integration-$pkg-$target.log"
     printf '+ cargo test --locked -p %s%s --test %s -- --nocapture --test-threads=1\n' "$pkg" "${features:+ --features $features}" "$target"
     # shellcheck disable=SC2086
     cargo test --locked -p "$pkg" ${features:+--features $features} --test "$target" -- --nocapture --test-threads=1 >"$out" 2>&1
     code=$?
     passed=$(LC_ALL=C awk '/^test result: ok\./ { for (i = 1; i <= NF; i++) if ($i == "passed;") n += $(i - 1) } END { print n + 0 }' "$out")
+    ignored=$(LC_ALL=C awk '/^test result: ok\./ { for (i = 1; i <= NF; i++) if ($i == "ignored;") n += $(i - 1) } END { print n + 0 }' "$out")
     skips=$(LC_ALL=C grep -a -c -E 'skipped:|건너뜀|건너뛴다' "$out")
     files=$((files + 1))
     total=$((total + passed))
@@ -346,6 +375,9 @@ step_integration() {
       bad=$((bad + 1))
     elif [ "$passed" = 0 ]; then
       echo "  실패  $target: 시험이 하나도 돌지 않았다"
+      bad=$((bad + 1))
+    elif [ "$ignored" != "$allowed" ]; then
+      echo "  실패  $target: #[ignore]된 시험이 ${ignored}건이다(목록이 허용한 것은 ${allowed}건) — 돌지 않은 시험은 통과가 아니다"
       bad=$((bad + 1))
     elif [ "${skips:-0}" != 0 ]; then
       echo "  실패  $target: 건너뜀 표지 ${skips}건 — 환경이 없어 시험이 돌지 않았다"
@@ -479,7 +511,7 @@ step_selftest() {
   fi
   local code=0 file
   export RELEASE_CHECK_IN_SELFTEST=1
-  for file in test_private_terms_check.py test_check_contracts.py test_integration_list.py test_release_check.py; do
+  for file in test_private_terms_check.py test_check_contracts.py test_integration_list.py test_release_check.py test_release_check_integration.py test_openai_sdk_results.py; do
     xs "python3 scripts/$file" python3 -I "$here/$file" || code=1
   done
   return $code

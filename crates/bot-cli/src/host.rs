@@ -269,6 +269,22 @@ fn catalog(
             })
             .collect(),
         http_endpoints: gateway.http.endpoints.keys().cloned().collect(),
+        // OpenAI 호환 입구 별칭 → 키 슬롯이 가리키는 주체 집합(승인 매핑의 요청자 검증용)
+        openai_endpoints: gateway
+            .http
+            .openai
+            .iter()
+            .map(|(alias, endpoint)| {
+                (
+                    alias.clone(),
+                    endpoint
+                        .keys
+                        .values()
+                        .map(|slot| slot.subject.clone())
+                        .collect(),
+                )
+            })
+            .collect(),
         egress,
     }
 }
@@ -341,6 +357,29 @@ mod tests {
         assert!(home.dm && home.channels.contains("planning"));
         assert_eq!(catalog.egress["personal"].len(), 1);
         assert!(!host.demo);
+    }
+
+    #[test]
+    fn the_catalog_lists_the_subjects_the_key_slots_of_each_openai_entrance_point_at() {
+        let host = parse(
+            r#"{"version": 1, "gateway": {"http": {"endpoints": {
+                "openai": {"kind": "openai", "keys": {
+                    "a": {"secret": "key-a", "subject": "build"},
+                    "b": {"secret": "key-b", "subject": "build"},
+                    "c": {"secret": "key-c", "subject": "ops"}}},
+                "hooks": {"issuer": "i", "audience": "a", "key": "k"}}}}}"#,
+        )
+        .unwrap();
+        // 같은 주체를 가리키는 슬롯(회전용)은 하나로 모이고, 웹훅 입구는 OpenAI 표에 없다
+        assert_eq!(
+            host.catalog.openai_endpoints,
+            BTreeMap::from([(
+                "openai".to_owned(),
+                BTreeSet::from(["build".to_owned(), "ops".to_owned()])
+            )])
+        );
+        assert!(host.catalog.http_endpoints.contains("hooks"));
+        assert!(!host.catalog.http_endpoints.contains("openai"));
     }
 
     #[test]

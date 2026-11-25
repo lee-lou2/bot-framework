@@ -1,4 +1,7 @@
 //! 본문·첨부 한도와 속도 제한. 어댑터가 읽기 전에(본문 크기) 또는 접수 전에(속도) 적용한다.
+mod failures;
+pub use failures::{DEFAULT_BLOCK, DEFAULT_MAX, DEFAULT_WINDOW, SourceFailures};
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

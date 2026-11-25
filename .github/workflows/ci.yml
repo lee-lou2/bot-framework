@@ -89,3 +89,38 @@ jobs:
           python3 --version
           psql "$BOT_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -c "SELECT 1"
           cargo test --locked -p bot-cli --test split_roles runs_personal_demo -- --ignored --exact
+
+  openai-sdk:
+    name: OpenAI SDK harness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.22.3'
+      - name: Fetch the pinned official OpenAPI document
+        run: |
+          pin=crates/bot-cli/tests/openai_sdk/schema/pin.json
+          commit="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["openapi"]["commit"])' "$pin")"
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/openapi.yaml" "https://raw.githubusercontent.com/openai/openai-openapi/$commit/openapi.yaml"
+      - name: Install the pinned official SDKs and check the pinned schema
+        env:
+          BOT_OPENAI_SPEC: ${{ runner.temp }}/openapi.yaml
+        run: scripts/openai-sdk-setup.sh "$RUNNER_TEMP/openai-sdk"
+      - name: Verify the npm registry signatures
+        run: cd "$RUNNER_TEMP/openai-sdk/node" && npm audit signatures
+      - name: Run the SDK suites against the contract stub
+        run: |
+          sdk="$RUNNER_TEMP/openai-sdk"
+          crates/bot-cli/tests/openai_sdk/run_stub.sh "$sdk/venv/bin/python"
+          crates/bot-cli/tests/openai_sdk/run_node_stub.sh "$sdk/venv/bin/python" "$sdk/node"
+      - name: The runners must refuse skipped, missing and untouched tests (broken examples)
+        run: |
+          sdk="$RUNNER_TEMP/openai-sdk"
+          crates/bot-cli/tests/openai_sdk/check_runners.sh "$sdk/venv/bin/python" "$sdk/node"

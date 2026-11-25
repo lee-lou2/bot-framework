@@ -9,6 +9,7 @@
 //!   시스템 지침에는 본문을 넣지 않고(고정 안내 한 문단뿐), 이번 질문 바로 앞의 사용자 영역에 출처를 붙인 «비신뢰 참고 자료»로 싣는다(`memory.rs`).
 //! - 도구는 (요청 범위 ∩ 에이전트 상한 ∩ 정책 상한)이 도구의 스코프를 **모두** 덮을 때만 보인다. 안내일 뿐 경계가 아니다 — 최종 판정은 브로커가 호출마다 다시 한다.
 //! - 위임 대상은 직계 하위 에이전트뿐이다(`delegate` 도구).
+//! - OpenAI 호환 입구로 접수된 루트 실행은 호출자가 보낸 대화 전체가 비신뢰 자료다(`chat.rs`): 서버 이력을 쓰지 않고, 모든 턴을 순서·역할 라벨 그대로 한 번만 사용자 입력에 담는다.
 
 use crate::model::{
     Exchange, Limits, Message, ModelRequest, RelayChannel, Role, Session, ToolKind, ToolSpec,
@@ -28,6 +29,8 @@ use std::{
 };
 use tokio::sync::watch;
 
+mod chat;
+pub use chat::is_chat;
 mod memory;
 pub use memory::REFERENCE_HEADER;
 
@@ -59,6 +62,8 @@ pub enum ContextError {
     UnknownAgent(AgentId),
     /// 도구를 직접 부르는 run에는 모델 맥락이 없다
     NotAnAgentRun,
+    /// 인증된 API 출처의 루트 실행인데 본문이 검증된 대화(`ChatBody`)가 아니다: 일반 입력으로 대신 읽지 않고 실패한다
+    InvalidChat,
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +187,16 @@ fn body_text(body: &JsonPayload) -> String {
         Ok(other) => other.to_string(),
         Err(_) => body.0.trim().to_owned(),
     }
+}
+
+/// 기억 검색·지식 고르기에 쓸 이번 질문의 글. 비신뢰 대화(API 루트)는 마지막 user 턴 하나만이다(대화 전체·접수 때 붙은 지시를 섞지 않는다).
+pub fn query_text(run: &RunContext) -> String {
+    if chat::is_chat(run) {
+        return chat::read(run)
+            .and_then(|body| chat::question(&body).map(|turn| turn.content.clone()))
+            .unwrap_or_default();
+    }
+    current_input(&run.work).unwrap_or_default()
 }
 
 /// 이번 입력: 트리거의 고정 지시와 본문을 합친다(같으면 한 번, 한쪽이 비면 다른 쪽만).
@@ -338,7 +353,19 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
         .agents
         .get(&run.agent)
         .ok_or_else(|| ContextError::UnknownAgent(run.agent.clone()))?;
-    let question = current_input(&run.work)?;
+    // 인증된 API 출처의 루트 실행은 호출자의 대화 전체가 비신뢰 자료다. 이 모드의 입력은 `instruction`(호출자의 마지막 user 글과 같은 값)도 신뢰 지시로 읽지 않는다
+    let chat = if chat::is_chat(run) {
+        if !matches!(run.work.target, Target::Agent { .. }) {
+            return Err(ContextError::NotAnAgentRun);
+        }
+        Some(chat::read(run)?)
+    } else {
+        None
+    };
+    let question = match &chat {
+        Some(body) => chat::question(body)?.content.clone(),
+        None => current_input(&run.work)?,
+    };
 
     let effective = effective_scopes(snapshot, agent, run);
     let visible = visible_tools(agent, &effective);
@@ -353,9 +380,9 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
         tools.push(delegate_tool(&children));
     }
 
-    let query = match &run.work.target {
-        Target::Agent { instruction, .. } => format!("{instruction}\n{question}"),
-        Target::Tool { .. } => question.clone(),
+    let query = match (&chat, &run.work.target) {
+        (Some(_), _) | (None, Target::Tool { .. }) => question.clone(),
+        (None, Target::Agent { instruction, .. }) => format!("{instruction}\n{question}"),
     };
     let docs = select_knowledge(&query, &agent.knowledge);
 
@@ -367,6 +394,9 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
         "## 현재 시각\n{}",
         clock(input.now, &snapshot.timezone)
     ));
+    if chat.is_some() {
+        sections.push(chat::NOTICE.to_owned());
+    }
     let skills: Vec<String> = agent
         .skills
         .iter()
@@ -407,12 +437,23 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
         sections.push(memory::SYSTEM_NOTICE.to_owned());
     }
 
-    let mut conversation = history_messages(input.history);
-    conversation.push(Message {
-        role: Role::User,
-        speaker: Some(run.principal.clone()),
-        text: question,
-    });
+    let mut conversation = match &chat {
+        // 서버 이력은 쓰지 않는다: 매 요청이 호출자가 보낸 대화 전체로 닫힌다
+        Some(body) => vec![Message {
+            role: Role::User,
+            speaker: Some(run.principal.clone()),
+            text: chat::render(body)?,
+        }],
+        None => {
+            let mut conversation = history_messages(input.history);
+            conversation.push(Message {
+                role: Role::User,
+                speaker: Some(run.principal.clone()),
+                text: question,
+            });
+            conversation
+        }
+    };
     memory::place(&mut conversation, reference);
     Ok(Assembled {
         model: agent.model.clone(),

@@ -1,5 +1,5 @@
 use super::{BrokerService, gate::Gate};
-use crate::approver::approver_for;
+use crate::approver::{approver_for, openai};
 use crate::{
     classify::{classify, risk_code},
     ports::*,
@@ -7,6 +7,7 @@ use crate::{
     scope::authorize,
 };
 use bot_core::{
+    api::ApprovalBlock,
     command::*,
     id::*,
     ledger::*,
@@ -30,6 +31,8 @@ pub(super) struct Flow {
     pub pinned: Arc<Snapshot>,
     /// 지금 판본이 지정한 승인자. 확인할 수 없으면 `None`.
     pub approver: Option<PrincipalId>,
+    /// 이 실행이 인증된 OpenAI 호환 입구로 접수됐으면 그 승인 경로 판정(고정·현재 판본이 같을 때만 `Ok`). 아니면 `None`이다(기존 규칙).
+    pub origin: Option<Result<openai::Origin, ApprovalBlock>>,
     pub resolved: Resolved,
     pub sealed: Sealed,
     /// 도구가 고른 환경 변수의 이름·값(고정·현재 판본이 같은 값을 준 것).
@@ -273,7 +276,13 @@ impl BrokerService {
         if record.tool != tool || record.args_sha256 != sealed.sha256 {
             return Err(Error::Conflict);
         }
-        let approver = approver_for(&ctx, &snapshot);
+        // OpenAI 출처 실행의 승인자는 접수 때 기록한 값이 아니라 원래 바인딩·HTTP 주체로 고정·현재 판본에서 다시 읽는다. 그 밖의 실행은 기존 규칙이다.
+        let origin = openai::for_run(&ctx, &pinned, &snapshot);
+        let approver = match &origin {
+            Some(Ok(found)) => Some(found.route.person().clone()),
+            Some(Err(_)) => None,
+            None => approver_for(&ctx, &snapshot),
+        };
         let flow = Flow {
             attempt,
             call,
@@ -282,6 +291,7 @@ impl BrokerService {
             snapshot,
             pinned,
             approver,
+            origin,
             resolved,
             sealed,
             env,
@@ -391,6 +401,36 @@ impl BrokerService {
             })
             .await
             .map(|_| ())
+    }
+
+    /// `deny`와 같되 승인 경로 때문에 막았다는 닫힌 이유(`ApprovalBlock`)를 호출 기록에 함께 저장한다(감사 로그를 추측하지 않고 호스트가 저장된 판정으로 안내한다).
+    /// 감사 낱말은 이유의 고정 낱말이다. 같은 호출 ID는 같은 거절을 받는다.
+    pub(super) async fn deny_blocked<T>(
+        &self,
+        flow: &Flow,
+        why: ApprovalBlock,
+    ) -> Result<T, Error> {
+        self.note(
+            &flow.attempt.profile,
+            &flow.ctx.principal,
+            "call.deny",
+            &flow.tool,
+            Some(flow.sealed.sha256),
+            why.code(),
+        )
+        .await?;
+        self.parts
+            .ledger
+            .finish_blocked(
+                FinishCall {
+                    attempt: flow.attempt.clone(),
+                    call: flow.call.clone(),
+                    outcome: Outcome::Blocked,
+                },
+                why,
+            )
+            .await?;
+        Err(Error::Denied)
     }
 
     /// 거절 이유를 감사에 남기고 호출을 닫는다. 같은 호출 ID는 같은 거절을 받는다.

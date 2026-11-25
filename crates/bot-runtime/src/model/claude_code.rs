@@ -27,6 +27,7 @@ use super::{
     },
 };
 use bot_core::{
+    command::{RunOutcome, TokenUsage},
     profile::Builtin,
     sandbox::{ModelSandbox, ModelSpec, Mount},
 };
@@ -199,7 +200,8 @@ impl ModelRunner for ClaudeCodeRunner {
                 timeout: request.limits.total,
                 idle_timeout: request.limits.idle,
             };
-            let parser = Box::<Tracker>::default();
+            // 이어 받은 세션의 보고는 그 CLI 실행 몫뿐이다(앞 실행은 도구 승인·위임으로 끝나 결과 보고가 없다): 전체 합을 알 수 없다
+            let parser = Box::new(Tracker::new(matches!(mode, Mode::Resume(_))));
             let output = match tail {
                 None => {
                     driver::drive(
@@ -360,12 +362,28 @@ struct Finished {
     status: Option<u64>,
     input: u64,
     output: u64,
+    /// 공급자가 실제로 보고한 이 CLI 실행의 전체 토큰 수(없으면 `None`)
+    measured: Option<TokenUsage>,
 }
 
 /// JSONL 이벤트를 한 줄씩 먹고 마지막 결과를 기억한다.
 #[derive(Default)]
 struct Tracker {
     result: Option<Finished>,
+    /// 이어 받은 세션이면 실측 합을 알 수 없다
+    resumed: bool,
+    /// 요청마다 공급자가 실제로 보고한 계량(`usage.rs`): 한 요청이라도 보고가 빠지면 전체 합을 알 수 없다
+    calls: usage::Calls,
+}
+
+impl Tracker {
+    fn new(resumed: bool) -> Self {
+        Self {
+            result: None,
+            resumed,
+            calls: usage::Calls::default(),
+        }
+    }
 }
 
 impl Parser for Tracker {
@@ -374,6 +392,7 @@ impl Parser for Tracker {
         match v["type"].as_str()? {
             "stream_event" => {
                 let e = &v["event"];
+                self.calls.feed(e);
                 let kind = match e["type"].as_str()? {
                     "content_block_start" => e["content_block"]["type"].as_str()?,
                     "content_block_delta" => e["delta"]["type"].as_str()?,
@@ -393,6 +412,7 @@ impl Parser for Tracker {
                     status: v["api_error_status"].as_u64(),
                     input: v["usage"]["input_tokens"].as_u64().unwrap_or(0),
                     output: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                    measured: self.calls.measured(&v["usage"]),
                 });
                 None
             }
@@ -427,11 +447,20 @@ impl Parser for Tracker {
                 input_tokens: r.input,
                 output_tokens: r.output,
             },
+            // 공급자의 출력 한도로 잘린 답은 이 CLI가 부분 글을 결과로 내지 않고 오류로 끝나 여기까지 오지 않는다(위 `is_error`: 실패로 둔다)
+            outcome: RunOutcome {
+                truncated: false,
+                usage: if self.resumed { None } else { r.measured },
+            },
         })
     }
 }
+
+mod usage;
 
 #[cfg(test)]
 mod session_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod usage_tests;

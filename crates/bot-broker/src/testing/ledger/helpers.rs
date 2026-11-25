@@ -304,7 +304,28 @@ impl MemLedger {
     }
 
     pub fn stored_approval(&self, nonce: &ApprovalId) -> StoredApproval {
-        self.peek(|i| i.approvals[nonce].stored.clone())
+        let stored = self.peek(|i| i.approvals[nonce].stored.clone());
+        self.notes.with_receipt(stored, nonce)
+    }
+
+    /// 이 승인 카드를 보내라고 브로커가 실어 준 전달 바인딩(OpenAI 출처의 Slack 승인 경로).
+    pub fn approval_delivery(&self, nonce: &ApprovalId) -> Option<BindingId> {
+        self.notes.delivery(nonce)
+    }
+
+    /// 승인 경로 때문에 막은 호출의 저장된 이유(`finish_blocked`). 이유 없이 막았거나 막지 않았으면 `None`이다.
+    pub fn blocked_why(&self, run: &str, call: &str) -> Option<bot_core::api::ApprovalBlock> {
+        self.notes.why(run, call)
+    }
+
+    /// 게이트웨이가 카드 게시를 확인해 영수증을 확정한 것처럼 기록한다(`StoredApproval::delivery`).
+    pub fn post_receipt(&self, nonce: &ApprovalId, receipt: bot_core::cards::CardReceipt) {
+        self.notes.post(nonce, receipt);
+    }
+
+    /// 확정한 영수증이 사라진 승인을 만든다(저장소는 영수증 없이 승인되지 않지만, 브로커가 어디에 올라갔는지 모르는 카드를 닫힌 채 막는지 본다).
+    pub fn clear_receipt(&self, nonce: &ApprovalId) {
+        self.notes.withdraw(nonce);
     }
 
     pub fn audit_log(&self) -> Vec<String> {

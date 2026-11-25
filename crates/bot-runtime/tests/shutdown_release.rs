@@ -375,6 +375,7 @@ impl ModelRunner for OneCall {
                 Ok(ModelStep::Final {
                     text: "마쳤어요".into(),
                     usage: Usage::default(),
+                    outcome: Default::default(),
                 })
             }
         })

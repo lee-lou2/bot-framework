@@ -19,8 +19,10 @@ pub struct HostCatalog {
     pub cli_accounts: BTreeSet<String>,
     /// 워크스페이스 별칭 → 채널·DM
     pub slack: BTreeMap<String, SlackWorkspace>,
-    /// 인증된 HTTP 입구 별칭
+    /// 인증된 웹훅 HTTP 입구 별칭(`kind: webhook`, 종류를 생략한 옛 설정 포함)
     pub http_endpoints: BTreeSet<String>,
+    /// OpenAI 호환 입구(`kind: openai`): 별칭 → 키 슬롯이 가리키는 주체(`http:<별칭>/<주체>`의 주체 부분) 집합. 키 값은 담지 않는다.
+    pub openai_endpoints: BTreeMap<String, BTreeSet<String>>,
     /// 프로필 → egress 상한(`host:port`). 항목이 없으면 호스트 상한 없이 도구 선언만 따른다.
     pub egress: BTreeMap<String, BTreeSet<String>>,
 }

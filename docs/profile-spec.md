@@ -158,6 +158,44 @@ triggers:
 
 triggers.yaml의 on은 5필드 cron, `{event: message, binding: team}`, `{http: {method: POST, path: /agenda}, binding: inbox}` 중 하나다. cron은 서비스 주체를 지정하며 승인 대상 도구라면 trigger의 approver에 등록된 사람 신원을 지정한다. 이벤트와 HTTP는 바인딩에서 검증한 주체를 그대로 쓴다. target은 고정 도구와 인자 또는 소유 에이전트에 보낼 `{instruction: "..."}`다. 이벤트 본문은 별도 입력으로 검증한다.
 
+## OpenAI 모델 바인딩
+
+클라이언트에 공개할 모델 이름과 요청을 처리할 에이전트를 프로필에 묶는다. 다음은 기존 프로필의 `bindings`에 추가할 항목이다.
+
+```json
+{"id":"assistant","adapter":"http","endpoint":"openai","model":"assistant","agent":"main"}
+```
+
+호스트의 `gateway.http.endpoints.openai`에는 아래처럼 입구 종류와 키를 등록한다. `automation-api-key`는 이 프로필 비밀 보관소의 자격 이름이다. 운영자는 난수 API 키를 보관소에 넣고 클라이언트에 발급한다. 프로필의 `members`에는 `http:openai/build`와 필요한 역할을 등록하고, 해당 에이전트에 `run`을 허용한다.
+
+```json
+{"kind":"openai","keys":{"automation":{"secret":"automation-api-key","subject":"build"}},"wait_ms":120000,"max_active_runs":32}
+```
+
+같은 입구에는 모델을 여러 개 둘 수 있다. 공개 모델 이름은 소문자 slug(최대 63자)이며 입구 안에서 유일하다. 한 입구는 활성 프로필 하나가 소유한다. 키가 가리키는 주체를 멤버에서 빼면 호출은 403으로 거절된다. 모델을 선택하면 연결한 에이전트가 직접 요청을 받는다. 트리거가 이 바인딩을 참조하면 프로필 검증이 실패한다. 키 슬롯·주체·승인 경로·에이전트 매핑 변경은 명시적 활성화 대상이다. 키 값만 교체하면 판본은 유지된다.
+
+승인 매핑은 키를 발급하기 전에도 등록할 수 있다. 해당 멤버를 가리키는 키 슬롯이 없으면 `bot validate`에 `approver-key-unknown` 경고가 표시된다. 이 경고가 있어도 활성화할 수 있다. 한 멤버의 마지막 슬롯을 제거한 설정을 활성화하면 기존 키는 401을 받는다. 다른 멤버의 키와 승인 매핑은 계속 사용할 수 있다.
+
+다른 사람이 일반 도구의 실행을 승인해야 한다면 이 바인딩에 아래 `approvers` 항목을 추가한다. Slack의 `team`은 같은 프로필에서 같은 워크스페이스에 연결한 Slack 채널 바인딩이다. 로컬 승인자는 `{"principal":"local:owner"}` 형태로 지정한다. 승인자는 현재 프로필의 사람 멤버여야 한다. 토큰을 발급받은 HTTP 멤버는 계속 자신의 역할로 실행한다.
+
+```json
+{
+  "id": "assistant",
+  "adapter": "http",
+  "endpoint": "openai",
+  "model": "assistant",
+  "agent": "main",
+  "approvers": {
+    "http:openai/build": {
+      "principal": "slack:home/U123",
+      "binding": "team"
+    }
+  }
+}
+```
+
+기존 웹훅은 호스트에 `kind:"webhook"`을 쓰고 프로필 바인딩에는 `model`을 두지 않는다. 옛 JWT 설정은 종류를 생략해도 웹훅으로 읽는다. 한 별칭에는 두 형식을 섞을 수 없으며, 새 API의 `/v1`과 충돌하는 기존 웹훅 이름은 함께 활성화하기 전에 바꿔야 한다. [SDK 연결·오류·재조회](gateway.md#openai-호환-api)
+
 ## 이벤트 하나를 도구 하나에 연결하기
 
 게이트웨이는 서명 등 어댑터 인증을 검증한 뒤 봉투를 만든다. 트리거가 읽을 수 있는 필드는 request_id, binding, principal, conversation(종류·ID·thread), attachments(접근 권한이 묶인 참조), body(검증한 본문)다. HTTP 어댑터는 중복 접수를 판정할 실제 메서드와 입구 아래 경로도 봉투에 기록한다. principal과 대화 주소는 인증된 어댑터에서만 채운다.

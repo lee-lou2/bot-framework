@@ -8,7 +8,7 @@ use crate::{
 };
 use bot_core::{
     id::{AgentId, BindingId, PrincipalId},
-    profile::{Adapter, Policy},
+    profile::{Adapter, ApprovalRoute, Policy},
 };
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -173,6 +173,27 @@ fn parse_members(
     out
 }
 
+/// OpenAI 바인딩의 `approvers`: HTTP 주체 → 승인 경로. `binding`이 있으면 Slack DM 경로, 없으면 로컬 경로(스키마가 둘을 가른다).
+fn parse_approvers(value: Option<&Value>) -> BTreeMap<PrincipalId, ApprovalRoute> {
+    let Some(map) = value.and_then(Value::as_object) else {
+        return BTreeMap::new();
+    };
+    map.iter()
+        .filter_map(|(requester, route)| {
+            let route = route.as_object()?;
+            let person = PrincipalId(text(route, "principal").to_owned());
+            let route = match route.get("binding").and_then(Value::as_str) {
+                Some(binding) => ApprovalRoute::Slack {
+                    person,
+                    binding: BindingId(binding.to_owned()),
+                },
+                None => ApprovalRoute::Local { person },
+            };
+            Some((PrincipalId(requester.clone()), route))
+        })
+        .collect()
+}
+
 fn parse_bindings(
     value: Option<&Value>,
     limits: &Limits,
@@ -192,27 +213,57 @@ fn parse_bindings(
     }
     let mut out: BTreeMap<BindingId, Binding> = BTreeMap::new();
     let mut entrances: BTreeMap<String, String> = BTreeMap::new();
+    // HTTP 별칭 → (OpenAI 모델 바인딩인가, 처음 쓴 바인딩 id). 한 별칭에는 두 방식을 섞지 않는다.
+    let mut http_kinds: BTreeMap<String, (bool, String)> = BTreeMap::new();
     for (i, item) in list.iter().enumerate() {
         let at = format!("/bindings/{i}");
         let Some(obj) = item.as_object() else {
             continue;
         };
-        let kind = match (text(obj, "adapter"), obj.contains_key("dm")) {
-            ("cli", _) => Adapter::Cli {
+        let kind = match (
+            text(obj, "adapter"),
+            obj.contains_key("dm"),
+            obj.contains_key("model"),
+        ) {
+            ("cli", ..) => Adapter::Cli {
                 account: text(obj, "account").to_owned(),
             },
-            ("slack", true) => Adapter::SlackDm {
+            ("slack", true, _) => Adapter::SlackDm {
                 workspace: text(obj, "workspace").to_owned(),
             },
-            ("slack", false) => Adapter::SlackChannel {
+            ("slack", false, _) => Adapter::SlackChannel {
                 workspace: text(obj, "workspace").to_owned(),
                 channel: text(obj, "channel").to_owned(),
+            },
+            (_, _, true) => Adapter::OpenAi {
+                endpoint: text(obj, "endpoint").to_owned(),
+                model: text(obj, "model").to_owned(),
+                approvers: parse_approvers(obj.get("approvers")),
             },
             _ => Adapter::Http {
                 endpoint: text(obj, "endpoint").to_owned(),
             },
         };
         let id = BindingId(text(obj, "id").to_owned());
+        if let Adapter::Http { endpoint } | Adapter::OpenAi { endpoint, .. } = &kind {
+            let openai = matches!(kind, Adapter::OpenAi { .. });
+            let (first_openai, first) = http_kinds
+                .entry(endpoint.clone())
+                .or_insert_with(|| (openai, id.0.clone()));
+            if *first_openai != openai {
+                issues.error_at(
+                    "endpoint-kind-mixed",
+                    "profile.yaml",
+                    at,
+                    format!(
+                        "HTTP 입구 `{endpoint}`를 웹훅 바인딩과 OpenAI 모델 바인딩(`model` 있음)이 함께 써요(`{first}`와 `{}`). {}",
+                        id.0,
+                        hint::MIXED_ENDPOINT
+                    ),
+                );
+                continue;
+            }
+        }
         let key = entrance(&kind);
         if let Some(first) = entrances.get(&key) {
             issues.error_at(

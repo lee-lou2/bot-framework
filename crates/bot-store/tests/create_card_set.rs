@@ -63,6 +63,7 @@ async fn create_card(db: &TestDb, run: &RunContext, call_id: &str, args: &str) -
         reasons: vec!["irreversible".into()],
         card: card(&approval.nonce.0, args),
         approval,
+        delivery: None,
     }
 }
 

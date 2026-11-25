@@ -117,6 +117,10 @@ pub struct RunContext {
     pub principal: PrincipalId,
     pub agent: AgentId,
     pub conversation: Conversation,
+    /// 접수 때 고정한 바인딩. 위임 자식은 부모의 것을 물려받는다(루트의 정확한 원래 바인딩).
+    pub binding: BindingId,
+    /// 루트가 인증된 OpenAI 호환 입구로 접수됐다면 그 접수 원장의 출처(위임 자식도 같다). 아니면 None이다.
+    pub api: Option<crate::api::ApiOrigin>,
     pub scopes: std::collections::BTreeSet<String>,
     pub private_memory_read: bool,
     pub work: Work,

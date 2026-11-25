@@ -11,6 +11,7 @@ mod ledger;
 mod legacy;
 mod limited;
 mod memory;
+mod openai;
 mod owner_precedence;
 mod preflight;
 mod recovery;

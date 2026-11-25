@@ -278,6 +278,92 @@
             "endpoint"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "adapter": {
+              "const": "http"
+            },
+            "agent": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$",
+              "allOf": [
+                {
+                  "pattern": "^[a-z0-9-]{1,63}(?:/[a-z0-9-]{1,63})*$"
+                }
+              ]
+            },
+            "endpoint": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "model": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "approvers": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "pattern": "^http:[a-z][a-z0-9]*(?:-[a-z0-9]+)*/[A-Za-z0-9._@+\\-]{1,128}$",
+                "maxLength": 197
+              },
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "principal": {
+                        "type": "string",
+                        "pattern": "^local:[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+                        "maxLength": 69
+                      }
+                    },
+                    "required": [
+                      "principal"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "principal": {
+                        "type": "string",
+                        "pattern": "^slack:[a-z][a-z0-9]*(?:-[a-z0-9]+)*/[UW][A-Z0-9]{1,31}$",
+                        "maxLength": 102
+                      },
+                      "binding": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+                        "maxLength": 63
+                      }
+                    },
+                    "required": [
+                      "principal",
+                      "binding"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          },
+          "required": [
+            "id",
+            "adapter",
+            "agent",
+            "endpoint",
+            "model"
+          ],
+          "additionalProperties": false
         }
       ]
     }

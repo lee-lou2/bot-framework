@@ -5,8 +5,9 @@
 //! 사건이 되게 한다 — 옛 매핑으로 뜬 프로세스는 구판으로 닫히고, 매핑이 다른 프로세스는 명시 활성화 없이는 합류하지 못한다.
 //!
 //! 지문에 넣는 것: CLI 계정 별칭 → **실제 uid**, Slack 워크스페이스 별칭 → (팀·앱 ID·채널 별칭→ID·DM 여부·수신 방식·자격 **이름**),
-//! HTTP 입구 별칭 → (발급자·대상·키 **이름**·토큰 최대 수명). 넣지 않는 것: 자격 **값**(회전은 재활성화 없이 반영된다), 속도·본문
-//! 한도, 대기 시간, 소켓·수신 주소, 관리 화면 주소(신원과 무관한 운영 값).
+//! HTTP 입구 별칭 → (발급자·대상·키 **이름**·토큰 최대 수명), OpenAI 호환 입구 별칭 → 키 슬롯별 (슬롯 이름·자격 **이름**·주체).
+//! OpenAI 입구가 없는 호스트의 지문 바이트는 그 기능이 생기기 전과 같다(구간 자체를 넣지 않는다 — 이미 활성화된 호스트가 재활성화를 요구받지 않는다).
+//! 넣지 않는 것: 자격 **값**(회전은 재활성화 없이 반영된다), 속도·본문·실행 수 한도, 대기 시간, 소켓·수신 주소, 관리 화면 주소(신원과 무관한 운영 값).
 use crate::host::{CliAccount, HostConfig, HostError, resolve_uid};
 use sha2::{Digest, Sha256};
 
@@ -82,6 +83,19 @@ pub fn fingerprint_with(
             None => hash.update([0]),
         }
     }
+    if !config.http.openai.is_empty() {
+        hash.update(b"openai");
+        count(&mut hash, config.http.openai.len());
+        for (alias, endpoint) in &config.http.openai {
+            field(&mut hash, alias.as_bytes());
+            count(&mut hash, endpoint.keys.len());
+            for (slot, key) in &endpoint.keys {
+                field(&mut hash, slot.as_bytes());
+                field(&mut hash, key.secret.as_bytes());
+                field(&mut hash, key.subject.as_bytes());
+            }
+        }
+    }
     Ok(hash.finalize().into())
 }
 
@@ -118,6 +132,106 @@ mod tests {
         let mut value = base();
         edit(&mut value);
         print(value)
+    }
+
+    fn hex(bytes: [u8; 32]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// 웹훅 입구만 있는 호스트의 지문 바이트는 OpenAI 입구가 생기기 전과 같다(이미 활성화된 호스트가 재활성화를 요구받지 않는다).
+    #[test]
+    fn a_host_without_openai_entrances_keeps_its_fingerprint_bytes() {
+        assert_eq!(
+            hex(print(base())),
+            "59bd29edd4e4f8b1a48c39bd3ddf43768c7076b5c8dbdb6fd319540881cd987d"
+        );
+    }
+
+    fn with_openai() -> Value {
+        let mut value = base();
+        value["http"]["endpoints"]["openai"] = json!({"kind": "openai", "keys": {
+            "automation": {"secret": "automation-api-key", "subject": "build"},
+            "rotated": {"secret": "automation-api-key-2", "subject": "build"}},
+            "wait_ms": 120000, "max_active_runs": 32});
+        value
+    }
+
+    #[test]
+    fn openai_entrances_join_the_fingerprint_by_identity_not_by_value_or_limits() {
+        let original = print(with_openai());
+        assert_ne!(
+            original,
+            print(base()),
+            "OpenAI 입구가 생기면 활성화 사건이다"
+        );
+        let changed_openai = |edit: &dyn Fn(&mut Value)| {
+            let mut value = with_openai();
+            edit(&mut value["http"]["endpoints"]["openai"]);
+            print(value)
+        };
+        for (name, print) in [
+            (
+                "주체",
+                changed_openai(&|e| e["keys"]["automation"]["subject"] = json!("ops")),
+            ),
+            (
+                "자격 이름",
+                changed_openai(&|e| e["keys"]["automation"]["secret"] = json!("other-key")),
+            ),
+            (
+                "슬롯 이름",
+                changed_openai(&|e| {
+                    let keys = e["keys"].as_object_mut().unwrap();
+                    let slot = keys.remove("rotated").unwrap();
+                    keys.insert("next".into(), slot);
+                }),
+            ),
+            (
+                "슬롯 추가",
+                changed_openai(&|e| {
+                    e["keys"]["extra"] = json!({"secret": "extra-key", "subject": "build"});
+                }),
+            ),
+            ("입구 별칭", {
+                let mut value = with_openai();
+                let endpoint = value["http"]["endpoints"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("openai")
+                    .unwrap();
+                value["http"]["endpoints"]["gpt"] = endpoint;
+                print(value)
+            }),
+            (
+                "슬롯 제거",
+                changed_openai(&|e| {
+                    e["keys"].as_object_mut().unwrap().remove("rotated");
+                }),
+            ),
+        ] {
+            assert_ne!(print, original, "{name}");
+        }
+        // 대기 시간·실행 수 한도·키 순서는 신원과 무관한 운영 값이다
+        for (name, print) in [
+            ("대기 시간", changed_openai(&|e| e["wait_ms"] = json!(5000))),
+            (
+                "실행 수 한도",
+                changed_openai(&|e| e["max_active_runs"] = json!(8)),
+            ),
+        ] {
+            assert_eq!(print, original, "{name}");
+        }
+    }
+
+    #[test]
+    fn openai_and_webhook_entrances_do_not_collide_in_the_fingerprint() {
+        // 같은 별칭·같은 이름을 웹훅 입구로 쓰는 것과 OpenAI 입구로 쓰는 것은 다르다(구간 표지가 다르다)
+        let mut webhook = base();
+        webhook["http"]["endpoints"]["x"] = json!({"issuer": "i", "audience": "a", "key": "k"});
+        let mut openai = base();
+        openai["http"]["endpoints"]["x"] =
+            json!({"kind": "openai", "keys": {"k": {"secret": "k", "subject": "i"}}});
+        assert_ne!(print(webhook), print(openai));
     }
 
     #[test]

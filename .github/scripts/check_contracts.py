@@ -1,6 +1,8 @@
-"""Validate schemas, example manifests, the public file list (length limit, no editor leftovers), the CI workflow hardening and the Rust toolchain pin."""
+"""Validate schemas, example manifests, the public file list (length limit, no editor leftovers), the CI workflow hardening, the Rust toolchain pin and the pinned SDK test environment."""
+import hashlib
 import json
 import re
+import shlex
 import subprocess
 import tomllib
 from pathlib import Path
@@ -127,6 +129,9 @@ def workflow_problems(text):
                 version = options.get("node-version")
                 if not (isinstance(version, str) and EXACT_VERSION.fullmatch(version)):
                     problems.append(f"job {job_id}: `setup-node` needs an exact `node-version` (x.y.z)")
+            run = step.get("run") if isinstance(step, dict) else None
+            if isinstance(run, str):
+                problems += [f"job {job_id}: {problem}" for problem in command_problems(run)]
     return problems
 
 
@@ -168,11 +173,177 @@ def check_toolchain():
         raise ValueError(f"{path}:\n" + "\n".join(problems))
 
 
+# ---- Test-environment supply chain (the official OpenAI SDKs used by the end-to-end tests) --------------------------------------------------------------------
+SDK_DIR = Path("crates/bot-cli/tests/openai_sdk")
+HEX40, HEX64 = re.compile(r"[0-9a-f]{40}"), re.compile(r"[0-9a-f]{64}")
+NPM_EXACT = re.compile(r"\d+\.\d+\.\d+")
+PIP_REQUIREMENT = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\d+(?:\.\d+)+)(?:\s*\\)?\s*$")
+PIP_HASH = re.compile(r"^\s+--hash=sha256:[0-9a-f]{64}(?:\s*\\)?\s*$")
+PIP_EXACT = re.compile(r"[A-Za-z0-9._-]+(?:\[[A-Za-z0-9,._-]+\])?==\d+(?:\.\d+)*")
+NPM_PACKAGE_EXACT = re.compile(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+@\d+\.\d+\.\d+")
+INSTALL_HOOKS = {"preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare"}
+PIPE_TO_SHELL = re.compile(r"\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b")
+PIP_VALUE_OPTIONS = {"-i", "--index-url", "--extra-index-url", "-f", "--find-links", "-c", "--constraint", "-e", "--editable", "--trusted-host"}
+NPM_VALUE_OPTIONS = {"--prefix", "--loglevel", "--cache", "--registry"}
+
+
+def python_lock_problems(text, openai_version):
+    """A pip lock names every package as `name==x.y.z` with at least one `--hash=sha256:…`: no URL, VCS, range, index or editable install."""
+    problems, name, hashes, seen = [], None, 0, {}
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        requirement = PIP_REQUIREMENT.match(line)
+        if requirement:
+            if name is not None and hashes == 0:
+                problems.append(f"requirements lock: `{name}` has no --hash=sha256")
+            name, hashes = requirement.group(1).lower().replace("_", "-"), 0
+            seen[name] = requirement.group(2)
+        elif PIP_HASH.match(line) and name is not None:
+            hashes += 1
+        else:
+            problems.append(f"requirements lock line {number}: `{line.strip()[:50]}` is not `name==x.y.z \\ --hash=sha256:<64 hex>` (no URL, range, option or editable)")
+    if name is not None and hashes == 0:
+        problems.append(f"requirements lock: `{name}` has no --hash=sha256")
+    if openai_version is not None and seen.get("openai") != openai_version:
+        problems.append(f"requirements lock: openai must be {openai_version}, not {seen.get('openai')}")
+    return problems
+
+
+def node_lock_problems(package_text, lock_text, openai_version):
+    """package.json names exact versions and no install hooks; the lock gives every package an integrity hash, a registry URL and no install script."""
+    try:
+        package, lock = json.loads(package_text), json.loads(lock_text)
+    except ValueError:
+        return ["package.json or package-lock.json is not valid JSON"]
+    problems = []
+    for group in ("dependencies", "devDependencies", "optionalDependencies"):
+        for name, version in (package.get(group) or {}).items():
+            if not (isinstance(version, str) and NPM_EXACT.fullmatch(version)):
+                problems.append(f"package.json {group}.{name}: `{version}` must be an exact x.y.z (no range, tag, URL or path)")
+    for hook in sorted(INSTALL_HOOKS & set(package.get("scripts") or {})):
+        problems.append(f"package.json scripts.{hook}: install hooks are not allowed")
+    if (package.get("dependencies") or {}).get("openai") != openai_version:
+        problems.append(f"package.json: openai must be {openai_version}")
+    if not (isinstance(lock.get("lockfileVersion"), int) and lock["lockfileVersion"] >= 3):
+        problems.append("package-lock.json: lockfileVersion must be 3 or newer")
+    packages = lock.get("packages") if isinstance(lock.get("packages"), dict) else {}
+    for path, entry in packages.items():
+        if path == "":
+            continue
+        where = f"package-lock.json {path}"
+        if not (isinstance(entry.get("integrity"), str) and entry["integrity"].startswith("sha512-")):
+            problems.append(f"{where}: needs a sha512 integrity")
+        if not str(entry.get("resolved", "")).startswith("https://registry.npmjs.org/"):
+            problems.append(f"{where}: must resolve from https://registry.npmjs.org/")
+        if entry.get("hasInstallScript") or entry.get("link"):
+            problems.append(f"{where}: install scripts and links are not allowed")
+        if not NPM_EXACT.fullmatch(str(entry.get("version", ""))):
+            problems.append(f"{where}: needs an exact version")
+    if (packages.get("node_modules/openai") or {}).get("version") != openai_version:
+        problems.append(f"package-lock.json: node_modules/openai must be {openai_version}")
+    return problems
+
+
+def sdk_pin_problems(pin_text, python_lock, package_text, node_lock_text, subset_bytes):
+    """`pin.json` names the official OpenAPI commit/hash and both SDK versions; the locks and the committed schema subset must agree with it."""
+    try:
+        pin = json.loads(pin_text)
+    except ValueError:
+        return ["pin.json: not valid JSON"]
+    spec, sdk = pin.get("openapi") or {}, pin.get("sdk") or {}
+    problems = []
+    if not HEX40.fullmatch(str(spec.get("commit", ""))):
+        problems.append("pin.json: openapi.commit must be a full 40-hex commit SHA")
+    for key in ("sha256", "subset_sha256"):
+        if not HEX64.fullmatch(str(spec.get(key, ""))):
+            problems.append(f"pin.json: openapi.{key} must be 64 hex digits")
+    if hashlib.sha256(subset_bytes).hexdigest() != spec.get("subset_sha256"):
+        problems.append("openai-subset.json does not match pin.json openapi.subset_sha256 (regenerate it from the pinned spec)")
+    python = re.fullmatch(r"openai==(\d+\.\d+\.\d+)", str(sdk.get("python", "")))
+    node = re.fullmatch(r"openai@(\d+\.\d+\.\d+)", str(sdk.get("node", "")))
+    if not (python and node):
+        problems.append("pin.json: sdk.python must be `openai==x.y.z` and sdk.node `openai@x.y.z`")
+    problems += python_lock_problems(python_lock, python.group(1) if python else None)
+    problems += node_lock_problems(package_text, node_lock_text, node.group(1) if node else None)
+    return problems
+
+
+def check_sdk_pins():
+    folder = SDK_DIR
+    names = ("schema/pin.json", "requirements.lock.txt", "node/package.json", "node/package-lock.json", "schema/openai-subset.json", "expected.json", "sdk_run.py", "check_runners.sh")
+    missing = [name for name in names if not (folder / name).is_file()]
+    if missing:
+        raise ValueError(f"{folder}: missing {', '.join(missing)} — the end-to-end SDK tests must be pinned")
+    text = lambda name: (folder / name).read_text(encoding="utf-8")
+    problems = sdk_pin_problems(text("schema/pin.json"), text("requirements.lock.txt"), text("node/package.json"), text("node/package-lock.json"), (folder / "schema/openai-subset.json").read_bytes())
+    if problems:
+        raise ValueError(f"{folder} pins:\n" + "\n".join(problems))
+
+
+def command_problems(run):
+    """Install commands in a workflow step: pip needs exact versions or a hash lock, npm needs `--ignore-scripts` and exact packages, nothing pipes a download to a shell."""
+    joined = re.sub(r"\\\n\s*", " ", run)
+    problems = [f"`{match.group(0)[:50]}…` pipes a download to a shell" for match in PIPE_TO_SHELL.finditer(joined)]
+    for line in joined.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        for part in re.split(r"\s*(?:&&|\|\||;|\|)\s*", line):
+            try:
+                tokens = shlex.split(part)
+            except ValueError:
+                tokens = part.split()
+            problems += pip_problems(tokens) + npm_problems(tokens)
+    return problems
+
+
+def pip_problems(tokens):
+    if "install" not in tokens or tokens.index("install") == 0 or not tokens[tokens.index("install") - 1].endswith(("pip", "pip3")):
+        return []
+    args, problems, skip = tokens[tokens.index("install") + 1:], [], False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg in ("-r", "--requirement"):
+            skip = True
+            if "--require-hashes" not in args:
+                problems.append("`pip install -r` needs `--require-hashes`")
+        elif arg in PIP_VALUE_OPTIONS:
+            skip = True
+            problems.append(f"`pip install {arg}` can pull unpinned code from elsewhere")
+        elif not arg.startswith("-") and not PIP_EXACT.fullmatch(arg):
+            problems.append(f"`pip install {arg}` must name an exact version (`name==x.y.z`)")
+    return problems
+
+
+def npm_problems(tokens):
+    if tokens[:1] == ["npx"]:
+        return ["`npx` runs unpinned code — install an exact version first"]
+    if tokens[:1] != ["npm"]:
+        return []
+    args = tokens[1:]
+    command = next((a for a in args if not a.startswith("-")), "")
+    if command not in {"install", "i", "add", "ci", "install-test", "it", "update", "up"}:
+        return []
+    problems, skip = [], False
+    if "--ignore-scripts" not in args:
+        problems.append(f"`npm {command}` needs `--ignore-scripts`")
+    for arg in args[args.index(command) + 1:]:
+        if skip:
+            skip = False
+        elif arg in NPM_VALUE_OPTIONS:
+            skip = True
+        elif not arg.startswith("-") and not NPM_PACKAGE_EXACT.fullmatch(arg):
+            problems.append(f"`npm {command} {arg}` must name an exact version (`name@x.y.z`)")
+    return problems
+
+
 def main():
     check_files()
     check_examples()
     check_workflows()
     check_toolchain()
+    check_sdk_pins()
 
 
 if __name__ == "__main__":

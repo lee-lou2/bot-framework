@@ -1,10 +1,13 @@
 //! 소유자 DM 승인 카드 전달(`bot_core::cards`)의 메모리 저장소: 작업을 점유하고(`claim`), 최초 전송자만 `begin`을 받고, 정산을 기록한다. `Posted`면 영수증을 만들고
 //! (원장 가짜에 이어 두었으면 그 승인의 `delivery`로도 읽힌다 — 실제 저장소가 정산과 한 커밋에 하는 일), 일시 실패(`NotSent`)는 다시 잡히도록 되돌린다(백오프 시간은 흉내 내지 않는다).
+use crate::testing::TestCatalog;
 use crate::testing::ports::MemoryLedger;
 use bot_core::{
-    cards::{CardJob, CardOutbox, CardOutcome, CardReceipt},
+    api::ApprovalBlock,
+    cards::{CardJob, CardOrigin, CardOutbox, CardOutcome, CardReceipt},
     id::{ApprovalId, Revision},
     port::{Error, Reply},
+    profile::ProfileCatalog,
 };
 use std::{
     collections::BTreeMap,
@@ -14,6 +17,10 @@ use std::{
 pub struct MemoryCards {
     ledger: Option<Arc<MemoryLedger>>,
     inner: Mutex<Inner>,
+    /// 실제 저장소처럼 `begin`이 «확인한 판본이 지금의 활성 판본인가»를 다시 본다(없으면 보지 않는다)
+    fence: Mutex<Option<Arc<TestCatalog>>>,
+    /// `begin`이 확인하기 직전에 부르는 동작(점유한 뒤 올리기 전에 다른 프로세스가 게시하는 상황)
+    before_begin: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Default)]
@@ -27,6 +34,11 @@ struct Inner {
     fail_claim: bool,
     /// 정산이 차례로 받을 오류(앞에서부터 하나씩 쓰고, 비면 정상으로 기록한다)
     fail_settle: Vec<Error>,
+    /// HTTP(OpenAI 호환) 출처 카드의 고정 증거. 없으면 채널 출처 카드다.
+    origins: BTreeMap<String, CardOrigin>,
+    fail_origin: bool,
+    /// `block`이 기록한 (승인 식별자, 판정)
+    blocked: Vec<(String, ApprovalBlock)>,
 }
 
 impl MemoryCards {
@@ -34,6 +46,8 @@ impl MemoryCards {
         Arc::new(Self {
             ledger: None,
             inner: Mutex::default(),
+            fence: Mutex::new(None),
+            before_begin: Mutex::new(None),
         })
     }
 
@@ -42,7 +56,19 @@ impl MemoryCards {
         Arc::new(Self {
             ledger: Some(ledger),
             inner: Mutex::default(),
+            fence: Mutex::new(None),
+            before_begin: Mutex::new(None),
         })
+    }
+
+    /// `begin`이 확인한 판본을 이 목록의 지금 활성 판본과 견준다(다르면 `Stale`). 실제 저장소의 계약이다.
+    pub fn fence(&self, catalog: Arc<TestCatalog>) {
+        *self.fence.lock().unwrap() = Some(catalog);
+    }
+
+    /// `begin`이 확인하기 직전에 `hook`을 부른다(점유와 게시 사이에 일어나는 일을 흉내 낸다).
+    pub fn before_begin(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.before_begin.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// 정산이 만든 영수증
@@ -62,6 +88,25 @@ impl MemoryCards {
     /// 정산 기록 (승인 식별자, 결과) — 정산 순서대로
     pub fn settled(&self) -> Vec<(String, CardOutcome)> {
         self.inner.lock().unwrap().settled.clone()
+    }
+
+    /// 이 카드를 HTTP 출처로 만든다(원래 요청에서 이어받은 고정 증거)
+    pub fn set_origin(&self, nonce: &str, origin: CardOrigin) {
+        self.inner
+            .lock()
+            .unwrap()
+            .origins
+            .insert(nonce.to_owned(), origin);
+    }
+
+    /// 증거 조회가 실패한다
+    pub fn fail_origin(&self, fail: bool) {
+        self.inner.lock().unwrap().fail_origin = fail;
+    }
+
+    /// `block`이 기록한 (승인 식별자, 판정) — 닫은 순서대로
+    pub fn blocked(&self) -> Vec<(String, ApprovalBlock)> {
+        self.inner.lock().unwrap().blocked.clone()
     }
 
     pub fn fail_begin(&self, fail: bool) {
@@ -100,7 +145,27 @@ impl CardOutbox for MemoryCards {
     }
 
     fn begin(&self, nonce: ApprovalId, checked_revision: Revision) -> Reply<'_, ()> {
+        if let Some(hook) = self.before_begin.lock().unwrap().as_ref() {
+            hook();
+        }
+        let fence = self.fence.lock().unwrap().clone();
         let mut inner = self.inner.lock().unwrap();
+        if let Some(catalog) = fence {
+            let profile = inner
+                .leased
+                .iter()
+                .find(|job| job.nonce == nonce)
+                .map(|job| job.profile.clone());
+            let current = profile.and_then(|profile| {
+                catalog
+                    .active()
+                    .get(&profile)
+                    .map(|snapshot| snapshot.revision.clone())
+            });
+            if current.as_ref() != Some(&checked_revision) {
+                return ready(Err(Error::Stale));
+            }
+        }
         let held = inner.leased.iter().any(|job| job.nonce == nonce);
         let first = !inner.begun.iter().any(|(begun, _)| *begun == nonce.0);
         if inner.fail_begin || !held || !first {
@@ -142,6 +207,27 @@ impl CardOutbox for MemoryCards {
             CardOutcome::Unavailable | CardOutcome::Held => {}
         }
         inner.settled.push((nonce.0, outcome));
+        ready(Ok(()))
+    }
+
+    fn origin(&self, nonce: ApprovalId) -> Reply<'_, Option<CardOrigin>> {
+        let inner = self.inner.lock().unwrap();
+        if inner.fail_origin {
+            return ready(Err(Error::Unavailable));
+        }
+        ready(Ok(inner.origins.get(&nonce.0).cloned()))
+    }
+
+    fn block(&self, nonce: ApprovalId, why: ApprovalBlock) -> Reply<'_, ()> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.fail_settle.is_empty() {
+            return ready(Err(inner.fail_settle.remove(0)));
+        }
+        let Some(at) = inner.leased.iter().position(|job| job.nonce == nonce) else {
+            return ready(Err(Error::Stale));
+        };
+        inner.leased.remove(at);
+        inner.blocked.push((nonce.0, why));
         ready(Ok(()))
     }
 }

@@ -4,7 +4,7 @@
 //! 모델 CLI는 예외다: 상류 목적지가 바로 호스트 설정이므로 이미 집은 시도라도 **상류로 나가는 모든 요청 직전**에 같은 판본인지 확인하고
 //! 열린 스트림도 주기적으로 다시 확인해 끊는다(`GuardedUpstream`).
 use bot_core::{
-    command::{Accept, Beat, CallResult, Failure, Finish, Retry, Step, ToolCall, Turn},
+    command::{Accept, Beat, CallResult, Failure, Finish, Retry, RunOutcome, Step, ToolCall, Turn},
     id::{ApprovalId, Attempt, PrincipalId, RunId},
     intake::{RequestKey, RequestState},
     port::{Broker, Error, Reply, RunStore},
@@ -121,6 +121,11 @@ impl RunStore for GuardedRuns {
 
     fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, ()> {
         self.inner.finish(attempt, done)
+    }
+
+    /// 완료와 같은 커밋에 실행 계량(잘림·실측 사용량)을 싣는 완료도 그대로 넘긴다. 기본 구현은 계량을 버리고 `finish`로 끝내므로 빠지면 저장소가 계량을 영영 받지 못한다.
+    fn finish_with(&self, attempt: Attempt, done: Finish, outcome: RunOutcome) -> Reply<'_, ()> {
+        self.inner.finish_with(attempt, done, outcome)
     }
 
     /// 구판이 된 프로세스의 실패 보고는 run의 잘못이 아닐 수 있다(철회된 모델 목적지를 거절당한 모델 CLI 등). 반납과 일반 실패를 **저장소의 한 판정**으로 정한다:

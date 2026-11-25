@@ -123,6 +123,7 @@ async fn a_memory_share_card_body_is_shown_only_to_the_owner_who_requested_and_a
             approval: a,
             reasons: vec!["irreversible".into()],
             card: JsonPayload(card.into()),
+            delivery: None,
         })
         .await
         .unwrap();
@@ -258,6 +259,7 @@ async fn the_share_card_body_comes_back_as_one_row_that_hashes_to_the_approval()
             approval: a,
             reasons: vec!["irreversible".into()],
             card: JsonPayload(card.to_string()),
+            delivery: None,
         })
         .await
         .unwrap();
@@ -383,6 +385,7 @@ async fn a_card_with_two_body_blocks_or_an_undecodable_body_does_not_collapse_in
                 approval: a,
                 reasons: vec![],
                 card: JsonPayload(card.to_string()),
+                delivery: None,
             })
             .await
             .unwrap();

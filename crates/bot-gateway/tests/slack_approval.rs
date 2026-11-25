@@ -294,6 +294,8 @@ async fn approval_clicks_are_traced_without_the_nonce() {
             .until(|s| s.calls("chat.postEphemeral").len() == 1)
             .await
     );
+    // 스팬은 안내를 보낸 뒤에 기록될 수 있다: 기록될 때까지(최대 5초) 기다린 다음 센다
+    assert!(rig.tracer.until_named("approval decide", 2).await);
     let spans = rig.tracer.named("approval decide");
     assert_eq!(spans.len(), 2);
     assert_eq!(spans[0].str(key::BOT_APPROVAL_OUTCOME), Some("approved"));

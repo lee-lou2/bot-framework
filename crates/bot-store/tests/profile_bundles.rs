@@ -26,6 +26,52 @@ fn personal() -> ProfileId {
     ProfileId("personal".into())
 }
 
+/// `/v1/models`의 `created`가 쓰는 값: 처음 보관한 시각이고, 다시 보관하거나 읽어도 바뀌지 않으며, 없는 판본은 None이다(지어내지 않는다).
+#[tokio::test]
+async fn the_first_store_time_is_stable_and_missing_bundles_have_none() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let store = &db.store;
+    let bytes = b"BOTPROFILE1\nstamp".to_vec();
+    let revision = sha(&bytes);
+    assert_eq!(
+        store.created_ms(&personal(), &revision).await.unwrap(),
+        None
+    );
+    store
+        .put_bundle(personal(), revision.clone(), bytes.clone())
+        .await
+        .unwrap();
+    let first = store
+        .created_ms(&personal(), &revision)
+        .await
+        .unwrap()
+        .expect("보관한 묶음의 시각");
+    assert!(
+        first > 1_700_000_000_000,
+        "DB 시각(밀리초)이어야 해요: {first}"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    store
+        .put_bundle(personal(), revision.clone(), bytes)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.created_ms(&personal(), &revision).await.unwrap(),
+        Some(first),
+        "같은 바이트를 다시 보관해도 처음 시각 그대로"
+    );
+    assert_eq!(
+        store
+            .created_ms(&ProfileId("work".into()), &revision)
+            .await
+            .unwrap(),
+        None,
+        "다른 프로필의 같은 판본은 따로다"
+    );
+}
+
 #[tokio::test]
 async fn a_bundle_is_stored_by_its_own_hash_once_and_never_changes() {
     let Some(db) = TestDb::new().await else {

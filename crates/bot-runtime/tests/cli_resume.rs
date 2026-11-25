@@ -149,6 +149,15 @@ async fn an_approval_pause_resumes_the_real_cli_session_and_runs_the_tool_exactl
         .await,
         r#"{"text":"삭제를 마쳤어요"}"#
     );
+    // 이어 받은 세션의 보고는 그 CLI 실행 몫뿐이라 전체 합을 알 수 없다: 사용량을 지어내지 않는다(비어 있다). 잘린 것도 아니다
+    assert_eq!(
+        w.pg.scalar::<String>(&format!(
+            "select coalesce(usage_prompt::text, '-') || '/' || coalesce(usage_completion::text, '-') || '/' || coalesce(truncated::text, '-') from bot_runs where id = '{}'",
+            run.0
+        ))
+        .await,
+        "-/-/false"
+    );
 }
 
 #[tokio::test]

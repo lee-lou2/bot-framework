@@ -173,6 +173,7 @@ impl ModelRunner for Says {
             Ok(ModelStep::Final {
                 text,
                 usage: Usage::default(),
+                outcome: Default::default(),
             })
         })
     }
@@ -258,6 +259,7 @@ impl ModelRunner for Delegating {
                 return Ok(ModelStep::Final {
                     text: "연구 결과: 일정 없음".into(),
                     usage: Usage::default(),
+                    outcome: Default::default(),
                 });
             }
             match request.exchanges.first() {
@@ -277,7 +279,7 @@ impl ModelRunner for Delegating {
                     let outcome = format!("{:?}", done.calls[0].end);
                     Ok(ModelStep::Final {
                         text: format!("부모의 답: {outcome}"),
-                        usage: Usage::default(),
+                        usage: Usage::default(), outcome: Default::default(),
                     })
                 }
             }
@@ -358,6 +360,7 @@ impl ModelRunner for Flaky {
                 Ok(ModelStep::Final {
                     text: "이제 돼요".into(),
                     usage: Usage::default(),
+                    outcome: Default::default(),
                 })
             } else {
                 Err(ModelError::Failed {

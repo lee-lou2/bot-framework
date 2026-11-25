@@ -15,11 +15,12 @@ use super::{
     span::RunSpan,
 };
 use crate::{
-    context::{self, Assembled, ContextError, ContextInput, current_input},
+    context::{self, Assembled, ContextError, ContextInput},
     model::{DoneCall, Exchange, ModelError, ModelRunner, ModelStep, RunnerKind, Session},
 };
 use bot_core::{
-    command::{Failure, Finish, JsonPayload, Step},
+    command::{Failure, Finish, JsonPayload, RunOutcome, Step},
+    id::Generation,
     port::Error,
     profile::Snapshot,
     state::RunContext,
@@ -31,17 +32,27 @@ use std::{collections::HashSet, sync::Arc, time::SystemTime};
 /// 대화로 보내는 답의 글자 수 상한
 const MAX_ANSWER_CHARS: usize = 12_000;
 
-fn answer(text: &str) -> Flow {
+/// 최종 답을 끝맺는다. 호스트 상한(`MAX_ANSWER_CHARS`)을 넘어 실제로 잘렸으면 계량의 `truncated`로 같은 커밋에 남긴다(조용히 자르지 않는다).
+/// `outcome`은 실행기가 아는 계량이다. `usage_whole`은 그 사용량이 이 run 전체의 합인가(첫 claim의 Loop 실행)다: 다시 집은 run(재시도·인계)이나 차례로 나눈 실행은
+/// 앞 실행의 사용량이 빠져 전체 합을 알 수 없으므로 실행기가 보고한 사용량을 버린다.
+fn answer(text: &str, mut outcome: RunOutcome, usage_whole: bool) -> Flow {
     let text = text.trim();
     if text.is_empty() {
         return Flow::Fail(Failure::Permanent("empty_answer"));
     }
     let clipped: String = text.chars().take(MAX_ANSWER_CHARS).collect();
+    outcome.truncated |= clipped.len() < text.len();
+    if !usage_whole {
+        outcome.usage = None;
+    }
     let payload = JsonPayload(json!({ "text": clipped }).to_string());
-    Flow::Done(Finish {
-        result: payload.clone(),
-        answers: vec![payload],
-    })
+    Flow::Done(
+        Finish {
+            result: payload.clone(),
+            answers: vec![payload],
+        },
+        outcome,
+    )
 }
 
 impl Worker {
@@ -57,18 +68,23 @@ impl Worker {
         if let Some(flow) = interrupted(control) {
             return flow;
         }
-        let history = match self
-            .deps
-            .runs
-            .history(attempt.clone(), self.cfg.history_turns)
-            .await
-        {
-            Ok(turns) => turns,
-            Err(Error::Stale | Error::Denied | Error::Missing) => return Flow::Lost,
-            Err(_) => return Flow::Fail(Failure::Transient("history_unavailable")),
+        // 비신뢰 대화(인증된 API 출처의 루트)는 호출자가 보낸 대화가 전부다: 서버 이력을 읽지도 섞지도 않는다
+        let history = if context::is_chat(ctx) {
+            Vec::new()
+        } else {
+            match self
+                .deps
+                .runs
+                .history(attempt.clone(), self.cfg.history_turns)
+                .await
+            {
+                Ok(turns) => turns,
+                Err(Error::Stale | Error::Denied | Error::Missing) => return Flow::Lost,
+                Err(_) => return Flow::Fail(Failure::Transient("history_unavailable")),
+            }
         };
         // 기억은 맥락을 보태는 것뿐이다: 저장소 사정으로 못 읽으면 기억 없이 진행한다(조회가 플래그를 먼저 커밋하므로 안전하다)
-        let query = current_input(&ctx.work).unwrap_or_default();
+        let query = context::query_text(ctx);
         let memory = match self.deps.memory.search(attempt.clone(), query).await {
             Ok(hits) => hits,
             Err(Error::Stale | Error::Denied | Error::Missing) => return Flow::Lost,
@@ -87,6 +103,9 @@ impl Worker {
             }
             Err(ContextError::NotAnAgentRun) => {
                 return Flow::Fail(Failure::Permanent("invalid_target"));
+            }
+            Err(ContextError::InvalidChat) => {
+                return Flow::Fail(Failure::Permanent("invalid_chat"));
             }
         };
         let Some(runner) = self.deps.models.runner(&attempt.profile, &assembled.model) else {
@@ -140,7 +159,9 @@ impl Worker {
         let result = runner.step(request).await;
         self.model_span(span, 0, &alias, started, &result);
         match result {
-            Ok(ModelStep::Final { text, .. }) => answer(&text),
+            Ok(ModelStep::Final { text, outcome, .. }) => {
+                answer(&text, outcome, ctx.attempt.generation == Generation(1))
+            }
             // 자기 순환을 가진 실행기는 최종 답만 돌려준다
             Ok(ModelStep::Calls { .. }) => Flow::Fail(Failure::Permanent("invalid_model_output")),
             Err(error) => model_error(control, error),
@@ -184,7 +205,10 @@ impl Worker {
                     let result = runner.step(request).await;
                     self.model_span(span, turn, &assembled.model, started, &result);
                     match result {
-                        Ok(ModelStep::Final { text, .. }) => return answer(&text),
+                        // 차례마다 나눠 도는 실행은 앞 차례의 사용량을 체크포인트하지 않아 전체 합을 알 수 없다: 실측 없음
+                        Ok(ModelStep::Final { text, outcome, .. }) => {
+                            return answer(&text, outcome, false);
+                        }
                         Ok(ModelStep::Calls { text, calls, .. }) => {
                             let ids: HashSet<&str> =
                                 calls.iter().map(|c| c.call.0.as_str()).collect();

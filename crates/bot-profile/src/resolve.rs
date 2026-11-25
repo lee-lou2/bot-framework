@@ -43,16 +43,20 @@ fn bindings(p: &ProfileParts, agents: &Agents, issues: &mut Issues) {
                 format!("에이전트 `{}`가 없어요", binding.agent.0),
             );
         }
-        if let Adapter::Cli { account } = &binding.kind
-            && !p
-                .members
-                .contains_key(&PrincipalId(format!("local:{account}")))
-        {
-            issues.warning(
-                "binding-no-member",
-                "profile.yaml",
-                format!("바인딩 {}: CLI 계정 `{account}`에 해당하는 멤버 `local:{account}`가 없어 아무도 쓸 수 없어요", binding.id.0),
-            );
+        match &binding.kind {
+            Adapter::Cli { account }
+                if !p
+                    .members
+                    .contains_key(&PrincipalId(format!("local:{account}"))) =>
+            {
+                issues.warning(
+                    "binding-no-member",
+                    "profile.yaml",
+                    format!("바인딩 {}: CLI 계정 `{account}`에 해당하는 멤버 `local:{account}`가 없어 아무도 쓸 수 없어요", binding.id.0),
+                );
+            }
+            Adapter::OpenAi { .. } => crate::openai::check(p, agents, binding, issues),
+            _ => {}
         }
     }
 }
@@ -327,6 +331,15 @@ fn binding_of<'a>(
         );
         return None;
     };
+    if matches!(binding.kind, Adapter::OpenAi { .. }) {
+        issues.error_at(
+            "openai-binding-no-trigger",
+            file,
+            at,
+            format!("OpenAI 모델 바인딩 `{}`은 트리거가 쓸 수 없어요. 모델을 고르면 연결한 에이전트가 요청을 바로 받아요(웹훅 트리거는 `model`이 없는 http 바인딩에 연결하세요)", id.0),
+        );
+        return Some(binding);
+    }
     let ok = match &t.on {
         Source::Message { .. } => matches!(
             binding.kind,

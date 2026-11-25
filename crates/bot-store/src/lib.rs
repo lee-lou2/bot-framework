@@ -13,6 +13,7 @@ mod admin;
 mod admin_act;
 mod admin_approvals;
 mod admin_read;
+mod api;
 mod approval_open;
 mod approvals;
 mod audit;

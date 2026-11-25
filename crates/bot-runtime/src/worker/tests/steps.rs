@@ -531,6 +531,7 @@ impl ModelRunner for OneShot {
             Ok(ModelStep::Final {
                 text,
                 usage: Default::default(),
+                outcome: Default::default(),
             })
         })
     }

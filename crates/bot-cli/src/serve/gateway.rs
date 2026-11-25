@@ -11,7 +11,9 @@ use crate::{
     host::HostFile,
     install::Installs,
     settings::Settings,
-    validate::{entrance_secrets, has_private_triggers, missing_named, weak_http_keys},
+    validate::{
+        entrance_secrets, has_private_triggers, missing_named, weak_http_keys, weak_openai_keys,
+    },
 };
 use bot_broker::{
     private::{PrivateGate, PrivateParts},
@@ -20,12 +22,13 @@ use bot_broker::{
     sys::SystemClock,
 };
 use bot_core::{
+    api::ApiRuns,
     cards::CardOutbox,
     id::Revision,
     intake::{Outbox, PrivateCall, PrivateIntake},
     ledger::{CallLedger, PrivateLedger},
     port::{Broker, EffectJournal, Error, Reply, RunStore},
-    profile::{ActiveRevisions, Adapter, ProfileCatalog},
+    profile::{ActiveRevisions, Adapter, ProfileBundles, ProfileCatalog},
     trace::Tracer,
 };
 use bot_gateway::{
@@ -156,7 +159,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         for binding in snapshot.bindings.values() {
             match binding.source {
                 Adapter::Cli { .. } => cli = true,
-                Adapter::Http { .. } => http = true,
+                Adapter::Http { .. } | Adapter::OpenAi { .. } => http = true,
                 Adapter::SlackChannel { .. } | Adapter::SlackDm { .. } => slack = true,
             }
         }
@@ -164,6 +167,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     }
     drop(routes);
     // 입구가 쓰는 자격은 열기 전에 모두 있어야 하고(없으면 이름과 환경 변수명을 알린다) HTTP 키는 하한 이상이어야 한다
+    problems.extend(weak_openai_keys(&*deps.secrets, &snapshots, &deps.host.gateway).await);
     for snapshot in snapshots {
         let names = entrance_secrets(&snapshot, &deps.host.gateway);
         problems.extend(
@@ -252,11 +256,13 @@ impl Prepared {
             });
         }
         if let Some(listener) = http {
-            let gateway = Arc::new(HttpGateway::new(
-                ingress.clone(),
-                store.clone() as Arc<dyn RunStore>,
-                secrets,
-            ));
+            let gateway = Arc::new(
+                HttpGateway::new(ingress.clone(), store.clone() as Arc<dyn RunStore>, secrets)
+                    .with_openai(
+                        store.clone() as Arc<dyn ApiRuns>,
+                        store.clone() as Arc<dyn ProfileBundles>,
+                    ),
+            );
             let stop = stop.clone();
             tasks.spawn(async move {
                 gateway

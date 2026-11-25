@@ -72,6 +72,9 @@ pub fn run_context(
         },
         approver: Some(principal),
         trigger: None,
+        // CLI 출처의 기본값: 루트의 원래 바인딩 `desk`와 OpenAI 접수 출처 없음(OpenAI 출처 시험은 이 값을 덮어쓴다)
+        binding: bot_core::id::BindingId("desk".into()),
+        api: None,
     }
 }
 
@@ -178,6 +181,32 @@ impl SnapshotBuilder {
                 source: Adapter::SlackChannel {
                     workspace: "home".into(),
                     channel: "planning".into(),
+                },
+            },
+        );
+        self
+    }
+
+    /// OpenAI 호환 모델 바인딩: 호스트 입구 `endpoint`가 공개 모델 `model`을 이 에이전트로 보낸다. `approvers`는 HTTP 주체 → 인간 승인 경로다.
+    pub fn openai_binding(
+        mut self,
+        id: &str,
+        agent: &str,
+        endpoint: &str,
+        model: &str,
+        approvers: &[(&str, bot_core::profile::ApprovalRoute)],
+    ) -> Self {
+        self.snapshot.bindings.insert(
+            BindingId(id.into()),
+            Binding {
+                agent: AgentId(agent.into()),
+                source: Adapter::OpenAi {
+                    endpoint: endpoint.into(),
+                    model: model.into(),
+                    approvers: approvers
+                        .iter()
+                        .map(|(principal, route)| (PrincipalId((*principal).into()), route.clone()))
+                        .collect(),
                 },
             },
         );

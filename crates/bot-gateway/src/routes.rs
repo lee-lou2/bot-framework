@@ -89,6 +89,7 @@ impl Routes {
             resolved.push((real, owner, entrance.to_string()));
         }
         let table = Table::build(resolved)?;
+        one_profile_per_openai_entrance(&table)?;
         let triggers = collect_triggers(&source)?;
         Ok(Self {
             source,
@@ -131,6 +132,28 @@ impl Routes {
         })
     }
 
+    /// OpenAI 호환 입구 별칭 위의 (공개 모델 이름, 바인딩) 목록. 모델 이름 순이다.
+    pub fn openai_models<'a>(
+        &'a self,
+        endpoint: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a Owner)> + 'a {
+        self.table
+            .iter()
+            .filter_map(move |(real, owner)| match real {
+                Real::HttpModel { endpoint: e, model } if e == endpoint => {
+                    Some((model.as_str(), owner))
+                }
+                _ => None,
+            })
+    }
+
+    /// OpenAI 호환 입구 별칭을 쓰는 프로필(별칭 하나는 활성 프로필 하나만 쓴다). 쓰는 바인딩이 없으면 None.
+    pub fn openai_profile<'a>(&'a self, endpoint: &'a str) -> Option<&'a ProfileId> {
+        self.openai_models(endpoint)
+            .next()
+            .map(|(_, owner)| &owner.profile)
+    }
+
     /// 활성 프로필 전체
     pub fn profiles(&self) -> impl Iterator<Item = &Arc<Snapshot>> {
         self.source.values()
@@ -148,6 +171,28 @@ impl Routes {
     pub fn entrances(&self) -> impl Iterator<Item = (&Real, &Owner)> {
         self.table.iter()
     }
+}
+
+/// OpenAI 호환 입구 별칭 하나는 활성 프로필 하나만 쓴다: 키가 별칭을, 별칭이 프로필을 하나로 정하므로 두 프로필이 나눠 쓰면 어느 쪽의 권한으로 열지 정할 수 없다.
+fn one_profile_per_openai_entrance(table: &Table<Real>) -> Result<(), RoutesError> {
+    let mut first: BTreeMap<&str, &Owner> = BTreeMap::new();
+    for (real, owner) in table.iter() {
+        let Real::HttpModel { endpoint, .. } = real else {
+            continue;
+        };
+        match first.get(endpoint.as_str()) {
+            Some(earlier) if earlier.profile != owner.profile => {
+                return Err(RoutesError(format!(
+                    "입구가 겹쳐요: {earlier} 와 {owner} 가 모두 http 입구 {endpoint}를 써요. OpenAI 호환 입구 별칭 하나는 프로필 하나만 쓸 수 있어요 — 한쪽 바인딩의 `endpoint`를 바꾸거나 바인딩을 지워 주세요"
+                )));
+            }
+            Some(_) => {}
+            None => {
+                first.insert(endpoint, owner);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn unknown(owner: &Owner, what: &str, alias: &str) -> RoutesError {
@@ -210,6 +255,15 @@ fn resolve(
             }
             Ok(Real::Http {
                 endpoint: endpoint.clone(),
+            })
+        }
+        Entrance::HttpModel { endpoint, model } => {
+            if !host.http.openai.contains_key(endpoint) {
+                return Err(unknown(owner, "OpenAI 호환 입구", endpoint));
+            }
+            Ok(Real::HttpModel {
+                endpoint: endpoint.clone(),
+                model: model.clone(),
             })
         }
     }

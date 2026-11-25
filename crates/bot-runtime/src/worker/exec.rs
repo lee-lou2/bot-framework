@@ -3,7 +3,7 @@
 
 use super::{Flow, Outcome, Worker, calls::Called, control::Control, interrupted, span::RunSpan};
 use bot_core::{
-    command::{Beat, Failure, Finish, Retry, Target},
+    command::{Beat, Failure, Finish, Retry, RunOutcome, Target},
     id::CallId,
     port::Error,
     state::{ConversationKind, RunContext},
@@ -47,9 +47,9 @@ impl Worker {
         };
         // 방금 만든 최종 답이 다른 수신자로 가야 하면 일반 완료 대신 그 초안을 동결해 승인을 받는다
         let flow = match flow {
-            Flow::Done(finish) => match self.delivery(&ctx, Some(finish.clone())).await {
+            Flow::Done(finish, outcome) => match self.delivery(&ctx, Some(finish.clone())).await {
                 Some(flow) => flow,
-                None => Flow::Done(finish),
+                None => Flow::Done(finish, outcome),
             },
             other => other,
         };
@@ -72,10 +72,13 @@ impl Worker {
             .await
         {
             // 결과는 run에 기록한다. 사용자 회신은 도구가 선언한 목적지(브로커)가 맡는다
-            Ok(Called::Done(result)) => Flow::Done(Finish {
-                result,
-                answers: Vec::new(),
-            }),
+            Ok(Called::Done(result)) => Flow::Done(
+                Finish {
+                    result,
+                    answers: Vec::new(),
+                },
+                RunOutcome::default(),
+            ),
             Ok(Called::Parked) => Flow::Parked,
             Err(error) => error.into_flow(),
         }
@@ -112,7 +115,12 @@ impl Worker {
             Flow::Release => self.release(ctx).await,
             // 리스를 잃었다: 어떤 결과도 쓰지 않는다
             _ if control.lost() => (Outcome::Lost, None),
-            Flow::Done(finish) => match self.deps.runs.finish(ctx.attempt.clone(), finish).await {
+            Flow::Done(finish, outcome) => match self
+                .deps
+                .runs
+                .finish_with(ctx.attempt.clone(), finish, outcome)
+                .await
+            {
                 Ok(()) => {
                     self.nudge(ctx, false).await;
                     (Outcome::Succeeded, None)

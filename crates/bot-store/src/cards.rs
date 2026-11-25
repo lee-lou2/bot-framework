@@ -22,9 +22,10 @@ use crate::{
     unsent::{drop_draft, lock_run},
 };
 use bot_core::{
+    api::ApprovalBlock,
     cards::{
-        APPROVAL_DM_UNAVAILABLE, CardJob, CardOutbox, CardOutcome, CardReceipt, DM_SENT_NOTICE,
-        DM_UNAVAILABLE_NOTICE, DM_UNCONFIRMED_NOTICE,
+        APPROVAL_DM_UNAVAILABLE, CardJob, CardOrigin, CardOutbox, CardOutcome, CardReceipt,
+        DM_SENT_NOTICE, DM_UNAVAILABLE_NOTICE, DM_UNCONFIRMED_NOTICE,
     },
     command::JsonPayload,
     id::*,
@@ -50,21 +51,39 @@ const MAX_ATTEMPTS: i32 = 6;
 enum Closing {
     Unavailable,
     Held,
+    /// 올리기 전에 승인 경로가 어긋났다(HTTP 출처 전용): 판정 낱말 그대로 저장한다.
+    Blocked(ApprovalBlock),
 }
 
 impl Closing {
-    /// 원래 채널·스레드에 남기는 안내: 올릴 수 없다고 확정했으면 그렇게, 불명이면 확인하지 못했다고만 말한다.
-    fn notice(self) -> &'static str {
+    /// 원래 채널·스레드에 남기는 안내: 올릴 수 없다고 확정했으면 그렇게, 불명이면 확인하지 못했다고만 말한다. 승인 경로 판정은 HTTP 출처 전용이라 채널 안내가 없다.
+    fn notice(self) -> Option<&'static str> {
         match self {
-            Closing::Unavailable => DM_UNAVAILABLE_NOTICE,
-            Closing::Held => DM_UNCONFIRMED_NOTICE,
+            Closing::Unavailable | Closing::Blocked(ApprovalBlock::ApprovalDmUnavailable) => {
+                Some(DM_UNAVAILABLE_NOTICE)
+            }
+            Closing::Held => Some(DM_UNCONFIRMED_NOTICE),
+            Closing::Blocked(_) => None,
         }
     }
 
     fn word(self) -> &'static str {
         match self {
-            Closing::Unavailable => "unavailable",
+            Closing::Unavailable | Closing::Blocked(ApprovalBlock::ApprovalDmUnavailable) => {
+                "unavailable"
+            }
             Closing::Held => "held",
+            Closing::Blocked(why) => why.code(),
+        }
+    }
+
+    /// 감사 행의 (행동, 판정 낱말).
+    fn audit(self) -> (&'static str, &'static str) {
+        match self {
+            Closing::Blocked(why) if why != ApprovalBlock::ApprovalDmUnavailable => {
+                ("approval.blocked", why.code())
+            }
+            _ => ("approval.dm_unavailable", APPROVAL_DM_UNAVAILABLE),
         }
     }
 }
@@ -98,7 +117,7 @@ async fn lock_all(tx: &mut Tx<'_>, nonce: &str) -> R<Locks> {
     let approval = lock_approval(tx, nonce).await?;
     let job = sqlx::query(
         "select nonce, profile, run, binding, owner, generation, state, attempts, activation, checked_revision,
-                team, dm, ts, closed_reason
+                team, dm, ts, closed_reason, origin_binding, origin_team
          from bot_card_jobs where nonce = $1 for update",
     )
     .bind(nonce)
@@ -305,6 +324,19 @@ impl Store {
             }
             _ => return Err(Error::Conflict.into()),
         }
+        // HTTP 출처 카드는 올라간 설치(team)가 원래 요청에 고정한 전달 설치와 정확히 같아야 영수증이 된다: 현재 상태·활성 집합만으로는 같은 별칭의 팀이 바뀐 것을 알 수 없다.
+        // 다르거나 고정한 team이 없으면 영수증·결정 대상·사람이 할 일이 없고, 지정된 사람의 클릭은 소비되지 않으며 승인 경로가 어긋난 것(`route_changed`)으로 닫는다
+        if locks
+            .job
+            .get::<Option<String>, _>("origin_binding")
+            .is_some()
+            && locks.job.get::<Option<String>, _>("origin_team").as_deref() != Some(team)
+        {
+            tx.rollback().await?;
+            self.card_close(nonce, Closing::Blocked(ApprovalBlock::RouteChanged))
+                .await?;
+            return Err(Error::Stale.into());
+        }
         let now = now_ms(&mut tx).await?;
         let set = active_set(&mut tx).await?;
         let same_set =
@@ -441,21 +473,36 @@ impl Store {
         .bind(closing.word())
         .execute(&mut *tx)
         .await?;
-        // 요청자는 요청이 닫혔다는 사실을 알아야 한다: 원래 채널·스레드에 한 줄만(초안·수신자·해시·승인 식별자 없음). 닫는 커밋이 한 번이라 재전달에도 한 번이다
-        let notice = replies::answer(&JsonPayload(
-            serde_json::json!({ "text": closing.notice() }).to_string(),
-        ))?;
-        push_reply(&mut tx, &profile, &run_id, &notice).await?;
-        let mut entry = Entry::new(
-            "system",
-            "approval.dm_unavailable",
-            &nonce.0,
-            APPROVAL_DM_UNAVAILABLE,
-        );
+        // 요청자는 요청이 닫혔다는 사실을 알아야 한다: 원래 채널·스레드에 한 줄만(초안·수신자·해시·승인 식별자 없음). 닫는 커밋이 한 번이라 재전달에도 한 번이다.
+        // HTTP 출처 실행에는 원래 채널이 없어 쌓이는 줄이 없다(`push_reply`는 직접·채널 대화에만 쌓는다)
+        if let Some(text) = closing.notice() {
+            let notice = replies::answer(&JsonPayload(
+                serde_json::json!({ "text": text }).to_string(),
+            ))?;
+            push_reply(&mut tx, &profile, &run_id, &notice).await?;
+        }
+        let (action, verdict) = closing.audit();
+        let mut entry = Entry::new("system", action, &nonce.0, verdict);
         entry.args = Some(to32(locks.approval.get("args_sha256"))?);
         audit::append(&mut tx, &profile, &entry).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// HTTP(OpenAI 호환) 출처 카드가 원래 요청에서 이어받은 고정 증거. 채널 출처 카드·없는 작업은 `None`.
+    pub(crate) async fn cards_origin(&self, nonce: &ApprovalId) -> R<Option<CardOrigin>> {
+        let row = sqlx::query(
+            "select origin_binding, requester, revision, origin_team from bot_card_jobs where nonce = $1 and origin_binding is not null",
+        )
+        .bind(&nonce.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| CardOrigin {
+            binding: BindingId(row.get("origin_binding")),
+            requester: PrincipalId(row.get("requester")),
+            revision: Revision(row.get("revision")),
+            team: row.get("origin_team"),
+        }))
     }
 
     /// 게시를 확인한 영수증. 확정 전이거나 소유자 DM으로 전달한 카드가 아니면 `None`.
@@ -494,6 +541,18 @@ impl CardOutbox for Store {
     fn settle(&self, nonce: ApprovalId, outcome: CardOutcome) -> Reply<'_, ()> {
         Box::pin(async move {
             self.cards_settle(&nonce, outcome)
+                .await
+                .map_err(Fail::into_core)
+        })
+    }
+
+    fn origin(&self, nonce: ApprovalId) -> Reply<'_, Option<CardOrigin>> {
+        Box::pin(async move { self.cards_origin(&nonce).await.map_err(Fail::into_core) })
+    }
+
+    fn block(&self, nonce: ApprovalId, why: ApprovalBlock) -> Reply<'_, ()> {
+        Box::pin(async move {
+            self.card_close(&nonce, Closing::Blocked(why))
                 .await
                 .map_err(Fail::into_core)
         })

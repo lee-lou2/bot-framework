@@ -34,6 +34,28 @@ def listed(script_text):
     return {tuple(line.split()[:2]) for line in block.group(1).splitlines() if line.strip()}
 
 
+IGNORE = re.compile(r"#\[ignore\b")
+
+
+def ignore_budget(script_text):
+    """`{(package, test file): N}`: how many `#[ignore]`d tests each listed file may have (`ignored=N` on its line, 0 when absent). An ignored test does not run, so the
+    gate requires the real count to equal N — a file that ignores a test the list does not know about fails, and so does a list that allows more than the source has."""
+    block = re.search(r"^INTEGRATION_TESTS='\n(.*?)^'$", script_text, re.S | re.M)
+    assert block, "INTEGRATION_TESTS list not found"
+    budget = {}
+    for line in block.group(1).splitlines():
+        words = line.split()
+        if words:
+            allowed = [int(w[len("ignored="):]) for w in words[2:] if re.fullmatch(r"ignored=\d+", w)]
+            budget[tuple(words[:2])] = allowed[0] if allowed else 0
+    return budget
+
+
+def ignored_count(path):
+    """`#[ignore]`s in a test file and the modules it pulls in (comments do not count)."""
+    return sum(len(IGNORE.findall("\n".join(strip_comments(f.read_text(encoding="utf-8"))))) for f in closure(path))
+
+
 def strip_comments(text):
     """Source lines without comments (line numbers are kept)."""
     out = []
@@ -308,7 +330,34 @@ class Synthetic(unittest.TestCase):
         self.assertEqual(listed(script), {("bot-broker", "claude_canary"), ("bot-cli", "vm_serve")})
 
 
+class Ignored(unittest.TestCase):
+    def test_the_budget_is_read_per_file_with_or_without_a_feature_column(self):
+        script = "INTEGRATION_TESTS='\nbot-broker claude_canary testing ignored=2\nbot-cli split_roles ignored=1\nbot-cli vm_serve\n\n'\n"
+        self.assertEqual(ignore_budget(script), {("bot-broker", "claude_canary"): 2, ("bot-cli", "split_roles"): 1, ("bot-cli", "vm_serve"): 0})
+
+    def test_an_ignored_test_is_counted_in_the_file_and_in_the_modules_it_pulls_in_but_not_in_comments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tests = Path(tmp) / "crates" / "p" / "tests"
+            (tests / "support").mkdir(parents=True)
+            (tests / "a.rs").write_text("mod support;\n#[test]\n#[ignore]\nfn one() {}\n// #[ignore] in a comment\n#[test]\n#[ignore = \"slow\"]\nfn two() {}\n")
+            (tests / "support" / "mod.rs").write_text("#[test]\n#[ignore]\nfn helper_test() {}\n")
+            self.assertEqual(ignored_count(tests / "a.rs"), 3)
+
+
 class Gate(unittest.TestCase):
+    def test_every_listed_file_ignores_exactly_the_tests_the_list_allows(self):
+        budget = ignore_budget(SCRIPT.read_text(encoding="utf-8"))
+        wrong = {}
+        for (package, name), allowed in sorted(budget.items()):
+            target = ROOT / "crates" / package / "tests" / f"{name}.rs"
+            real = ignored_count(target)
+            if real != allowed:
+                wrong[f"{package} {name}"] = f"소스의 #[ignore] {real}건, 목록 ignored={allowed}"
+        self.assertEqual(wrong, {}, "목록의 ignored=N은 소스의 #[ignore] 수와 같아야 한다(돌지 않은 시험은 통과가 아니다)")
+
+    def test_the_one_known_ignored_test_is_the_ci_only_demo(self):
+        self.assertEqual({k: v for k, v in ignore_budget(SCRIPT.read_text(encoding="utf-8")).items() if v}, {("bot-cli", "split_roles"): 1})
+
     def test_every_skip_capable_test_file_is_in_the_integration_list(self):
         found = missing(ROOT, SCRIPT.read_text(encoding="utf-8"))
         self.assertEqual(

@@ -37,7 +37,7 @@ pub use sandbox::{FakeSandbox, Script};
 pub use session::{PortFuture, Session, SessionError, SessionPort, Slot, ToolOutput};
 
 use bot_core::{
-    command::{Failure, JsonPayload},
+    command::{Failure, JsonPayload, RunOutcome},
     id::{Attempt, CallId, PrincipalId, RunId, ToolId},
     profile::Builtin,
     state::Risk,
@@ -162,8 +162,13 @@ pub struct PendingCall {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelStep {
-    /// 최종 답
-    Final { text: String, usage: Usage },
+    /// 최종 답. `outcome`은 실행기가 아는 계량이다: 공급자의 출력 한도로 답이 잘렸는가, 공급자가 이 답을 만든 **전체** 실행에 대해 실제로 보고한 토큰 수(입력·출력 둘 다
+    /// 보고된 경우만; 보고가 없거나 전체 합을 알 수 없으면 `None`). 관측용 `usage`처럼 0으로 채우지 않는다.
+    Final {
+        text: String,
+        usage: Usage,
+        outcome: RunOutcome,
+    },
     /// 도구를 부르고 결과를 다음 차례에 넘겨야 한다. `text`는 호출과 함께 나온 모델의 말(없으면 빈 글).
     Calls {
         text: String,
@@ -173,7 +178,8 @@ pub enum ModelStep {
 }
 
 /// 실행 실패. 코드는 고정 어휘다: `cancelled` `timeout` `idle_timeout` `sandbox_failed` `prepare_failed` `unknown_model`
-/// `invalid_relay` `no_result` `empty_answer` `rate_limited` `overloaded` `network` `model_error`.
+/// `invalid_relay` `no_result` `empty_answer` `output_limit` `rate_limited` `overloaded` `network` `model_error`.
+/// `output_limit`은 공급자의 출력 토큰 상한에서 답이 끊긴 것이다(부분 글을 성공으로 올리지 않는다; 호스트 상한에 걸려 잘린 답만 `RunOutcome::truncated`다).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelError {
     /// 취소 신호를 받아 멈췄다.

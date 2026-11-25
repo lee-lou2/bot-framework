@@ -8,6 +8,8 @@
 //!
 //! 어느 쪽이든 사람 신원이고 지금 판본의 멤버여야 한다. 확인할 수 없으면 `None`이고 승인이 필요한 호출은 거절한다.
 
+pub mod openai;
+
 use bot_core::{
     id::PrincipalId,
     profile::{Snapshot, TriggerSource},

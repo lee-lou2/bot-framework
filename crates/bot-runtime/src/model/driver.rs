@@ -2,7 +2,10 @@
 //! 성공·실패는 종료 코드가 아니라 CLI가 낸 마지막 결과로 가른다. stderr는 결과 없이 죽었을 때 **분류**에만 쓰고 밖으로 내보내지 않는다.
 
 use super::{Limits, ModelError, Usage};
-use bot_core::sandbox::{Exit, ModelProcess, ModelSandbox, ModelSpec};
+use bot_core::{
+    command::RunOutcome,
+    sandbox::{Exit, ModelProcess, ModelSandbox, ModelSpec},
+};
 use tokio::{sync::watch, time::Instant};
 
 /// 진행 신호. 출력이 있다는 뜻이다(무출력 시간 재기는 줄이 올 때마다 새로 시작한다).
@@ -18,6 +21,8 @@ pub enum Event {
 pub struct Output {
     pub text: String,
     pub usage: Usage,
+    /// 실행기가 아는 계량(`ModelStep::Final::outcome`).
+    pub outcome: RunOutcome,
 }
 
 /// CLI의 출력을 한 줄씩 읽어 진행 신호와 마지막 결과를 만든다. 순수.
@@ -36,6 +41,10 @@ pub fn is_transient(message: &str) -> bool {
 /// 오류 문구와 HTTP 상태에서 (고정 코드, 일시 여부)를 가린다. 문구 자체는 돌려주지 않는다.
 pub fn classify(message: &str, status: Option<u64>) -> (&'static str, bool) {
     let m = message.to_lowercase();
+    // 공급자의 출력 토큰 상한에서 답이 끊겼다(CLI는 부분 글을 결과로 내지 않고 이 오류로 끝낸다): 다시 해도 같다. 잘린 글을 성공으로 올리지 않는다
+    if m.contains("output token maximum") {
+        return ("output_limit", false);
+    }
     if status == Some(429) || m.contains("429") || m.contains("rate limit") {
         return ("rate_limited", true);
     }

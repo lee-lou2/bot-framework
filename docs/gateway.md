@@ -18,8 +18,9 @@
 |---|---|
 | `cli.accounts.<별칭>` | `{"os_user": "이름"}` 또는 `{"uid": 501}` 중 정확히 하나. `cli.socket`은 절대 경로(100바이트 이하) |
 | `slack.workspaces.<별칭>` | `team_id`·`app_id`(선택, 소켓 hello 확인)·`channels`(별칭→채널 ID)·`dm`(DM 입구를 열지, 기본 거짓)·`receive`(`socket`만 — `http`는 Events API·버튼을 받는 수신기와 서명·재전송 검사가 생길 때까지 `bot validate`와 `serve`가 워크스페이스 이름(`slack.workspaces.<별칭>.receive`)을 밝혀 거절한다. 서명 비밀을 줘도 같다)와 자격 **이름** `bot_token`·`app_token`(소켓 수신에 필요)·`signing_secret`(지금은 쓰지 않는다) |
-| `http.listen`·`http.remote`·`http.endpoints.<별칭>` | 기본 `127.0.0.1:8788`(관리 화면의 기본 8787과 겹치지 않는다). 이 입구는 TLS 없는 평문 HTTP라서 **루프백이 아닌 주소는 `http.remote: true`로 명시해야** 열린다(기본 거짓) — 없으면 `bot validate`와 `bot serve`가 `gateway.http.listen`을 밝혀 거절하고 아무것도 열지 않는다. TLS를 맡는 프록시나 보호된 망 뒤에서만 켠다. `issuer`·`audience`·`key`(HS256 키의 자격 이름)·`sync_wait_ms`(기본 10초)·`max_token_age_secs` |
-| `limits` | `body_bytes`(64 KiB)·`attachments`(8)·`per_entrance_per_min`(120)·`per_principal_per_min`(30) |
+| `http.listen`·`http.remote`·`http.endpoints.<별칭>` | 기본 `127.0.0.1:8788`(관리 화면의 기본 8787과 겹치지 않는다). 이 입구는 TLS 없는 평문 HTTP라서 **루프백이 아닌 주소는 `http.remote: true`로 명시해야** 열린다(기본 거짓) — 없으면 `bot validate`와 `bot serve`가 `gateway.http.listen`을 밝혀 거절하고 아무것도 열지 않는다. TLS를 맡는 프록시 뒤에서 켠다. 웹훅(`kind:"webhook"`)에는 `issuer`·`audience`·`key`(HS256 키의 자격 이름)·`sync_wait_ms`(기본 10초)·`max_token_age_secs` |
+| `http.endpoints.<별칭>` (OpenAI) | `kind:"openai"`, 키 슬롯 `keys`, 최대 대기 `wait_ms`(기본 120초), 미완료 실행 상한 `max_active_runs`(기본 32). JWT 웹훅과 다른 별칭을 사용한다. |
+| `limits` | `body_bytes`(기본 OpenAI 256 KiB, 그 밖의 입구 64 KiB)·`attachments`(8)·`per_entrance_per_min`(120)·`per_principal_per_min`(30) |
 | `admin_url` | 일반 승인 카드용 관리 화면 주소(선택). Slack 소유자의 예약 승인 DM에는 사용하지 않는다 |
 
 자격 값은 이 파일에 쓰지 않는다. 이름만 적고 값은 **바인딩을 가진 프로필**의 `bot/<profile>/<name>`에서 읽는다(전역 폴백 없음, 토큰 값이 같아도 권한을 합치지 않는다).
@@ -37,6 +38,8 @@
 
 ## HTTP 입구
 
+아래는 JWT 웹훅의 요청·응답 규칙이다. SDK의 세 경로는 [OpenAI 호환 API](#openai-호환-api)를 따른다.
+
 이 입구는 TLS를 직접 처리하지 않아 베어러 토큰이 평문으로 오간다: 기본은 루프백에서만 열리고, 밖에서 받으려면 TLS를 맡는 프록시 뒤에 두고 `http.remote`를 명시한다(위 표). `POST|PUT|PATCH|DELETE|GET /{입구 별칭}{트리거 path}`. `Authorization: Bearer <HS256 토큰>`(발급자·대상·만료·nbf 확인, `alg`는 HS256만, 키는 32바이트 이상)과 `Idempotency-Key`(재시도에도 같은 값)가 필요하다. 등록되지 않은 별칭은 인증 전에 404이고, 등록된 입구는 경로가 없어도 먼저 인증한다(401, 이유는 알리지 않는다). 인증과 접수는 같은 라우팅 표를 쓰고 키 캐시는 (프로필·바인딩·판본·자격 이름)별이다.
 
 | 응답 | 조건 |
@@ -47,6 +50,86 @@
 | 502 | 도구 결과가 고정 형식이 아님 |
 
 상태 조회 `GET /{입구}/_requests/{id}`는 같은 주체의 결과만 돌려주고 새 도구 호출을 만들지 않는다. 응답 방식은 호출자가 고르지 않는다 — 최초 접수 때 저장소에 저장한 방식(`sync`·`accepted`)만 쓰므로 POST 재전달·재조회가 최초 응답과 같은 모양이다(그 뒤 트리거를 바꿔도 같다). 방식 기록이 없는 이전 요청은 `accepted` 모양으로 돌려준다. 결과·상태를 내보내기 직전마다 지금의 멤버 권한과 활성 판본(위)을 다시 확인한다.
+
+## OpenAI 호환 API
+
+호스트 설정에서 HTTP 입구의 종류를 `openai`로 지정하고 프로필 바인딩에 공개 모델 이름과 에이전트를 연결한다. SDK에는 `base_url`과 운영자에게 발급받은 API 키를 설정한다. 모델 이름은 `models.list()`로 확인할 수 있다. [바인딩 예시](profile-spec.md#openai-모델-바인딩)
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8788/v1", api_key=os.environ["BOT_API_KEY"])
+model = client.models.list().data[0].id
+reply = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "오늘 일정을 알려줘"}],
+    extra_headers={"Idempotency-Key": "agenda-request-1"},
+)
+print(reply.choices[0].message.content)
+```
+
+한 가지 일을 다시 조회할 때는 원래 메시지·모델·키를 사용한다. 새 일을 시작할 때는 새 멱등키를 쓴다. 키를 생략하면 서버가 난수로 생성해 응답의 `Idempotency-Key` 헤더에 담는다. 키 없이 첫 응답을 통째로 잃으면 클라이언트는 생성된 키를 알 수 없다. 외부 쓰기가 가능한 작업에는 첫 요청부터 키를 지정한다. SDK가 키 없이 재시도라고 표시한 요청은 400 `idempotency_key_required`로 끝난다. 본문이 같다는 이유로 서로 다른 요청을 합치지 않는다.
+
+| 메서드와 경로 | 응답 |
+|---|---|
+| `GET /v1/models` | 인증된 멤버가 이 입구에서 실행할 수 있는 모델 목록. 각 모델의 `created`는 현재 프로필 판본을 처음 보관한 Unix 초다. |
+| `GET /v1/models/{id}` | 같은 권한 검사 뒤 모델 하나. 없는 모델과 권한 밖 모델은 같은 404다. |
+| `POST /v1/chat/completions` | JSON의 `choices[0].message.content`에 최종 답이 온다. 저장된 최종 답의 일부가 출력 상한으로 잘렸으면 `finish_reason:"length"`다. 실행기가 최종 답을 남기지 못하고 출력 한도로 실패하면 422 `run_failed`다. `stream:true`면 SSE로 받는다. |
+
+모든 경로에 `Authorization: Bearer <API 키>`가 필요하다. 호스트의 키 슬롯은 비밀 보관소 이름과 HTTP 멤버를 연결한다. 키를 회전할 때는 같은 멤버에 새 슬롯을 추가한 뒤 옛 키를 철회한다. 게이트웨이는 인증할 때마다 보관소를 읽으므로, 보관소가 새 값을 반환하는 시점부터 회전이 반영된다. 모델 목록·최종 답·SSE 전달에도 현재 멤버 권한이 적용된다. 기본 주소는 루프백이다. 외부에 열려면 `gateway.http.remote`를 활성화하고 TLS 프록시를 둔다. 기본 CORS 허용은 없다. 요청 본문은 기본 256 KiB까지 받는다. 호스트의 `gateway.limits.body_bytes`를 설정하면 그 값(최대 1 MiB)을 사용한다. 웹훅의 기본값은 64 KiB다. 본문을 읽는 시간은 최대 10초이며, 요청 기한이 더 짧으면 그 안에 읽어야 한다.
+
+### 대화와 승인
+
+각 요청은 새 대화다. 클라이언트는 이전 턴을 포함한 `messages`를 매번 보낸다. 마지막 user 턴을 현재 질문으로 쓰며 나머지 턴은 원래 순서의 대화 문맥으로 한 번만 전달한다. 서버는 클라이언트가 붙인 system·developer·assistant 역할까지 모두 사용자 제공 대화 자료로 취급한다. 프로필 지침과 실행 권한은 서버가 결정한다.
+
+승인이 필요한 도구는 요청을 접수한 바인딩의 지정 승인자가 승인한 뒤에만 실행한다. 위임한 작업에도 같은 바인딩과 요청자가 적용된다. 서버는 접수 때와 현재 프로필에서 승인자와 전달 경로가 일치하는지 확인한다. Slack 승인자는 자신의 DM에서, 로컬 승인자는 본인 인증을 거친 관리 화면에서 결정한다. HTTP 키에는 승인 권한이 없다. 승인자가 없거나 경로가 바뀌거나 DM 전달을 확인할 수 없으면, HTTP 응답에 해당 도구를 실행하지 않았다는 안내가 온다.
+
+### 대기와 스트리밍
+
+`wait_ms`는 인증 직후부터 접수를 포함한 응답까지의 단일 기한이다(기본 120초, 허용 범위 1~300000밀리초). 본문 읽기·접수·결과 대기에 쓸 수 있는 시간은 `wait_ms − min(2000, wait_ms / 4)`밀리초다. 나머지는 최종 권한 확인과 응답 전송에 쓴다. 너무 짧으면 첫 요청의 접수 여부를 확인하지 못해 422 `request_outcome_unknown`을 받을 수 있으므로 운영에서는 수 초 이상을 권장한다.
+
+마지막으로 확인한 작업이 진행 중인 채 대기 시간이 끝나면, 서버는 권한을 다시 확인하고 HTTP 200으로 ‘처리 중’ 안내를 보낸다. 사람이 승인할 차례가 되면 즉시 200으로 승인 대기를 알린다. 두 경우 모두 작업은 유지된다.
+
+같은 키와 본문으로 다시 POST하면 현재 상태나 최종 답을 받는다. 같은 키에 다른 본문을 보내면 400이다. 저장소 오류로 작업 상태를 끝내 확인할 수 없으면 422 `request_outcome_unknown`을 받는다. 조회에는 처음 요청한 주체와 입구의 키가 필요하다.
+
+`stream:true`는 `text/event-stream`을 반환한다. 접수 뒤 기다리는 동안 서버는 최대 15초 간격으로 keep-alive 주석을 보낸다. 첫 청크에는 assistant 역할이, 이어지는 청크에는 저장된 최종 답의 텍스트가 담긴다. 종료 사유를 보낸 뒤 `data: [DONE]`으로 끝난다. `Cache-Control: no-cache`와 `X-Accel-Buffering: no`를 사용한다. 스트림이 이미 열린 뒤 실패하면 오류 객체를 보내고 닫는다. 이 버전은 모델 생성 중간의 토큰을 전송하지 않는다.
+
+한 실행의 모든 모델 호출에서 입력·출력 토큰 수를 확인해야 `usage`를 반환한다. 한 번이라도 계량이 빠지면 JSON 응답에서 `usage`를 생략한다. JSON에서는 `prompt_tokens`, `completion_tokens`, 그 합인 `total_tokens`를 받는다. SSE에서는 `stream_options.include_usage:true`일 때 일반 청크의 usage는 null이고, 측정값이 있으면 `[DONE]` 직전에 빈 `choices`와 사용량을 담은 청크가 온다. 측정할 수 없는 실행에는 통계 청크가 없다.
+
+### 허용하는 요청 옵션
+
+| 입력 | 처리 |
+|---|---|
+| `model`, `messages` | 필수. system·developer·user·assistant 역할과 문자열 또는 text 파트 배열을 받는다. 한 메시지의 text 파트는 줄바꿈(LF) 하나로 잇는다. user 턴이 하나 이상 있어야 하며, 마지막 user 턴에는 공백 이외의 글자가 필요하다. |
+| `stream`, `stream_options.include_usage`, `n` | 기본 비스트리밍. include_usage는 스트림에서만 쓴다. 선택지는 하나다(`n:1`). |
+| `temperature`, `top_p`, `seed`, `user`, `metadata` | 타입과 범위를 확인하되 실행 설정·신원·감사에는 사용하지 않는다. |
+| `store`, `response_format` | 생략, `store:false`, 텍스트 형식만 지원한다. 접수·복구에 필요한 작업 기록은 별도로 보관한다. |
+| `max_tokens`, `max_completion_tokens`, `stop` | 호출별 길이·중단 조건은 지원하지 않는다. 값을 지정하면 400이다. |
+| tools·functions·tool_choice, 이미지·오디오·파일, logprobs 등 | 400 `unsupported_parameter`. 서버에는 프로필이 허용한 도구만 있다. |
+
+### 오류와 재시도
+
+오류는 `{"error":{"message":"…","type":"…","param":null,"code":"…"}}` 형식이다. `param`에는 서버가 아는 필드 경로만 담는다. 호출자가 임의로 붙인 필드 이름은 최상위에서 `null`, 중첩 위치에서는 `messages[0]`처럼 알려진 부모 경로까지만 표시한다. 오류 본문에는 호출자가 붙인 이름이나 입력값이 노출되지 않는다.
+
+| HTTP | type | code |
+|---|---|---|
+| 400 | `invalid_request_error` | `invalid_request`, `unsupported_parameter`, `idempotency_key_conflict`, `idempotency_key_required` |
+| 401 / 403 | `authentication_error` / `permission_error` | `invalid_api_key` / `access_denied` |
+| 404 / 405 | `invalid_request_error` | `model_not_found`, `not_found` / `method_not_allowed` |
+| 413 / 415 | `invalid_request_error` | `request_too_large` / `unsupported_media_type` |
+| 408 / 429 / 503 | `invalid_request_error` / `rate_limit_error` / `server_error` | 접수 전 `request_timeout` / `rate_limit_exceeded`(Retry-After 초) / `service_unavailable` |
+| 422 | `server_error` | `request_outcome_unknown`이면 같은 키·본문으로 조회한다. 이미 종료한 작업이면 `run_failed` 또는 `run_cancelled`다. |
+
+새 작업이 동시 실행 상한에 걸리면 `Retry-After: 1`로 1초 뒤 재확인을 안내한다. 요청 속도 제한에 걸리면 제한이 풀리기까지 남은 초를 올림해 반환한다. 같은 키로 이미 접수한 작업을 조회할 때는 새 실행 슬롯을 쓰지 않는다.
+
+**인증 실패 한도.** 게이트웨이 프로세스마다 직접 연결한 IP별로 센다. 60초 안에 `Authorization` 헤더로 인증을 20번 실패하면, 그다음부터 60초간 같은 IP의 모델·채팅 요청은 키를 확인하기 전에 429를 받는다. 정상 키를 보내거나 기존 작업을 재조회해도 차단된다. `Retry-After`는 남은 차단 시간(초)이다. 헤더를 생략한 요청과 보관소 장애는 실패 횟수에서 제외한다.
+
+TLS 프록시 뒤에서는 같은 프록시 IP를 거치는 사용자들이 이 한도를 공유한다. 게이트웨이는 `X-Forwarded-For`를 출처 판정에 사용하지 않는다. 사용자별 제한이 필요하면 프록시에서 적용한다. v2.0의 인증 실패 한도는 고정값이다.
+
+인증을 마치고 접수한 작업의 결과를 반환할 때는 SDK가 자동 재시도하는 408·409·429·5xx를 쓰지 않는다. 커밋 여부를 확인할 수 없으면 422와 `x-should-retry:false`를 반환한다. 기존 JWT 웹훅은 입구 별칭이 포함된 경로에서 동작한다. [Chat Completions 공식 규격](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) · [모델 목록 공식 규격](https://developers.openai.com/api/reference/resources/models/methods/list)
+
+현재 제공하는 경로는 모델 목록·상세와 Chat Completions다. 후속 Responses API는 같은 인증·모델 권한·실행 결과 조회를 사용할 수 있다. 토큰 단위 스트리밍을 추가할 때는 외부에 공개할 수 있는 텍스트만 순서대로 전달한다.
 
 ## Slack 입구
 

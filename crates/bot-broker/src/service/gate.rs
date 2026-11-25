@@ -4,10 +4,12 @@ use crate::{
     classify::Class,
 };
 use bot_core::{
+    api::ApprovalBlock,
     command::*,
     id::*,
     ledger::*,
     port::Error,
+    profile::ApprovalRoute,
     schedule::{DELIVER_TOOL, UnsentReason},
     state::*,
 };
@@ -64,7 +66,11 @@ impl BrokerService {
             return Ok(Gate::Go(None));
         }
         let Some(approver) = flow.approver.as_ref() else {
-            return self.deny(flow, "no_approver").await;
+            // OpenAI 출처 실행은 이유(고정 판본에 경로 없음·철회·재지정)를 호출 기록에 함께 남겨 호스트가 고정 안내로 알리게 한다
+            return match &flow.origin {
+                Some(Err(why)) => self.deny_blocked(flow, *why).await,
+                _ => self.deny(flow, "no_approver").await,
+            };
         };
         let reasons = class.codes();
         let expected = Binding {
@@ -105,6 +111,17 @@ impl BrokerService {
                     return Ok(Gate::Return(CallResult::Awaiting(nonce)));
                 }
                 ApprovalState::Approved if same => {
+                    // OpenAI 출처 Slack 경로: 카드가 올라가 눌린 설치가 지금 호스트의 같은 설치여야 소비한다. 같은 별칭의 team_id만 바뀐 재배포는 프로필·사람·바인딩이
+                    // 그대로라 판본 비교로는 보이지 않는다(`site.rs`). 어긋나면 소비 0·실행 0이고, 확인하지 못했으면 아무것도 확정하지 않고 다시 시도한다.
+                    if let Some(Ok(found)) = &flow.origin {
+                        match self.card_site(&stored, &flow.snapshot, found) {
+                            Route::Same => {}
+                            Route::Gone => {
+                                return self.deny_blocked(flow, ApprovalBlock::RouteChanged).await;
+                            }
+                            Route::Unsure => return Err(Error::Unavailable),
+                        }
+                    }
                     let consumable = Approval {
                         nonce: stored.approval.nonce,
                         expires_at: stored.approval.expires_at,
@@ -160,6 +177,14 @@ impl BrokerService {
                 approval,
                 reasons,
                 card,
+                // 지정된 사람의 Slack DM로 보낼 때만 전달 바인딩을 싣는다(로컬 승인은 관리 화면이다)
+                delivery: match &flow.origin {
+                    Some(Ok(found)) => match &found.route {
+                        ApprovalRoute::Slack { binding, .. } => Some(binding.clone()),
+                        ApprovalRoute::Local { .. } => None,
+                    },
+                    _ => None,
+                },
             })
             .await?;
         Ok(Gate::Return(CallResult::Awaiting(nonce)))

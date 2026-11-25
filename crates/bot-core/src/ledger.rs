@@ -57,6 +57,10 @@ pub struct OpenApproval {
     pub approval: Approval,
     pub reasons: Vec<String>,
     pub card: JsonPayload,
+    /// OpenAI 모델 바인딩에서 접수된 실행의 일반 도구 승인 카드를 지정된 사람의 Slack DM으로 보낼 때, 그 설치를 정하는 **전달 바인딩**(같은 프로필·같은
+    /// 워크스페이스의 Slack 채널 바인딩). 브로커가 고정 판본과 지금 활성 판본이 같은 경로를 가리킬 때만 싣는다. `None`이면 기존 규칙이다(채널 출처 명시
+    /// 목적지 카드는 원래 바인딩의 소유자 DM, 그 밖은 같은 대화).
+    pub delivery: Option<BindingId>,
 }
 
 pub struct Decision {
@@ -122,6 +126,11 @@ pub trait CallLedger: Send + Sync {
     /// memory.share는 여기서 거절한다. 승인과 공유를 함께 커밋하는 MemoryStore::share를 사용한다.
     fn start(&self, start: StartCall) -> Reply<'_, ()>;
     fn finish(&self, finish: FinishCall) -> Reply<'_, ()>;
+    /// 승인 경로 때문에 호출을 `Outcome::Blocked`로 닫고 그 이유(`ApprovalBlock`)를 호출 기록에 함께 남긴다. 조회(`ApiRuns::lookup`)가 이 저장된 판정으로 `ApprovalBlocked`를 알린다.
+    /// 이유를 저장하지 않는 구현은 이유를 버리고 `finish`로 닫는다(기본 구현).
+    fn finish_blocked(&self, finish: FinishCall, _why: crate::api::ApprovalBlock) -> Reply<'_, ()> {
+        self.finish(finish)
+    }
 }
 
 /// 민감 DM 본문은 메모리에서만 처리한다. HMAC과 접수 키만 저장한다.

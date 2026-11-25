@@ -289,12 +289,14 @@ impl Parser for Tracker {
                 transient: false,
             });
         };
+        // 이 실행기의 보고는 실측 여부를 구분하지 못한다(없으면 0): API에 내보낼 실측으로 쓰지 않는다
         Ok(Output {
             text,
             usage: Usage {
                 input_tokens: self.input,
                 output_tokens: self.output,
             },
+            outcome: Default::default(),
         })
     }
 }

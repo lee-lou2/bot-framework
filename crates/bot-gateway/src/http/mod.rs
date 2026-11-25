@@ -10,6 +10,8 @@
 //!   확인한다(철회된 뒤에는 본문이 나가지 않고, 구판 프로세스는 503으로 닫는다).
 //!
 //! 인증 실패는 이유를 알리지 않는다. 등록되지 않은 입구 별칭은 인증 전에 404지만, 등록된 입구는 경로가 없어도 먼저 인증한다.
+mod openai;
+pub use openai::{Passed, Probe};
 pub mod reply;
 pub mod token;
 mod wire;
@@ -21,7 +23,7 @@ use crate::{
     identity,
     inbound::{Event, Inbound, Respond, valid_request_id},
     ingress::{Admission, Ingress},
-    limits::RateLimiter,
+    limits::{RateLimiter, SourceFailures},
     routes::{Routes, STATUS_SEGMENT},
 };
 use axum::{
@@ -32,15 +34,18 @@ use axum::{
     response::Response,
 };
 use bot_core::{
+    api::ApiRuns,
     id::{PrincipalId, RequestId, SecretName},
     intake::{RequestKey, RequestState},
     port::{RunStore, SecretStore},
+    profile::ProfileBundles,
     state::{Conversation, ConversationKind},
 };
 use reply::{error, json_response, retry_after};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -52,6 +57,8 @@ use wire::{
     split_endpoint, state_name, stored_mode, terminal, unauthorized, unavailable,
 };
 
+/// SSE keep-alive 기본 간격(계약 상한 15초 안)
+pub const KEEP_ALIVE_DEFAULT: Duration = openai::KEEP_ALIVE_EVERY;
 const KEY_TTL: Duration = Duration::from_secs(30);
 const MAX_IN_FLIGHT: usize = 256;
 
@@ -69,6 +76,18 @@ pub struct HttpGateway {
     /// 상태 조회는 제출보다 자주 한다. 제출 한도의 10배까지 허용한다.
     status_limiter: RateLimiter,
     in_flight: Arc<Semaphore>,
+    /// OpenAI 호환 입구의 접수·조회 포트(없으면 그 입구는 열리지 않는다: 503)
+    api: Option<Arc<dyn ApiRuns>>,
+    /// `/v1/models`의 `created`(판본 번들을 처음 보관한 시각)
+    bundles: Option<Arc<dyn ProfileBundles>>,
+    /// SSE에서 쓰는 것이 없을 때 `: keep-alive`를 쓰는 간격(계약 상한 15초)
+    keep_alive: Duration,
+    /// 모델 목록·조회 한 번에 주는 총 시간
+    models_budget: Duration,
+    /// 스트림 조각이 «넘기는 경계»를 지날 때마다 알리는 관찰 지점(시험용)
+    probe: Option<Probe>,
+    /// OpenAI 키 인증 실패를 출처(접속한 피어 IP)별로 센다: 한도를 넘은 출처는 비밀 보관소를 읽기 전에 거절한다
+    auth_failures: SourceFailures,
 }
 
 impl HttpGateway {
@@ -90,7 +109,55 @@ impl HttpGateway {
             keys: Mutex::new(HashMap::new()),
             status_limiter: RateLimiter::new(status_per_min),
             in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            api: None,
+            bundles: None,
+            keep_alive: openai::KEEP_ALIVE_EVERY,
+            models_budget: openai::MODELS_BUDGET,
+            probe: None,
+            auth_failures: SourceFailures::default(),
         }
+    }
+
+    /// 시험용: OpenAI 키 인증 실패 예산(집계 창 안의 실패 횟수·창·차단 시간)을 바꾼다(운영은 기본값: 60초 안에 20번이면 60초 차단).
+    pub fn with_auth_failure_limit(
+        mut self,
+        max: usize,
+        window: Duration,
+        block: Duration,
+    ) -> Self {
+        self.auth_failures = SourceFailures::new(max, window, block);
+        self
+    }
+
+    /// 시험용: SSE 조각이 HTTP 본문으로 넘어가는 경계를 지날 때마다 (종류, 바이트 수)를 알린다.
+    pub fn with_probe(mut self, probe: Probe) -> Self {
+        self.probe = Some(probe);
+        self
+    }
+
+    /// 시험용: 모델 목록·조회의 총 시간을 줄인다(운영은 기본값).
+    pub fn with_models_budget(mut self, budget: Duration) -> Self {
+        self.models_budget = budget;
+        self
+    }
+
+    /// 시험용: 동시에 붙잡을 수 있는 요청 수를 줄인다(운영은 256).
+    pub fn with_connection_limit(mut self, limit: usize) -> Self {
+        self.in_flight = Arc::new(Semaphore::new(limit));
+        self
+    }
+
+    /// 시험용: SSE keep-alive 간격을 줄인다(운영은 기본값).
+    pub fn with_keep_alive(mut self, every: Duration) -> Self {
+        self.keep_alive = every;
+        self
+    }
+
+    /// OpenAI 호환 입구(`/v1`)를 여는 저장소 포트. 호스트에 OpenAI 입구가 있으면 반드시 붙인다.
+    pub fn with_openai(mut self, api: Arc<dyn ApiRuns>, bundles: Arc<dyn ProfileBundles>) -> Self {
+        self.api = Some(api);
+        self.bundles = Some(bundles);
+        self
     }
 
     /// 시험용: 토큰 만료 판정에 쓰는 시계(유닉스 초)를 바꾼다.
@@ -99,8 +166,17 @@ impl HttpGateway {
         self
     }
 
+    /// 종료 신호가 없는 라우터(시험·단독 사용). 기다리는 요청은 기한까지 간다.
     pub fn router(self: Arc<Self>) -> Router {
-        Router::new().fallback(handle).with_state(self)
+        self.router_with(CancellationToken::new())
+    }
+
+    /// `stop`이 오면 기다리는 OpenAI 요청이 기다림을 멈추고 진행 중 안내로 끝낸다(작업은 그대로 두고 같은 키로 다시 조회한다).
+    pub fn router_with(self: Arc<Self>, stop: CancellationToken) -> Router {
+        Router::new().fallback(handle).with_state(Shared {
+            gateway: self,
+            stop,
+        })
     }
 
     /// stop이 오면 진행 중인 요청을 마치고 돌아온다. TLS 종단·연결 한도·느린 클라이언트 방어는 앞단 프록시 몫이다.
@@ -109,16 +185,38 @@ impl HttpGateway {
         listener: TcpListener,
         stop: CancellationToken,
     ) -> std::io::Result<()> {
-        axum::serve(listener, self.router())
-            .with_graceful_shutdown(async move { stop.cancelled().await })
-            .await
+        // 실제 연결의 피어 주소(`ConnectInfo`)를 요청에 실어 출처별 인증 실패 한도에 쓴다
+        axum::serve(
+            listener,
+            self.router_with(stop.clone())
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move { stop.cancelled().await })
+        .await
     }
 }
 
-async fn handle(State(gateway): State<Arc<HttpGateway>>, request: Request) -> Response {
-    let Ok(_permit) = gateway.in_flight.clone().try_acquire_owned() else {
-        return unavailable();
+#[derive(Clone)]
+struct Shared {
+    gateway: Arc<HttpGateway>,
+    stop: CancellationToken,
+}
+
+async fn handle(State(shared): State<Shared>, request: Request) -> Response {
+    let gateway = shared.gateway;
+    // 호스트에 OpenAI 입구가 있으면 `/v1` 아래는 모두 그 입구의 몫이다(웹훅 별칭 `v1`은 이 경우 호스트 검증이 거절한다)
+    let openai = openai::is_openai_path(request.uri().path())
+        && !gateway.ingress.host().http.openai.is_empty();
+    let Ok(permit) = gateway.in_flight.clone().try_acquire_owned() else {
+        return if openai {
+            openai::busy()
+        } else {
+            unavailable()
+        };
     };
+    if openai {
+        return gateway.openai(request, permit, shared.stop).await;
+    }
     gateway.process(request).await
 }
 

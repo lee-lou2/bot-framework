@@ -321,13 +321,21 @@ pub fn outgoing(
 /// 저장소가 게시한 활성 집합 판본을 흉내 낸다. 다른 프로세스가 새 판본을 활성화한 상황을 만든다.
 pub struct MemoryActive {
     current: Mutex<Option<Revision>>,
+    /// `current()`가 답하기 전에 기다리는 시간(저장소가 느린 상황)
+    delay: Mutex<std::time::Duration>,
 }
 
 impl MemoryActive {
     pub fn new(current: Option<&str>) -> Arc<Self> {
         Arc::new(Self {
             current: Mutex::new(current.map(|r| Revision(r.to_owned()))),
+            delay: Mutex::new(std::time::Duration::ZERO),
         })
+    }
+
+    /// 앞으로의 `current()`가 이 시간만큼 기다린 뒤 답한다(저장소 지연).
+    pub fn delay(&self, delay: std::time::Duration) {
+        *self.delay.lock().unwrap() = delay;
     }
 
     /// 저장소의 활성 집합 판본을 바꾼다(None은 아직 게시된 적 없음).
@@ -343,7 +351,13 @@ impl MemoryActive {
 
 impl ActiveRevisions for MemoryActive {
     fn current(&self) -> Reply<'_, Option<Revision>> {
-        Box::pin(std::future::ready(Ok(self.current.lock().unwrap().clone())))
+        let delay = *self.delay.lock().unwrap();
+        Box::pin(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            Ok(self.current.lock().unwrap().clone())
+        })
     }
 
     fn replace(

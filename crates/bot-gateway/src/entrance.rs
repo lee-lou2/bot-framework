@@ -18,6 +18,8 @@ pub enum Entrance {
     SlackDm { workspace: String },
     /// 호스트에 등록한 인증된 HTTP 입구
     Http { endpoint: String },
+    /// 호스트에 등록한 OpenAI 호환 입구 별칭과 그 위의 공개 모델 이름
+    HttpModel { endpoint: String, model: String },
 }
 
 impl From<&Adapter> for Entrance {
@@ -36,6 +38,12 @@ impl From<&Adapter> for Entrance {
             Adapter::Http { endpoint } => Entrance::Http {
                 endpoint: endpoint.clone(),
             },
+            Adapter::OpenAi {
+                endpoint, model, ..
+            } => Entrance::HttpModel {
+                endpoint: endpoint.clone(),
+                model: model.clone(),
+            },
         }
     }
 }
@@ -49,6 +57,9 @@ impl fmt::Display for Entrance {
             }
             Entrance::SlackDm { workspace } => write!(f, "slack {workspace}의 DM"),
             Entrance::Http { endpoint } => write!(f, "http 입구 {endpoint}"),
+            Entrance::HttpModel { endpoint, model } => {
+                write!(f, "http 입구 {endpoint}의 모델 {model}")
+            }
         }
     }
 }
@@ -70,6 +81,11 @@ pub enum Real {
     },
     Http {
         endpoint: String,
+    },
+    /// OpenAI 호환 입구 별칭과 그 위의 공개 모델 이름. 모델을 고르면 그 모델의 바인딩이 정해진다.
+    HttpModel {
+        endpoint: String,
+        model: String,
     },
 }
 

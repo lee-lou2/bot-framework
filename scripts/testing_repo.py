@@ -102,3 +102,11 @@ class Repo:
 def everything(done):
     """All the text a run printed."""
     return done.stdout + done.stderr
+
+
+def committed(case, message="work"):
+    """A repository with one public-author commit (the minimal thing the gate steps can run on)."""
+    repo = Repo(case)
+    repo.write("a.txt", "fine\n")
+    repo.commit(message, env=PUBLIC)
+    return repo

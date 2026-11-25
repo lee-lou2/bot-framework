@@ -31,6 +31,45 @@ fn model_places(snap: &Snapshot, alias: &str) -> Vec<String> {
     places
 }
 
+/// HTTP 입구 별칭이 호스트에 등록돼 있고 종류(웹훅/OpenAI)가 바인딩과 맞는지 본다.
+/// 새 API의 `/v1`과 경로가 겹치는 웹훅 별칭 `v1`은 OpenAI 입구와 함께 켜지 못한다(단독으로는 옛 그대로 쓴다).
+fn http_endpoint(host: &HostCatalog, endpoint: &str, openai: bool, at: &str, issues: &mut Issues) {
+    let (is_webhook, is_openai) = (
+        host.http_endpoints.contains(endpoint),
+        host.openai_endpoints.contains_key(endpoint),
+    );
+    if !is_webhook && !is_openai {
+        issues.error_at(
+            "unknown-endpoint",
+            "profile.yaml",
+            at,
+            format!("호스트에 등록하지 않은 HTTP 입구예요: {endpoint}"),
+        );
+    } else if openai && !is_openai {
+        issues.error_at(
+            "endpoint-kind-mismatch",
+            "profile.yaml",
+            at,
+            format!("HTTP 입구 `{endpoint}`는 호스트에서 웹훅(`kind: webhook`)으로 등록돼 있어요. `model`이 있는 OpenAI 바인딩은 `kind: openai` 입구에만 연결해요"),
+        );
+    } else if !openai && !is_webhook {
+        issues.error_at(
+            "endpoint-kind-mismatch",
+            "profile.yaml",
+            at,
+            format!("HTTP 입구 `{endpoint}`는 호스트에서 OpenAI 호환(`kind: openai`)으로 등록돼 있어요. `model`이 없는 웹훅 바인딩은 웹훅 입구에만 연결해요"),
+        );
+    }
+    if !openai && endpoint == "v1" && !host.openai_endpoints.is_empty() {
+        issues.error_at(
+            "webhook-v1-conflict",
+            "profile.yaml",
+            at,
+            "웹훅 입구 별칭 `v1`은 OpenAI 호환 API의 `/v1` 경로와 겹쳐서 함께 켤 수 없어요. 웹훅 별칭을 다른 이름(예: `hooks`)으로 바꾸고 호스트 설정과 프로필의 `endpoint`를 함께 고쳐 주세요",
+        );
+    }
+}
+
 pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
     let profile = snap.id.0.as_str();
     let mut models: BTreeSet<&str> = BTreeSet::from([snap.model.as_str()]);
@@ -103,15 +142,33 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                 }
                 Some(_) => {}
             },
-            Adapter::Http { endpoint } if !host.http_endpoints.contains(endpoint) => {
-                issues.error_at(
-                    "unknown-endpoint",
-                    "profile.yaml",
-                    &at,
-                    format!("호스트에 등록하지 않은 HTTP 입구예요: {endpoint}"),
-                );
+            Adapter::Cli { .. } => {}
+            Adapter::Http { endpoint } => http_endpoint(host, endpoint, false, &at, issues),
+            Adapter::OpenAi {
+                endpoint,
+                approvers,
+                ..
+            } => {
+                http_endpoint(host, endpoint, true, &at, issues);
+                // 승인 매핑은 프로필의 지정이고 키 슬롯은 호스트의 자격 발급이다. 슬롯이 없는 주체의 매핑은 인증 권한을 주지 않으므로 오류가 아니라 경고다
+                // (한 멤버의 마지막 슬롯을 빼면서 프로필 수정까지 요구하면 철회하려던 옛 설정이 활성화 실패로 계속 살아 있다). 오타는 이 경고로 알린다.
+                if let Some(subjects) = host.openai_endpoints.get(endpoint) {
+                    let prefix = format!("http:{endpoint}/");
+                    for requester in approvers.keys() {
+                        let subject = requester.0.strip_prefix(&prefix);
+                        if !subject.is_some_and(|s| subjects.contains(s)) {
+                            issues.warning(
+                                "approver-key-unknown",
+                                "profile.yaml",
+                                format!(
+                                    "{at}: 승인 매핑의 HTTP 주체 `{}`를 가리키는 키 슬롯이 호스트 입구 `{endpoint}`에 없어요. 이 주체는 키가 있어야 호출할 수 있어요(호스트 설정의 `keys.<슬롯>.subject`를 확인하세요)",
+                                    requester.0
+                                ),
+                            );
+                        }
+                    }
+                }
             }
-            _ => {}
         }
     }
     let mut seen = BTreeSet::new();

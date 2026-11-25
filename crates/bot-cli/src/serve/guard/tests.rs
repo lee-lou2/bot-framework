@@ -1,6 +1,6 @@
 use super::*;
 use bot_core::{
-    command::JsonPayload,
+    command::{JsonPayload, TokenUsage},
     id::{CallId, Generation, ProfileId, ToolId},
     port::Error,
 };
@@ -13,6 +13,7 @@ struct Spy(
     std::sync::atomic::AtomicUsize,
     std::sync::Mutex<Option<Failure>>,
     std::sync::Mutex<Vec<Attempt>>,
+    std::sync::Mutex<Vec<RunOutcome>>,
 );
 
 fn unavailable<T: Send + 'static>() -> Reply<'static, T> {
@@ -42,6 +43,10 @@ impl RunStore for Spy {
     }
     fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, ()> {
         unavailable()
+    }
+    fn finish_with(&self, _: Attempt, _: Finish, outcome: RunOutcome) -> Reply<'_, ()> {
+        self.3.lock().unwrap().push(outcome);
+        Box::pin(std::future::ready(Ok(())))
     }
     fn fail(&self, _: Attempt, failure: Failure) -> Reply<'_, Retry> {
         *self.1.lock().unwrap() = Some(failure);
@@ -73,6 +78,41 @@ async fn a_stale_worker_claims_nothing_and_leaves_the_work_for_a_current_one() {
         request: bot_core::id::RequestId("r1".into()),
     };
     assert!(matches!(runs.status(key).await, Ok(None)));
+}
+
+/// 운영 래퍼가 계량을 삼키면 저장소는 잘림·사용량을 영영 받지 못한다(기본 `finish_with`는 계량을 버리고 `finish`로 끝낸다): 같은 완료·같은 계량이 안쪽에 닿아야 한다.
+#[tokio::test]
+async fn a_finish_with_an_outcome_reaches_the_inner_store_unchanged_even_for_a_stale_worker() {
+    let active = MemoryActive::new(Some("set-1"));
+    let spy = Arc::new(Spy::default());
+    let runs = GuardedRuns::new(spy.clone(), active.check("set-1"));
+    let done = || Finish {
+        result: JsonPayload(r#"{"text":"답"}"#.into()),
+        answers: Vec::new(),
+    };
+    let outcome = RunOutcome {
+        truncated: true,
+        usage: Some(TokenUsage {
+            prompt: 9,
+            completion: 4,
+        }),
+    };
+    runs.finish_with(attempt(), done(), outcome).await.unwrap();
+    // 구판이 된 프로세스도 이미 집은 run의 완료는 그대로 저장한다(새 일만 집지 않는다)
+    active.set(Some("set-2"));
+    runs.finish_with(attempt(), done(), RunOutcome::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        *spy.3.lock().unwrap(),
+        vec![outcome, RunOutcome::default()],
+        "계량이 한 번씩 그대로 닿는다"
+    );
+    // 계량이 없는 일반 완료는 안쪽의 `finish`로 간다(여기서는 시험용 저장소가 거절한다)
+    assert!(matches!(
+        runs.finish(attempt(), done()).await,
+        Err(Error::Unavailable)
+    ));
 }
 
 #[tokio::test]

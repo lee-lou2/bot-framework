@@ -16,6 +16,7 @@
 use crate::approval::same_binding;
 use crate::sys::Clock;
 use bot_core::{
+    api::ApprovalBlock,
     command::JsonPayload,
     id::*,
     ledger::*,
@@ -47,6 +48,7 @@ pub struct MemLedger {
     lenient_begin: AtomicBool,
     /// `step` 읽기에 끼어드는 갈고리(붙잡기·읽기가 끝나는 순간의 일).
     steps: steps::StepProbe,
+    notes: openai::Notes,
 }
 
 type Hook = Arc<dyn Fn() + Send + Sync>;
@@ -119,6 +121,7 @@ impl MemLedger {
             context_delay: Mutex::new(std::time::Duration::ZERO),
             context_block: Mutex::new(std::time::Duration::ZERO),
             steps: steps::StepProbe::default(),
+            notes: openai::Notes::default(),
         }
     }
 
@@ -140,6 +143,7 @@ impl MemLedger {
 }
 
 mod helpers;
+mod openai;
 mod steps;
 
 impl MemLedger {
@@ -401,6 +405,7 @@ impl CallLedger for MemLedger {
             i.calls.get_mut(&key).expect("call").phase = CallPhase::Open {
                 approval: Some(a.nonce.clone()),
             };
+            self.notes.opened(&a.nonce, open.delivery.as_ref());
             i.approvals.insert(
                 a.nonce.clone(),
                 ApprovalEntry {
@@ -442,11 +447,16 @@ impl CallLedger for MemLedger {
 
     fn approval(&self, nonce: ApprovalId) -> Reply<'_, StoredApproval> {
         self.with(|i, _| {
-            i.approvals
-                .get(&nonce)
-                .map(|e| e.stored.clone())
+            let found = i.approvals.get(&nonce).map(|e| e.stored.clone());
+            found
+                .map(|s| self.notes.with_receipt(s, &nonce))
                 .ok_or(Error::Missing)
         })
+    }
+
+    fn finish_blocked(&self, f: FinishCall, why: ApprovalBlock) -> Reply<'_, ()> {
+        let (run, call, done) = (f.attempt.run.clone(), f.call.clone(), self.finish(f));
+        Box::pin(async move { done.await.map(|()| self.notes.blocked(&run, &call, why)) })
     }
 
     fn supersede(&self, nonce: ApprovalId, actor: PrincipalId) -> Reply<'_, ()> {

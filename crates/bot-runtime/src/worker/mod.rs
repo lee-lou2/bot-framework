@@ -23,7 +23,7 @@ mod tests;
 pub use delivery::Delivery;
 
 use crate::host::{Deps, Handback, Quiesce, WorkerConfig};
-use bot_core::command::{Failure, Finish, Retry};
+use bot_core::command::{Failure, Finish, Retry, RunOutcome};
 use std::sync::Arc;
 use tokio::{sync::watch, task::JoinSet};
 
@@ -46,7 +46,8 @@ pub enum Outcome {
 
 /// run 실행의 중간 결말(보고 전).
 pub(crate) enum Flow {
-    Done(Finish),
+    /// 결과와, 같은 커밋에 기록할 실행 계량(잘림·실측 사용량)
+    Done(Finish, RunOutcome),
     /// 목적지가 다른 예약 회신을 소유자가 승인해 저장소가 등록과 run 완료를 한 커밋으로 마쳤다(워커가 `finish`로 다시 끝내지 않는다).
     Delivered,
     Parked,

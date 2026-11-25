@@ -13,6 +13,23 @@ use crate::{
 };
 use bot_core::{ledger::OpenApproval, port::Error};
 
+/// 이 실행의 루트가 접수 원장의 인증된 API 행이면 그 행의 (인증된 주체, 접수 때 확인한 전달 설치 team). 아니면 `None`.
+async fn api_origin(
+    pool: &sqlx::PgPool,
+    profile: &str,
+    run: &str,
+) -> R<Option<(String, Option<String>)>> {
+    Ok(sqlx::query_as(
+        "select q.principal, q.api_team from bot_runs r
+         join bot_requests q on q.profile = r.profile and q.run = r.root and q.api_endpoint is not null
+         where r.profile = $1 and r.id = $2",
+    )
+    .bind(profile)
+    .bind(run)
+    .fetch_optional(pool)
+    .await?)
+}
+
 impl Store {
     /// 승인을 연다. 호출이 `Open`일 때만, 이전 대기·승인은 `Superseded`로 닫는다. run은 승인 대기로 넘어간다.
     pub(crate) async fn approval_open(&self, open: OpenApproval) -> R<()> {
@@ -48,8 +65,22 @@ impl Store {
         if create_to && self.activation.is_none() {
             return Err(Error::Denied.into());
         }
+        // OpenAI 호환 입구로 접수된 실행(루트가 접수 원장의 인증된 API 행)의 승인은 전부 활성 집합 잠금 아래에서 연다: 브로커가 승인 경로(지정된 사람·전달 바인딩)를
+        // 확인한 집합이 이 커밋에서도 현재 집합이어야 한다. 교체가 먼저 커밋됐으면 옛 로컬 카드도 옛 전달 작업도 만들지 않는다(`Stale`). 집합을 고정하지 않은 핸들은
+        // 비교할 대상이 없어 거절한다. 접수 행은 만든 뒤 바뀌지 않아 트랜잭션 밖에서 읽어도 같다. 본문·레거시 실행의 승인은 예전처럼 연다.
+        let origin = api_origin(&self.pool, &a.attempt.profile.0, &a.attempt.run.0).await?;
+        if origin.is_some() && self.activation.is_none() {
+            return Err(Error::Denied.into());
+        }
+        // 전달 바인딩은 접수 원장이 보증한 루트의, 접수 때 확인한 전달 설치(team)가 있는 요청만 받는다. 브로커가 싣는 값이 아니라 접수 행이 근거다.
+        // 아무것도 기록하기 전에 거절한다
+        let slack = match (&open.delivery, &origin) {
+            (None, _) => None,
+            (Some(binding), Some((_, Some(team)))) => Some((binding, team.clone())),
+            (Some(_), _) => return Err(Error::Denied.into()),
+        };
         let routed = delivery || create_to;
-        let mut tx = if routed {
+        let mut tx = if routed || origin.is_some() {
             self.begin_authorized().await?
         } else {
             self.pool.begin().await?
@@ -76,6 +107,13 @@ impl Store {
             if kind == "channel" {
                 return Err(Error::Denied.into());
             }
+        }
+        // API 출처 승인의 요청자는 접수 행이 인증한 주체(위임 자식도 루트의 주체를 이어받는다)와 같아야 한다: 브로커가 싣는 값이 아니라 접수 행이 근거다.
+        // 아무것도 기록하기 전에 거절한다
+        if let Some((principal, _)) = &origin
+            && *principal != a.requester.0
+        {
+            return Err(Error::Denied.into());
         }
         let call = lock_call(&mut tx, &a.attempt, &a.call).await?;
         // 예약 회신 승인은 동결한 초안의 승인 문서가 카드에 그대로 보이고 소유자 본인이 승인자일 때만 연다
@@ -155,14 +193,35 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         // 푸시 대화에는 승인 카드를 회신 행으로 같은 커밋에 쌓는다(브로커가 만든 카드만 허용한다)
-        let (kind, binding): (String, String) = sqlx::query_as(
-            "select conv_kind, binding from bot_runs where profile = $1 and id = $2",
+        let (kind, binding, revision): (String, String, String) = sqlx::query_as(
+            "select conv_kind, binding, revision from bot_runs where profile = $1 and id = $2",
         )
         .bind(&run.profile)
         .bind(&run.id)
         .fetch_one(&mut *tx)
         .await?;
-        if kind == "channel" && routed {
+        if let Some((delivery, team)) = slack {
+            // OpenAI 호환 입구로 접수된 실행의 일반 도구 승인: 지정된 사람의 Slack DM으로만 전달한다(전달 바인딩은 브로커가 승인 경로에서 정했다).
+            // 인증된 접수 원장이 보증한 루트(위임 자식이면 그 루트)일 때만 받는다: 본문·레거시 webhook 실행에는 이 경로가 없다. 카드는 영수증이 확정되기 전까지 열리지 않고,
+            // 원래 요청의 바인딩·요청자·판본·전달 설치(team)를 작업에 고정해 둔다. HTTP 출처에는 원래 채널이 없어 공개 안내를 쌓지 않는다
+            ids_ok(&[&delivery.0])?;
+            sqlx::query(
+                "insert into bot_card_jobs (nonce, profile, run, binding, owner, generation, origin_binding, requester, revision, origin_team)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            )
+            .bind(&a.nonce.0)
+            .bind(&run.profile)
+            .bind(&run.id)
+            .bind(&delivery.0)
+            .bind(&a.approver.0)
+            .bind(a.attempt.generation.0 as i64)
+            .bind(&binding)
+            .bind(&a.requester.0)
+            .bind(&revision)
+            .bind(team)
+            .execute(&mut *tx)
+            .await?;
+        } else if kind == "channel" && routed {
             // 채널 출처의 명시 목적지 생성·전송 초안 카드는 공개 채널에 올리지 않는다: 소유자 1:1 DM으로만 전달한다. 같은 커밋에 전달 작업을 쌓아 두면
             // 카드는 영수증(DM 채널·메시지 ts)이 확정될 때까지 열리지 않는다(결정·목록·클릭 대상 아님). 공개 안내는 그 확정 커밋의 한 줄뿐이다
             sqlx::query(

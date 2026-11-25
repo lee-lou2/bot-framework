@@ -93,6 +93,7 @@ pub fn open_delivery(approval: &Approval, document: &str) -> OpenApproval {
         approval: approval.clone(),
         reasons: vec!["irreversible".into()],
         card: card_for(&approval.nonce.0, document),
+        delivery: None,
     }
 }
 

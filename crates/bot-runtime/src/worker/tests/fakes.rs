@@ -125,6 +125,8 @@ fn base(run: &str, generation: u64, target: Target, kind: ConversationKind) -> R
             id: "c1".into(),
             thread: None,
         },
+        binding: BindingId("desk".into()),
+        api: None,
         scopes: scopes(&["run", "calendar.read", "calendar.delete"]),
         private_memory_read: false,
         work: Work {
@@ -184,6 +186,8 @@ pub(super) struct RunsState {
     pub history: Vec<Turn>,
     pub steps: Vec<Step>,
     pub finished: Vec<Finish>,
+    /// `finish_with`로 받은 실행 계량(완료마다 하나)
+    pub outcomes: Vec<RunOutcome>,
     pub failed: Vec<Failure>,
     pub renews: u32,
     pub renew_script: VecDeque<Result<Beat, Error>>,
@@ -260,6 +264,10 @@ impl RunStore for FakeRuns {
             state.finished.push(done);
         }
         Box::pin(async move { error.map_or(Ok(()), Err) })
+    }
+    fn finish_with(&self, at: Attempt, done: Finish, outcome: RunOutcome) -> Reply<'_, ()> {
+        lock(&self.state).outcomes.push(outcome);
+        self.finish(at, done)
     }
     fn fail(&self, _: Attempt, failure: Failure) -> Reply<'_, Retry> {
         lock(&self.state).failed.push(failure);
@@ -479,6 +487,7 @@ pub(super) fn say(text: &str) -> Result<ModelStep, ModelError> {
             input_tokens: 10,
             output_tokens: 3,
         },
+        outcome: Default::default(),
     })
 }
 

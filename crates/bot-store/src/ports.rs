@@ -11,6 +11,7 @@ use bot_core::{
         HoldRef, HoldVerdict, HoldView, Listing, ProfileStatus, RunDetail, RunQuery, RunView,
         Viewer,
     },
+    api::ApprovalBlock,
     command::*,
     id::*,
     intake::{DeliveryKey, DeliveryOutcome, Outbox, Outgoing, RequestKey, RequestState},
@@ -65,6 +66,10 @@ impl RunStore for Store {
 
     fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, ()> {
         reply!(async move { self.finish_run(&attempt, done).await })
+    }
+
+    fn finish_with(&self, attempt: Attempt, done: Finish, outcome: RunOutcome) -> Reply<'_, ()> {
+        reply!(async move { self.finish_run_with(&attempt, done, Some(outcome)).await })
     }
 
     fn fail(&self, attempt: Attempt, failure: Failure) -> Reply<'_, Retry> {
@@ -236,6 +241,10 @@ impl CallLedger for Store {
 
     fn finish(&self, finish: FinishCall) -> Reply<'_, ()> {
         reply!(self.call_finish(finish))
+    }
+
+    fn finish_blocked(&self, finish: FinishCall, why: ApprovalBlock) -> Reply<'_, ()> {
+        reply!(self.call_finish_with(finish, Some(why)))
     }
 }
 

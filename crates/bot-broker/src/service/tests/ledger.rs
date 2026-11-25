@@ -175,6 +175,7 @@ fn opening_a_new_approval_supersedes_the_old_one_and_decisions_wake_the_run() {
         },
         reasons: vec![],
         card: JsonPayload("{}".into()),
+        delivery: None,
     };
     block_on(ledger.open_approval(open("n1"))).unwrap();
     block_on(ledger.open_approval(open("n2"))).unwrap();

@@ -109,6 +109,21 @@ impl Store {
         .await?)
     }
 
+    /// 묶음을 처음 보관한 DB 시각(Unix 밀리초). 행은 바뀌지 않으므로 몇 번을 읽어도 같다. 없으면 None.
+    pub(crate) async fn bundle_created_ms(
+        &self,
+        profile: &ProfileId,
+        revision: &Revision,
+    ) -> R<Option<i64>> {
+        Ok(sqlx::query_scalar(
+            "select created_ms from bot_profile_bundles where profile = $1 and revision = $2",
+        )
+        .bind(&profile.0)
+        .bind(&revision.0)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub(crate) async fn pinned(
         &self,
         target: &BTreeMap<ProfileId, Revision>,
@@ -130,6 +145,15 @@ impl ProfileBundles for Store {
         let (profile, revision) = (profile.clone(), revision.clone());
         Box::pin(async move {
             self.bundle_get(&profile, &revision)
+                .await
+                .map_err(Fail::into_core)
+        })
+    }
+
+    fn created_ms(&self, profile: &ProfileId, revision: &Revision) -> Reply<'_, Option<i64>> {
+        let (profile, revision) = (profile.clone(), revision.clone());
+        Box::pin(async move {
+            self.bundle_created_ms(&profile, &revision)
                 .await
                 .map_err(Fail::into_core)
         })

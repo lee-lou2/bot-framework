@@ -40,6 +40,19 @@ pub fn entrance(kind: &Adapter) -> String {
         }
         Adapter::SlackDm { workspace } => format!("slack:{workspace}:dm"),
         Adapter::Http { endpoint } => format!("http:{endpoint}"),
+        // 같은 별칭에 모델을 여러 개 둘 수 있어, 프로필 안에서는 (별칭, 모델)이 입구다
+        Adapter::OpenAi {
+            endpoint, model, ..
+        } => format!("http:{endpoint}/{model}"),
+    }
+}
+
+/// 입구를 소유하는 단위의 정규 문자열. 활성 프로필 전체에서 한 프로필만 쓸 수 있다.
+/// OpenAI 입구는 별칭 하나를 프로필 하나가 소유하고 그 안에서 모델을 여러 개 둔다(그래서 별칭이 단위다).
+pub fn owner_key(kind: &Adapter) -> String {
+    match kind {
+        Adapter::OpenAi { endpoint, .. } => format!("http:{endpoint}"),
+        other => entrance(other),
     }
 }
 
@@ -48,6 +61,7 @@ pub fn adapter_name(kind: &Adapter) -> &'static str {
         Adapter::Cli { .. } => "cli",
         Adapter::SlackChannel { .. } | Adapter::SlackDm { .. } => "slack",
         Adapter::Http { .. } => "http",
+        Adapter::OpenAi { .. } => "openai",
     }
 }
 

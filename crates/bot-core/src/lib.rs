@@ -1,6 +1,7 @@
 //! 역할 사이의 데이터와 포트 계약. 구현은 각 담당 크레이트가 제공한다.
 //! 예정 수락 시험: preserves_run_identity, prevents_cross_profile_lookup.
 pub mod admin;
+pub mod api;
 pub mod canon;
 pub mod cards;
 pub mod cli;

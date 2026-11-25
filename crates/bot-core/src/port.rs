@@ -49,6 +49,10 @@ pub trait RunStore: Send + Sync {
     fn checkpoint_batch(&self, attempt: Attempt, steps: Vec<Step>) -> Reply<'_, ()>;
     /// 결과·답(outbox)·부모 깨우기를 한 커밋으로 기록한다.
     fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, ()>;
+    /// `finish`와 같되 실행 계량(잘림·사용량)도 같은 커밋에 기록한다. 계량을 저장하지 않는 구현은 계량을 버리고 `finish`로 끝낸다(기본 구현).
+    fn finish_with(&self, attempt: Attempt, done: Finish, _outcome: RunOutcome) -> Reply<'_, ()> {
+        self.finish(attempt, done)
+    }
     /// 일시 오류는 백오프 재시도, 영구 오류·시도 한도 초과는 dead letter.
     fn fail(&self, attempt: Attempt, failure: Failure) -> Reply<'_, Retry>;
     /// 같은 대화의 최근 차례(오래된 순). 요청자에게 보이는 것만.

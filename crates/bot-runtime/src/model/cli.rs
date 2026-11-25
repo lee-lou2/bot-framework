@@ -241,6 +241,7 @@ pub(crate) fn final_step(output: Output) -> ModelStep {
     ModelStep::Final {
         text: output.text,
         usage: output.usage,
+        outcome: output.outcome,
     }
 }
 

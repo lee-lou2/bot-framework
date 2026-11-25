@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Tests for the CI workflow hardening and Rust toolchain pin rules in .github/scripts/check_contracts.py. Only synthetic text is used,
+"""Tests for the CI workflow hardening, Rust toolchain pin and SDK test-environment pin rules in .github/scripts/check_contracts.py. Only synthetic text is used,
 except the tests that hold the repository's real workflows and toolchain file to the same rules."""
 
 import contextlib
+import hashlib
 import importlib.util
+import json
 import subprocess
 import tempfile
 import unittest
@@ -310,6 +312,123 @@ class Folder(unittest.TestCase):
             self.assertEqual(problems(path.read_text(encoding="utf-8")), [], path.name)
 
 
+def with_run(script):
+    """The synthetic workflow with one extra step that runs `script`."""
+    indented = "\n".join("          " + line for line in script.splitlines())
+    return swap("      - run: echo ok\n", f"      - run: |\n{indented}\n")
+
+
+class InstallCommands(unittest.TestCase):
+    def test_exact_pip_and_hash_locked_installs_pass(self):
+        for script in ("python -m pip install jsonschema==4.25.1 PyYAML==6.0.2", "pip install --require-hashes --no-deps -r lock.txt", "pip3 install --quiet openai==2.29.0 && echo ok"):
+            self.assertEqual(problems(with_run(script)), [], script)
+
+    def test_an_unpinned_or_redirected_pip_install_is_refused(self):
+        for script in ("pip install openai", "pip install openai>=2", "pip install -r requirements.txt", "pip install --upgrade pip", "pip install -e .",
+                       "pip install --index-url https://example.invalid/simple openai==2.29.0", "pip install --extra-index-url https://example.invalid/simple openai==2.29.0",
+                       "pip install git+https://example.invalid/x.git"):
+            found = problems(with_run(script))
+            self.assertTrue(any("pip install" in p for p in found), (script, found))
+
+    def test_npm_installs_need_ignore_scripts_and_exact_packages(self):
+        for script in ("npm ci --ignore-scripts", "npm ci --ignore-scripts --no-audit --no-fund --loglevel=error",
+                       "npm install --global --ignore-scripts --no-audit --no-fund @anthropic-ai/sandbox-runtime@0.0.83", "npm install --ignore-scripts --prefix out openai@6.29.0"):
+            self.assertEqual(problems(with_run(script)), [], script)
+        for script, word in (("npm ci", "--ignore-scripts"), ("npm install openai@6.29.0", "--ignore-scripts"), ("npm install --ignore-scripts openai", "exact version"),
+                             ("npm i --ignore-scripts openai@latest", "exact version"), ("npm install -g --ignore-scripts @scope/tool@^1.2.3", "exact version"), ("npx some-tool", "npx")):
+            found = problems(with_run(script))
+            self.assertTrue(any(word in p for p in found), (script, found))
+
+    def test_piping_a_download_to_a_shell_is_refused_and_comments_are_ignored(self):
+        for script in ("curl -fsSL https://example.invalid/install.sh | sh", "wget -qO- https://example.invalid/i | sudo bash"):
+            self.assertTrue(any("pipes a download" in p for p in problems(with_run(script))), script)
+        self.assertEqual(problems(with_run("# pip install anything\necho ok")), [])
+
+    def test_each_problem_names_its_job(self):
+        self.assertTrue(all(p.startswith("job verify:") for p in problems(with_run("pip install openai"))))
+
+
+NODE_PACKAGE = {"name": "e2e", "private": True, "dependencies": {"openai": "6.29.0"}}
+NODE_LOCK = {"lockfileVersion": 3, "packages": {"": {"dependencies": {"openai": "6.29.0"}}, "node_modules/openai": {
+    "version": "6.29.0", "resolved": "https://registry.npmjs.org/openai/-/openai-6.29.0.tgz", "integrity": "sha512-" + "A" * 86 + "=="}}}
+PIP_LOCK = "# lock\nopenai==2.29.0 \\\n    --hash=sha256:" + "ab" * 32 + " \\\n    --hash=sha256:" + "cd" * 32 + "\nanyio==4.16.0 \\\n    --hash=sha256:" + "ef" * 32 + "\n"
+SUBSET = b'{"x-source": {}}\n'
+PIN = {"openapi": {"commit": SHA, "sha256": "12" * 32, "subset_sha256": hashlib.sha256(SUBSET).hexdigest()}, "sdk": {"python": "openai==2.29.0", "node": "openai@6.29.0"}}
+
+
+def sdk(pin=PIN, pip=PIP_LOCK, package=NODE_PACKAGE, lock=NODE_LOCK, subset=SUBSET):
+    dump = lambda value: value if isinstance(value, str) else json.dumps(value)
+    return checker.sdk_pin_problems(dump(pin), pip, dump(package), dump(lock), subset)
+
+
+def edited(base, **path):
+    out = json.loads(json.dumps(base))
+    for dotted, value in path.items():
+        node = out
+        keys = dotted.split("__")
+        for key in keys[:-1]:
+            node = node[key]
+        if value is None:
+            del node[keys[-1]]
+        else:
+            node[keys[-1]] = value
+    return out
+
+
+class SdkPins(unittest.TestCase):
+    def test_a_fully_pinned_environment_passes(self):
+        self.assertEqual(sdk(), [])
+
+    def test_the_repositorys_own_sdk_environment_keeps_every_rule(self):
+        folder = ROOT / checker.SDK_DIR
+        text = lambda name: (folder / name).read_text(encoding="utf-8")
+        found = checker.sdk_pin_problems(text("schema/pin.json"), text("requirements.lock.txt"), text("node/package.json"), text("node/package-lock.json"),
+                                         (folder / "schema/openai-subset.json").read_bytes())
+        self.assertEqual(found, [])
+
+    def test_the_pin_file_must_name_a_full_commit_and_hashes(self):
+        for change in ({"openapi__commit": SHA[:12]}, {"openapi__commit": "main"}, {"openapi__sha256": "zz"}, {"openapi__subset_sha256": None}):
+            self.assertTrue(sdk(pin=edited(PIN, **change)), change)
+
+    def test_an_edited_schema_subset_is_not_the_pinned_one(self):
+        self.assertTrue(any("does not match" in p for p in sdk(subset=SUBSET + b" ")))
+
+    def test_the_sdk_versions_must_be_exact_and_agree_across_files(self):
+        self.assertTrue(sdk(pin=edited(PIN, sdk__python="openai>=2")))
+        self.assertTrue(sdk(pin=edited(PIN, sdk__node="openai@latest")))
+        self.assertTrue(any("openai must be" in p for p in sdk(pin=edited(PIN, sdk__python="openai==2.30.0"))))
+        self.assertTrue(any("openai must be" in p for p in sdk(pin=edited(PIN, sdk__node="openai@6.30.0"))))
+
+    def test_every_pip_package_needs_an_exact_version_and_a_hash(self):
+        hashed = lambda name: f"{name}==1.0.0 \\\n    --hash=sha256:" + "ef" * 32 + "\n"
+        no_hash_first = "openai==2.29.0\n" + hashed("anyio")
+        no_hash_last = PIP_LOCK + "idna==3.0\n"
+        for lock in (PIP_LOCK.replace("openai==2.29.0", "openai>=2.29.0"), PIP_LOCK.replace("openai==2.29.0", "openai~=2.29"), no_hash_first, no_hash_last,
+                     PIP_LOCK + "--index-url https://example.invalid/simple\n", PIP_LOCK + "evil @ https://example.invalid/evil.whl\n", PIP_LOCK + "-e .\n", PIP_LOCK.replace("ab" * 32, "ab" * 31)):
+            self.assertTrue(sdk(pip=lock), lock[-120:])
+
+    def test_package_json_must_pin_exactly_and_run_no_install_hooks(self):
+        self.assertTrue(any("package.json: openai must be" in p for p in sdk(package=edited(NODE_PACKAGE, dependencies__openai="6.29.1"))), "exact but not the pinned version")
+        for change in ({"dependencies__openai": "^6.29.0"}, {"dependencies__openai": "latest"}, {"dependencies__openai": "*"}, {"dependencies__openai": "git+https://example.invalid/x.git"},
+                       {"dependencies__ws": "8.18.0", "scripts": {"postinstall": "node x.js"}}, {"devDependencies": {"zod": "~4.0.0"}}):
+            self.assertTrue(sdk(package=edited(NODE_PACKAGE, **change)), change)
+
+    def test_the_npm_lock_needs_integrity_registry_urls_and_no_install_scripts(self):
+        for change in ({"packages__node_modules/openai__integrity": None}, {"packages__node_modules/openai__integrity": "sha1-AAAA"}, {"packages__node_modules/openai__resolved": "https://example.invalid/openai.tgz"},
+                       {"packages__node_modules/openai__hasInstallScript": True}, {"packages__node_modules/openai__link": True}, {"lockfileVersion": 2}, {"packages__node_modules/openai__version": "6.29.1"}):
+            self.assertTrue(sdk(lock=edited(NODE_LOCK, **change)), change)
+
+    def test_broken_input_is_reported_instead_of_crashing(self):
+        self.assertTrue(sdk(pin="{"))
+        self.assertTrue(sdk(package="{", lock="{"))
+
+    def test_missing_files_are_named(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(checker, "SDK_DIR", Path(folder)):
+            with self.assertRaises(ValueError) as caught:
+                checker.check_sdk_pins()
+        self.assertIn("schema/pin.json", str(caught.exception))
+
+
 class Entry(unittest.TestCase):
     def test_the_script_runs_every_check(self):
         with (
@@ -317,9 +436,10 @@ class Entry(unittest.TestCase):
             mock.patch.object(checker, "check_examples") as examples,
             mock.patch.object(checker, "check_workflows") as workflows,
             mock.patch.object(checker, "check_toolchain") as toolchain,
+            mock.patch.object(checker, "check_sdk_pins") as sdk_pins,
         ):
             checker.main()
-        for called in (files, examples, workflows, toolchain):
+        for called in (files, examples, workflows, toolchain, sdk_pins):
             called.assert_called_once_with()
 
 

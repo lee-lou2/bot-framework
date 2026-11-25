@@ -156,6 +156,22 @@ pub struct Finish {
     pub answers: Vec<JsonPayload>,
 }
 
+/// 공급자가 보고한 토큰 수. 입력(`prompt`)은 공급자가 정의한 캐시 입력 토큰을 한 번 포함한다.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TokenUsage {
+    pub prompt: u64,
+    pub completion: u64,
+}
+
+/// 성공 완료와 같은 커밋에 저장하는 실행 계량. 기본은 «잘리지 않음·사용량 모름»이다.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RunOutcome {
+    /// 최종 글이 호스트 상한(최대 출력 토큰)으로 실제로 잘렸다.
+    pub truncated: bool,
+    /// 실제 전체 실행의 신뢰할 수 있는 계수가 모두 있을 때만 Some. 재개·위임·미측정으로 합계를 보장할 수 없으면 None이다(0으로 채우지 않는다).
+    pub usage: Option<TokenUsage>,
+}
+
 /// 사유는 고정 어휘 코드만 쓴다(로그·감사에 자유 문장을 남기지 않는다).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failure {

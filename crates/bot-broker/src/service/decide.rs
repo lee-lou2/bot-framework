@@ -7,11 +7,17 @@ use super::{
     schedule::{self, CREATE_TOOL, REVISION as SCHEDULE_REVISION, create_tool_to},
     share::{SHARE_REVISION, SHARE_TOOL, share_approver, share_class, share_tool},
 };
-use crate::{approval::same_binding, approver::approver_for, classify::classify, scope::authorize};
+use crate::{
+    approval::same_binding,
+    approver::{approver_for, openai},
+    classify::classify,
+    scope::authorize,
+};
 use bot_core::{
     id::*,
     ledger::*,
     port::Error,
+    profile::ApprovalRoute,
     schedule::{DELIVER_REVISION, DELIVER_TOOL, DeliveryFence, DeliveryTarget, UnsentReason},
 };
 
@@ -23,6 +29,26 @@ enum Check {
     Changed,
     /// 전송 카드의 수신자가 지금 등록부에서 빠졌거나 다른 경로가 됐다(확정): 이 발생을 미발송으로 끝낸다.
     Unrouted(DeliveryTarget),
+}
+
+/// Slack 경로의 카드는 게시를 확인한 영수증(팀·DM·ts)이 있어야 하고, 그 영수증이 지정한 사람·전달 바인딩·프로필의 것이어야 누를 수 있다. 영수증이 아직 없으면 카드가
+/// 열리지 않은 것이라 `Conflict`(저장소도 같은 이유로 거절한다), 다른 사람·바인딩의 것이면 `Stale`이다. 어느 쪽이든 이 클릭만 거절하고 카드와 승인은 그대로다
+/// (위조·이른 클릭이 정상 카드를 닫지 못한다). 로컬 경로는 영수증이 없다(본인 인증된 관리 화면).
+fn receipt_matches(stored: &StoredApproval, found: &openai::Origin) -> Result<(), Error> {
+    let ApprovalRoute::Slack { person, binding } = &found.route else {
+        return Ok(());
+    };
+    match &stored.delivery {
+        Some(receipt)
+            if receipt.owner == *person
+                && receipt.binding == *binding
+                && receipt.profile == stored.approval.attempt.profile =>
+        {
+            Ok(())
+        }
+        None => Err(Error::Conflict),
+        Some(_) => Err(Error::Stale),
+    }
 }
 
 impl BrokerService {
@@ -197,6 +223,7 @@ impl BrokerService {
             let Decl {
                 resolved,
                 current: snapshot,
+                pinned,
                 ..
             } = self.declarations(ctx, &approval.attempt.profile, &approval.tool)?;
             let class = classify(
@@ -205,7 +232,22 @@ impl BrokerService {
                 ctx.private_memory_read,
             );
             // 지금 판본이 지정한 승인자. 카드가 보여 준 승인자와 같아야 한다(바뀌었으면 옛 승인자의 버튼은 거절한다).
-            let approver = approver_for(ctx, &snapshot);
+            // OpenAI 출처 실행은 고정·현재 판본이 같은 사람·경로를 가리킬 때만이고, Slack 경로는 확정한 게시 영수증이 그 사람·전달 바인딩의 것이어야 누를 수 있다.
+            let approver = match openai::for_run(ctx, &pinned, &snapshot) {
+                Some(Ok(found)) => {
+                    receipt_matches(stored, &found)?;
+                    // 카드가 올라간 설치가 지금 호스트의 같은 설치여야 한다(같은 별칭의 team_id만 바뀐 재배포의 옛 카드). 어긋나면 조건이 바뀐 것과 같다: 옛 버튼은 무효이고
+                    // 깨어난 run이 새 카드를 열면 원래 요청에 고정한 설치와 달라 게시 전에 `route_changed`로 닫힌다. 확인하지 못했으면 이 클릭만 다시 시도하게 한다.
+                    match self.card_site(stored, &snapshot, &found) {
+                        Route::Same => {}
+                        Route::Gone => return Ok(Check::Changed),
+                        Route::Unsure => return Err(Error::Unavailable),
+                    }
+                    Some(found.route.person().clone())
+                }
+                Some(Err(_)) => None,
+                None => approver_for(ctx, &snapshot),
+            };
             (snapshot, resolved.tool.revision.clone(), class, approver)
         };
         let Some(approver) = approver else {

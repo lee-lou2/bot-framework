@@ -169,7 +169,7 @@ impl Store {
             == 1;
         if !fresh {
             let row = sqlx::query(
-                "select input_sha256, run from bot_requests
+                "select input_sha256, run, api_endpoint from bot_requests
                  where profile = $1 and binding = $2 and principal = $3 and request = $4",
             )
             .bind(profile)
@@ -179,8 +179,10 @@ impl Store {
             .fetch_one(&mut *tx)
             .await?;
             let stored: Vec<u8> = row.get("input_sha256");
+            let api: Option<String> = row.get("api_endpoint");
             tx.rollback().await?;
-            return if stored.as_slice() == c.digest.as_slice() {
+            // 키로 이어지는 입구(OpenAI 호환)의 접수 행은 일반 접수가 읽거나 이어받지 못한다: 같은 키는 충돌이다(재배포로 입구 종류가 바뀌어도 옛 작업은 새지 않는다)
+            return if api.is_none() && stored.as_slice() == c.digest.as_slice() {
                 Ok(RunId(row.get("run")))
             } else {
                 Err(Error::Conflict.into())
@@ -203,7 +205,8 @@ impl Store {
         let row = sqlx::query(
             "select r.id, r.state, r.result, q.http_method, q.http_path, q.http_response from bot_requests q
              join bot_runs r on r.profile = q.profile and r.id = q.run
-             where q.profile = $1 and q.binding = $2 and q.principal = $3 and q.request = $4",
+             where q.profile = $1 and q.binding = $2 and q.principal = $3 and q.request = $4
+               and q.api_endpoint is null",
         )
         .bind(&key.profile.0)
         .bind(&key.binding.0)

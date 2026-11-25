@@ -75,6 +75,11 @@ pub fn entrance_secrets(snapshot: &Snapshot, gateway: &HostConfig) -> BTreeSet<S
                     names.insert(config.key.clone());
                 }
             }
+            Adapter::OpenAi { endpoint, .. } => {
+                if let Some(config) = gateway.http.openai.get(endpoint) {
+                    names.extend(config.keys.values().map(|slot| slot.secret.clone()));
+                }
+            }
             Adapter::Cli { .. } => {}
         }
     }
@@ -188,6 +193,65 @@ pub async fn weak_http_keys(
     weak
 }
 
+/// OpenAI 호환 입구의 키 슬롯 값 점검(값은 모양과 겹침만 보고 어디에도 남기지 않는다). 인증이 슬롯 값을 요청마다 읽어 대조하므로,
+/// 모양이 틀린 값은 아무도 인증하지 못하고, 한 값이 슬롯 둘 이상에(입구·프로필이 달라도) 있으면 그 키가 모든 요청에서 거절된다 — 시작 전에 막는다.
+/// 없는 값은 `missing_named`가 알린다.
+pub async fn weak_openai_keys(
+    store: &dyn SecretStore,
+    snapshots: &[std::sync::Arc<Snapshot>],
+    gateway: &HostConfig,
+) -> Vec<String> {
+    use bot_core::profile::Adapter;
+    use bot_gateway::host::openai_key_shaped;
+    use sha2::{Digest, Sha256};
+    let mut problems = Vec::new();
+    // 값의 지문 → 처음 쓴 (프로필, 입구, 슬롯)
+    let mut seen: std::collections::BTreeMap<[u8; 32], (String, String, String)> =
+        Default::default();
+    for snapshot in snapshots {
+        let Ok(handle) = store.for_profile(snapshot.id.clone()).await else {
+            continue;
+        };
+        let endpoints: BTreeSet<&String> = snapshot
+            .bindings
+            .values()
+            .filter_map(|binding| match &binding.source {
+                Adapter::OpenAi { endpoint, .. } => Some(endpoint),
+                _ => None,
+            })
+            .collect();
+        for endpoint in endpoints {
+            let Some(config) = gateway.http.openai.get(endpoint) else {
+                continue;
+            };
+            for (slot, key) in &config.keys {
+                let Some(name) = SecretName::parse(&key.secret) else {
+                    continue;
+                };
+                let Ok(value) = handle.resolve(name).await else {
+                    continue;
+                };
+                let value = value.0.trim_ascii();
+                if !openai_key_shaped(value) {
+                    problems.push(format!(
+                        "{}: OpenAI 입구 {endpoint}의 키 슬롯 {slot}의 값이 키 모양이 아니에요(공백 없는 ASCII 32~256바이트여야 해요)",
+                        snapshot.id.0
+                    ));
+                    continue;
+                }
+                let here = (snapshot.id.0.clone(), endpoint.clone(), slot.clone());
+                if let Some(first) = seen.insert(Sha256::digest(value).into(), here.clone()) {
+                    problems.push(format!(
+                        "{}: OpenAI 입구 {endpoint}의 키 슬롯 {slot}이(가) {}/{}의 슬롯 {}과(와) 같은 값을 써요 — 슬롯마다 다른 키여야 해요(같으면 그 키는 인증되지 않아요)",
+                        here.0, first.0, first.1, first.2
+                    ));
+                }
+            }
+        }
+    }
+    problems
+}
+
 pub async fn run(settings: &Settings) -> Result<(), String> {
     let loaded = load(settings)?;
     let active = loaded.set.active().clone();
@@ -218,6 +282,8 @@ pub async fn run(settings: &Settings) -> Result<(), String> {
         problems.extend(weak_http_keys(&*store, snapshot, &loaded.host.gateway).await);
         problems.extend(crate::serve::seed::problems(snapshot));
     }
+    let snapshots: Vec<_> = active.values().cloned().collect();
+    problems.extend(weak_openai_keys(&*store, &snapshots, &loaded.host.gateway).await);
     if !problems.is_empty() {
         return Err(problems.join("\n"));
     }
@@ -356,5 +422,146 @@ mod tests {
         assert!(model_secrets(&snapshot, &other).is_empty());
         // providers 절이 없는 호스트(게이트웨이만 쓰는 호스트)
         assert!(model_secrets(&snapshot, &host::parse(r#"{"version": 1}"#).unwrap()).is_empty());
+    }
+
+    fn openai_gateway() -> HostConfig {
+        HostConfig::from_json(
+            r#"{"http": {"endpoints": {"openai": {"kind": "openai", "keys": {
+                "build": {"secret": "build-key", "subject": "build"},
+                "next": {"secret": "next-key", "subject": "build"}}}}}}"#,
+        )
+        .unwrap()
+    }
+
+    fn openai_profile(id: &str) -> std::sync::Arc<Snapshot> {
+        profile(id)
+            .binding(
+                "assistant",
+                bot_core::profile::Adapter::OpenAi {
+                    endpoint: "openai".into(),
+                    model: "assistant".into(),
+                    approvers: Default::default(),
+                },
+                "main",
+            )
+            .build()
+    }
+
+    #[test]
+    fn an_openai_binding_needs_the_credentials_of_every_key_slot_of_its_entrance() {
+        let names = entrance_secrets(&openai_profile("personal"), &openai_gateway());
+        assert_eq!(
+            names,
+            BTreeSet::from(["build-key".to_owned(), "next-key".to_owned()])
+        );
+        // 입구를 쓰지 않는 프로필은 그 자격을 요구하지 않는다
+        assert!(entrance_secrets(&profile("personal").build(), &openai_gateway()).is_empty());
+        // validate·관측(알려진 비밀 가리기)이 쓰는 필요한 자격 목록에도 들어간다
+        let host = host::parse(
+            r#"{"version": 1, "gateway": {"http": {"endpoints": {"openai": {"kind": "openai", "keys": {
+                "build": {"secret": "build-key", "subject": "build"}}}}}}}"#,
+        )
+        .unwrap();
+        assert!(needed_secrets(&openai_profile("personal"), &host).contains("build-key"));
+        assert!(!needed_secrets(&profile("personal").build(), &host).contains("build-key"));
+    }
+
+    #[tokio::test]
+    async fn openai_key_slots_must_hold_key_shaped_distinct_values() {
+        use bot_gateway::testing::MemorySecrets;
+        let good = "good-key-0123456789abcdef0123456789ab";
+        let other = "other-key-0123456789abcdef0123456789a";
+        let snapshots = [openai_profile("personal")];
+        let check = |entries: &[(&str, &str, &[u8])]| {
+            let store = MemorySecrets::new(entries);
+            let snapshots = snapshots.clone();
+            async move { weak_openai_keys(&*store, &snapshots, &openai_gateway()).await }
+        };
+        // 모양도 맞고 서로 다르면 문제가 없다
+        let fine = check(&[
+            ("personal", "build-key", good.as_bytes()),
+            ("personal", "next-key", other.as_bytes()),
+        ])
+        .await;
+        assert!(fine.is_empty(), "{fine:?}");
+        // 값 끝의 줄바꿈은 값이 아니다(인증과 같은 규칙)
+        let newline = format!("{good}\n");
+        assert!(
+            check(&[
+                ("personal", "build-key", newline.as_bytes()),
+                ("personal", "next-key", other.as_bytes()),
+            ])
+            .await
+            .is_empty()
+        );
+        // 너무 짧거나·공백이 있거나·ASCII가 아닌 값
+        for bad in [
+            &b"short"[..],
+            b"has a space 0123456789abcdef01234567",
+            "한글키-0123456789abcdef0123456789abcd".as_bytes(),
+        ] {
+            let problems = check(&[
+                ("personal", "build-key", bad),
+                ("personal", "next-key", other.as_bytes()),
+            ])
+            .await;
+            assert_eq!(problems.len(), 1, "{problems:?}");
+            assert!(
+                problems[0].contains("build") && problems[0].contains("키 모양"),
+                "{problems:?}"
+            );
+            // 값은 어디에도 싣지 않는다
+            assert!(
+                !problems[0].contains("short") && !problems[0].contains("한글키"),
+                "{problems:?}"
+            );
+        }
+        // 같은 값이 슬롯 둘에 있으면 그 키는 인증되지 않는다 — 시작 전에 막고, 값은 싣지 않는다
+        let same = check(&[
+            ("personal", "build-key", good.as_bytes()),
+            ("personal", "next-key", good.as_bytes()),
+        ])
+        .await;
+        assert_eq!(same.len(), 1, "{same:?}");
+        assert!(
+            same[0].contains("같은 값") && !same[0].contains(good),
+            "{same:?}"
+        );
+        // 없는 값은 여기서 알리지 않는다(`missing_named`의 몫)
+        let missing = check(&[("personal", "build-key", good.as_bytes())]).await;
+        assert!(missing.is_empty(), "{missing:?}");
+    }
+
+    #[tokio::test]
+    async fn the_same_key_value_in_two_profiles_is_caught_too() {
+        use bot_gateway::testing::MemorySecrets;
+        let value = "dup-key-0123456789abcdef0123456789abc";
+        let gateway = HostConfig::from_json(
+            r#"{"http": {"endpoints": {
+                "alpha": {"kind": "openai", "keys": {"a": {"secret": "a-key", "subject": "build"}}},
+                "beta": {"kind": "openai", "keys": {"b": {"secret": "b-key", "subject": "build"}}}}}}"#,
+        )
+        .unwrap();
+        let on = |profile_id: &str, endpoint: &str| {
+            profile(profile_id)
+                .binding(
+                    "assistant",
+                    bot_core::profile::Adapter::OpenAi {
+                        endpoint: endpoint.into(),
+                        model: "assistant".into(),
+                        approvers: Default::default(),
+                    },
+                    "main",
+                )
+                .build()
+        };
+        let store = MemorySecrets::new(&[
+            ("one", "a-key", value.as_bytes()),
+            ("two", "b-key", value.as_bytes()),
+        ]);
+        let problems =
+            weak_openai_keys(&*store, &[on("one", "alpha"), on("two", "beta")], &gateway).await;
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(!problems[0].contains(value), "{problems:?}");
     }
 }

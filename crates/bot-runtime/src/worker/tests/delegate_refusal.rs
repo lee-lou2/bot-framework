@@ -27,6 +27,7 @@ impl ModelRunner for Grab {
             Ok(ModelStep::Final {
                 text: "답".into(),
                 usage: Default::default(),
+                outcome: Default::default(),
             })
         })
     }

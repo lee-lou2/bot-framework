@@ -39,6 +39,7 @@ pub fn claude_bin() -> Option<PathBuf> {
     found
 }
 
+mod api;
 mod card;
 mod modes;
 mod moved;
@@ -47,6 +48,8 @@ mod route;
 mod sandbox;
 mod sse;
 
+#[allow(unused_imports)]
+pub use api::*;
 #[allow(unused_imports)]
 pub use card::*;
 #[allow(unused_imports)]

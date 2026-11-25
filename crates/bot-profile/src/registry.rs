@@ -7,12 +7,12 @@ use crate::{
     host::HostCatalog,
     issue::{Issue, Issues, Severity},
     limits::Limits,
-    model::entrance,
+    model::owner_key,
     scan,
 };
 use bot_core::{
     id::{ProfileId, Revision},
-    profile::{ProfileCatalog, Snapshot},
+    profile::{Adapter, ProfileCatalog, Snapshot},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -219,23 +219,36 @@ pub fn load(root: &Path, host: &HostCatalog, limits: &Limits) -> Result<ProfileS
     Ok(ProfileSet::new(snapshots, bundles, all.into_vec()))
 }
 
-/// 활성 프로필 전체에서 같은 입구를 두 번 쓸 수 없다.
+/// 활성 프로필 전체에서 같은 입구를 두 번 쓸 수 없다. OpenAI 입구(별칭)는 프로필 하나가 소유하고 그 안에서만 모델을 여러 개 둘 수 있다.
 fn cross_profile(snapshots: &BTreeMap<ProfileId, Arc<Snapshot>>, issues: &mut Issues) {
     let mut seen: HashMap<String, (&str, &str)> = HashMap::new();
     for (id, snap) in snapshots {
         for (binding_id, binding) in &snap.bindings {
-            let key = entrance(&binding.source);
-            if let Some((other, other_binding)) = seen.insert(key.clone(), (&id.0, &binding_id.0)) {
-                issues.error_at(
-                    "duplicate-entrance",
-                    &format!("{}/profile.yaml", id.0),
-                    format!("바인딩 {}", binding_id.0),
-                    format!(
-                        "입구 `{key}`를 프로필 {other}의 바인딩 {other_binding}도 써요. {}",
-                        hint::entrance_fix(&key, true)
-                    ),
-                );
+            let key = owner_key(&binding.source);
+            let openai = matches!(binding.source, Adapter::OpenAi { .. });
+            let Some((other, other_binding)) = seen.insert(key.clone(), (&id.0, &binding_id.0))
+            else {
+                continue;
+            };
+            if openai && other == id.0 {
+                continue;
             }
+            let other_openai = snapshots
+                .iter()
+                .find(|(p, _)| p.0 == other)
+                .and_then(|(_, s)| s.bindings.iter().find(|(b, _)| b.0 == other_binding))
+                .is_some_and(|(_, b)| matches!(b.source, Adapter::OpenAi { .. }));
+            let fix = if openai || other_openai {
+                hint::OPENAI_OWNER.to_owned()
+            } else {
+                hint::entrance_fix(&key, true)
+            };
+            issues.error_at(
+                "duplicate-entrance",
+                &format!("{}/profile.yaml", id.0),
+                format!("바인딩 {}", binding_id.0),
+                format!("입구 `{key}`를 프로필 {other}의 바인딩 {other_binding}도 써요. {fix}"),
+            );
         }
     }
 }

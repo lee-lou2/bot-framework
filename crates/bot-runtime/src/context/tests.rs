@@ -3,7 +3,7 @@
 use super::*;
 use bot_core::{
     command::Step,
-    id::{Generation, MemoryId, PrincipalId, ProfileId, Revision, RunId},
+    id::{BindingId, Generation, MemoryId, PrincipalId, ProfileId, Revision, RunId},
     profile::{Policy, Skill, Tool},
     state::{Conversation, ConversationKind, Visibility},
 };
@@ -127,6 +127,8 @@ fn run_context(agent: &str, scope_list: &[&str], text: &str) -> RunContext {
             id: "owner".into(),
             thread: None,
         },
+        binding: BindingId("desk".into()),
+        api: None,
         scopes: scopes(scope_list),
         private_memory_read: false,
         work: Work {
@@ -167,6 +169,8 @@ fn build<'a>(
 }
 
 const FULL: [&str; 3] = ["run", "calendar.read", "calendar.delete"];
+
+mod chat;
 
 #[test]
 fn system_has_a_fixed_shape_and_the_conversation_ends_with_the_input() {

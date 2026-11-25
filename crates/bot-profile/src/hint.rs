@@ -96,6 +96,18 @@ pub fn pattern_hint(pattern: &str) -> Option<&'static str> {
             "^/[^?#]*$",
             "`/`로 시작하는 경로여야 하고 `?`·`#`은 쓸 수 없어요. 예: `/notify`",
         ),
+        (
+            "^http:[a-z][a-z0-9]*(?:-[a-z0-9]+)*/[A-Za-z0-9._@+\\-]{1,128}$",
+            "`http:<입구 별칭>/<주체>` 형식의 HTTP 주체여야 해요(주체는 글자·숫자와 `.`·`_`·`@`·`+`·`-`, 128자까지). 예: `http:openai/build`",
+        ),
+        (
+            "^local:[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+            "`local:<CLI 계정 별칭>` 형식의 로컬 사람 신원이어야 해요. 예: `local:owner`",
+        ),
+        (
+            "^slack:[a-z][a-z0-9]*(?:-[a-z0-9]+)*/[UW][A-Z0-9]{1,31}$",
+            "`slack:<워크스페이스 별칭>/<사용자 ID>` 형식이어야 해요(사용자 ID는 Slack 프로필에서 복사한 `U`나 `W`로 시작하는 대문자·숫자). 예: `slack:home/<사용자 ID>`",
+        ),
     ];
     table
         .iter()
@@ -103,9 +115,19 @@ pub fn pattern_hint(pattern: &str) -> Option<&'static str> {
         .map(|(_, text)| *text)
 }
 
+/// 한 HTTP 별칭에 웹훅 바인딩과 OpenAI 모델 바인딩이 섞였을 때 고치는 방법.
+pub const MIXED_ENDPOINT: &str = "한 별칭은 한 가지 방식만 써요. `model`이 있는 바인딩(OpenAI 호환)과 `model`이 없는 바인딩(웹훅)은 서로 다른 `endpoint` 별칭으로 나누고, 호스트 설정의 별칭 종류(`kind`)도 맞춰 주세요";
+
+/// OpenAI 입구 별칭을 다른 프로필이 이미 쓸 때 고치는 방법.
+pub const OPENAI_OWNER: &str = "OpenAI 호환 입구 별칭은 활성 프로필 하나만 소유하고 그 안에서 모델을 여러 개 둘 수 있어요. 다른 프로필은 호스트 설정에 별칭을 따로 만들어 쓰거나, 모델을 한 프로필로 모아 주세요";
+
 /// 같은 입구를 두 바인딩이 쓸 때 고치는 방법. `key`는 `model::entrance`의 정규 문자열(`cli:owner`·`slack:home:channel:planning`·`slack:home:dm`·`http:reminders`),
 /// `across`가 참이면 서로 다른 프로필이 겹친 것이다(입구는 활성 프로필 전체에서 한 번만 쓸 수 있다).
 pub fn entrance_fix(key: &str, across: bool) -> String {
+    if key.starts_with("http:") && key.contains('/') {
+        // OpenAI 모델 바인딩(`http:<별칭>/<모델>`): 같은 별칭에서 모델 이름이 겹쳤다
+        return "같은 입구 별칭에서 공개 모델 이름은 바인딩 하나에만 연결할 수 있어요. 한쪽 바인딩을 지우거나 `model`을 다른 이름으로 바꿔 주세요".to_owned();
+    }
     let (what, field) = if key.starts_with("cli:") {
         ("CLI 계정 별칭", "`account`")
     } else if key.ends_with(":dm") {

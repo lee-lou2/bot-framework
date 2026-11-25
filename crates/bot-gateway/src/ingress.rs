@@ -13,7 +13,7 @@ use crate::{
 };
 use bot_core::{
     command::{Accept, Envelope, HttpRoute, JsonPayload, Target},
-    id::{PrincipalId, RunId},
+    id::{PrincipalId, ProfileId, Revision, RunId},
     intake::{PrivateCall, PrivateIntake, RequestKey},
     port::{Error, RunStore},
     profile::{ProfileCatalog, ResponseMode, Snapshot, TriggerSource, TriggerTarget},
@@ -158,6 +158,11 @@ impl Ingress {
         self
     }
 
+    /// 실행·승인이 고정한 판본의 스냅숏(복원하지 못하면 None). 지금의 활성 판본과 견주는 데 쓴다.
+    pub fn pinned(&self, profile: &ProfileId, revision: &Revision) -> Option<Arc<Snapshot>> {
+        self.catalog.lookup(profile, revision)
+    }
+
     pub fn limits(&self) -> &Limits {
         &self.limits
     }
@@ -262,7 +267,7 @@ impl Ingress {
         let adapter = match inbound.real {
             Real::Cli { .. } => "cli",
             Real::SlackChannel { .. } | Real::SlackDm { .. } => "slack",
-            Real::Http { .. } => "http",
+            Real::Http { .. } | Real::HttpModel { .. } => "http",
         };
         let mut seen = Seen::default();
         let admission = self.admit_inner(routes, inbound, &mut seen).await;
@@ -498,6 +503,9 @@ fn rejection_of(error: Error) -> Rejection {
         Error::Stale | Error::Missing | Error::Unavailable => Rejection::Unavailable,
     }
 }
+
+mod api;
+pub use api::{ApiInbound, ApiRelease, ApiVerdict, CHAT_PATH};
 
 #[cfg(test)]
 mod tests;

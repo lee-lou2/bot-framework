@@ -7,7 +7,7 @@ use crate::{
     replies,
 };
 use bot_core::{
-    command::Finish,
+    command::{Finish, RunOutcome},
     id::{Attempt, ClaimEpoch},
     port::Error,
     schedule::quiet_completion,
@@ -249,6 +249,16 @@ impl Store {
     /// 성공 완료. 결과·회신(outbox)·부모 깨우기가 한 커밋이다. 옛 세대·리스 만료 뒤는 `Stale`.
     /// 위임한 자식의 답은 저장하지 않는다(부모만 답한다). 자식 결과는 부모 체크포인트로 간다.
     pub(crate) async fn finish_run(&self, at: &Attempt, done: Finish) -> R<()> {
+        self.finish_run_with(at, done, None).await
+    }
+
+    /// `finish_run`과 같되 실행 계량(잘림·사용량)을 같은 커밋에 기록한다. `None`이면 계량 열은 비워 둔다(지어내지 않는다).
+    pub(crate) async fn finish_run_with(
+        &self,
+        at: &Attempt,
+        done: Finish,
+        outcome: Option<RunOutcome>,
+    ) -> R<()> {
         let (_, result) = canonical(&done.result)?;
         let answers = done
             .answers
@@ -277,6 +287,18 @@ impl Store {
             return Err(Error::Conflict.into());
         }
         end_run(&mut tx, &run, End::Succeeded(&result), "system").await?;
+        if let Some(outcome) = outcome {
+            sqlx::query(
+                "update bot_runs set truncated = $3, usage_prompt = $4, usage_completion = $5 where profile = $1 and id = $2",
+            )
+            .bind(&run.profile)
+            .bind(&run.id)
+            .bind(outcome.truncated)
+            .bind(outcome.usage.map(|u| i64::try_from(u.prompt).unwrap_or(i64::MAX)))
+            .bind(outcome.usage.map(|u| i64::try_from(u.completion).unwrap_or(i64::MAX)))
+            .execute(&mut *tx)
+            .await?;
+        }
         // 조용한 예약: 성공 결과 전체가 `<조용히>`이면 사용자에게 보낼 답이 없다(승인·오류·첨부는 이 경로로 오지 않는다)
         let quiet: bool =
             sqlx::query_scalar("select quiet from bot_runs where profile = $1 and id = $2")

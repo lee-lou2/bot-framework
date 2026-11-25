@@ -336,6 +336,9 @@ pub fn cards(s: &Snapshot) -> Vec<Card> {
             }
             Adapter::SlackDm { workspace } => ("slack", format!("{workspace} dm")),
             Adapter::Http { endpoint } => ("http", format!("endpoint {endpoint}")),
+            Adapter::OpenAi {
+                endpoint, model, ..
+            } => ("openai", format!("endpoint {endpoint} model {model}")),
         };
         out.push(
             Card::new(

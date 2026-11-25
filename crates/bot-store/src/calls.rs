@@ -393,6 +393,19 @@ impl Store {
     /// 호출을 닫는다. 열린 호출은 거절(Blocked)로만, 시작한 호출(같은 세대 또는 옛 세대)은 어느 결과로나,
     /// 판정이 있는 보류는 영수증이면 완료·미실행이면 되돌림(또는 거절)으로만 닫는다.
     pub(crate) async fn call_finish(&self, f: FinishCall) -> R<()> {
+        self.call_finish_with(f, None).await
+    }
+
+    /// `call_finish`와 같되 거절(`Blocked`)을 승인 경로 때문이라고 저장한다: 호출 기록의 `reason`에 닫힌 낱말을 남겨 조회(`ApiRuns::lookup`)가 도구가
+    /// 실행되지 않은 이유를 저장된 판정에서 읽게 한다. `Blocked`가 아닌 결과에는 쓸 수 없다(`Conflict`).
+    pub(crate) async fn call_finish_with(
+        &self,
+        f: FinishCall,
+        block: Option<bot_core::api::ApprovalBlock>,
+    ) -> R<()> {
+        if block.is_some() && !matches!(f.outcome, Outcome::Blocked) {
+            return Err(Error::Conflict.into());
+        }
         let at = &f.attempt;
         let result = match &f.outcome {
             Outcome::Done(payload) => Some(canonical(payload)?.1),
@@ -434,7 +447,12 @@ impl Store {
                 "call.held",
                 format!("held:{reason}"),
             ),
-            Outcome::Blocked => ("denied", None, "call.blocked", "blocked".to_owned()),
+            Outcome::Blocked => (
+                "denied",
+                block.map(bot_core::api::ApprovalBlock::code),
+                "call.blocked",
+                block.map_or_else(|| "blocked".to_owned(), |b| format!("blocked:{}", b.code())),
+            ),
         };
         // 풀려 Open으로 돌아가면 판정·시작 표지를 비워 새 시작을 받을 수 있게 한다. 보류가 되면 시작 표지는 복구용으로 남긴다
         sqlx::query(

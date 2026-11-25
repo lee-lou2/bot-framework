@@ -9,7 +9,7 @@ use crate::{
 };
 use bot_core::{
     id::{ProfileId, Revision},
-    profile::Snapshot,
+    profile::{Adapter, ApprovalRoute, Snapshot},
 };
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -126,7 +126,8 @@ pub fn decode(bundle: &[u8], limits: &Limits) -> Result<Tree, Issue> {
     Ok(Tree { files, dirs })
 }
 
-/// 승인에 묶는 정책 판본: roles·members·policy와 트리거 주체·승인자 매핑.
+/// 승인에 묶는 정책 판본: roles·members·policy와 트리거 주체·승인자 매핑, OpenAI 모델 바인딩의 모델→에이전트·승인 경로 매핑.
+/// OpenAI 모델 바인딩이 없는 프로필은 문서에 `openai` 키를 넣지 않는다 — 웹훅 전용 프로필의 판본 바이트가 그대로여야 한다.
 pub fn policy_revision(built: &Built) -> Revision {
     let parts = &built.parts;
     let mut triggers = Map::new();
@@ -155,13 +156,52 @@ pub fn policy_revision(built: &Built) -> Revision {
         .iter()
         .map(|(k, v)| (k.0.clone(), json!(v)))
         .collect();
-    let doc = json!({
+    let mut doc = json!({
         "roles": parts.roles,
         "members": members,
         "policy": {"scopes": parts.policy.scopes, "agents": policy_agents, "approve": parts.policy.approve},
         "triggers": triggers,
     });
+    let openai = openai_mapping(built);
+    if !openai.is_empty() {
+        doc["openai"] = Value::Object(openai);
+    }
     Revision(sha256_hex(canonical_json(&doc).as_bytes()))
+}
+
+/// `<별칭>/<모델>` → 바인딩 id·에이전트·승인 경로(HTTP 주체 → 사람과 전달 바인딩). 매핑이 바뀌면 옛 승인으로 새 매핑을 열 수 없다.
+fn openai_mapping(built: &Built) -> Map<String, Value> {
+    built
+        .parts
+        .bindings
+        .values()
+        .filter_map(|b| {
+            let Adapter::OpenAi {
+                endpoint,
+                model,
+                approvers,
+            } = &b.kind
+            else {
+                return None;
+            };
+            let approvers: Map<String, Value> = approvers
+                .iter()
+                .map(|(requester, route)| {
+                    let route = match route {
+                        ApprovalRoute::Local { person } => json!({"person": person.0}),
+                        ApprovalRoute::Slack { person, binding } => {
+                            json!({"person": person.0, "binding": binding.0})
+                        }
+                    };
+                    (requester.0.clone(), route)
+                })
+                .collect();
+            Some((
+                format!("{endpoint}/{model}"),
+                json!({"binding": b.id.0, "agent": b.agent.0, "approvers": approvers}),
+            ))
+        })
+        .collect()
 }
 
 /// 저장해 둔 묶음에서 판본을 다시 만든다. 구조·참조 검증을 다시 하고, 해시가 `revision`과 같은지,

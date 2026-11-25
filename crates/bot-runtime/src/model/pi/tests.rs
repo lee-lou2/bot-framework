@@ -355,7 +355,8 @@ async fn step_writes_isolated_agent_config_and_passes_no_secret() {
             usage: Usage {
                 input_tokens: 350,
                 output_tokens: 32
-            }
+            },
+            outcome: Default::default(),
         }
     );
 

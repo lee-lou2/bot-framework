@@ -409,6 +409,8 @@ impl BrokerService {
             _ => None,
         };
         let flow = Flow {
+            // 소유자 전용 기능: OpenAI 승인 경로로 열지 않는다(요청자 본인이 승인자인 기존 규칙)
+            origin: None,
             attempt,
             call,
             approver: approver_for(&ctx, &current),

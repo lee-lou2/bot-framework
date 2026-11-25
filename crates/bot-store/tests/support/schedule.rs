@@ -76,6 +76,7 @@ pub fn open_create_text(approval: Approval, canonical: &str) -> OpenApproval {
         approval,
         reasons: vec!["irreversible".into()],
         card: bot_core::command::JsonPayload(card.to_string()),
+        delivery: None,
     }
 }
 

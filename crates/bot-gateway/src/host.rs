@@ -6,6 +6,13 @@ use bot_core::id::SecretName;
 use serde::Deserialize;
 use std::{collections::BTreeMap, fmt, net::SocketAddr};
 
+mod openai;
+pub use openai::{
+    DEFAULT_BODY_BYTES as DEFAULT_OPENAI_BODY_BYTES, DEFAULT_MAX_ACTIVE_RUNS, DEFAULT_WAIT_MS,
+    KeySlot, MAX_ACTIVE_RUNS, MAX_KEY_SLOTS, MAX_WAIT_MS, OpenAiEndpoint,
+    key_shaped as openai_key_shaped,
+};
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
@@ -74,17 +81,18 @@ pub struct SlackWorkspace {
     pub receive: Receive,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// 읽기(`Deserialize`)는 `host/openai.rs`가 한다: `endpoints`의 각 입구를 `kind`로 갈라 웹훅은 `endpoints`에, OpenAI는 `openai`에 담는다.
+#[derive(Clone, Debug, Default)]
 pub struct HttpHost {
     /// 생략하면 `127.0.0.1:8788`(관리 화면의 기본 `127.0.0.1:8787`과 겹치지 않는다)
     pub listen: Option<String>,
     /// 루프백이 아닌 주소(`listen`)를 열어도 된다는 운영자의 명시(관리 화면의 `remote`와 같은 뜻). 이 입구는 TLS 없는 평문 HTTP라서 베어러 토큰이 그대로 오간다 —
     /// 켜려면 TLS를 맡는 프록시·사설망 뒤인지 먼저 확인한다. 생략하면 루프백만 열린다.
-    #[serde(default)]
     pub remote: bool,
-    #[serde(default)]
+    /// 웹훅 입구(발급자·대상·키 이름의 JWT). `kind`를 생략하거나 `webhook`이면 여기에 담긴다.
     pub endpoints: BTreeMap<String, HttpEndpoint>,
+    /// OpenAI 호환 입구(`kind: openai`, 정적 API 키 슬롯). 같은 JSON 객체 `endpoints`에 쓴다.
+    pub openai: BTreeMap<String, OpenAiEndpoint>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -289,6 +297,7 @@ impl HostConfig {
                 return Err(bad(&path, "max_token_age_secs는 1 이상이어야 해요"));
             }
         }
+        openai::validate(&self.http)?;
         self.limits().validate().map_err(|why| bad("limits", why))
     }
 
@@ -307,6 +316,11 @@ impl HostConfig {
                 .per_principal_per_min
                 .unwrap_or(base.per_principal_per_min),
         }
+    }
+
+    /// OpenAI 요청 본문 한도: 호스트가 `limits.body_bytes`를 정했으면 그 값(웹훅과 같다, 최대 1 MiB), 생략하면 256 KiB.
+    pub fn openai_body_bytes(&self) -> usize {
+        self.limits.body_bytes.unwrap_or(openai::DEFAULT_BODY_BYTES)
     }
 
     pub fn listen(&self) -> SocketAddr {
