@@ -5,7 +5,8 @@
 //! - 지침은 부모에서 자식까지 이미 합쳐진 `Agent.instructions`를 그대로 쓴다.
 //! - 지식은 입력 글과 단어가 겹치는 문서만 점수 순으로 **최대 8개·합계 32 KiB**, 각 문서에 출처(relative_path)를 붙인다.
 //!   한도를 넘으면 점수가 낮은 것부터 버리고 문서 중간은 자르지 않는다.
-//! - 기억은 호출자가 이미 요청자·대화 종류로 거른 `MemoryHit`만 받는다(가시성 판정은 저장소 몫이다). 이 모듈은 개수·크기만 막는다.
+//! - 기억은 호출자가 이미 요청자·대화 종류로 거른 `MemoryHit`만 받는다(가시성 판정은 저장소 몫이다). 이 모듈은 개수·크기만 막는다. 기억은 구성원이 쓴 글이라 지침이 아니다:
+//!   시스템 지침에는 본문을 넣지 않고(고정 안내 한 문단뿐), 이번 질문 바로 앞의 사용자 영역에 출처를 붙인 «비신뢰 참고 자료»로 싣는다(`memory.rs`).
 //! - 도구는 (요청 범위 ∩ 에이전트 상한 ∩ 정책 상한)이 도구의 스코프를 **모두** 덮을 때만 보인다. 안내일 뿐 경계가 아니다 — 최종 판정은 브로커가 호출마다 다시 한다.
 //! - 위임 대상은 직계 하위 에이전트뿐이다(`delegate` 도구).
 
@@ -26,6 +27,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::watch;
+
+mod memory;
+pub use memory::REFERENCE_HEADER;
 
 pub const MAX_KNOWLEDGE_DOCS: usize = 8;
 pub const MAX_KNOWLEDGE_BYTES: usize = 32 * 1024;
@@ -306,27 +310,6 @@ fn delegate_tool(children: &[(AgentId, String)]) -> ToolSpec {
     }
 }
 
-fn memory_section(memory: &[MemoryHit]) -> Option<String> {
-    let (mut seen, mut lines, mut used) = (BTreeSet::new(), Vec::new(), 0usize);
-    for hit in memory {
-        let text = hit.text.trim();
-        if text.is_empty() || !seen.insert(text) {
-            continue;
-        }
-        if lines.len() >= MAX_MEMORY_ITEMS || used + text.len() > MAX_MEMORY_BYTES {
-            break;
-        }
-        used += text.len();
-        lines.push(format!("- {}", text.replace('\n', "\n  ")));
-    }
-    (!lines.is_empty()).then(|| {
-        format!(
-            "## 기억\n이 요청자에게 보이는 기억만 담았어요.\n{}",
-            lines.join("\n")
-        )
-    })
-}
-
 fn history_messages(history: &[Turn]) -> Vec<Message> {
     let (mut kept, mut used) = (Vec::new(), 0usize);
     for turn in history.iter().rev() {
@@ -418,7 +401,11 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
             .collect();
         sections.push(format!("## 참고 문서\n{}", body.join("\n\n")));
     }
-    sections.extend(memory_section(input.memory));
+    // 회상한 기억은 지침이 아니다: 시스템에는 본문 없이 고정 안내만 두고, 본문은 아래 대화의 이번 질문 앞(사용자 영역)에 «비신뢰 참고 자료»로 싣는다
+    let reference = memory::reference(input.memory);
+    if reference.is_some() {
+        sections.push(memory::SYSTEM_NOTICE.to_owned());
+    }
 
     let mut conversation = history_messages(input.history);
     conversation.push(Message {
@@ -426,6 +413,7 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
         speaker: Some(run.principal.clone()),
         text: question,
     });
+    memory::place(&mut conversation, reference);
     Ok(Assembled {
         model: agent.model.clone(),
         system: sections.join("\n\n"),

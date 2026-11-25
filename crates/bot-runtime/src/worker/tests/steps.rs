@@ -374,7 +374,8 @@ async fn only_a_direct_child_can_be_delegated_to() {
 }
 
 #[tokio::test]
-async fn memory_hits_reach_the_prompt_and_memory_trouble_does_not_fail_the_run() {
+async fn memory_hits_reach_the_prompt_as_untrusted_reference_and_memory_trouble_does_not_fail_the_run()
+ {
     let model = ScriptedModel::new(vec![say("네")]);
     let r = rig(model.clone());
     *lock(&r.memory.hits) = vec![MemoryHit {
@@ -383,11 +384,12 @@ async fn memory_hits_reach_the_prompt_and_memory_trouble_does_not_fail_the_run()
         text: "우유는 저지방만 마신다".into(),
     }];
     assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Succeeded);
-    assert!(
-        model.requests()[0]
-            .system
-            .contains("우유는 저지방만 마신다")
-    );
+    // 기억 본문은 시스템 지침이 아니라 이번 질문 바로 앞 사용자 영역의 비신뢰 참고 자료다
+    let request = &model.requests()[0];
+    assert!(!request.system.contains("우유는 저지방만 마신다"));
+    let reference = &request.conversation[request.conversation.len() - 2];
+    assert!(reference.text.starts_with(crate::context::REFERENCE_HEADER));
+    assert!(reference.text.contains("우유는 저지방만 마신다"));
 
     let model = ScriptedModel::new(vec![say("네")]);
     let r = rig(model.clone());

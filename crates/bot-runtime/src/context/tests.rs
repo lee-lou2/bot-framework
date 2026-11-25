@@ -318,51 +318,8 @@ fn delegation_targets_are_direct_children_only() {
 #[cfg(test)]
 mod knowledge;
 
-#[test]
-fn memory_is_listed_deduplicated_and_capped() {
-    let snap = snapshot();
-    let run = run_context("main", &FULL, "x");
-    let hit = |text: &str| MemoryHit {
-        id: MemoryId("m".into()),
-        visibility: Visibility::Private,
-        text: text.into(),
-    };
-    let out = build(
-        &snap,
-        &run,
-        &[],
-        &[
-            hit("커피는 아침에만 마신다"),
-            hit("커피는 아침에만 마신다"),
-            hit("  "),
-            hit("줄\n바꿈"),
-        ],
-    );
-    assert!(
-        out.system.ends_with(
-            "## 기억\n이 요청자에게 보이는 기억만 담았어요.\n- 커피는 아침에만 마신다\n- 줄\n  바꿈"
-        ),
-        "{}",
-        out.system
-    );
-    assert!(
-        !build(&snap, &run, &[], &[]).system.contains("## 기억"),
-        "기억이 없으면 절도 없다"
-    );
-
-    let many: Vec<MemoryHit> = (0..40).map(|n| hit(&format!("기억 {n}"))).collect();
-    let out = build(&snap, &run, &[], &many);
-    assert_eq!(out.system.matches("\n- 기억 ").count(), MAX_MEMORY_ITEMS);
-    let fat: Vec<MemoryHit> = (0..4)
-        .map(|n| hit(&format!("{n}{}", "가".repeat(1000))))
-        .collect();
-    let out = build(&snap, &run, &[], &fat);
-    assert_eq!(
-        out.system.matches("\n- ").count() - out.system.matches("\n- main/").count(),
-        2,
-        "8 KiB 한도: 3천 바이트짜리 둘까지"
-    );
-}
+#[cfg(test)]
+mod memory;
 
 #[test]
 fn history_becomes_messages_and_old_turns_are_dropped_first() {

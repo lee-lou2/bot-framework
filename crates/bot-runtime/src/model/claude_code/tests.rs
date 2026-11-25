@@ -163,6 +163,19 @@ fn args_run_claude_bare_with_only_the_relay_server_and_no_builtin_tools_by_defau
     for flag in ["--plugin-dir", "--system-prompt-file", "--settings"] {
         assert!(!a.iter().any(|x| x == flag), "{flag}는 쓰지 않아요");
     }
+    // `--bare`는 작업 폴더의 AGENTS.md를 자동으로 읽지 않는다: 지침은 이 인자로 시스템 지침에 실린다(이어 받는 세션에서도 같다)
+    assert_eq!(after(&a, "--append-system-prompt-file"), "/bot/AGENTS.md");
+    let resumed = ClaudeCodeRunner::args(
+        &model(),
+        &BTreeSet::new(),
+        &relay(),
+        &Mode::Resume("s".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        after(&resumed, "--append-system-prompt-file"),
+        "/bot/AGENTS.md"
+    );
     assert_eq!(after(&a, "--tools"), "", "내장 도구는 기본 0개");
     assert_eq!(
         (after(&a, "--mcp-config"), after(&a, "--allowedTools")),

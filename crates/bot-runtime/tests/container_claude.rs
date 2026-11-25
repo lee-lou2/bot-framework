@@ -19,6 +19,22 @@ use std::{
 };
 use support::{cli::*, view::*, *};
 
+/// 프로필이 정한 지침: VM 안의 `claude`가 입력 폴더(`/bot`)의 `AGENTS.md`를 시스템 지침으로 읽어 모델 요청에 싣는지 본다.
+const TRUSTED: &str = "TRUSTED-INSTRUCTION-4410 한국어로 짧게 답한다";
+
+/// 요청 본문의 `system`(블록 목록이거나 글 하나)의 글.
+fn system_text(body: &serde_json::Value) -> String {
+    match &body["system"] {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 /// VM 안에서 도는 `claude` 프로세스의 권한과, 지금 이 VM에서 닿는 곳(막힌 것은 시간 제한까지 기다리므로 나란히 점검한다).
 const INSIDE: &str = r#"B=/bin/busybox
 for p in /proc/[0-9]*; do
@@ -76,6 +92,13 @@ async fn the_real_claude_in_the_vm_reaches_only_the_front_and_runs_unprivileged(
     let last = final_turn("msg_vm2", "VM 안에서 잘 돌아요");
     let refs: Vec<&[u8]> = last.iter().map(Vec::as_slice).collect();
     upstream.respond_slowly(200, &refs, Duration::from_secs(3), End::Eof);
+    let mut snapshot = (*profile()).clone();
+    snapshot
+        .agents
+        .get_mut(&bot_core::id::AgentId("main".into()))
+        .expect("루트 에이전트")
+        .instructions = TRUSTED.into();
+    w.catalog.publish(Arc::new(snapshot));
     let run = w.accept("req-vm", "일정을 알려줘").await;
 
     let sandbox_slot = Mutex::new(None);
@@ -183,6 +206,14 @@ async fn the_real_claude_in_the_vm_reaches_only_the_front_and_runs_unprivileged(
         result_text(&seen[1], "toolu_vm1").is_some(),
         "도구 결과가 둘째 요청에 있다"
     );
+    // 지침은 VM 안의 `claude`도 `--append-system-prompt-file`로 읽어 두 요청의 system에 실었다(`--bare`는 작업 폴더의 AGENTS.md를 자동으로 읽지 않는다)
+    for body in &seen {
+        let system = system_text(body);
+        assert!(
+            system.contains(TRUSTED),
+            "지침이 VM의 모델 요청에 없다: {system}"
+        );
+    }
     assert!(
         w.runner.jobs().len() == 1,
         "도구는 한 번 실행됐다: {:?}",

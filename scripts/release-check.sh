@@ -267,6 +267,8 @@ bot-runtime cli_started
 bot-runtime cli_resume
 bot-runtime cli_refusal
 bot-runtime cli_credentials
+bot-runtime cli_instructions
+bot-runtime cli_memory
 bot-runtime container_canary
 bot-runtime container_anchor
 bot-runtime container_claude

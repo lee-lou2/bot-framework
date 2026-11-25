@@ -61,7 +61,7 @@ builtin: [read]
 
 `read`는 파일 내용, `grep`은 본문 검색, `glob`은 파일명 검색을 허용한다. 생략 또는 `[]`은 내장 도구 0개다. 자식은 자기 파일에서 다시 선택한다. 중복, 셸·쓰기·웹 도구, 그 밖의 이름은 검증 오류다. 이 필드는 호스트 경로를 추가로 마운트하지 않는다. 호스트는 읽기 격리를 지원하는 모델 샌드박스에서만 내장 도구를 허용한다. 모델 VM에 연결되는 호스트 폴더는 이 시도의 읽기 전용 입력과 쓰기 가능한 작업 폴더다. 내장 도구를 켜도 모델이 읽는 곳은 입력 폴더뿐이고, 이 시도의 세션 토큰은 어느 폴더에도 파일로 없다.
 
-v2.0 호스트가 지원하는 모델 제공자는 `demo`와 `claude-cli`다. 고정한 Claude Code 2.1.331의 `--bare` 모드에서는 `read`만 사용할 수 있다. 이 실행기에서 `grep`이나 `glob`을 요청하면 모델을 시작하기 전에 거절한다.
+v2.0 호스트가 지원하는 모델 제공자는 `demo`와 `claude-cli`다. 고정한 Claude Code 2.1.331의 `--bare` 모드에서는 `read`만 사용할 수 있다. 이 실행기에서 `grep`이나 `glob`을 요청하면 모델을 시작하기 전에 거절한다. 프로필 작성자는 에이전트 폴더의 `AGENT.md`에 지침을 쓴다. 워커가 상속된 지침을 조립해 Claude의 시스템 지침으로 전달한다. [Claude Code 실행 방식](architecture.md#claude-code가-브로커에-연결하는-방법)
 
 ## 새 프로필의 호스트 설정
 
@@ -117,7 +117,7 @@ policy:
 - **profile.yaml**에서 id는 폴더명, timezone은 IANA 시간대, model은 호스트 모델 별칭이다. roles는 허용 스코프, members는 검증된 신원과 역할이다. secrets에는 허용할 도구 자격 이름만 적는다. policy.scopes는 전체 상한, agents는 지정한 경로의 추가 제한, approve는 승인이 필요한 write 스코프다. irreversible은 항상 승인받는다.
 - **bindings**는 외부 입구를 한 에이전트에 연결한다. CLI의 account는 호스트가 OS 사용자에 연결한 별칭이다. Slack은 `{id: team, adapter: slack, workspace: home, channel: planning, agent: main}`, HTTP는 `{id: inbox, adapter: http, endpoint: reminders, agent: main}`처럼 쓴다. 별칭은 호스트에 등록한 실제 워크스페이스·채널·인증된 HTTP 입구를 가리킨다. 활성 프로필 전체에서 같은 입구를 두 번 쓸 수 없다.
 - **rules.md → AGENT.md** 순으로 부모에서 자식까지 지침을 합친다. 조상과 현재 역할의 skills·knowledge만 보인다. 지식 검색은 profile/knowledge와 루트부터 현재 에이전트까지의 knowledge에서만 한다. 한 요청에 최대 8개 문서·합계 32 KiB를 읽고 출처를 붙인다. AGENT.md 첫 YAML front matter의 선택 필드 `description`은 부모가 위임 대상에게서 기대할 일을 보여 주는 한 줄이다. 생략하면 해당 역할의 폴더 이름을 쓴다. `model: assistant`로 역할 모델을 바꿀 수 있다. 생략하면 부모, 루트는 프로필 모델을 쓴다. 스킬 이름 충돌은 오류다. env.yaml은 비비밀 문자열 지도이며 자식 값이 우선한다. 셸 치환과 호스트 환경 상속은 없다.
-- **memory/**는 최초 기동용 기억이다. 경로·내용 해시로 한 번 등록한다. 각 항목에 owner와 visibility(private 기본, profile은 명시적 공유)를 기록한다. 시드 Markdown의 YAML front matter에는 owner가 필수이고 visibility를 생략하면 private이다. 검색은 프로필·에이전트 범위에서 현재 요청자에게 보이는 행만 읽는다. private은 본인 DM·CLI에서만, 채널·HTTP·예약은 profile만 읽는다. 위임한 자식도 같은 요청자와 대화 종류를 유지한다. 실행 중 생성한 기억의 owner는 인증된 요청자로 고정한다. 수정·삭제는 소유자만 가능하며 profile로 공유할 때는 소유자가 대상·내용을 승인 카드에서 확인해야 한다.
+- **memory/**는 최초 기동용 기억이다. 경로·내용 해시로 한 번 등록한다. 각 항목에 owner와 visibility(private 기본, profile은 명시적 공유)를 기록한다. 시드 Markdown의 YAML front matter에는 owner가 필수이고 visibility를 생략하면 private이다. 검색은 프로필·에이전트 범위에서 현재 요청자에게 보이는 행만 읽는다. 모델은 회상한 기억 본문을 출처가 표시된 사용자 입력의 참고 자료로 받는다. private은 본인 DM·CLI에서만, 채널·HTTP·예약은 profile만 읽는다. 위임한 자식도 같은 요청자와 대화 종류를 유지한다. 실행 중 생성한 기억의 owner는 인증된 요청자로 고정한다. 수정·삭제는 소유자만 가능하며 profile로 공유할 때는 소유자가 대상·내용을 승인 카드에서 확인해야 한다.
 
 ## 일정 스킬과 예약
 

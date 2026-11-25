@@ -1,7 +1,9 @@
 //! Claude Code CLI(`claude -p`) 실행기.
 //!
 //! 루프 내장(`RunnerKind::Loop`) 실행기다: CLI가 자기 도구 순환을 돌리고 워커는 차례를 제어하지 않는다. 항상 `ModelStep::Final`을 돌려준다.
-//! 샌드박스(VM) 안에서 `/bot`(읽기 전용 입력 폴더)을 작업 폴더로 `--bare`로 실행한다. 지침은 `AGENTS.md`로 두고, 대화는 표준입력으로 준다.
+//! 샌드박스(VM) 안에서 `/bot`(읽기 전용 입력 폴더)을 작업 폴더로 `--bare`로 실행한다. 지침은 입력 폴더의 `AGENTS.md`에 두고 `--append-system-prompt-file`로 시스템 지침에
+//! 실어 준다(실측: `--bare`는 작업 폴더의 `AGENTS.md`·`CLAUDE.md`를 자동으로 읽지 않으므로 이 인자가 없으면 지침이 모델에 닿지 않는다). 대화는 표준입력으로 준다:
+//! 사용자가 쓴 글은 사용자 메시지에만 있고 시스템 지침에는 이 파일(프로필이 정한 지침·스킬·지식과 고정 안내)만 있다.
 //! 모델과 도구는 `ModelRequest::relay`(run별 브로커 프런트)로만 나간다: `ANTHROPIC_BASE_URL`은 그 주소, `ANTHROPIC_API_KEY`는 이 시도에 발급한
 //! 세션 토큰이다(실제 제공자 키는 VM에 없다). 같은 주소로 `--mcp-config`(HTTP MCP) 파일을 만들되 **모델이 읽는 폴더(`/bot`) 밖인 쓰기 공간(`/work`)에** 두고,
 //! 토큰은 그 파일에 쓰지 않는다: 헤더에는 `${RELAY_TOKEN}` 자리표시만 있고 값은 환경변수로만 간다(그래서 내장 Read를 켜도 모델이 읽는 어떤 파일에도 토큰이 없다).
@@ -101,6 +103,8 @@ impl ClaudeCodeRunner {
             &model.id,
             "--effort",
             &model.effort,
+            "--append-system-prompt-file",
+            &format!("{BOT_MOUNT}/AGENTS.md"),
             "--strict-mcp-config",
             "--mcp-config",
             &format!("{WORK_MOUNT}/{MCP_CONFIG}"),
