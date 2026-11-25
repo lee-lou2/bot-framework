@@ -2,7 +2,7 @@
 //!
 //! 실행기는 두 방식(`RunnerKind`)이다. 워커는 `ModelRunner::kind()`로 도구 중계 책임을 가른다.
 //!
-//! - **Step**(API 모델·데모): 워커가 맥락(`context::assemble`)과 이전 교환(`Exchange`)으로 `ModelRequest`를 만들어 `step`을 **차례마다** 부른다.
+//! - **Step**(API 직접 호출 `api`·데모): 워커가 맥락(`context::assemble`)과 이전 교환(`Exchange`)으로 `ModelRequest`를 만들어 `step`을 **차례마다** 부른다.
 //!   돌아온 `ModelStep::Calls`는 워커가 `Broker::call`로 중계하고(승인 대기·보류도 워커 몫), 모델 차례와 호출 결과를 체크포인트에 적은 뒤
 //!   다음 차례를 부른다. `ModelStep::Final`이면 답을 `Finish`로 올린다. 이 방식의 실행기는 도구를 직접 부르지 않는다.
 //! - **Loop**(CLI: Claude Code·Pi): CLI가 자기 도구 순환을 가지므로 워커는 차례를 제어하지 않는다. `step`은 한 번만 부르고 항상 `Final`(또는 오류)을 받는다.
@@ -14,6 +14,7 @@
 //! 외부와 통신하지 못하며 브로커 프런트 한 곳에만 닿는다(`container.rs`). 도구 서버의 격리(srt)는 별개이고 브로커 쪽이다. 여기에는 VM 어댑터와 가짜(`FakeSandbox`)가 있다.
 //! 오류는 고정 어휘 코드만 싣는다(로그·감사에 자유 문장·stderr를 남기지 않는다).
 
+pub mod api;
 mod claude_code;
 mod cli;
 pub mod container;
@@ -26,6 +27,7 @@ mod relay;
 mod sandbox;
 pub mod session;
 
+pub use api::{ApiClient, ApiEndpoint, ApiKind, ApiRunner, ApiSettings, LimitField, SendGate};
 pub use claude_code::ClaudeCodeRunner;
 pub use cli::{CliConfig, CliModel};
 pub use demo::DemoModel;
@@ -37,7 +39,7 @@ pub use sandbox::{FakeSandbox, Script};
 pub use session::{PortFuture, Session, SessionError, SessionPort, Slot, ToolOutput};
 
 use bot_core::{
-    command::{Failure, JsonPayload, RunOutcome},
+    command::{Failure, JsonPayload, RunOutcome, TokenUsage},
     id::{Attempt, CallId, PrincipalId, RunId, ToolId},
     profile::Builtin,
     state::Risk,
@@ -174,11 +176,19 @@ pub enum ModelStep {
         text: String,
         calls: Vec<PendingCall>,
         usage: Usage,
+        /// 공급자가 이 차례의 요청에 대해 실제로 보고한 토큰 수(입력·출력 둘 다 보고된 경우만, 아니면 `None`). 워커가 차례마다 체크포인트에 적어 두었다가
+        /// 모든 차례가 보고됐을 때만 run 전체의 합으로 낸다. 관측용 `usage`처럼 0으로 채우지 않는다.
+        measured: Option<TokenUsage>,
+        /// 불투명 공급자 상태(`Exchange::state`): 워커는 해석하지 않고 이 차례의 체크포인트에 적어 두었다가 다음 요청에 돌려준다.
+        state: Option<String>,
     },
 }
 
 /// 실행 실패. 코드는 고정 어휘다: `cancelled` `timeout` `idle_timeout` `sandbox_failed` `prepare_failed` `unknown_model`
-/// `invalid_relay` `no_result` `empty_answer` `output_limit` `rate_limited` `overloaded` `network` `model_error`.
+/// `invalid_relay` `no_result` `empty_answer` `output_limit` `rate_limited` `overloaded` `network` `model_error`. API 직접 호출 실행기(`api`)는 여기에
+/// `upstream_auth`(401·403) `upstream_rejected`(그 밖의 4xx) `upstream_redirect`(3xx) `invalid_response`(깨진 응답·알 수 없는 종료 사유) `refused`·`content_filter`
+/// `context_limit` `unknown_tool` `invalid_tool_args` `too_many_calls` `unsupported_tool_signature` `model_key_missing` `model_key_invalid` `secret_unavailable`
+/// `secret_in_response`(해당 요청의 서비스 키가 응답에 있다) `stale_worker`·`activation_unverified`(구판·확인 불가) `quota_exhausted`(429 본문이 `insufficient_quota`)를 더한다.
 /// `output_limit`은 공급자의 출력 토큰 상한에서 답이 끊긴 것이다(부분 글을 성공으로 올리지 않는다; 호스트 상한에 걸려 잘린 답만 `RunOutcome::truncated`다).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelError {

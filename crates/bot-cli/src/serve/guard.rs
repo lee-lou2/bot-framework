@@ -190,8 +190,10 @@ impl Broker for GuardedBroker {
 }
 
 mod upstream;
+mod wire;
 
 pub use upstream::GuardedUpstream;
+pub use wire::GuardedWire;
 
 #[cfg(test)]
 mod tests;

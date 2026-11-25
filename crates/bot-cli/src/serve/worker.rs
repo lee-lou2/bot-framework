@@ -93,6 +93,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         tracer: deps.observe.tracer(),
         uid: deps.uid,
         routes: deps.routes.clone(),
+        active: deps.active.clone(),
     })
     .await?;
     // 구판 보호가 걸린 브로커: 워커의 Step 방식과 모델 CLI의 브로커 프런트가 같은 브로커를 쓴다
@@ -131,8 +132,17 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         ),
         None => None,
     };
+    // API 직접 호출 별칭(`anthropic-api`·`openai-api`)은 VM 없이 워커가 상류를 부른다: 키는 가림 장치를 거치는 보관소로만 읽고, 매 요청 직전에 이 프로세스의 활성화 판본을 확인한다
+    let api = models::ApiParts {
+        secrets: deps.secrets.clone(),
+        gate: Arc::new(models::ActiveGate(deps.active.clone())),
+    };
     // 이 뒤의 실패는 이미 띄운 모델 프런트·VM을 치우고 돌아간다(닻 VM이 남지 않게)
-    let models = match models::build(&deps.host, claude.as_ref().map(|c| c.runner.clone())) {
+    let models = match models::build(
+        &deps.host,
+        claude.as_ref().map(|c| c.runner.clone()),
+        Some(&api),
+    ) {
         Ok(models) => models,
         Err(error) => {
             if let Some(claude) = claude {

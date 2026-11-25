@@ -135,6 +135,8 @@ mod tests {
             effects: false,
             external: false,
             destination: None,
+            definition: None,
+            mcp_name: None,
         }
     }
 

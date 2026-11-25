@@ -13,7 +13,7 @@ use crate::{
     egress::EgressPolicy,
     guard::blocks_output,
     json::parse,
-    mcp::{self, McpError, Session},
+    mcp::{self, McpError, Session, remote::Remote, wire::RemoteWire},
     ports::{Ran, ToolJob, ToolRunner},
     proxy::{Connector, LOCAL_HOST, LocalService, Proxy, ProxyConfig, Resolver},
     resolve::HostPort,
@@ -25,6 +25,7 @@ use bot_core::{
     command::JsonPayload,
     id::{ProfileId, SecretName},
     port::{EffectJournal, Error, Reply, SecretStore},
+    profile::Tool,
     state::ConversationKind,
 };
 use serde_json::Value;
@@ -45,6 +46,8 @@ pub struct HostRegistry {
     pub servers: BTreeMap<String, String>,
     /// 프로필 → 운영자가 정한 egress 상한. 없으면 도구가 선언한 호스트만 허용한다.
     pub egress_caps: BTreeMap<ProfileId, Vec<HostPort>>,
+    /// 원격(Streamable HTTP) 서버 별칭 → 접속 대상. 이 별칭은 `servers`에도 있다(판본은 `Remote::revision`). 원격 서버는 샌드박스를 거치지 않고 브로커가 직접 연결한다.
+    pub remote: BTreeMap<String, Remote>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -86,7 +89,11 @@ pub struct McpRunner {
     deps: Deps,
     host: HostRegistry,
     cfg: RunnerConfig,
+    /// 원격 서버로 나가는 전송. 없으면 원격 서버로 가는 호출은 실행하지 않는다.
+    wire: Option<Arc<dyn RemoteWire>>,
 }
+
+mod remote;
 
 fn kind_name(kind: &ConversationKind) -> &'static str {
     match kind {
@@ -140,10 +147,34 @@ impl LocalService for EffectLocal {
 /// 전용 주소로 단계 원장을 받는 샌드박스에 알려 줄 주소.
 const EFFECT_URL: &str = "http://bot-effects.invalid/effect";
 
+/// 서버가 내세우는 도구 정의(`entry`)가 선언과 맞는가. 정의 해시가 고정된 도구(`tools.lock.yaml`)는 서버의 이름·설명·입력 스키마가 해시와 같아야 한다
+/// (설명만 바뀐 것도 막는다: 도구 오염). 다르거나 사라졌으면 호출하기 전에 `Refused`다. 그 밖에는 입력 스키마가 선언과 같아야 한다(아니면 `NotSent`).
+fn check_definition(tool: &Tool, entry: Option<&Value>, declared: &str) -> Result<(), Ran> {
+    if let Some(pin) = &tool.definition {
+        match entry {
+            None => return Err(Ran::Refused("tool_missing")),
+            Some(found) if bot_core::mcp::entry_sha256(found).as_deref() != Some(pin.as_str()) => {
+                return Err(Ran::Refused("tool_definition_changed"));
+            }
+            Some(_) => {}
+        }
+    }
+    let schema = entry
+        .and_then(|found| found.get("inputSchema"))
+        .and_then(canonicalize);
+    if schema.as_deref() == Some(declared) {
+        Ok(())
+    } else {
+        Err(Ran::NotSent)
+    }
+}
+
 /// 구조화 결과의 모든 키와 디코딩한 문자열 값을 검사한다(직렬화한 글만 보면 이스케이프가 필요한 문자가 든 자격을 놓친다).
 fn structured_blocked(value: &Value, credentials: &[Vec<u8>]) -> bool {
     match value {
         Value::String(text) => blocks_output(text, credentials),
+        // 숫자 토큰도 글이다(숫자로만 된 자격이 숫자로 오는 경우)
+        Value::Number(number) => blocks_output(&number.to_string(), credentials),
         Value::Array(items) => items
             .iter()
             .any(|item| structured_blocked(item, credentials)),
@@ -156,7 +187,18 @@ fn structured_blocked(value: &Value, credentials: &[Vec<u8>]) -> bool {
 
 impl McpRunner {
     pub fn new(deps: Deps, host: HostRegistry, cfg: RunnerConfig) -> Self {
-        Self { deps, host, cfg }
+        Self {
+            deps,
+            host,
+            cfg,
+            wire: None,
+        }
+    }
+
+    /// 원격 서버로 나가는 전송(조립하는 곳이 이름 풀이 검사·TLS를 맡는다, `mcp::wire`).
+    pub fn with_wire(mut self, wire: Arc<dyn RemoteWire>) -> Self {
+        self.wire = Some(wire);
+        self
     }
 
     async fn execute(&self, job: ToolJob) -> Ran {
@@ -174,6 +216,10 @@ impl McpRunner {
             != Some(image.as_str())
         {
             return Ran::NotSent;
+        }
+        // 원격 서버는 샌드박스 없이 브로커가 직접 연결한다
+        if let Some(remote) = self.host.remote.get(&tool.server) {
+            return self.execute_remote(&job, remote).await;
         }
         // 샌드박스가 이 서버를 실행할 수 있어야 한다(상태 볼륨을 요구하는데 지원하지 않으면 자격을 풀기 전에 시작하지 않는다).
         if self.deps.sandbox.admit(&tool.server, &image).is_err() {
@@ -373,13 +419,16 @@ impl McpRunner {
         if session.initialize(limit).await.is_err() {
             return Ran::NotSent;
         }
-        // 일치하는 도구 하나만 부른다: 서버가 내세우는 입력 스키마가 선언과 같아야 한다.
+        // 일치하는 도구 하나만 부른다: 서버가 내세우는 정의가 선언과 같아야 한다.
         let Some(declared) = parse(&job.tool.tool.input.0).and_then(|v| canonicalize(&v)) else {
             return Ran::NotSent;
         };
-        match session.tool_schema(&job.tool.name, limit).await {
-            Ok(Some(schema)) if canonicalize(&schema).as_deref() == Some(declared.as_str()) => {}
-            _ => return Ran::NotSent,
+        let entry = match session.find_tool(&job.tool.name, limit).await {
+            Ok(entry) => entry,
+            Err(_) => return Ran::NotSent,
+        };
+        if let Err(ran) = check_definition(&job.tool.tool, entry.as_ref(), &declared) {
+            return ran;
         }
         // 파이프 채널은 `effects: true`이고 샌드박스가 FD를 줄 수 있을 때만 있다(프록시 경유 샌드박스는 파이프가 없다).
         let channel = match (job.tool.tool.effects, effects) {
@@ -477,7 +526,28 @@ impl ToolRunner for McpRunner {
 
     fn admit(&self, server: &str) -> Result<(), Error> {
         let image = self.host.servers.get(server).ok_or(Error::Denied)?;
+        if self.host.remote.contains_key(server) {
+            return if self.wire.is_some() {
+                Ok(())
+            } else {
+                Err(Error::Denied)
+            };
+        }
         self.deps.sandbox.admit(server, image)
+    }
+
+    fn server_secrets(&self, server: &str) -> Vec<SecretName> {
+        self.host
+            .remote
+            .get(server)
+            .and_then(|remote| remote.bearer.clone())
+            .into_iter()
+            .collect()
+    }
+
+    /// 원격 서버는 연결을 닫아도 원격 실행이 계속될 수 있다: `reap` 성공이 끝남의 증명이 아니다.
+    fn reap_proves_end(&self, server: &str) -> bool {
+        !self.host.remote.contains_key(server)
     }
 
     /// 이 프로필의 보관소에 선언한 자격 이름이 모두 있는가(없으면 `Missing`). 값은 읽어도 곧바로 버리고 쓰거나 남기지 않는다.

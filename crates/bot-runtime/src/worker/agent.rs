@@ -8,7 +8,7 @@
 use super::{
     Flow, Worker,
     calls::Ran,
-    checkpoint::{self, Planned},
+    checkpoint::{self, Planned, TurnUsage},
     control::Control,
     interrupted,
     session::RunSession,
@@ -19,7 +19,7 @@ use crate::{
     model::{DoneCall, Exchange, ModelError, ModelRunner, ModelStep, RunnerKind, Session},
 };
 use bot_core::{
-    command::{Failure, Finish, JsonPayload, RunOutcome, Step},
+    command::{Failure, Finish, JsonPayload, RunOutcome, Step, TokenUsage},
     id::Generation,
     port::Error,
     profile::Snapshot,
@@ -31,10 +31,12 @@ use std::{collections::HashSet, sync::Arc, time::SystemTime};
 
 /// 대화로 보내는 답의 글자 수 상한
 const MAX_ANSWER_CHARS: usize = 12_000;
+/// 실행기가 차례마다 남기는 불투명 공급자 상태(체크포인트에 그대로 적는다)의 크기 상한
+const MAX_STATE_BYTES: usize = 256 * 1024;
 
 /// 최종 답을 끝맺는다. 호스트 상한(`MAX_ANSWER_CHARS`)을 넘어 실제로 잘렸으면 계량의 `truncated`로 같은 커밋에 남긴다(조용히 자르지 않는다).
-/// `outcome`은 실행기가 아는 계량이다. `usage_whole`은 그 사용량이 이 run 전체의 합인가(첫 claim의 Loop 실행)다: 다시 집은 run(재시도·인계)이나 차례로 나눈 실행은
-/// 앞 실행의 사용량이 빠져 전체 합을 알 수 없으므로 실행기가 보고한 사용량을 버린다.
+/// `outcome`은 실행기가 아는 계량이다. `usage_whole`은 그 사용량이 이 run 전체의 합인가다(Loop는 첫 claim의 실행, Step은 `step_usage`가 합을 낸 경우): 아니면
+/// (다시 집은 run·합을 알 수 없는 실행) 실행기가 보고한 사용량을 버린다.
 fn answer(text: &str, mut outcome: RunOutcome, usage_whole: bool) -> Flow {
     let text = text.trim();
     if text.is_empty() {
@@ -182,6 +184,8 @@ impl Worker {
         };
         let mut exchanges = restored.done;
         let mut planned = restored.planned;
+        // 차례마다 그 차례를 정한 응답의 사용량 기록(체크포인트에서 되살린 것 + 이번 시도에서 정한 것)
+        let mut usages = restored.usages;
         loop {
             if let Some(flow) = interrupted(control) {
                 return flow;
@@ -205,23 +209,53 @@ impl Worker {
                     let result = runner.step(request).await;
                     self.model_span(span, turn, &assembled.model, started, &result);
                     match result {
-                        // 차례마다 나눠 도는 실행은 앞 차례의 사용량을 체크포인트하지 않아 전체 합을 알 수 없다: 실측 없음
                         Ok(ModelStep::Final { text, outcome, .. }) => {
-                            return answer(&text, outcome, false);
+                            // 이 응답의 사용량과 앞 차례들의 기록이 모두 있을 때만 run 전체의 합이다
+                            let total = step_usage(
+                                &usages,
+                                exchanges.len(),
+                                has_children(ctx, &exchanges),
+                                outcome.usage,
+                                ctx.attempt.generation == Generation(1),
+                            );
+                            return answer(
+                                &text,
+                                RunOutcome {
+                                    usage: total,
+                                    ..outcome
+                                },
+                                true,
+                            );
                         }
-                        Ok(ModelStep::Calls { text, calls, .. }) => {
+                        Ok(ModelStep::Calls {
+                            text,
+                            calls,
+                            measured,
+                            state,
+                            ..
+                        }) => {
                             let ids: HashSet<&str> =
                                 calls.iter().map(|c| c.call.0.as_str()).collect();
                             if calls.is_empty() || ids.len() != calls.len() || ids.contains("") {
                                 return Flow::Fail(Failure::Permanent("invalid_model_output"));
                             }
-                            let plan = Planned { text, calls };
+                            if state.as_ref().is_some_and(|s| s.len() > MAX_STATE_BYTES) {
+                                return Flow::Fail(Failure::Permanent("invalid_model_output"));
+                            }
+                            let usage = measured.map_or(TurnUsage::Unreported, TurnUsage::Reported);
+                            let plan = Planned {
+                                text,
+                                calls,
+                                usage,
+                                state,
+                            };
                             if let Err(flow) = self
                                 .checkpoint(ctx, checkpoint::plan_key(turn), plan.to_payload())
                                 .await
                             {
                                 return flow;
                             }
+                            usages.push(usage);
                             plan
                         }
                         Err(error) => return model_error(control, error),
@@ -251,6 +285,7 @@ impl Worker {
             let exchange = Exchange {
                 text: plan.text,
                 calls: done,
+                state: plan.state,
             };
             if let Err(flow) = self
                 .checkpoint(ctx, checkpoint::end_key(turn), exchange.to_payload())
@@ -297,14 +332,53 @@ impl Worker {
             .attr(key::GEN_AI_REQUEST_MODEL, alias.to_owned());
         match result {
             Ok(ModelStep::Final { usage, .. } | ModelStep::Calls { usage, .. }) => {
-                record = record
-                    .attr(key::GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens)
-                    .attr(key::GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
+                // 상류가 보고하지 않은 사용량은 0으로 적지 않고 속성을 비운다(실제 요청은 입력도 출력도 0일 수 없다)
+                if usage.input_tokens > 0 {
+                    record = record.attr(key::GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens);
+                }
+                if usage.output_tokens > 0 {
+                    record = record.attr(key::GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
+                }
             }
             Err(error) => record = record.fail(error.code()),
         }
         span.emit(record);
     }
+}
+
+/// 이 run이 **실제로 자식을 만든** 위임을 했는가: 위임 호출의 호출 ID로 저장소가 적은 단계(`ctx.work.steps`)가 있다(`run_delegate`가 같은 표지로 «이미 위임했다»를 안다).
+/// 자식을 만들지 못한 위임(대상 오류·거절)은 해당하지 않는다 — 그 호출의 모델 요청은 이 run의 합에 그대로 들어 있다.
+fn has_children(ctx: &RunContext, exchanges: &[Exchange]) -> bool {
+    exchanges
+        .iter()
+        .flat_map(|exchange| &exchange.calls)
+        .filter(|call| call.tool.0 == context::DELEGATE_TOOL)
+        .any(|call| ctx.work.steps.iter().any(|step| step.key == call.call.0))
+}
+
+/// Step 실행의 사용량 합계: 공급자가 보고한 값을 **모든 모델 요청**에서 모을 수 있을 때만이다. 앞 차례마다 체크포인트의 기록이 `Reported`이고 마지막 응답(`last`)도
+/// 보고했고(`previous`는 앞 `turns`차례 전부의 기록이어야 한다), 이 run이 첫 claim이고(다시 집은 run은 응답을 받고도 기록하지 못한 요청이 있을 수 있다) 실제로 만든 자식이 없을 때
+/// (`children`; 자식의 요청은 이 합에 없다)만 `Some`이다.
+/// 하나라도 빠지면 `None`이다 — 마지막 차례만 합계로 내지 않는다.
+fn step_usage(
+    previous: &[TurnUsage],
+    turns: usize,
+    children: bool,
+    last: Option<TokenUsage>,
+    first_claim: bool,
+) -> Option<TokenUsage> {
+    if !first_claim || children || previous.len() != turns {
+        return None;
+    }
+    let mut total = last?;
+    for usage in previous {
+        let TurnUsage::Reported(turn) = usage else {
+            return None;
+        };
+        total.prompt = total.prompt.checked_add(turn.prompt)?;
+        total.completion = total.completion.checked_add(turn.completion)?;
+    }
+    Some(total)
 }
 
 /// 실행기 실패를 run의 흐름으로 옮긴다. 취소 신호로 멈춘 것은 리스를 잃은 것인지, 운영자 취소인지 가른다.

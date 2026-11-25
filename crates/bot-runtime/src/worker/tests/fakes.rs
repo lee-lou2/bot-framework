@@ -1,5 +1,4 @@
 //! 워커 시험용 가짜 포트와 고정 입력.
-
 use super::fake_ledger::FakeLedger;
 use crate::{
     host::{Deps, Models, NoRelays, Relays, SingleModel, WorkerConfig},
@@ -25,7 +24,6 @@ use std::{
 pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
-
 pub(super) fn scopes(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_owned()).collect()
 }
@@ -43,6 +41,8 @@ fn tool_decl(needs: &[&str]) -> Tool {
         effects: false,
         external: false,
         destination: None,
+        definition: None,
+        mcp_name: None,
     }
 }
 
@@ -503,6 +503,8 @@ pub(super) fn calls(text: &str, items: &[(&str, &str, &str)]) -> Result<ModelSte
             })
             .collect(),
         usage: crate::model::Usage::default(),
+        measured: None,
+        state: None,
     })
 }
 

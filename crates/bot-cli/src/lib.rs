@@ -2,6 +2,7 @@
 //! 예정 수락 시험: runs_personal_demo, starts_split_roles.
 pub mod chat;
 pub mod cli;
+pub mod doctor;
 pub mod execution;
 pub mod host;
 pub mod install;
@@ -9,8 +10,10 @@ pub mod load;
 pub mod lock;
 pub mod logging;
 pub mod map;
+pub mod mcp_sync;
 pub mod nonce;
 pub mod profile_bundle;
+pub mod scaffold;
 pub mod secrets;
 pub mod serve;
 pub mod settings;

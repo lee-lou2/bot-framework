@@ -3,6 +3,7 @@ use crate::{
     hash::{canonical_json, sha256_hex},
     issue::Issues,
     limits::Limits,
+    lock::Lock,
     model::Tool,
     schema::Schema,
 };
@@ -41,16 +42,30 @@ const RESERVED_TOOL_IDS: &[&str] = &[
     "schedule.deliver",
 ];
 
+/// `lock`은 같은 스킬 폴더의 `tools.lock.yaml`(검증을 마친 것). 도구가 `input`을 생략하면 입력 스키마와 정의 해시를 여기서 가져온다.
 pub fn parse(
     value: &Value,
     skill: &str,
     path: &str,
     limits: &Limits,
+    lock: Option<&Lock>,
     issues: &mut Issues,
 ) -> Option<Vec<Arc<Tool>>> {
     let root = value.as_object()?;
     let server = root.get("server").and_then(Value::as_str)?.to_owned();
     let list = root.get("tools").and_then(Value::as_array)?;
+    if let Some(lock) = lock.filter(|lock| lock.server != server) {
+        issues.error_at(
+            "lock-server-mismatch",
+            &lock.path,
+            "/server",
+            format!(
+                "tools.yaml의 서버는 `{server}`인데 이 잠금은 `{}`의 것이에요",
+                lock.server
+            ),
+        );
+        return None;
+    }
     if list.len() > limits.max_tools {
         issues.error_at(
             "too-many",
@@ -66,7 +81,15 @@ pub fn parse(
         let Some(obj) = item.as_object() else {
             continue;
         };
-        if let Some(tool) = parse_tool(obj, skill, &server, path, &format!("/tools/{i}"), issues) {
+        if let Some(tool) = parse_tool(
+            obj,
+            skill,
+            &server,
+            path,
+            &format!("/tools/{i}"),
+            lock,
+            issues,
+        ) {
             if tools.iter().any(|t| t.id == tool.id) {
                 issues.error_at(
                     "duplicate-tool",
@@ -79,6 +102,24 @@ pub fn parse(
             }
         }
     }
+    if let Some(lock) = lock {
+        // 선언에 없는 항목은 쓰이지 않는다(`bot mcp sync`는 선언한 도구만 적으므로 도구를 지운 뒤 다시 동기화하면 사라진다)
+        let declared: BTreeSet<&str> = list
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect();
+        for id in lock
+            .tools
+            .keys()
+            .filter(|id| !declared.contains(id.as_str()))
+        {
+            issues.warning(
+                "lock-unused",
+                &lock.path,
+                format!("`{id}`는 tools.yaml에 선언돼 있지 않아 쓰이지 않아요 — `bot mcp sync`로 다시 만들면 사라져요"),
+            );
+        }
+    }
     (issues.error_count() == before).then_some(tools)
 }
 
@@ -88,6 +129,7 @@ fn parse_tool(
     server: &str,
     path: &str,
     at: &str,
+    lock: Option<&Lock>,
     issues: &mut Issues,
 ) -> Option<Tool> {
     let name = obj.get("id").and_then(Value::as_str)?.to_owned();
@@ -105,10 +147,45 @@ fn parse_tool(
         "write" => Risk::Write,
         _ => Risk::Irreversible,
     };
-    let input = obj.get("input")?.clone();
+    // 서버가 내세우는 도구 이름: `name`(MCP 이름 규칙, 번들 스키마가 모양을 본다), 생략하면 id. id와 같으면 쓰지 않은 것과 같다(판본도 그대로).
+    let mcp_name = obj
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|given| *given != name)
+        .map(str::to_owned);
+    let remote_name = mcp_name.as_deref().unwrap_or(&name);
+    // `input`을 적으면 그것이 정본이다(실행할 때 서버의 입력 스키마가 같은지만 본다). 생략하면 잠금 파일의 스키마와 정의 해시가 정본이다.
+    let (input, definition) = match (obj.get("input"), lock.and_then(|l| l.tools.get(&name))) {
+        // (`bot mcp sync`는 선언한 도구를 모두 적으므로 인라인 도구의 항목은 있어도 쓰이지 않는다 — 경고하지 않는다)
+        (Some(inline), _) => (inline.clone(), None),
+        (None, Some(entry)) if entry.name != remote_name => {
+            issues.error_at(
+                "lock-name-mismatch",
+                path,
+                format!("{at}/name"),
+                format!(
+                    "tools.yaml는 이 도구의 서버 이름을 `{remote_name}`로 정했는데 잠금은 `{}`로 적었어요 — `bot mcp sync <스킬 폴더>`로 다시 만드세요",
+                    entry.name
+                ),
+            );
+            return None;
+        }
+        (None, Some(entry)) => (entry.input_schema.clone(), Some(entry.sha256.clone())),
+        (None, None) => {
+            issues.error_at(
+                "missing-input",
+                path,
+                format!("{at}/input"),
+                "input을 생략하려면 같은 폴더의 tools.lock.yaml에 이 도구가 있어야 해요 — `bot mcp sync <스킬 폴더>`로 만들거나 input을 적으세요",
+            );
+            return None;
+        }
+    };
     let before = issues.error_count();
     let schema = compile_input(&input, path, at, issues);
-    let destination = parse_destination(obj.get("destination"), class, &input, path, at, issues);
+    // 목적지 경로는 `$ref`를 펼친 스키마의 속성으로 확인한다(원본 스키마의 최상위가 `$ref`일 수 있다)
+    let expanded = schema.as_ref().map_or(&input, |compiled| compiled.doc());
+    let destination = parse_destination(obj.get("destination"), class, expanded, path, at, issues);
     let egress = parse_egress(obj.get("egress"), path, at, issues);
     let secrets: BTreeMap<String, SecretName> = obj
         .get("secrets")
@@ -140,6 +217,14 @@ fn parse_tool(
     if !env.is_empty() {
         declared["env"] = json!(env);
     }
+    // 정의 해시는 판본에 든다: 서버의 설명·스키마가 바뀌어 잠금을 다시 만들면 도구 판본이 달라져 옛 승인이 새 정의에 쓰이지 않는다
+    if let Some(sha) = &definition {
+        declared["definition"] = json!(sha);
+    }
+    // 다른 서버 이름을 가리키게 바꾸면 다른 도구다(id와 같은 이름은 쓰지 않은 것과 같아 옛 판본이 그대로다)
+    if let Some(given) = &mcp_name {
+        declared["name"] = json!(given);
+    }
     Some(Tool {
         id: ToolId(format!("{skill}.{name}")),
         name,
@@ -155,22 +240,24 @@ fn parse_tool(
         input: JsonPayload(canonical_json(&input)),
         revision: Revision(sha256_hex(canonical_json(&declared).as_bytes())),
         schema: Arc::new(schema?),
+        definition,
+        mcp_name,
     })
 }
 
-/// 인자는 항상 객체이므로 입력 스키마의 최상위는 `type: object`여야 하고, 지원하는 키워드만 써야 한다.
+/// 인자는 항상 객체이므로 입력 스키마의 최상위는 `type: object`여야 하고, 지원하는 키워드만 써야 한다(로컬 `$ref`는 재귀 없는 것만 펼쳐 쓴다).
 fn compile_input(input: &Value, path: &str, at: &str, issues: &mut Issues) -> Option<Schema> {
     let at = format!("{at}/input");
-    if input.get("type") != Some(&json!("object")) {
-        issues.error_at(
-            "bad-input-schema",
-            path,
-            at,
-            "input의 최상위는 `type: object`여야 해요",
-        );
-        return None;
-    }
     match Schema::compile_input(input.clone()) {
+        Ok(schema) if schema.doc().get("type") != Some(&json!("object")) => {
+            issues.error_at(
+                "bad-input-schema",
+                path,
+                at,
+                "input의 최상위는 `type: object`여야 해요",
+            );
+            None
+        }
         Ok(schema) => Some(schema),
         Err(errors) => {
             for e in errors {
@@ -265,146 +352,4 @@ fn parse_egress(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse_text(doc: Value) -> (Option<Vec<Arc<Tool>>>, Vec<&'static str>) {
-        let mut issues = Issues::new(50);
-        let parsed = parse(
-            &doc,
-            "agenda",
-            "tools.yaml",
-            &Limits::default(),
-            &mut issues,
-        );
-        (parsed, issues.items().iter().map(|i| i.code).collect())
-    }
-
-    fn doc(tool: Value) -> Value {
-        json!({"version": 1, "server": "demo", "tools": [tool]})
-    }
-
-    fn tool(extra: Value) -> Value {
-        let mut base = json!({
-            "id": "send", "class": "write", "scopes": ["mail.send"],
-            "input": {"type": "object", "properties": {"to": {"type": "string"}, "message": {"type": "string"}}, "additionalProperties": false}
-        });
-        base.as_object_mut()
-            .unwrap()
-            .extend(extra.as_object().unwrap().clone());
-        base
-    }
-
-    #[test]
-    fn builds_tools_with_revision_and_schema() {
-        let (parsed, codes) = parse_text(doc(tool(
-            json!({"destination": {"recipient": "args.to", "content": "args.message"}, "egress": ["mail.test:443"]}),
-        )));
-        assert!(codes.is_empty(), "{codes:?}");
-        let tools = parsed.unwrap();
-        let t = &tools[0];
-        assert_eq!(t.id.0, "agenda.send");
-        assert_eq!(t.risk(), Risk::Irreversible);
-        assert_eq!(t.revision.0.len(), 64);
-        assert!(
-            t.schema
-                .validate(&json!({"to": "a", "message": "b"}))
-                .is_empty()
-        );
-        assert!(!t.schema.validate(&json!({"to": 1})).is_empty());
-        let (other, _) = parse_text(doc(tool(json!({"scopes": ["mail.other"]}))));
-        assert_ne!(other.unwrap()[0].revision, t.revision);
-    }
-
-    #[test]
-    fn rejects_bad_declarations() {
-        assert_eq!(
-            parse_text(doc(tool(
-                json!({"destination": {"recipient": "args.nope", "content": "args.message"}})
-            )))
-            .1,
-            ["bad-destination"]
-        );
-        assert_eq!(
-            parse_text(doc(tool(json!({"class": "read", "destination": "reply"})))).1,
-            ["destination-on-read"]
-        );
-        assert_eq!(
-            parse_text(doc(tool(json!({"egress": ["a.test:0"]})))).1,
-            ["bad-egress"]
-        );
-        assert_eq!(
-            parse_text(doc(tool(json!({"egress": ["-a.test:443"]})))).1,
-            ["bad-egress"]
-        );
-        assert_eq!(
-            parse_text(doc(tool(json!({"egress": ["a..test:443"]})))).1,
-            ["bad-egress"]
-        );
-        assert_eq!(
-            parse_text(doc(tool(json!({"input": {"properties": {}}})))).1,
-            ["bad-input-schema"]
-        );
-        assert_eq!(
-            parse_text(doc(tool(
-                json!({"input": {"type": "object", "patternProperties": {}}})
-            )))
-            .1,
-            ["bad-input-schema"]
-        );
-        let dup = json!({"version": 1, "server": "s", "tools": [tool(json!({})), tool(json!({}))]});
-        assert_eq!(parse_text(dup).1, ["duplicate-tool"]);
-    }
-
-    #[test]
-    fn reply_destination_is_allowed_on_write_tools() {
-        let (parsed, codes) = parse_text(doc(tool(json!({"destination": "reply"}))));
-        assert!(codes.is_empty());
-        assert!(matches!(
-            parsed.unwrap()[0].destination,
-            Some(Destination::Reply)
-        ));
-    }
-
-    #[test]
-    fn only_the_exact_builtin_tool_id_is_reserved() {
-        let named = |skill: &str, tool: &str| {
-            let doc = doc(tool_named(tool));
-            let mut issues = Issues::new(10);
-            let parsed = parse(&doc, skill, "tools.yaml", &Limits::default(), &mut issues);
-            (
-                parsed.is_some(),
-                issues.items().iter().map(|i| i.code).collect::<Vec<_>>(),
-            )
-        };
-        assert_eq!(named("memory", "share"), (false, vec!["reserved-tool"]));
-        for tool in ["create", "list", "cancel", "deliver"] {
-            assert_eq!(
-                named("schedule", tool),
-                (false, vec!["reserved-tool"]),
-                "schedule.{tool}"
-            );
-        }
-        for tool in ["get", "update", "delete"] {
-            assert_eq!(named("schedule", tool), (true, vec![]), "schedule.{tool}");
-        }
-        assert_eq!(named("calendar", "create"), (true, vec![]));
-        assert_eq!(named("schedule-notes", "create"), (true, vec![]));
-        assert_eq!(
-            named("memory", "recall"),
-            (true, vec![]),
-            "memory 스킬 자체는 허용"
-        );
-        assert_eq!(
-            named("mail", "share"),
-            (true, vec![]),
-            "같은 도구 이름은 허용"
-        );
-        assert_eq!(named("memory-notes", "share"), (true, vec![]));
-    }
-
-    fn tool_named(name: &str) -> Value {
-        json!({"id": name, "class": "read", "scopes": ["x.read"],
-               "input": {"type": "object", "properties": {}, "additionalProperties": false}})
-    }
-}
+mod tests;

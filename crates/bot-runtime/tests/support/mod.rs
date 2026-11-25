@@ -3,9 +3,12 @@
 //! 시험마다 `runtime_pg_<pid>_<번호>` 스키마를 만들고 끝나면(패닉 포함) 자기 것만 지운다.
 #![allow(dead_code)]
 
+pub mod api;
 pub mod cli;
+pub mod model_request;
 pub mod sweep;
 pub mod turns;
+pub mod upstream;
 pub mod view;
 
 use bot_broker::{

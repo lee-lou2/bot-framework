@@ -157,7 +157,7 @@ API에서는 `POST /v1/admin/approvals/{nonce}/decide`에 `{"allow":true,"seen":
 | `endpoint` | 필수 | 평문 `http://호스트:포트/경로`. 루프백·사설 주소·`localhost`만 명시 없이 받는다(아래 `remote`). 공개망은 TLS를 맡는 수집기를 거친다. |
 | `remote` | `false` | 사설망 밖일 수 있는 수집기로 **평문** 전송을 해도 된다는 운영자의 명시. 없으면 위 주소가 아닌 수집기는 시작 전에 거절된다. |
 | `name`·`link` | `default`·없음 | 표시 이름, 화면 링크 틀(`{trace_id}` 포함, http(s)). |
-| `headers` | 없음 | 글은 평문 값, `{"secret": 이름}`은 그 프로필의 SecretStore 이름(보낼 때마다 받는다). |
+| `headers` | 없음 | 글은 평문 값, `{"secret": 이름}`은 그 프로필의 SecretStore 이름(보낼 때마다 받는다). 이름은 프로필이 선언한 자격과 같이 `bot validate`·`bot doctor`가 보관소에 있는지 보고 `bot serve`가 시작 때 읽어 가림 목록에 넣는다. |
 | `content`·`ids`·`sample` | `false`·`hash`·`1.0` | 내용 기록 opt-in, 식별자 표기(`hash`·`plain`), 표본 비율. |
 
 ### 시작 순서

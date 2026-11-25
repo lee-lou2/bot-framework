@@ -6,8 +6,9 @@
 //!   실행은 그 설치본에서만 한다(원래 경로를 다시 열지 않는다). 설치본은 `<기준>/<판본>/`이라 같은 내용·명령이면 같은 폴더이고
 //!   (여러 프로세스·재시작이 공유), 이미 있으면 설치본 바이트를 다시 해시해 판본과 같을 때만 쓴다(바뀌었으면 거절).
 //! - 링크·특수 파일·UTF-8이 아닌 이름은 거절한다. 설치 위치·수정 시각은 판본에 들어가지 않는다.
+use bot_broker::mcp::remote::Remote;
 use bot_core::{
-    id::Revision,
+    id::{Revision, SecretName},
     install::{InstallEntry, ServerState, server_revision},
 };
 use serde_json::Value;
@@ -46,6 +47,80 @@ fn relative_ok(path: &str) -> bool {
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
+/// `servers` 절 전체: 로컬 설치본(stdio)과 원격(Streamable HTTP, `transport: "http"`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Servers {
+    pub local: BTreeMap<String, ServerSpec>,
+    pub remote: BTreeMap<String, Remote>,
+}
+
+/// `servers` 절을 읽는다: `transport`가 `http`인 항목은 원격(`url`·선택 `auth`), 그 밖(생략·`stdio`)은 로컬 설치본이다.
+pub fn parse_all(value: &Value) -> Result<Servers, String> {
+    let Value::Object(map) = value else {
+        return parse_servers(value).map(|local| Servers {
+            local,
+            ..Servers::default()
+        });
+    };
+    let (mut local, mut remote) = (serde_json::Map::new(), BTreeMap::new());
+    for (alias, entry) in map {
+        if entry.get("transport").and_then(Value::as_str) == Some("http") {
+            if !bot_core::id::is_name(alias) {
+                return Err(format!(
+                    "servers.{alias}: 별칭이 이름 규칙(소문자·숫자·하이픈)에 맞지 않아요"
+                ));
+            }
+            remote.insert(alias.clone(), parse_remote(alias, entry)?);
+        } else {
+            local.insert(alias.clone(), entry.clone());
+        }
+    }
+    Ok(Servers {
+        local: parse_servers(&Value::Object(local))?,
+        remote,
+    })
+}
+
+/// 원격 서버 한 항목: `{"transport": "http", "url": "https://…", "auth": {"kind": "bearer", "secret": "<자격 이름>"}}`(`auth`는 생략할 수 있다).
+fn parse_remote(alias: &str, entry: &Value) -> Result<Remote, String> {
+    let fields = entry
+        .as_object()
+        .ok_or_else(|| format!("servers.{alias}: 객체여야 해요"))?;
+    if let Some(unknown) = fields
+        .keys()
+        .find(|k| !matches!(k.as_str(), "transport" | "url" | "auth"))
+    {
+        return Err(format!("servers.{alias}: 알 수 없는 키예요: {unknown}"));
+    }
+    let url = fields
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("servers.{alias}.url: 주소 문자열이 필요해요"))?;
+    let bearer = match fields.get("auth") {
+        None => None,
+        Some(Value::Object(auth))
+            if auth.get("kind").and_then(Value::as_str) == Some("bearer")
+                && auth.keys().all(|k| matches!(k.as_str(), "kind" | "secret")) =>
+        {
+            let name = auth
+                .get("secret")
+                .and_then(Value::as_str)
+                .and_then(SecretName::parse)
+                .filter(|name| !bot_broker::private::reserved_secret(name))
+                .ok_or_else(|| {
+                    format!("servers.{alias}.auth.secret: 자격 이름(소문자·숫자·하이픈)이 필요해요")
+                })?;
+            Some(name)
+        }
+        Some(_) => {
+            return Err(format!(
+                "servers.{alias}.auth: {{\"kind\": \"bearer\", \"secret\": \"<자격 이름>\"}} 모양이어야 해요"
+            ));
+        }
+    };
+    Remote::parse(url, bearer).map_err(|why| format!("servers.{alias}.url: {why}"))
+}
+
 /// `servers` 절을 읽는다. 별칭을 키로 한 객체여야 하고, 옛 별칭 배열과 수동 판본(`revision`)은 받지 않는다.
 pub fn parse_servers(value: &Value) -> Result<BTreeMap<String, ServerSpec>, String> {
     let Value::Object(map) = value else {
@@ -66,9 +141,15 @@ pub fn parse_servers(value: &Value) -> Result<BTreeMap<String, ServerSpec>, Stri
                 "servers.{alias}: {{\"root\": …, \"command\": […]}} 객체여야 해요"
             ));
         };
+        // `transport: "http"`는 `parse_all`이 원격으로 가른다. 여기에 오는 것은 로컬 설치본이라 `stdio`(기본)만 쓸 수 있다.
+        if fields.get("transport").is_some_and(|t| t != "stdio") {
+            return Err(format!(
+                "servers.{alias}.transport: \"stdio\"(기본) 또는 \"http\"여야 해요"
+            ));
+        }
         if let Some(unknown) = fields
             .keys()
-            .find(|k| !matches!(k.as_str(), "root" | "command" | "state"))
+            .find(|k| !matches!(k.as_str(), "root" | "command" | "state" | "transport"))
         {
             let hint = if unknown == "revision" {
                 " (판본은 설치본의 내용에서 자동으로 계산해요)"
@@ -149,6 +230,20 @@ fn revision_of(
             spec.command[0]
         )
     })
+}
+
+/// 로컬 설치본과 원격 서버의 판본 전부(원격은 주소·접속 방식·자격 이름에서 계산한다). 승인 결정과 활성화 지문이 쓴다.
+pub fn measure_all(
+    local: &BTreeMap<String, ServerSpec>,
+    remote: &BTreeMap<String, Remote>,
+) -> Result<BTreeMap<String, Revision>, String> {
+    let mut out = measure(local)?;
+    out.extend(
+        remote
+            .iter()
+            .map(|(alias, remote)| (alias.clone(), Revision(remote.revision()))),
+    );
+    Ok(out)
 }
 
 /// 설치하지 않고 판본만 계산한다(승인 결정만 하는 역할·`bot validate`).

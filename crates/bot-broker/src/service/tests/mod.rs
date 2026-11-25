@@ -15,6 +15,7 @@ mod openai;
 mod owner_precedence;
 mod preflight;
 mod recovery;
+mod remote;
 mod revision;
 mod schedule;
 mod secret_check;

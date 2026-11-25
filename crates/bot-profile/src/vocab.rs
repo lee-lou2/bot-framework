@@ -38,16 +38,19 @@ const INPUT_KEYS: &[&str] = &[
     "title",
     "description",
     "default",
-];
-const BUNDLED_EXTRA: &[&str] = &[
+    // 주석 키워드: 받아들이되 검증에는 쓰지 않는다(실제 MCP 서버의 입력 스키마가 흔히 싣는다)
     "$schema",
     "$comment",
-    "$id",
     "examples",
+    "format",
     "deprecated",
     "readOnly",
     "writeOnly",
-    "format",
+    // MCP Streamable HTTP: 이 인자의 값을 `Mcp-Param-<이름>` 머리로 되풀이한다(주석일 뿐 검증에는 영향이 없다). 값은 HTTP 필드 이름 토큰이다.
+    "x-mcp-header",
+];
+const BUNDLED_EXTRA: &[&str] = &[
+    "$id",
     "$ref",
     "$defs",
     "definitions",
@@ -67,11 +70,48 @@ const TYPES: &[&str] = &[
     "null", "boolean", "object", "array", "string", "number", "integer",
 ];
 
+/// RFC 9110 `token`(`tchar`)으로만 이뤄진 1~64자.
+fn header_token(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
 fn escape(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
 
+/// 어휘 검사에서 찾은 문제 하나. `code`는 고정 이름이고 `pointer`는 문제가 있는 스키마 자리(JSON 포인터)다. `message`는 사람이 읽는 설명이며 **스키마 안의 글(키워드·패턴 등)을
+/// 되풀이할 수 있다** — 출처를 믿을 수 없는 스키마(서버가 내세운 정의)의 진단에는 `code`와 `pointer`만 쓴다.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Problem {
+    pub code: &'static str,
+    pub pointer: String,
+    pub message: String,
+}
+
+impl Problem {
+    /// 옛 한 줄 모양(`<포인터>: <설명>`)
+    pub fn line(&self) -> String {
+        let at = if self.pointer.is_empty() {
+            "/"
+        } else {
+            &self.pointer
+        };
+        format!("{at}: {}", self.message)
+    }
+}
+
 pub fn check(doc: &Value, dialect: Dialect) -> Result<HashMap<String, Regex>, Vec<String>> {
+    check_problems(doc, dialect).map_err(|found| found.iter().map(Problem::line).collect())
+}
+
+pub fn check_problems(
+    doc: &Value,
+    dialect: Dialect,
+) -> Result<HashMap<String, Regex>, Vec<Problem>> {
     let mut walk = Walk {
         root: doc,
         dialect,
@@ -90,13 +130,16 @@ struct Walk<'a> {
     root: &'a Value,
     dialect: Dialect,
     patterns: HashMap<String, Regex>,
-    errors: Vec<String>,
+    errors: Vec<Problem>,
 }
 
 impl Walk<'_> {
-    fn bad(&mut self, ptr: &str, msg: impl AsRef<str>) {
-        let at = if ptr.is_empty() { "/" } else { ptr };
-        self.errors.push(format!("{at}: {}", msg.as_ref()));
+    fn bad(&mut self, ptr: &str, code: &'static str, msg: impl AsRef<str>) {
+        self.errors.push(Problem {
+            code,
+            pointer: ptr.to_owned(),
+            message: msg.as_ref().to_owned(),
+        });
     }
 
     fn allowed(&self, key: &str) -> bool {
@@ -108,53 +151,69 @@ impl Walk<'_> {
         let obj = match node {
             Value::Bool(_) if self.dialect == Dialect::Bundled || depth > 0 => return,
             Value::Object(o) => o,
-            _ => return self.bad(ptr, "스키마는 객체여야 해요"),
+            _ => return self.bad(ptr, "shape", "스키마는 객체여야 해요"),
         };
         if depth > MAX_DEPTH {
-            return self.bad(ptr, "스키마가 너무 깊어요");
+            return self.bad(ptr, "too-deep", "스키마가 너무 깊어요");
         }
         let mut subs: Vec<(String, &Value)> = Vec::new();
         for (key, value) in obj {
             if !self.allowed(key) {
-                self.bad(ptr, format!("지원하지 않는 키워드 `{key}`"));
+                self.bad(
+                    ptr,
+                    "unsupported-keyword",
+                    format!("지원하지 않는 키워드 `{key}`"),
+                );
                 continue;
             }
             let at = |name: &str| format!("{ptr}/{name}");
             match key.as_str() {
                 "type" => self.type_keyword(value, ptr),
-                "enum" if !value.is_array() => self.bad(ptr, "enum은 배열이어야 해요"),
+                "enum" if !value.is_array() => self.bad(ptr, "shape", "enum은 배열이어야 해요"),
                 "required"
                     if !value
                         .as_array()
                         .is_some_and(|a| a.iter().all(Value::is_string)) =>
                 {
-                    self.bad(ptr, "required는 문자열 배열이어야 해요");
+                    self.bad(ptr, "shape", "required는 문자열 배열이어야 해요");
                 }
                 "uniqueItems" if !value.is_boolean() => {
-                    self.bad(ptr, "uniqueItems는 true/false여야 해요")
+                    self.bad(ptr, "shape", "uniqueItems는 true/false여야 해요")
                 }
                 "minProperties" | "maxProperties" | "minItems" | "maxItems" | "minLength"
                 | "maxLength"
                     if value.as_u64().is_none() =>
                 {
-                    self.bad(ptr, format!("{key}는 0 이상의 정수여야 해요"));
+                    self.bad(ptr, "shape", format!("{key}는 0 이상의 정수여야 해요"));
                 }
                 "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum"
                     if value.as_f64().is_none() =>
                 {
-                    self.bad(ptr, format!("{key}는 숫자여야 해요"));
+                    self.bad(ptr, "shape", format!("{key}는 숫자여야 해요"));
                 }
                 "multipleOf" if value.as_f64().is_none_or(|m| m <= 0.0) => {
-                    self.bad(ptr, "multipleOf는 0보다 큰 숫자여야 해요");
+                    self.bad(ptr, "shape", "multipleOf는 0보다 큰 숫자여야 해요");
                 }
                 "pattern" => self.pattern(value, ptr),
+                "$schema" | "$comment" | "format" if !value.is_string() => {
+                    self.bad(ptr, "shape", format!("{key}는 글이어야 해요"));
+                }
+                "examples" if !value.is_array() => {
+                    self.bad(ptr, "shape", "examples는 배열이어야 해요")
+                }
+                "deprecated" | "readOnly" | "writeOnly" if !value.is_boolean() => {
+                    self.bad(ptr, "shape", format!("{key}는 true/false여야 해요"));
+                }
+                "x-mcp-header" if !value.as_str().is_some_and(header_token) => {
+                    self.bad(ptr, "bad-header-name", "x-mcp-header는 HTTP 필드 이름으로 쓸 수 있는 글자(영숫자와 `-` `_` 등 64자 이하)여야 해요");
+                }
                 "$ref" => self.reference(value, ptr),
                 "properties" | "$defs" | "definitions" => match value.as_object() {
                     Some(map) => subs.extend(
                         map.iter()
                             .map(|(k, v)| (at(&format!("{key}/{}", escape(k))), v)),
                     ),
-                    None => self.bad(ptr, format!("{key}는 객체여야 해요")),
+                    None => self.bad(ptr, "shape", format!("{key}는 객체여야 해요")),
                 },
                 "additionalProperties"
                 | "propertyNames"
@@ -173,7 +232,11 @@ impl Walk<'_> {
                                 .map(|(i, v)| (at(&format!("{key}/{i}")), v)),
                         );
                     }
-                    _ => self.bad(ptr, format!("{key}는 비어 있지 않은 배열이어야 해요")),
+                    _ => self.bad(
+                        ptr,
+                        "shape",
+                        format!("{key}는 비어 있지 않은 배열이어야 해요"),
+                    ),
                 },
                 _ => {}
             }
@@ -195,7 +258,7 @@ impl Walk<'_> {
             1
         };
         if names.is_empty() || names.len() != count || names.iter().any(|n| !TYPES.contains(n)) {
-            self.bad(ptr, format!("type이 올바르지 않아요: {value}"));
+            self.bad(ptr, "bad-type", format!("type이 올바르지 않아요: {value}"));
         }
     }
 
@@ -205,27 +268,32 @@ impl Walk<'_> {
             Some(r) if r.starts_with('#') && self.root.pointer(&r[1..]).is_some() => {}
             Some(r) => self.bad(
                 ptr,
+                "bad-ref",
                 format!("참조할 수 없어요(같은 문서의 `#/…`만 가능): {r}"),
             ),
-            None => self.bad(ptr, "$ref는 문자열이어야 해요"),
+            None => self.bad(ptr, "bad-ref", "$ref는 문자열이어야 해요"),
         }
     }
 
     fn pattern(&mut self, value: &Value, ptr: &str) {
         let Some(p) = value.as_str() else {
-            return self.bad(ptr, "pattern은 문자열이어야 해요");
+            return self.bad(ptr, "bad-pattern", "pattern은 문자열이어야 해요");
         };
         if self.patterns.contains_key(p) {
             return;
         }
         if let Err(why) = common_syntax(p) {
-            return self.bad(ptr, format!("pattern `{p}`: {why}"));
+            return self.bad(ptr, "bad-pattern", format!("pattern `{p}`: {why}"));
         }
         match RegexBuilder::new(p).size_limit(1 << 18).build() {
             Ok(re) => {
                 self.patterns.insert(p.to_owned(), re);
             }
-            Err(e) => self.bad(ptr, format!("pattern `{p}`을 쓸 수 없어요: {e}")),
+            Err(e) => self.bad(
+                ptr,
+                "bad-pattern",
+                format!("pattern `{p}`을 쓸 수 없어요: {e}"),
+            ),
         }
     }
 }
@@ -305,12 +373,12 @@ mod tests {
                            "o": {"anyOf": [{"type": "null"}, {"type": "string"}]}},
             "required": ["a"], "additionalProperties": false, "allOf": [{"required": ["a"]}], "oneOf": [{"type": "object"}]});
         assert!(input(ok).is_ok());
+        // `$ref`·`$defs`는 어휘 검사 앞에서 `Schema::compile_input`이 펼친다: 어휘 검사 자체는 남은 `$ref`를 받지 않는다
         for key in [
-            "$schema",
             "$ref",
             "$defs",
+            "definitions",
             "uniqueItems",
-            "format",
             "not",
             "if",
             "patternProperties",
@@ -318,7 +386,9 @@ mod tests {
             "exclusiveMinimum",
             "multipleOf",
             "$id",
-            "examples",
+            "$anchor",
+            "$dynamicRef",
+            "dependentSchemas",
         ] {
             let doc =
                 json!({"type": "object", key: if key == "$ref" { json!("#") } else { json!({}) }});
@@ -381,5 +451,51 @@ mod tests {
             assert!(input(doc.clone()).is_err(), "{doc}");
         }
         assert!(input(json!(true)).is_err(), "최상위 스키마는 객체여야 해요");
+    }
+
+    #[test]
+    fn annotation_keywords_are_accepted_but_never_checked_against_the_value() {
+        let doc = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#", "$comment": "생성한 스키마",
+            "type": "object", "title": "t", "description": "d", "examples": [{"a": "x"}],
+            "properties": {
+                "a": {"type": "string", "format": "uri", "deprecated": true, "readOnly": false,
+                      "writeOnly": false, "examples": ["x"], "default": "y", "$comment": "c"}
+            }
+        });
+        assert!(input(doc).is_ok());
+        // 모양이 틀린 주석은 거절한다
+        for bad in [
+            json!({"type": "object", "$schema": {}}),
+            json!({"type": "object", "format": 1}),
+            json!({"type": "object", "examples": {}}),
+            json!({"type": "object", "deprecated": "yes"}),
+            json!({"type": "object", "readOnly": 1}),
+        ] {
+            assert!(input(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_mcp_header_annotation_takes_a_field_name_token_only() {
+        let with = |value: Value| {
+            json!({"type": "object",
+                   "properties": {"region": {"type": "string", "x-mcp-header": value}}})
+        };
+        assert!(input(with(json!("Region"))).is_ok());
+        assert!(input(with(json!("X-Region_1"))).is_ok());
+        for bad in [
+            json!(""),
+            json!("a b"),
+            json!("a:b"),
+            json!("é"),
+            json!(5),
+            json!(null),
+            json!("x".repeat(65)),
+        ] {
+            assert!(input(with(bad.clone())).is_err(), "{bad}");
+        }
+        // 다른 `x-` 키는 여전히 어휘 밖이다
+        assert!(input(json!({"type": "object", "x-other": 1})).is_err());
     }
 }

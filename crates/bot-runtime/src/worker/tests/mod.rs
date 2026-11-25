@@ -8,4 +8,5 @@ mod lifecycle;
 mod outcome;
 mod session;
 mod shutdown;
+mod step_usage;
 mod steps;

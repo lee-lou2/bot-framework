@@ -97,16 +97,21 @@ async fn a_measured_usage_is_kept_for_the_first_claim_only() {
 }
 
 #[tokio::test]
-async fn a_step_run_never_reports_a_measured_usage() {
-    // 차례마다 나눠 도는 실행은 앞 차례의 사용량을 체크포인트하지 않아 전체 합을 알 수 없다
-    let model = ScriptedModel::new(vec![Ok(ModelStep::Final {
-        text: "답".into(),
-        usage: Default::default(),
-        outcome: measured(5, 2),
-    })]);
-    let (outcome, outcomes) = stored(model, agent_run("r1")).await;
+async fn a_single_turn_step_run_keeps_the_reported_usage_only_on_its_first_claim() {
+    // 첫 claim의 한 차례 실행: 그 응답이 run의 모든 모델 요청이다(여러 차례의 합은 `step_usage.rs`)
+    let reply = || {
+        ScriptedModel::new(vec![Ok(ModelStep::Final {
+            text: "답".into(),
+            usage: Default::default(),
+            outcome: measured(5, 2),
+        })])
+    };
+    let (outcome, outcomes) = stored(reply(), agent_run("r1")).await;
     assert_eq!(outcome, Outcome::Succeeded);
-    assert_eq!(outcomes, vec![RunOutcome::default()]);
+    assert_eq!(outcomes, vec![measured(5, 2)]);
+    // 다시 집은 run: 앞 시도가 응답을 받고도 기록하지 못한 요청이 있을 수 있어 합을 알 수 없다
+    let (_, retaken) = stored(reply(), generation(agent_run("r2"), 2)).await;
+    assert_eq!(retaken, vec![RunOutcome::default()]);
 }
 
 fn turn(role: TurnRole, content: &str) -> ChatTurn {

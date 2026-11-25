@@ -29,6 +29,8 @@ pub fn tool(class: Risk, scopes: &[&str]) -> Tool {
         effects: false,
         external: false,
         destination: None,
+        definition: None,
+        mcp_name: None,
     }
 }
 

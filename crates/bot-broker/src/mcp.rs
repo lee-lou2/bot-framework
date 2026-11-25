@@ -1,4 +1,4 @@
-//! MCP stdio 클라이언트(JSON-RPC 2.0, 한 줄에 메시지 하나).
+//! MCP 클라이언트. 여기는 stdio(JSON-RPC 2.0, 한 줄에 메시지 하나)이고, 원격 서버는 Streamable HTTP(`http`)로 말한다.
 //!
 //! 한 호출에 한 세션이다: `initialize`(협상한 판본 확인) → `tools/list`(선언과 대조할 입력 스키마) → `tools/call`.
 //! 서버가 보낸 요청은 지원하지 않는다고 답하고(우리는 어떤 클라이언트 기능도 내세우지 않는다), 알림은 무시한다.
@@ -18,6 +18,12 @@ use tokio::{
     time::timeout,
 };
 
+pub mod header;
+pub mod http;
+pub mod remote;
+pub mod sse;
+pub mod wire;
+
 /// 지원하는 MCP 판본. 서버가 이 밖의 판본으로 답하면 호출하지 않는다.
 pub const SUPPORTED: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// 서버가 보내는 줄 하나의 상한.
@@ -34,6 +40,19 @@ pub enum McpError {
     Version,
     /// 서버가 JSON-RPC 오류로 답했다(코드만 취한다).
     Server(i64),
+    /// (HTTP) 연결을 맺기 전에 실패했다: 요청이 서버에 닿지 않았다.
+    Unreached,
+    /// (HTTP) 2xx가 아닌 응답. `code`는 본문이 같은 요청의 JSON-RPC 오류일 때의 코드다(분류에는 쓰지 않는다: 실행 여부를 알려 주지 않는다).
+    Status {
+        status: u16,
+        code: Option<i64>,
+    },
+    /// (HTTP) 서버 응답 어딘가(원문·해석한 글·키·숫자 표기·커서)에 이쪽 자격이 섞여 있다. 응답을 쓰지 않는다.
+    Exposed,
+    /// (HTTP) 도구 목록을 모으는 동안 서버가 목록이 바뀌었다고 알렸다: 모은 목록은 한 시점의 것이 아니다.
+    Changed,
+    /// (HTTP) 요청을 보내기 직전 확인에서 이 프로세스의 판본이 더는 활성이 아니다: 아무것도 보내지 않았다.
+    Stale,
 }
 
 pub struct Session {
@@ -158,6 +177,21 @@ impl Session {
         name: &str,
         limit: Duration,
     ) -> Result<Option<Value>, McpError> {
+        let found = self.find_tool(name, limit).await?;
+        match found {
+            None => Ok(None),
+            Some(tool) => Ok(Some(
+                tool.get("inputSchema").cloned().ok_or(McpError::Protocol)?,
+            )),
+        }
+    }
+
+    /// 서버가 내세우는 도구 `name`의 정의 한 건(`name`·`description`·`inputSchema` …). 없으면 `None`, 같은 이름이 둘이면 모호하므로 오류다.
+    pub async fn find_tool(
+        &mut self,
+        name: &str,
+        limit: Duration,
+    ) -> Result<Option<Value>, McpError> {
         let mut found: Option<Value> = None;
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_PAGES {
@@ -175,7 +209,7 @@ impl Session {
                     if found.is_some() {
                         return Err(McpError::Protocol);
                     }
-                    found = Some(tool.get("inputSchema").cloned().ok_or(McpError::Protocol)?);
+                    found = Some(tool.clone());
                 }
             }
             match result.get("nextCursor").and_then(Value::as_str) {

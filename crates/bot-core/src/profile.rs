@@ -95,6 +95,11 @@ pub struct Tool {
     pub effects: bool,
     pub external: bool,
     pub destination: Option<Destination>,
+    /// MCP 도구 정의(이름·설명·입력 스키마)의 고정 해시(`mcp::definition_sha256`, 소문자 16진). 입력 스키마를 `tools.lock.yaml`에서 가져온 도구만 있다.
+    /// 실행할 때 서버가 내세우는 정의가 이 해시와 다르면 호출하기 전에 막는다. 도구 판본(`revision`)에 이미 들어 있어 바뀌면 승인이 무효가 된다.
+    pub definition: Option<String>,
+    /// 서버가 내세우는 도구 이름(tools.yaml `name`, MCP 이름 규칙). 생략하면 도구 ID의 도구 부분이다(`skill.tool`의 `tool`). 도구 판본에 들어 있다.
+    pub mcp_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]

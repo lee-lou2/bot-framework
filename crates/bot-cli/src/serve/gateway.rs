@@ -32,7 +32,7 @@ use bot_core::{
     trace::Tracer,
 };
 use bot_gateway::{
-    active::ActiveSet,
+    active::{ActiveCheck, ActiveSet},
     cli::{CliGateway, socket},
     delivery::Deliverer,
     http::HttpGateway,
@@ -62,6 +62,8 @@ pub struct Deps {
     pub tracer: Arc<dyn Tracer>,
     /// 가짜 Slack 서버 주소(시험 전용, 제품은 `None`)
     pub slack_base: Option<String>,
+    /// 이 프로세스의 활성화 판본 확인(민감 DM 접수가 쓰는 원격 도구 서버 요청 직전에 다시 확인한다)
+    pub active: Arc<dyn ActiveCheck>,
 }
 
 /// 민감 트리거가 없는 호스트의 자리. 민감 접수가 올 수 없으므로 받지 않는다(ack하지 않아 Slack이 다시 보낸다).
@@ -91,6 +93,7 @@ async fn private_intake(deps: &Deps) -> Result<Arc<dyn PrivateIntake>, String> {
         &deps.secrets,
         deps.store.clone() as Arc<dyn EffectJournal>,
         deps.uid,
+        deps.active.clone(),
     )
     .await?;
     let gate = PrivateGate::new(

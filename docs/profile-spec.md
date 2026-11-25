@@ -14,7 +14,7 @@ profiles/personal/
     triggers.yaml
     memory/
     knowledge/
-    skills/agenda/{SKILL.md,tools.yaml}
+    skills/agenda/{SKILL.md,tools.yaml[,tools.lock.yaml]}
     agents/research/AGENT.md
 ```
 
@@ -61,7 +61,7 @@ builtin: [read]
 
 `read`는 파일 내용, `grep`은 본문 검색, `glob`은 파일명 검색을 허용한다. 생략 또는 `[]`은 내장 도구 0개다. 자식은 자기 파일에서 다시 선택한다. 중복, 셸·쓰기·웹 도구, 그 밖의 이름은 검증 오류다. 이 필드는 호스트 경로를 추가로 마운트하지 않는다. 호스트는 읽기 격리를 지원하는 모델 샌드박스에서만 내장 도구를 허용한다. 모델 VM에 연결되는 호스트 폴더는 이 시도의 읽기 전용 입력과 쓰기 가능한 작업 폴더다. 내장 도구를 켜도 모델이 읽는 곳은 입력 폴더뿐이고, 이 시도의 세션 토큰은 어느 폴더에도 파일로 없다.
 
-v2.0 호스트가 지원하는 모델 제공자는 `demo`와 `claude-cli`다. 고정한 Claude Code 2.1.331의 `--bare` 모드에서는 `read`만 사용할 수 있다. 이 실행기에서 `grep`이나 `glob`을 요청하면 모델을 시작하기 전에 거절한다. 프로필 작성자는 에이전트 폴더의 `AGENT.md`에 지침을 쓴다. 워커가 상속된 지침을 조립해 Claude의 시스템 지침으로 전달한다. [Claude Code 실행 방식](architecture.md#claude-code가-브로커에-연결하는-방법)
+v2.0 호스트가 지원하는 모델 제공자는 `demo`, `claude-cli`, API 직접 호출(`anthropic-api`·`openai-api`)이다. API 직접 호출에는 내장 파일 도구가 없어 `builtin`을 선언한 에이전트는 모델을 부르기 전에 `unsupported_builtin`으로 거절한다. 고정한 Claude Code 2.1.331의 `--bare` 모드에서는 `read`만 사용할 수 있다. 이 실행기에서 `grep`이나 `glob`을 요청하면 모델을 시작하기 전에 거절한다. 프로필 작성자는 에이전트 폴더의 `AGENT.md`에 지침을 쓴다. 워커가 상속된 지침을 조립해 Claude의 시스템 지침으로 전달한다. [Claude Code 실행 방식](architecture.md#claude-code가-브로커에-연결하는-방법)
 
 ## 새 프로필의 호스트 설정
 
@@ -146,6 +146,8 @@ tools:
 ```
 
 실제 일정 서버라면 `secrets: {CALENDAR_TOKEN: calendar-reader}`, `egress: ["calendar.example:443"]`처럼 선언한다. calendar-reader는 profile.yaml의 secrets에도 있어야 한다. 호스트가 확인한 프로필 아래의 이름만 해석한다. 운영자가 프로필별 egress 상한을 지정하면 선언과의 교집합만 허용한다.
+
+`input`을 생략하면 같은 폴더의 `tools.lock.yaml`에서 입력 스키마를 가져온다. 이 파일은 `bot mcp sync <스킬 폴더>`가 서버의 `tools/list`에서 선언한 도구만 받아 `{id, name, description, input_schema, sha256}`로 적으며(도구의 선택 필드 `name`은 서버가 내세우는 이름이고 생략하면 `id`다) [plugins.md](plugins.md#도구-정의-잠금-toolslockyaml)가 절차를 설명한다. 인라인 `input`이 있으면 그것이 우선이고, 둘 다 없으면 활성화를 거절한다. 잠금의 `sha256`은 내용에서 다시 계산해 맞지 않으면 거절하며, 도구 판본에 들어가 실행 때 서버의 정의와 대조한다. `servers.<별칭>`이 원격 서버(`transport: "http"`)면 호스트가 `url`의 `호스트:포트`를 알려 주고, 그 도구는 `effects`·`secrets`·`env`를 선언할 수 없으며 `egress`에 그 `호스트:포트`가 정확히 있어야 한다.
 
 ```yaml
 version: 1
@@ -269,7 +271,7 @@ BOT_HOST_CONFIG는 CLI가 읽는 JSON이다. gateway 키는 게이트웨이가 �
 
 ## bot-profile 검증 규칙
 
-**폴더.** BOT_PROFILES 바로 아래에는 프로필 폴더만 둔다(루트 자체는 링크여도 된다). 트리 안의 링크·소켓·FIFO·장치·하드링크 파일, UTF-8이 아니거나 제어·방향 전환 문자가 든 이름과 내용, 대소문자만 다른 이름을 거절한다. 알려진 이름만 받는다. 프로필은 profile.yaml·rules.md·agents·knowledge·skills, 에이전트는 AGENT.md·env.yaml·triggers.yaml·memory·knowledge·skills·agents, 스킬은 SKILL.md·tools.yaml이다. knowledge는 `.md`·`.txt`, memory는 `.md`만 둔다. `.git`·`.DS_Store`·`.gitkeep`은 읽지도 해시하지도 않는다. 기본 한도는 프로필 64개, 프로필당 파일 2,000개·16 MiB, 파일 1 MiB(YAML 256 KiB), 경로 깊이 24, 에이전트 128개·8단계다. 한도를 넘으면 일부만 받지 않고 전체를 거절한다.
+**폴더.** BOT_PROFILES 바로 아래에는 프로필 폴더만 둔다(루트 자체는 링크여도 된다). 트리 안의 링크·소켓·FIFO·장치·하드링크 파일, UTF-8이 아니거나 제어·방향 전환 문자가 든 이름과 내용, 대소문자만 다른 이름을 거절한다. 알려진 이름만 받는다. 프로필은 profile.yaml·rules.md·agents·knowledge·skills, 에이전트는 AGENT.md·env.yaml·triggers.yaml·memory·knowledge·skills·agents, 스킬은 SKILL.md·tools.yaml·tools.lock.yaml(원격 서버의 도구 정의 잠금)이다. knowledge는 `.md`·`.txt`, memory는 `.md`만 둔다. `.git`·`.DS_Store`·`.gitkeep`은 읽지도 해시하지도 않는다. 기본 한도는 프로필 64개, 프로필당 파일 2,000개·16 MiB, 파일 1 MiB(YAML 256 KiB), 경로 깊이 24, 에이전트 128개·8단계다. 한도를 넘으면 일부만 받지 않고 전체를 거절한다.
 
 **YAML과 스키마.** 앵커·별칭·태그·다중 문서·중복 키·복합 키·무한대·NaN, 깊이 32·항목 2만 개 초과를 거절한다. 평문은 YAML 1.2 코어 스키마로 읽어 `yes/no/on/off`는 문자열이고 키는 글자 그대로 문자열이다. 번들 스키마로 검증한다. cron은 5칸 표현과 `@hourly`·`@daily`·`@midnight`·`@weekly`·`@monthly`·`@yearly`·`@annually`, 일·요일 칸의 `?`를 받으며 `bot_core::cron::Cron`(검증과 스케줄러 공용)이 정규 5칸으로 바꾼다. AGENT.md의 front matter는 [agent.schema.json](../schemas/v1/agent.schema.json)의 `model`, `description`(한 줄 200자 이하, 상속하지 않으며 생략하면 경로의 마지막 이름), `builtin`(모델 실행기의 읽기 전용 내장 도구 `read`·`grep`·`glob`, 기본은 빈 목록, 상속하지 않으며 중복·미등록은 거절)만 받는다. 도구 input은 [plugins.md](plugins.md)의 어휘만 받으며, pattern은 `\d \w \s \b`·인라인 플래그·lookaround 없이 엔진마다 같게 읽히는 문법만 쓴다. 쓸 수 없는 키워드·패턴은 활성화를 거절한다.
 

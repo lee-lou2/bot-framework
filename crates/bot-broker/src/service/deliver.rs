@@ -55,6 +55,8 @@ pub fn deliver_tool() -> Tool {
         // 다른 수신자에게 나가는 일이다: private 기억을 읽은 실행이면 승인 이유에 `private_recall`이 더해진다.
         external: true,
         destination: None,
+        definition: None,
+        mcp_name: None,
     }
 }
 

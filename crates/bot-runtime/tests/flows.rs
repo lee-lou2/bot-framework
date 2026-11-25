@@ -274,6 +274,8 @@ impl ModelRunner for Delegating {
                         ),
                     }],
                     usage: Usage::default(),
+                    measured: None,
+                    state: None,
                 }),
                 Some(done) => {
                     let outcome = format!("{:?}", done.calls[0].end);

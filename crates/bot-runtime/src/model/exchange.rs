@@ -29,6 +29,9 @@ pub struct DoneCall {
 pub struct Exchange {
     pub text: String,
     pub calls: Vec<DoneCall>,
+    /// 실행기가 이 차례를 정할 때 남긴 **불투명 공급자 상태**(`ModelStep::Calls::state`). 워커는 해석하지 않고 체크포인트에 그대로 적었다가 다음 요청의 같은 차례에
+    /// 돌려준다(공급자가 도구 호출과 함께 준 서명·원래 호출 ID를 다음 요청에 되돌려야 할 때). 실행기가 만든 글이라 신뢰하지 않고, 같은 종류의 실행기만 읽는다.
+    pub state: Option<String>,
 }
 
 fn json_of(payload: &JsonPayload) -> Value {
@@ -36,7 +39,7 @@ fn json_of(payload: &JsonPayload) -> Value {
 }
 
 impl Exchange {
-    /// 체크포인트 본문. `{"text":…,"calls":[{"call","tool","args","end":{"done":…}|{"failed":"코드"}|{"denied":true}}]}`
+    /// 체크포인트 본문. `{"text":…,"calls":[{"call","tool","args","end":{"done":…}|{"failed":"코드"}|{"denied":true}}],"state":"…"}`(`state`는 있을 때만)
     pub fn to_payload(&self) -> JsonPayload {
         let calls: Vec<Value> = self
             .calls
@@ -50,7 +53,11 @@ impl Exchange {
                 json!({"call": c.call.0, "tool": c.tool.0, "args": json_of(&c.args), "end": end})
             })
             .collect();
-        JsonPayload(json!({"text": self.text, "calls": calls}).to_string())
+        let mut body = json!({"text": self.text, "calls": calls});
+        if let Some(state) = &self.state {
+            body["state"] = Value::String(state.clone());
+        }
+        JsonPayload(body.to_string())
     }
 
     /// `to_payload`의 역. 모양이 다르면 None(손상된 체크포인트를 조용히 받아들이지 않는다).
@@ -76,7 +83,11 @@ impl Exchange {
                 end,
             });
         }
-        Some(Exchange { text, calls })
+        let state = match value.get("state") {
+            None | Some(Value::Null) => None,
+            Some(state) => Some(state.as_str()?.to_owned()),
+        };
+        Some(Exchange { text, calls, state })
     }
 }
 
@@ -109,6 +120,7 @@ mod tests {
                     end: CallEnd::Failed("unavailable".into()),
                 },
             ],
+            state: Some(r#"{"v":1}"#.into()),
         }
     }
 
@@ -119,6 +131,22 @@ mod tests {
             Exchange::from_payload(&original.to_payload()),
             Some(original)
         );
+    }
+
+    #[test]
+    fn the_provider_state_is_kept_verbatim_and_a_payload_without_it_has_none() {
+        let mut exchange = sample();
+        exchange.state = Some("{\"a\":\"줄\\n바꿈\"}".into());
+        let back = Exchange::from_payload(&exchange.to_payload()).unwrap();
+        assert_eq!(back.state, exchange.state);
+        // 상태가 없는 교환의 본문에는 `state` 키가 없고, 옛 본문(키 없음)은 상태 없음으로 읽힌다
+        exchange.state = None;
+        assert!(!exchange.to_payload().0.contains("state"));
+        let old = JsonPayload(r#"{"text":"x","calls":[]}"#.into());
+        assert_eq!(Exchange::from_payload(&old).unwrap().state, None);
+        // 문자열이 아닌 상태는 손상이다
+        let bad = JsonPayload(r#"{"text":"x","calls":[],"state":{"a":1}}"#.into());
+        assert_eq!(Exchange::from_payload(&bad), None);
     }
 
     #[test]

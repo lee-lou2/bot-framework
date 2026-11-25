@@ -26,6 +26,8 @@ fn tool(class: Risk, needs: &[&str], input: &str) -> Tool {
         effects: false,
         external: false,
         destination: None,
+        definition: None,
+        mcp_name: None,
     }
 }
 

@@ -84,6 +84,10 @@ pub struct Tool {
     pub input: JsonPayload,
     pub revision: Revision,
     pub schema: Arc<Schema>,
+    /// `tools.lock.yaml`에서 입력 스키마를 가져온 도구의 정의 해시(`bot_core::mcp::definition_sha256`)
+    pub definition: Option<String>,
+    /// tools.yaml `name`(서버가 내세우는 도구 이름). 생략했거나 도구 id와 같으면 `None`이다.
+    pub mcp_name: Option<String>,
 }
 
 impl Tool {

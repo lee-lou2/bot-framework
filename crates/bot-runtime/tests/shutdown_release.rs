@@ -370,6 +370,8 @@ impl ModelRunner for OneCall {
                         args: JsonPayload("{}".into()),
                     }],
                     usage: Usage::default(),
+                    measured: None,
+                    state: None,
                 })
             } else {
                 Ok(ModelStep::Final {

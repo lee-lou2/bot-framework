@@ -3,7 +3,7 @@
 //! 읽어 쓰는 모든 값이 쓰이기 전에 가림 장치에 들어가므로(`Watched`) 키를 교체해도 새 값이 바로 가려진다. 스스로 읽지 않는 값은 주기적으로 다시 읽어
 //! 따라잡는다(`watched::reread`).
 use super::watched::{Pace, Watched, declared, read_round};
-use crate::host::HostFile;
+use crate::{host::HostFile, secrets::env::EnvStore};
 use bot_admin::{
     Exporter,
     trace::{Options, Redactor},
@@ -32,6 +32,15 @@ impl Observe {
     pub async fn flush(&self) {
         self.exporter.flush(Duration::from_secs(5)).await;
     }
+}
+
+/// `bot doctor`가 모델 별칭 판정(`models::build`)에 넘기는 **자리만 채우는** 보관소: 비어 있는 개발용 보관소를 가림 장치로 감싼 것이라 아무 값도
+/// 읽지 않고 어떤 역할에도 넘기지 않는다. 보관소를 감싸는 곳을 이 파일 하나로 두는 규칙(`watched` 구조 시험)을 지키려고 여기에 둔다.
+pub(super) fn inert_secrets() -> Arc<Watched> {
+    Arc::new(Watched::new(
+        Arc::new(EnvStore::default()),
+        Redactor::default(),
+    ))
 }
 
 /// 수집기 설정(`admin.trace`)으로 내보내기 작업을 띄운다. 설정이 없으면 아무것도 내보내지 않는다. 잘못된 설정이면 Err(시작 전).

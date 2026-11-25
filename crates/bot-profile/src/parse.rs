@@ -5,6 +5,7 @@ use crate::{
     issue::{Issue, Issues},
     layout::{AgentFiles, Layout, SkillFiles},
     limits::Limits,
+    lock,
     model::{ProfileParts, Skill, Trigger},
     names, profile,
     scan::Tree,
@@ -57,21 +58,26 @@ fn text_of<'a>(tree: &'a Tree, path: &str, issues: &mut Issues) -> Option<&'a st
     }
 }
 
-fn yaml_of(
+/// 스키마 없이 YAML만 읽는다(번들 스키마가 없는 파일: `tools.lock.yaml`은 코드가 모양을 검사한다).
+fn yaml_value(tree: &Tree, path: &str, limits: &Limits, issues: &mut Issues) -> Option<Value> {
+    let text = text_of(tree, path, issues)?;
+    match yaml::parse(path, text, limits) {
+        Ok(value) => Some(value),
+        Err(issue) => {
+            issues.push(issue);
+            None
+        }
+    }
+}
+
+pub(crate) fn yaml_of(
     tree: &Tree,
     path: &str,
     schema: &Schema,
     limits: &Limits,
     issues: &mut Issues,
 ) -> Option<Value> {
-    let text = text_of(tree, path, issues)?;
-    let value = match yaml::parse(path, text, limits) {
-        Ok(v) => v,
-        Err(issue) => {
-            issues.push(issue);
-            return None;
-        }
-    };
+    let value = yaml_value(tree, path, limits, issues)?;
     let found = schema.validate(&value);
     for v in &found {
         issues.error_at("schema", path, v.pointer.clone(), v.message.clone());
@@ -139,7 +145,7 @@ fn skills(
         .collect()
 }
 
-fn skill(
+pub(crate) fn skill(
     tree: &Tree,
     files: &SkillFiles,
     limits: &Limits,
@@ -151,10 +157,26 @@ fn skill(
         issues.error("empty-file", md_path, "SKILL.md가 비어 있어요");
         return None;
     }
+    // 잠금 파일은 tools.yaml이 `input`을 생략한 도구의 입력 스키마·정의 해시의 정본이다. 틀리면 그것을 쓰는 도구가 모두 막히므로 여기서 멈춘다.
+    let lock = match files.lock.as_deref() {
+        Some(path) if files.tools.is_none() => {
+            issues.error(
+                "lock-without-tools",
+                path,
+                "tools.lock.yaml은 같은 폴더의 tools.yaml이 있어야 해요",
+            );
+            return None;
+        }
+        Some(path) => {
+            let value = yaml_value(tree, path, limits, issues)?;
+            Some(lock::parse(&value, path, limits, issues)?)
+        }
+        None => None,
+    };
     let tools = match files.tools.as_deref() {
         Some(path) => {
             let value = yaml_of(tree, path, &bundled().tools, limits, issues)?;
-            tools::parse(&value, &files.name, path, limits, issues)?
+            tools::parse(&value, &files.name, path, limits, lock.as_ref(), issues)?
         }
         None => Vec::new(),
     };

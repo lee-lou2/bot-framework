@@ -67,6 +67,7 @@ fn done(tool: &str, args: &str, end: CallEnd) -> Exchange {
             args: JsonPayload(args.into()),
             end,
         }],
+        state: None,
     }
 }
 

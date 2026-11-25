@@ -10,7 +10,8 @@ pub(crate) const RESUME_INSTRUCTION: &str =
 /// 도구 결과 하나를 문서에 싣는 글자 수 상한(넘으면 뒤를 자르고 표시한다)
 const MAX_RESULT_CHARS: usize = 8_000;
 
-fn clip(text: &str) -> String {
+/// 도구 결과를 모델에 보이는 글로 줄인다(CLI 실행기와 API 실행기가 같은 한도를 쓴다).
+pub(crate) fn clip(text: &str) -> String {
     match text.char_indices().nth(MAX_RESULT_CHARS) {
         Some((end, _)) => format!("{}… (잘림)", &text[..end]),
         None => text.to_owned(),
@@ -125,6 +126,7 @@ mod tests {
                     end: CallEnd::Denied,
                 },
             ],
+            state: None,
         };
         let doc = render_stdin(&request(vec![], vec![exchange]));
         assert!(doc.contains("# 이번 요청에서 이미 한 일\n\n확인할게요\n"));

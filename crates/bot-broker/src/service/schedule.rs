@@ -81,6 +81,8 @@ fn builtin(id: &str, class: Risk, schema: &str) -> Tool {
         effects: false,
         external: false,
         destination: None,
+        definition: None,
+        mcp_name: None,
     }
 }
 

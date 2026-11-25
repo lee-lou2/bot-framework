@@ -51,6 +51,9 @@ pub enum Ran {
     NotSent,
     /// 서버가 호출을 실행하기 전에 확정적으로 거절했다(JSON-RPC 잘못된 요청·없는 메서드·잘못된 인자). 외부 효과는 없다.
     Rejected,
+    /// `tools/call`을 보내기 **전에** 이쪽이 확정적으로 거절했다(서버가 내세우는 도구 정의가 `tools.lock.yaml`과 다름·정의가 사라짐 등). 미실행이 입증되고,
+    /// 호출은 거절로 닫히며 고정 코드가 감사에 남는다(같은 호출을 다시 보내도 같다).
+    Refused(&'static str),
     /// 보냈으나 결과를 모른다(시간 초과·프로세스 종료·연결 끊김·서버 내부 오류).
     Unknown(&'static str),
     /// 실행은 끝났지만 결과를 막았다(자격 노출·형식·크기).
@@ -72,7 +75,17 @@ pub trait ToolRunner: Send + Sync {
     fn admit_secrets(&self, _profile: &ProfileId, _names: &[SecretName]) -> Reply<'_, ()> {
         Box::pin(async { Ok(()) })
     }
+    /// 이 서버로 가는 호출에 쓰는 호스트 쪽 자격 이름들(예: 원격 서버의 bearer). 도구 선언의 `secrets`와 함께 새 호출을 기록하기 전에 보관소에 있는지 본다.
+    /// 기본은 없다.
+    fn server_secrets(&self, _server: &str) -> Vec<SecretName> {
+        Vec::new()
+    }
     fn run(&self, job: ToolJob) -> Reply<'_, Ran>;
     /// 이전 시도가 남긴 프로세스(자식 포함)가 모두 끝났음을 확인한다. 확인하지 못하면 `Unavailable`.
     fn reap(&self, owner: String) -> Reply<'_, ()>;
+    /// `reap`이 성공하면 이 서버로 간 옛 호출이 **끝났다는 증명**이 되는가. 로컬 샌드박스는 프로세스 그룹이 사라진 것이 증명이다. 원격 서버는 연결을 닫아도
+    /// 원격 실행이 계속될 수 있어 증명이 아니다(`false`): 복구는 보류를 유지하고 관리자의 판정을 기다린다. 기본은 `true`다.
+    fn reap_proves_end(&self, _server: &str) -> bool {
+        true
+    }
 }

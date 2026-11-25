@@ -55,6 +55,8 @@ fn tool(server: &str, class: Risk, scopes: BTreeSet<String>) -> Tool {
         effects: false,
         external: false,
         destination: None,
+        definition: None,
+        mcp_name: None,
     }
 }
 

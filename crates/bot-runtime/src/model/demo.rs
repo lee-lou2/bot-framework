@@ -54,6 +54,8 @@ fn call(request: &ModelRequest, tool: &str, args: Value, text: &str) -> ModelSte
             args: JsonPayload(args.to_string()),
         }],
         usage: Usage::default(),
+        measured: None,
+        state: None,
     }
 }
 

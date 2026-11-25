@@ -50,6 +50,8 @@ pub fn share_tool() -> Tool {
         effects: false,
         external: false,
         destination: None,
+        definition: None,
+        mcp_name: None,
     }
 }
 

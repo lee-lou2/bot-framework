@@ -13,6 +13,7 @@ pub mod install;
 pub mod intake;
 pub mod json;
 pub mod ledger;
+pub mod mcp;
 pub mod port;
 pub mod profile;
 pub mod sandbox;

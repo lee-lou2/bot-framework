@@ -1,5 +1,6 @@
 //! 명령줄 정의. 각 명령의 동작은 같은 이름의 모듈에 있다.
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -25,6 +26,93 @@ pub enum Command {
     Serve(ServeArgs),
     /// 프로필 판본의 묶음을 저장소에서 다룬다(재배포 뒤 옛 판본 복원용)
     ProfileBundle(BundleArgs),
+    /// 새 작업 폴더를 만든다(프로필 폴더 + 호스트 설정 예시). 있는 것은 덮어쓰지 않는다
+    Init(InitArgs),
+    /// 프로필에 에이전트·스킬 뼈대를 더한다. 권한 상한(profile.yaml)은 바꾸지 않는다
+    Add(AddArgs),
+    /// 설정을 점검해 한국어로 요약한다(기본은 네트워크 접속 없이 설정만 본다). 실패 항목이 있으면 종료 코드가 0이 아니다
+    Doctor(DoctorArgs),
+    /// MCP 도구 서버의 도구 정의를 프로필에 고정한다
+    Mcp(McpArgs),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Template {
+    /// 에이전트 하나: 가장 작은 개인 비서
+    Personal,
+    /// 팀 리드 아래에 개발·디자인·기획 에이전트
+    Team,
+    /// 매니저 아래에 제품·고객지원 팀과 팀원
+    Company,
+}
+
+#[derive(Args)]
+pub struct InitArgs {
+    /// 만들 이름: 작업 폴더 이름이자 프로필 ID(소문자·숫자·하이픈)
+    pub name: String,
+    /// 시작 템플릿
+    #[arg(long, value_enum, default_value = "personal")]
+    pub template: Template,
+    /// 이 폴더 안에 `<이름>/`을 만든다(이미 있는 폴더, 기본은 현재 폴더)
+    #[arg(long, default_value = ".")]
+    pub dir: PathBuf,
+}
+
+#[derive(Args)]
+pub struct AddArgs {
+    #[command(subcommand)]
+    pub what: AddKind,
+}
+
+#[derive(Subcommand)]
+pub enum AddKind {
+    /// 에이전트 뼈대(AGENT.md)를 더한다. 경로는 계보로 쓴다(예: main/cs)
+    Agent {
+        /// 에이전트 경로(상위 에이전트는 이미 있어야 한다)
+        path: String,
+        /// 프로필 폴더(profile.yaml이 있는 곳, 기본은 현재 폴더)
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// 스킬 뼈대(SKILL.md)를 더한다
+    Skill {
+        /// 스킬 이름(소문자·숫자·하이픈)
+        name: String,
+        /// 이 에이전트의 스킬로 둔다(생략하면 프로필 전체가 보는 스킬)
+        #[arg(long)]
+        agent: Option<String>,
+        /// 프로필 폴더(profile.yaml이 있는 곳, 기본은 현재 폴더)
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+}
+
+#[derive(Args)]
+pub struct DoctorArgs {
+    /// 호스트 등록부(host.json) 경로. 생략하면 BOT_HOST_CONFIG, 그것도 없으면 내장 데모 호스트
+    #[arg(long)]
+    pub host: Option<PathBuf>,
+    /// 프로필 루트 폴더(프로필 폴더들의 부모). 생략하면 BOT_PROFILES
+    #[arg(long)]
+    pub profiles: Option<PathBuf>,
+    /// 데이터베이스에 짧게 접속해 연결만 확인한다(쓰기·마이그레이션 없음). 기본은 접속하지 않는다
+    #[arg(long)]
+    pub check_db: bool,
+}
+
+#[derive(Args)]
+pub struct McpArgs {
+    #[command(subcommand)]
+    pub action: McpAction,
+}
+
+#[derive(Subcommand)]
+pub enum McpAction {
+    /// 스킬 폴더의 tools.yaml이 선언한 도구의 정의(이름·설명·입력 스키마)를 서버에서 받아 tools.lock.yaml에 적는다(원격 `transport: "http"` 서버)
+    Sync {
+        /// 스킬 폴더(BOT_PROFILES 아래 프로필의 `skills/<이름>`)
+        dir: std::path::PathBuf,
+    },
 }
 
 #[derive(Args)]
@@ -181,6 +269,58 @@ mod tests {
             Cli::try_parse_from(["bot", "chat", "--attach", "--request-id", "r1", "글"]).is_err()
         );
         assert!(Cli::try_parse_from(["bot", "serve", "--role", "nope"]).is_err());
+        match Cli::try_parse_from(["bot", "init", "my-bot", "--template", "team"])
+            .unwrap()
+            .command
+        {
+            Command::Init(args) => {
+                assert_eq!(
+                    (args.name.as_str(), args.template),
+                    ("my-bot", Template::Team)
+                );
+                assert_eq!(args.dir, PathBuf::from("."));
+            }
+            _ => panic!(),
+        }
+        match Cli::try_parse_from(["bot", "add", "skill", "triage", "--agent", "main/cs"])
+            .unwrap()
+            .command
+        {
+            Command::Add(AddArgs {
+                what: AddKind::Skill { name, agent, .. },
+            }) => assert_eq!(
+                (name.as_str(), agent.as_deref()),
+                ("triage", Some("main/cs"))
+            ),
+            _ => panic!(),
+        }
+        assert!(Cli::try_parse_from(["bot", "add", "agent"]).is_err());
+        match Cli::try_parse_from(["bot", "doctor", "--check-db", "--host", "h.json"])
+            .unwrap()
+            .command
+        {
+            Command::Doctor(args) => {
+                assert!(args.check_db);
+                assert_eq!(args.host, Some(PathBuf::from("h.json")));
+            }
+            _ => panic!(),
+        }
+        // 도구 정의 고정: 스킬 폴더 하나를 받는다
+        match Cli::try_parse_from(["bot", "mcp", "sync", "profiles/personal/skills/weather"])
+            .unwrap()
+            .command
+        {
+            Command::Mcp(args) => match args.action {
+                McpAction::Sync { dir } => {
+                    assert_eq!(
+                        dir,
+                        std::path::PathBuf::from("profiles/personal/skills/weather")
+                    );
+                }
+            },
+            _ => panic!(),
+        }
+        assert!(Cli::try_parse_from(["bot", "mcp", "sync"]).is_err());
         // 브로커는 목록에서 숨기지만 요청하면 파싱돼 이유와 함께 거절된다
         let hidden = Cli::command()
             .find_subcommand("serve")

@@ -305,7 +305,7 @@ impl PrivateGate {
             Ok(Ran::Done(payload)) if reports_error(&payload.0) => PrivateOutcome::Held,
             Ok(Ran::Done(_)) => PrivateOutcome::Completed,
             // 서버가 실행 전에 확정적으로 거절했다(잘못된 요청·인자): 외부 효과가 없다.
-            Ok(Ran::Rejected) => PrivateOutcome::Rejected,
+            Ok(Ran::Rejected | Ran::Refused(_)) => PrivateOutcome::Rejected,
             Ok(Ran::NotSent) => PrivateOutcome::NotSent,
             // 결과를 막았어도 도구는 이미 실행됐다(외부 효과가 불명이다): 거절로 단정하지 않고 보류한다.
             // 보냈는지 모르거나 실행기가 실패했을 때도 보류하고 원문으로 다시 실행하지 않는다.

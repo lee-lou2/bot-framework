@@ -296,6 +296,9 @@ bot-cli split_roles ignored=1
 bot-cli team_template
 bot-cli secret_sweep
 bot-cli openai_compat
+bot-cli mcp_http
+bot-cli mcp_http_real
+bot-cli mcp_http_review
 '
 
 step_integration() {

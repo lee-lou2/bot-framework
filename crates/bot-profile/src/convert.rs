@@ -99,6 +99,8 @@ fn tool(t: &model::Tool) -> Tool {
         effects: t.effects,
         external: t.external,
         destination: t.destination.clone(),
+        definition: t.definition.clone(),
+        mcp_name: t.mcp_name.clone(),
     }
 }
 

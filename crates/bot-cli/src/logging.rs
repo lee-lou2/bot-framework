@@ -1,12 +1,14 @@
-//! 로그 설정. `BOT_LOG`(기본 `warn`)는 **이 프로그램의 크레이트**에만 그 수준으로 적용한다. 그 밖의 라이브러리(웹소켓·HTTP·TLS·DB 드라이버·런타임)는
+//! 로그 설정. `BOT_LOG`(기본 `warn`)는 **이 프로그램의 크레이트**에만 그 수준으로 적용한다. 그 밖의 라이브러리(웹소켓·HTTP·TLS·런타임)는
 //! `BOT_LOG`가 무엇이든 경고까지만 낸다 — 이 라이브러리들은 `trace`에서 오가는 프레임·본문을 그대로 기록하므로(예: 웹소켓 라이브러리의 «Received message …»)
 //! 민감 DM 원문이나 요청·응답 본문이 stderr에 남는다. 수준을 올려도 외부 전송 라이브러리의 상세 로그는 나오지 않는다.
+//!
+//! 데이터베이스 드라이버(sqlx)는 아예 끈다: 접속 주소를 구문 분석하다 모르는 매개변수의 **값**(예: 합성 `sslpassword`)을 경고에 싣는다.
 //!
 //! 이 프로그램의 크레이트가 남기는 로그는 식별자·분류 낱말만 싣고 본문·인자·자격 값은 싣지 않는다(시험이 trace에서 확인한다).
 use std::io;
 use tracing::Level;
 use tracing_subscriber::{
-    filter::Targets,
+    filter::{LevelFilter, Targets},
     fmt::{self, MakeWriter},
     layer::SubscriberExt,
     util::{SubscriberInitExt, TryInitError},
@@ -34,12 +36,19 @@ pub fn level_of(text: Option<&str>) -> Level {
         .unwrap_or(Level::WARN)
 }
 
-/// 타깃별 수준 상한: 이 프로그램의 크레이트는 요청한 수준, 나머지는 요청한 수준과 `warn` 중 덜 상세한 쪽.
+/// 데이터베이스 드라이버의 기록 타깃. 접속 주소를 구문 분석하다 모르는 매개변수의 **값**을 경고로 남기므로(예: 주소에 든 인증서 비밀번호)
+/// 어떤 명령에서도 어떤 수준에서도 이 기록을 받지 않는다.
+const DATABASE_DRIVERS: [&str; 3] = ["sqlx", "sqlx_core", "sqlx_postgres"];
+
+/// 타깃별 수준 상한: 이 프로그램의 크레이트는 요청한 수준, 데이터베이스 드라이버는 끔, 나머지는 요청한 수준과 `warn` 중 덜 상세한 쪽.
 pub fn filter(level: Level) -> Targets {
-    OWN.iter().fold(
+    let targets = OWN.iter().fold(
         Targets::new().with_default(level.min(OUTSIDE)),
         |targets, own| targets.with_target(*own, level),
-    )
+    );
+    DATABASE_DRIVERS.iter().fold(targets, |targets, driver| {
+        targets.with_target(*driver, LevelFilter::OFF)
+    })
 }
 
 /// 이 프로세스의 로그를 `writer`로 보내도록 한 번 설치한다(`log` 크레이트를 쓰는 라이브러리의 기록도 같은 필터를 지난다).
@@ -109,7 +118,6 @@ mod tests {
                 "h2::codec",
                 "reqwest::connect",
                 "rustls::client",
-                "sqlx::query",
                 "tokio_util::codec",
                 "mio::poll",
                 "axum::serve",
@@ -120,6 +128,24 @@ mod tests {
                     Some(Level::WARN),
                     "{outside}"
                 );
+            }
+        }
+        // 데이터베이스 드라이버는 어떤 수준을 요청해도 아무것도 내지 않는다(타깃 이름이 `sqlx`로 시작하든 `sqlx_postgres::…`이든)
+        for level in [
+            Level::TRACE,
+            Level::DEBUG,
+            Level::INFO,
+            Level::WARN,
+            Level::ERROR,
+        ] {
+            let targets = filter(level);
+            for driver in [
+                "sqlx",
+                "sqlx::query",
+                "sqlx_core::pool::inner",
+                "sqlx_postgres::options::parse",
+            ] {
+                assert_eq!(most_verbose(&targets, driver), None, "{level} {driver}");
             }
         }
         // 낮은 수준을 요청하면 외부도 그보다 상세하지 않다

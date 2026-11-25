@@ -15,6 +15,7 @@ use bot_core::{
     schedule::{ScheduleDelivery, ScheduleRoutes, ScheduledReplies, UserSchedules},
     trace::Tracer,
 };
+use bot_gateway::active::ActiveCheck;
 use bot_profile::{Registry, SchemaValidator};
 use bot_store::Store;
 use std::sync::Arc;
@@ -31,6 +32,8 @@ pub struct ToolDeps<'a> {
     pub uid: u32,
     /// 명시 목적지 등록부(결정 브로커·scheduler와 같은 것)
     pub routes: Arc<dyn ScheduleRoutes>,
+    /// 이 프로세스의 활성화 판본 확인: 원격 도구 서버로 나가는 모든 요청 직전에 다시 확인한다
+    pub active: Arc<dyn ActiveCheck>,
 }
 
 /// 도구를 실행하는 브로커와, 쓰는 동안 설치본 사용 잠금을 쥐는 설치 목록. 같은 브로커가 예약 회신 전송 입구와 CLI 확정 거절 사전 판정도 맡는다.
@@ -55,6 +58,7 @@ pub async fn build(deps: ToolDeps<'_>) -> Result<Tools, String> {
         tracer,
         uid,
         routes,
+        active,
     } = deps;
     let ledger = store.clone() as Arc<dyn CallLedger>;
     let (runner, installs) = runner::build(
@@ -63,6 +67,7 @@ pub async fn build(deps: ToolDeps<'_>) -> Result<Tools, String> {
         &secrets,
         store.clone() as Arc<dyn EffectJournal>,
         uid,
+        active,
     )
     .await?;
     // 도구가 받는 자격이 빠진 도구는 쓸 수 없을 뿐 worker를 세우지 않는다: 이름만 경고한다. 그 도구의 호출은 브로커가 호출을 기록하기 전에

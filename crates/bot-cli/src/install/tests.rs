@@ -5,6 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+mod remote;
 mod state;
 
 fn write(path: &Path, text: &str, mode: u32) {

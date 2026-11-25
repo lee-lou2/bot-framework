@@ -3,7 +3,7 @@
 //! `pattern`은 선형 시간 정규식(regex)이라 악의적 패턴이 시간을 끌지 못한다.
 use crate::{
     hint,
-    vocab::{self, Dialect, MAX_DEPTH, META_REF},
+    vocab::{self, Dialect, MAX_DEPTH, META_REF, Problem},
 };
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -44,7 +44,20 @@ impl Schema {
 
     /// 도구 입력 스키마용. docs/plugins.md의 어휘만 허용한다.
     pub fn compile_input(doc: Value) -> Result<Self, Vec<String>> {
-        Self::build(doc, Dialect::Input)
+        Self::compile_input_problems(doc).map_err(|found| found.iter().map(Problem::line).collect())
+    }
+
+    /// `compile_input`과 같되 문제를 고정 코드와 JSON 포인터로 알린다(`Problem::message`는 스키마 안의 글을 되풀이할 수 있으니, 출처를 믿을 수 없는 스키마의 진단에는
+    /// `code`와 `pointer`만 쓴다).
+    pub fn compile_input_problems(doc: Value) -> Result<Self, Vec<Problem>> {
+        // 도구 입력 스키마의 로컬 `$ref`(재귀 없는 것)는 컴파일 때 펼친다. 번들 스키마는 평가 때 `$ref`를 직접 따른다.
+        let doc = crate::refs::expand(doc).map_err(|found| vec![found])?;
+        let patterns = vocab::check_problems(&doc, Dialect::Input)?;
+        Ok(Self {
+            doc,
+            patterns,
+            dialect: Dialect::Input,
+        })
     }
 
     fn build(doc: Value, dialect: Dialect) -> Result<Self, Vec<String>> {

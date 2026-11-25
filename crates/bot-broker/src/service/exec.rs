@@ -145,6 +145,20 @@ impl BrokerService {
                 self.still_current(flow).await?;
                 Ok(CallResult::Done(payload))
             }
+            // 보내기 전에 이쪽이 확정적으로 거절했다(도구 정의 불일치 등): 외부 효과가 없고 호출은 거절로 닫힌다. 고정 코드를 감사에 남긴다.
+            Ran::Refused(why) => {
+                self.note(
+                    &flow.attempt.profile,
+                    &flow.ctx.principal,
+                    "call.refuse",
+                    &flow.tool,
+                    Some(flow.sealed.sha256),
+                    why,
+                )
+                .await?;
+                self.finish(flow, Outcome::Blocked).await?;
+                Err(Error::Denied)
+            }
             Ran::NotSent => {
                 self.finish(flow, Outcome::Released).await?;
                 Err(Error::Unavailable)
@@ -193,8 +207,13 @@ impl BrokerService {
     /// 옛 도구 종료와 수신처 미실행 증거 확인을 포함하므로 프로세스를 다시 확인하지 않는다.
     pub(super) async fn recover(&self, flow: &Flow, phase: &CallPhase) -> Result<Recovered, Error> {
         let (reaped, resolution, started) = match phase {
+            // 원격 서버로 간 호출은 연결을 닫아도 원격 실행이 계속될 수 있어 `reap` 성공이 «끝났다»의 증명이 아니다(`reap_proves_end`)
             CallPhase::Started { owner, .. } => (
-                self.parts.runner.reap(owner.clone()).await.is_ok(),
+                self.parts.runner.reap(owner.clone()).await.is_ok()
+                    && self
+                        .parts
+                        .runner
+                        .reap_proves_end(&flow.resolved.tool.server),
                 None,
                 true,
             ),

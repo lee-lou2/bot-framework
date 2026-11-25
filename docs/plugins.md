@@ -25,6 +25,44 @@
 
 설정 `servers.<별칭>.state`의 기본값은 `"ephemeral"`이다. 호출 사이에 파일을 보존해야 하는 서버에는 `"required"`를 지정한다. 상태 요구를 바꾸면 설치 판본도 바뀐다. 전용 상태 볼륨을 제공할 수 없는 어댑터는 해당 서버를 실행하기 전에 거절한다.
 
+## 원격 도구 서버(Streamable HTTP)
+
+이미 운영 중인 MCP 서버는 설치하지 않고 주소로 연결한다. 호스트 파일의 해당 절이다.
+
+```json
+{
+  "servers": {
+    "docs": {
+      "transport": "http",
+      "url": "https://mcp.example/api",
+      "auth": {"kind": "bearer", "secret": "docs-token"}
+    }
+  }
+}
+```
+
+- `url`은 `https`다. `http`는 루프백 IPv4 리터럴(`127.0.0.0/8`)만 받는다. IPv6 리터럴(`[::1]` 포함)은 허용 목록의 `호스트:포트`에 적을 수 없어 거절한다. `user:pass@`·`#` 조각·1–65535 밖의 포트는 거절한다. 숫자로 끝나는 호스트(마지막 라벨이 십진수나 `0x` 16진수)는 URL 파서가 IPv4로 읽으므로 점으로 나눈 십진수 네 마디의 정규 표기(`93.184.216.34`)만 받고 `0x7f000001`·`2130706433`·`0177.0.0.1`·`127.1`·끝에 점이 붙은 표기는 거절한다. 리다이렉트를 따라가지 않고 숨은 재시도도 없으며 응답 크기·시간에 한도가 있다.
+- `auth`는 생략할 수 있다. bearer는 비밀 **이름**만 적고 값은 대상 프로필의 비밀 보관소에서 읽는다. 값은 `Authorization` 머리에만 실리고 결과·로그·감사에 남기지 않는다. 서버 응답 어디에든(원문·해석한 글·키·숫자 표기·`nextCursor`·세션 ID) 이 값이 들어 있으면 그 응답을 쓰지 않는다: 도구 목록이면 호출하지 않고(`response_credential`), 호출 결과면 결과를 막는다(`result_credential`). 이 비밀이 없으면 호출을 보내지 않는다.
+- 접속 대상은 `url`의 `호스트:포트` 하나다. 이 서버를 쓰는 도구의 `egress` ∩ 프로필 상한에 정확히 있어야 한다(없으면 활성화를 거절하고 호출도 보내지 않는다). 연결마다 이름 풀이 결과 전체를 검사해 사설·루프백·링크로컬 주소가 하나라도 있으면 거절하고, 검사한 주소로만 접속한다. 전역 사설망 허용으로 루프백 예외를 넓히지 않는다. 판정한 호스트·포트·방식이 연결에 쓰는 URL 파서가 읽은 값과 글자 그대로 같을 때만 보낸다. 요청을 보내기 직전마다(판본 확인·도구 목록·구판의 초기화·`tools/call`·세션 정리) 이 프로세스의 활성 판본을 다시 확인하고, 다르거나 확인하지 못하면 아무것도 보내지 않는다(그 호출은 미실행으로 풀려난다). 승인 뒤 목록을 기다리는 사이 목적지를 철회한 새 집합이 게시돼도 구판 프로세스는 옛 주소로 bearer와 쓰기 호출을 보내지 않는다.
+- 판본은 공식 규격의 현행(2026-07-28)과 구판 2025-11-25·2025-06-18·2025-03-26이다(구판은 도구 부분이 같다). 읽기 전용 `server/discover`로 먼저 판별하고, 공식 HTTP 호환 절차에서 구판으로 확인될 때만 `initialize`→`initialized`와 세션 ID를 쓴다(`initialize`에는 구판 중 최신을 내세우고 서버가 답한 구판을 쓴다. `MCP-Protocol-Version` 머리는 이 머리가 생긴 2025-06-18부터 싣고 2025-03-26에는 싣지 않는다). 쓰기 `tools/call`을 판본 탐지나 재전송에 쓰지 않는다. 현행 판본에서는 스키마의 `x-mcp-header`가 가리키는 인자를 `Mcp-Param-*` 머리로 되풀이한다.
+- 원격 서버의 도구는 `effects: true`·`secrets`·`env`를 선언할 수 없다(활성화 때 거절). 로컬 FD·프록시 콜백과 원장 증거를 원격에 이어 줄 길이 없기 때문이다. 서버로 가는 `_meta`는 `bot/call-id`·`bot/profile-id`·`bot/run-id`뿐이다.
+- HTTP 연결이 끝난 것은 원격 실행 종료의 증거가 아니다. 보낸 뒤 응답을 못 받으면(시간 초과·끊김) 같은 호출을 다시 보내지 않고 기존 복구 규약대로 보류한다. **2xx이고 같은 요청 번호의 응답만** 결과로 인정한다: 연결 전 실패와 요청 직전 판본 확인의 거절은 실행되지 않은 것이고, 2xx 안의 같은 번호의 확정적 JSON-RPC 거절(잘못된 요청·없는 메서드·잘못된 인자)만 서버의 거절이다. 인증·권한 거절(401·403)과 5xx를 포함해 2xx가 아닌 응답은 본문이 무엇이든 실행 여부를 알려 주지 않으므로 결과 불명이다(쓰기는 보류, 읽기는 일시 실패).
+- 설치 판본에는 `url`·transport·bearer 이름이 묶인다. 바꾸면 이전 승인 카드로 실행할 수 없다.
+
+### 도구 정의 잠금: tools.lock.yaml
+
+서버가 내세우는 도구 이름이 tools.yaml `id`(소문자·숫자·`-`)와 다르면(실제 서버는 대개 `get_forecast`처럼 snake_case다) 도구에 선택 필드 `name`을 적는다(영문·숫자·`_`·`-`·`.` 128자 이하, 생략하면 `id`). 모델이 보는 도구 ID(`skill.id`)·승인·권한은 `id`를 따르고, 서버로 가는 `tools/list` 조회·`tools/call`·`Mcp-Name`은 `name`을 쓴다. `name`은 도구 판본에 들어가고, 잠금은 `id`로 묶어 서버 이름을 기록한다(둘이 다르면 `lock-name-mismatch`로 거절하니 `bot mcp sync`를 다시 실행한다).
+
+tools.yaml 도구의 `input`을 생략하면 같은 스킬 폴더의 `tools.lock.yaml`에서 입력 스키마를 가져온다. 인라인 `input`이 있으면 그 값이 우선하고 잠금 비교는 하지 않는다. `input`도 잠금 항목도 없으면 활성화를 거절한다(`missing-input`). 잠금 파일은 프로필 내용이라 프로필 판본과 도구 판본에 들어간다.
+
+```bash
+bot mcp sync <BOT_PROFILES 아래 스킬 폴더>
+```
+
+폴더로 대상 프로필을 정한다: `validate`와 같은 로더로 루트 목록·링크 금지·폴더 구조·`profile.yaml`의 스키마와 `id`(폴더 이름과 같아야 한다)를 확인하고, 자격은 그 프로필의 보관소에서만 읽는다(정하지 못하면 접속하지 않고 자격도 읽지 않는다). tools.yaml의 서버에 연결해 `tools/list`를 **모든 쪽** 읽고 **선언한 도구만** `{id, name, description, input_schema, sha256}`로 적는다(서버에서는 `name`으로 찾는다). 선언한 도구가 서버에 없거나 이름이 겹치면 실패한다. 목록은 상한(16쪽·4096개)까지 모두 받아야 하고, `nextCursor`는 없거나 비어 있지 않은 글이어야 한다(다른 형식·반복되는 커서·모으는 동안의 `list_changed` 알림은 오류다). `sha256`은 `{"name","description","inputSchema"}`의 RFC 8785 정규 JSON의 SHA-256이라 설명만 바뀌어도 달라진다. 출력은 결정적이라 바뀐 게 없으면 파일을 다시 쓰지 않는다. 서버가 돌려준 정의는 믿지 않는다: 자격이 응답 어디에도(선언하지 않은 도구·키·숫자 표기·커서까지) 섞이지 않았는지를 **먼저** 보고, 입력 스키마가 프로필 어휘로 읽히는지 본다. 진단은 고정 코드와 JSON 포인터만 싣고 서버가 고른 글은 되풀이하지 않는다. 만든 잠금은 `validate`와 같은 검사(파일 크기·YAML 한도·잠금의 모양과 해시·`tools.yaml`과의 짝)를 통과해야 쓰며, 하나라도 어긋나면 아무것도 쓰지 않고 0이 아닌 코드로 끝난다. 현재는 원격(`transport: "http"`) 서버만 지원한다.
+
+실행할 때 브로커는 서버가 내세우는 도구 정의의 해시를 잠금과 비교한다. 달라졌거나 도구가 사라졌으면 **호출하기 전에** 막고 고정 코드(`tool_definition_changed`·`tool_missing`)를 감사에 남긴다. 새 정의를 받아들이려면 `bot mcp sync`를 다시 실행하고 프로필을 다시 배포한다. 로컬(stdio) 서버의 잠금도 같은 방식으로 비교한다.
+
 ## 일반 호출
 
 1. 브로커는 실행할 도구 이름·판본·인자를 고정하고 권한·위험도·속도 제한을 확인한다. 필요한 승인을 얻기 전에는 도구를 실행하지 않는다.
@@ -72,7 +110,7 @@
 
 호출별 시간·출력 한도와 콜백 프레임 한도(64 KiB)를 적용한다. 런타임 오류에는 invalid, denied, conflict, stale, unavailable 같은 분류만 싣는다. 재시도·보류 판정은 [복구 규약](reliability.md)을 따른다.
 
-도구의 scopes는 하나 이상이다. 입력 스키마의 지원 어휘는 type·enum·const·properties·required·additionalProperties·items·min/maxItems·min/maxLength·minimum/maximum·pattern·anyOf/oneOf/allOf 및 title·description·default다. pattern은 길이가 제한된 Rust regex 공통 문법만 허용한다. 지원하지 않는 키워드와 외부 참조는 활성화 때 거절한다. 호출 시에도 같은 InputValidator로 검증한다. reply 도구에는 호스트가 _meta의 bot/destination에 원래 대화 종류·ID·스레드를 넣는다.
+도구의 scopes는 하나 이상이다. 입력 스키마의 지원 어휘는 type·enum·const·properties·required·additionalProperties·items·min/maxItems·min/maxLength·minimum/maximum·pattern·anyOf/oneOf/allOf 및 title·description·default다. 실제 서버의 스키마가 흔히 싣는 주석 키워드(`$schema`·`$comment`·`examples`·`format`·`deprecated`·`readOnly`·`writeOnly`)도 받되 검증에는 쓰지 않는다(`format`을 검사하지 않는다). 같은 문서 안의 `$defs`·`definitions`와 `#/$defs/<이름>`·`#/definitions/<이름>` 참조는 컴파일할 때 그 자리에 펼친다(고정한 입력과 해시는 받은 그대로이고 검증만 펼친 스키마로 한다). 참조의 조각은 퍼센트 부호를 먼저 풀고(`%20`은 공백) 그다음 JSON 포인터 이스케이프(`~1`→`/`, `~0`→`~`)를 푼다(잘못된 퍼센트 표기는 거절). `$ref` 옆에는 주석 키워드(`title`·`description`·`default`·`examples`·`$comment`·`deprecated`·`readOnly`·`writeOnly`·`$schema`·`format`)만 둘 수 있고, `allOf`·`type`·`minLength` 같은 조건 키워드가 함께 있으면 조건을 바꾸거나 버릴 수 있어 거절한다(정의 안으로 옮긴다). 재귀 참조(자기 자신·서로를 부름·`#`)·외부 참조·없는 정의·펼친 결과가 크기 한도(노드 2만 개)를 넘는 경우는 이유를 밝혀 거절한다. pattern은 길이가 제한된 Rust regex 공통 문법만 허용한다. 지원하지 않는 키워드는 활성화 때 거절한다. 호출 시에도 같은 InputValidator로 검증한다. reply 도구에는 호스트가 _meta의 bot/destination에 원래 대화 종류·ID·스레드를 넣는다.
 
 ## 모델 CLI가 받는 내장 도구
 

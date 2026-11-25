@@ -16,9 +16,10 @@
 //! 모르는 최상위 키는 거절한다. 파일이 없으면 내장 데모 호스트(`demo`)를 쓴다.
 use crate::{
     execution::{self, Provider, Sandbox},
-    install::{ServerSpec, parse_servers},
+    install::{ServerSpec, Servers, parse_all},
 };
 use bot_admin::AdminSettings;
+use bot_broker::mcp::remote::Remote;
 use bot_gateway::host::{CliAccount, HostConfig};
 use bot_profile::{HostCatalog, SlackWorkspace};
 use serde_json::Value;
@@ -54,6 +55,8 @@ pub struct HostFile {
     pub admin: AdminSettings,
     /// 도구 서버 설치 명세(별칭 → 설치 폴더·실행 명령). 내장 데모 호스트는 `attach_demo_server`가 채운다.
     pub servers: BTreeMap<String, ServerSpec>,
+    /// 원격(Streamable HTTP) 도구 서버(별칭 → 접속 대상). 설치할 파일이 없고 브로커가 직접 연결한다.
+    pub remote_servers: BTreeMap<String, Remote>,
     /// 모델 별칭 → 실행 방법
     pub providers: BTreeMap<String, Provider>,
     /// srt·VM 설정(런타임 역할이 쓴다)
@@ -127,8 +130,8 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         None => HostConfig::default(),
     };
     let servers = match top.remove("servers") {
-        Some(value) => parse_servers(&value).map_err(bad)?,
-        None => BTreeMap::new(),
+        Some(value) => parse_all(&value).map_err(bad)?,
+        None => Servers::default(),
     };
     let models = match top.remove("models") {
         Some(value) => profile_map(&value, "models", bot_core::id::is_name)?,
@@ -154,10 +157,22 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         return Err(bad(format!("알 수 없는 최상위 키예요: {unknown}")));
     }
     Ok(HostFile {
-        catalog: catalog(&gateway, servers.keys().cloned().collect(), models, egress),
+        catalog: catalog(
+            &gateway,
+            servers
+                .local
+                .keys()
+                .chain(servers.remote.keys())
+                .cloned()
+                .collect(),
+            &servers.remote,
+            models,
+            egress,
+        ),
         gateway,
         admin,
-        servers,
+        servers: servers.local,
+        remote_servers: servers.remote,
         providers,
         sandbox,
         demo: false,
@@ -247,11 +262,16 @@ fn default_admin() -> AdminSettings {
 fn catalog(
     gateway: &HostConfig,
     servers: BTreeSet<String>,
+    remote: &BTreeMap<String, Remote>,
     models: BTreeMap<String, BTreeSet<String>>,
     egress: BTreeMap<String, BTreeSet<String>>,
 ) -> HostCatalog {
     HostCatalog {
         servers,
+        remote_servers: remote
+            .iter()
+            .map(|(alias, remote)| (alias.clone(), remote.target_text()))
+            .collect(),
         models,
         cli_accounts: gateway.cli.accounts.keys().cloned().collect(),
         slack: gateway
@@ -318,6 +338,7 @@ pub fn demo(uid: u32) -> HostFile {
         catalog,
         admin: default_admin(),
         servers: BTreeMap::new(),
+        remote_servers: BTreeMap::new(),
         // 내장 데모: 데모 모델은 외부 키·VM이 필요 없다
         providers: BTreeMap::from([("assistant".to_owned(), Provider::Demo)]),
         sandbox: Sandbox::default(),
@@ -327,6 +348,9 @@ pub fn demo(uid: u32) -> HostFile {
 
 #[cfg(test)]
 mod trace_authority_tests;
+
+#[cfg(test)]
+mod remote_tests;
 
 #[cfg(test)]
 mod tests {

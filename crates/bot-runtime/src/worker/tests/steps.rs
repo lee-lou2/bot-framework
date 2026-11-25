@@ -6,7 +6,10 @@ use crate::{
         CallEnd, ModelError, ModelRequest, ModelRunner, ModelStep, PendingCall, RunnerKind,
         StepFuture,
     },
-    worker::{Outcome, checkpoint::Planned},
+    worker::{
+        Outcome,
+        checkpoint::{Planned, TurnUsage},
+    },
 };
 use bot_core::{command::*, id::*, port::Error, state::Visibility};
 use std::sync::Arc;
@@ -22,6 +25,8 @@ fn plan(run: &str, calls: &[(&str, &str, &str)]) -> Step {
                 args: JsonPayload((*args).into()),
             })
             .collect(),
+        usage: TurnUsage::Unreported,
+        state: None,
     };
     Step {
         key: "turn-0".into(),
@@ -99,6 +104,7 @@ async fn resuming_continues_a_half_done_turn_with_the_same_call_ids_and_skips_fi
     let finished = crate::model::Exchange {
         text: "찾아볼게요".into(),
         calls: vec![],
+        state: None,
     };
     let mut ctx = agent_run("r2");
     ctx.work.steps = vec![

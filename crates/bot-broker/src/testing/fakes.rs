@@ -89,6 +89,10 @@ pub struct FakeRunner {
     secret_failure: Mutex<Option<Error>>,
     /// `admit_secrets`가 받은 (프로필, 이름들).
     secret_checks: Mutex<Vec<(ProfileId, Vec<String>)>>,
+    /// 서버 별칭 → 호스트가 그 서버에 묶은 자격 이름들(`server_secrets`, 원격 서버의 bearer처럼).
+    server_secrets: Mutex<HashMap<String, Vec<String>>>,
+    /// `reap`이 성공해도 «끝났다»의 증명이 아닌 서버 별칭들(원격 서버).
+    unproven: Mutex<Vec<String>>,
 }
 
 impl Default for FakeRunner {
@@ -106,6 +110,8 @@ impl Default for FakeRunner {
             missing_secrets: Mutex::new(Vec::new()),
             secret_failure: Mutex::new(None),
             secret_checks: Mutex::new(Vec::new()),
+            server_secrets: Mutex::new(HashMap::new()),
+            unproven: Mutex::new(Vec::new()),
         }
     }
 }
@@ -166,6 +172,17 @@ impl FakeRunner {
     pub fn set_reap_ok(&self, ok: bool) {
         *lock(&self.reap_ok) = ok;
     }
+    /// 이 서버로 가는 호출이 쓰는 호스트 쪽 자격 이름을 더한다(`server_secrets`).
+    pub fn bind_server_secret(&self, server: &str, name: &str) {
+        lock(&self.server_secrets)
+            .entry(server.to_owned())
+            .or_default()
+            .push(name.to_owned());
+    }
+    /// 이 서버의 `reap` 성공은 옛 호출이 끝났다는 증명이 아니다(원격 서버처럼 연결을 닫아도 원격 실행은 이어질 수 있다).
+    pub fn reap_proves_nothing_for(&self, server: &str) {
+        lock(&self.unproven).push(server.to_owned());
+    }
     /// 서버의 설치 판본을 바꾼다(`None`이면 미설치).
     pub fn set_image(&self, server: &str, image: Option<&str>) {
         let mut images = lock(&self.images);
@@ -187,6 +204,17 @@ impl ToolRunner for FakeRunner {
         } else {
             Ok(())
         }
+    }
+
+    fn server_secrets(&self, server: &str) -> Vec<SecretName> {
+        lock(&self.server_secrets)
+            .get(server)
+            .map(|names| names.iter().filter_map(|n| SecretName::parse(n)).collect())
+            .unwrap_or_default()
+    }
+
+    fn reap_proves_end(&self, server: &str) -> bool {
+        !lock(&self.unproven).iter().any(|s| s == server)
     }
 
     fn admit_secrets(&self, profile: &ProfileId, names: &[SecretName]) -> Reply<'_, ()> {

@@ -2,7 +2,7 @@
 //!
 //! 호스트에서 계산하는 값: srt 실행 파일(`sandbox.srt.binary`, 내장 데모는 PATH의 `srt`)·작업 루트(`sandbox.srt.work_root`, 기본은
 //! 설치 폴더 옆 `work`)·srt가 쓰는 PATH(srt 폴더 + 시스템 기본)·도구가 읽지 못하는 곳(홈·프로필 루트·호스트 설정·비밀 파일·소켓·설치 기준).
-use super::{decide::InstalledOnly, watched::Watched};
+use super::{decide::InstalledOnly, guard::GuardedWire, watched::Watched};
 use crate::{
     host::HostFile,
     install::{self, Installs},
@@ -13,10 +13,16 @@ use bot_broker::{
     proxy::{SystemResolver, TcpConnector},
     resolve::HostPort,
     runner::{Deps as RunnerDeps, HostRegistry, McpRunner, RunnerConfig},
+    sandbox::{Process, Sandbox, SandboxSpec},
     srt::{ServerCommand, SrtConfig, SrtSandbox},
     sys::OsEntropy,
 };
-use bot_core::{id::ProfileId, install::ServerState, port::EffectJournal};
+use bot_core::{
+    id::ProfileId,
+    install::ServerState,
+    port::{EffectJournal, Error, Reply},
+};
+use bot_gateway::active::ActiveCheck;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -50,7 +56,9 @@ fn denied(settings: &Settings, base: &Path) -> Vec<PathBuf> {
 
 /// 호출 간 상태 볼륨을 요구하는(`state: required`) 서버가 있으면 Err. srt 샌드박스는 영속 볼륨을 지원하지 않으므로, 호출할 때마다 거절되기
 /// 전에 도구를 실행하는 역할의 시작에서 막는다(영속 볼륨은 격리·용량·잠금을 검증한 별도 어댑터가 생긴 뒤에 쓴다).
-fn refuse_required_state(servers: &BTreeMap<String, install::ServerSpec>) -> Result<(), String> {
+pub(crate) fn refuse_required_state(
+    servers: &BTreeMap<String, install::ServerSpec>,
+) -> Result<(), String> {
     match servers
         .iter()
         .find(|(_, spec)| spec.state == ServerState::Required)
@@ -67,20 +75,96 @@ pub(super) fn default_work(base: &Path) -> PathBuf {
     base.parent().unwrap_or(base).join("work")
 }
 
+/// 로컬 서버가 없는 호스트(원격 서버만)의 샌드박스: 아무것도 띄우지 않는다. 원격 서버는 샌드박스 없이 브로커가 직접 연결한다.
+struct NoSandbox;
+
+impl Sandbox for NoSandbox {
+    fn spawn(&self, _: SandboxSpec) -> Reply<'_, Process> {
+        Box::pin(std::future::ready(Err(Error::Unavailable)))
+    }
+
+    fn reap(&self, _: &str) -> Reply<'_, ()> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
 /// 도구 실행기와 그 설치본(쓰는 동안 설치본 사용 잠금을 쥔다). 서버가 없는 호스트는 실행기 없이(설치 판본 조회만) 만든다.
+/// `active`는 이 프로세스의 활성화 판본 확인이다: 원격 서버로 나가는 모든 요청 직전에 다시 확인한다(`GuardedWire`).
 pub(super) async fn build(
     host: &HostFile,
     settings: &Settings,
     secrets: &Arc<Watched>,
     effects: Arc<dyn EffectJournal>,
     uid: u32,
+    active: Arc<dyn ActiveCheck>,
 ) -> Result<(Arc<dyn ToolRunner>, Installs), String> {
-    if host.servers.is_empty() {
+    if host.servers.is_empty() && host.remote_servers.is_empty() {
         return Ok((
             Arc::new(InstalledOnly(BTreeMap::new())),
             Installs::default(),
         ));
     }
+    let (installs, sandbox): (Installs, Arc<dyn Sandbox>) = if host.servers.is_empty() {
+        (Installs::default(), Arc::new(NoSandbox))
+    } else {
+        let (installs, sandbox) = local_sandbox(host, settings, uid).await?;
+        (installs, Arc::new(sandbox))
+    };
+    let egress_caps: BTreeMap<ProfileId, Vec<HostPort>> = host
+        .catalog
+        .egress
+        .iter()
+        .map(|(profile, targets)| {
+            let ports = targets
+                .iter()
+                .map(|target| {
+                    HostPort::parse(target)
+                        .ok_or_else(|| format!("egress.{profile}: {target}을 해석할 수 없어요"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((ProfileId(profile.clone()), ports))
+        })
+        .collect::<Result<_, String>>()?;
+    let mut servers: BTreeMap<String, String> = installs
+        .revisions()
+        .into_iter()
+        .map(|(alias, revision)| (alias, revision.0))
+        .collect();
+    servers.extend(
+        host.remote_servers
+            .iter()
+            .map(|(alias, remote)| (alias.clone(), remote.revision())),
+    );
+    let mut runner = McpRunner::new(
+        RunnerDeps {
+            sandbox,
+            secrets: secrets.clone(),
+            effects,
+            resolver: Arc::new(SystemResolver),
+            connector: Arc::new(TcpConnector),
+            entropy: Arc::new(OsEntropy),
+        },
+        HostRegistry {
+            servers,
+            egress_caps,
+            remote: host.remote_servers.clone(),
+        },
+        RunnerConfig::default(),
+    );
+    // 원격 서버가 있으면 전송을 붙인다(연결마다 이름 풀이 결과 전체를 검사하고, 요청마다 활성 판본을 다시 확인한다)
+    if !host.remote_servers.is_empty() {
+        let wire = super::remote::ReqwestWire::new(Arc::new(SystemResolver))?;
+        runner = runner.with_wire(Arc::new(GuardedWire::new(Arc::new(wire), active)));
+    }
+    Ok((Arc::new(runner), installs))
+}
+
+/// 로컬 서버의 읽기 전용 설치본과 srt 샌드박스.
+async fn local_sandbox(
+    host: &HostFile,
+    settings: &Settings,
+    uid: u32,
+) -> Result<(Installs, SrtSandbox), String> {
     refuse_required_state(&host.servers)?;
     let base = install::default_base(
         settings.installs.as_deref(),
@@ -139,46 +223,13 @@ pub(super) async fn build(
                 bot_broker::srt::PINNED_VERSION
             )
         })?;
-    let egress_caps: BTreeMap<ProfileId, Vec<HostPort>> = host
-        .catalog
-        .egress
-        .iter()
-        .map(|(profile, targets)| {
-            let ports = targets
-                .iter()
-                .map(|target| {
-                    HostPort::parse(target)
-                        .ok_or_else(|| format!("egress.{profile}: {target}을 해석할 수 없어요"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok((ProfileId(profile.clone()), ports))
-        })
-        .collect::<Result<_, String>>()?;
-    let runner = McpRunner::new(
-        RunnerDeps {
-            sandbox: Arc::new(sandbox),
-            secrets: secrets.clone(),
-            effects,
-            resolver: Arc::new(SystemResolver),
-            connector: Arc::new(TcpConnector),
-            entropy: Arc::new(OsEntropy),
-        },
-        HostRegistry {
-            servers: installs
-                .revisions()
-                .into_iter()
-                .map(|(alias, revision)| (alias, revision.0))
-                .collect(),
-            egress_caps,
-        },
-        RunnerConfig::default(),
-    );
-    Ok((Arc::new(runner), installs))
+    Ok((installs, sandbox))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bot_gateway::testing::ports::MemoryActive;
 
     #[test]
     fn the_work_root_defaults_next_to_the_install_base_and_denied_paths_exist_only() {
@@ -234,7 +285,8 @@ mod tests {
         .unwrap();
         let secrets = Watched::plain(Arc::new(bot_broker::testing::FakeSecrets::new(&[])));
         let effects: Arc<dyn EffectJournal> = Arc::new(bot_broker::testing::FakeEffects::new());
-        let error = build(&host, &settings, &secrets, effects, 0)
+        let active: Arc<dyn ActiveCheck> = MemoryActive::new(Some("set-1")).check("set-1");
+        let error = build(&host, &settings, &secrets, effects, 0, active.clone())
             .await
             .err()
             .unwrap();
@@ -243,7 +295,11 @@ mod tests {
         // 서버가 없는 호스트는 srt도 설치도 필요 없다
         let none = crate::host::parse(r#"{"version": 1}"#).unwrap();
         let effects: Arc<dyn EffectJournal> = Arc::new(bot_broker::testing::FakeEffects::new());
-        assert!(build(&none, &settings, &secrets, effects, 0).await.is_ok());
+        assert!(
+            build(&none, &settings, &secrets, effects, 0, active)
+                .await
+                .is_ok()
+        );
         assert!(!installs.exists());
     }
 

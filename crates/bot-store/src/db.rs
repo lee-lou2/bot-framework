@@ -199,6 +199,15 @@ impl Store {
         Ok(Store::from_pool(pool, cfg))
     }
 
+    /// 접속하지 않고 주소 형식만 본다(`connect`가 쓰는 것과 같은 구문 분석). 이유와 주소는 돌려주지도 남기지도 않는다 — 구문 분석기는 모르는
+    /// 매개변수의 **값**을 경고로 남기므로(예: 주소에 든 `sslpassword`) 이 호출 동안은 기록을 받지 않는다.
+    pub fn check_url(url: &str) -> bool {
+        use std::str::FromStr;
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            sqlx::postgres::PgConnectOptions::from_str(url).is_ok()
+        })
+    }
+
     pub fn from_pool(pool: PgPool, cfg: Config) -> Store {
         Store {
             pool,

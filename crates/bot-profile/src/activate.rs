@@ -70,6 +70,42 @@ fn http_endpoint(host: &HostCatalog, endpoint: &str, openai: bool, at: &str, iss
     }
 }
 
+/// 원격(Streamable HTTP) 서버의 도구: 접속 대상이 도구 선언 ∩ 운영자 상한의 허용 목록에 정확히 있어야 하고, 로컬 전용인 단계 원장·자격·환경 변수는 쓸 수 없다.
+fn remote_tool(
+    host: &HostCatalog,
+    profile: &str,
+    id: &str,
+    tool: &bot_core::profile::Tool,
+    target: &str,
+    file: &str,
+    issues: &mut Issues,
+) {
+    if tool.effects {
+        issues.error(
+            "remote-effects",
+            file,
+            format!("{id}: 원격 서버의 도구는 `effects: true`를 쓸 수 없어요(단계 원장은 로컬 서버에서만 지원해요)"),
+        );
+    }
+    if !tool.secrets.is_empty() || !tool.env.is_empty() {
+        issues.error(
+            "remote-tool-config",
+            file,
+            format!("{id}: 원격 서버의 도구는 `secrets`·`env`를 쓸 수 없어요(인증은 호스트 설정의 `auth`로 해요)"),
+        );
+    }
+    if !host
+        .effective_egress(profile, &tool.egress)
+        .contains(target)
+    {
+        issues.error(
+            "remote-egress",
+            file,
+            format!("{id}: 원격 서버 주소 `{target}`가 이 도구의 `egress`(와 운영자 상한 `egress.{profile}`)에 없어요 — 정확히 그 `호스트:포트`를 적으세요"),
+        );
+    }
+}
+
 pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
     let profile = snap.id.0.as_str();
     let mut models: BTreeSet<&str> = BTreeSet::from([snap.model.as_str()]);
@@ -188,6 +224,9 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                     &file,
                     format!("{}: 호스트에 설치하지 않은 서버예요: {}", id.0, tool.server),
                 );
+            }
+            if let Some(target) = host.remote_servers.get(&tool.server) {
+                remote_tool(host, profile, id.0.as_str(), tool, target, &file, issues);
             }
             let kept = host.effective_egress(profile, &tool.egress);
             if kept.len() < tool.egress.len() {

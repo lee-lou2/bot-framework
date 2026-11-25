@@ -13,6 +13,7 @@ mod routes;
 mod sandbox;
 mod schedules;
 mod turns;
+mod wire;
 mod world;
 
 pub use exec::write_executable;
@@ -29,6 +30,7 @@ pub use sandbox::{
 };
 pub use schedules::MemSchedules;
 pub use turns::{FakeDelegation, FakeRuns, PlanningRuns, RecordingPark, RecordingTurns};
+pub use wire::{Era, FakeMcp, FakeWire, McpReply, McpRequest, McpTool, Probe};
 pub use world::{SnapshotBuilder, run_context, snapshot, tool};
 
 use crate::{

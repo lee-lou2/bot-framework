@@ -18,8 +18,11 @@ use bot_gateway::{
 };
 use std::collections::BTreeSet;
 
-/// 이 프로필이 쓰는 자격 이름: 프로필이 선언한 것 + 도구가 환경으로 받는 것 + 바인딩한 입구가 쓰는 것(호스트가 정한 이름)
-/// + 프로필이 허용한 모델 별칭 중 `claude-cli`로 실행하는 것의 서비스 키(호스트가 정한 이름)
+mod trace;
+pub use trace::trace_secrets;
+
+/// 이 프로필이 쓰는 자격 이름: 프로필이 선언한 것 + 도구가 환경으로 받는 것 + 바인딩한 입구가 쓰는 것(호스트가 정한 이름) + 수집 헤더가 받는 것
+/// + 프로필이 허용한 모델 별칭 중 서비스 키가 필요한 것(`claude-cli`·API 직접 호출)의 키(호스트가 정한 이름)
 pub fn needed_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> {
     let mut names: BTreeSet<String> = snapshot
         .secrets
@@ -30,16 +33,24 @@ pub fn needed_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> 
         for skill in agent.skills.values() {
             for tool in skill.tools.values() {
                 names.extend(tool.secrets.values().map(|s| s.as_str().to_owned()));
+                // 원격 서버의 bearer는 호스트가 서버에 묶은 자격이라 그 서버를 쓰는 프로필의 보관소에 있어야 한다
+                names.extend(
+                    host.remote_servers
+                        .get(&tool.server)
+                        .and_then(|remote| remote.bearer.as_ref())
+                        .map(|name| name.as_str().to_owned()),
+                );
             }
         }
     }
     names.extend(entrance_secrets(snapshot, &host.gateway));
     names.extend(model_secrets(snapshot, host));
+    names.extend(trace_secrets(snapshot, host));
     names
 }
 
-/// 이 프로필이 쓰는 모델 서비스 키: 프로필이 허용한 별칭(`models`) 중 `claude-cli`로 실행하는 것의 `secret`(프로필 자격 이름).
-/// 데모 별칭과 허용하지 않은 별칭은 키가 필요 없다. 이 이름을 보관소에서 못 찾으면 모든 모델 요청이 런타임에 실패하므로 validate와
+/// 이 프로필이 쓰는 모델 서비스 키: 프로필이 허용한 별칭(`models`) 중 `claude-cli`·API 직접 호출(`anthropic-api`·`openai-api`)로 실행하는 것의 `secret`(프로필 자격 이름).
+/// 데모 별칭·키 없는 loopback 로컬 서버·허용하지 않은 별칭은 키가 필요 없다. 이 이름을 보관소에서 못 찾으면 모든 모델 요청이 런타임에 실패하므로 validate와
 /// worker 시작이 같이 점검한다.
 pub fn model_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> {
     host.catalog
@@ -49,6 +60,16 @@ pub fn model_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> {
         .flatten()
         .filter_map(|alias| match host.providers.get(alias) {
             Some(Provider::ClaudeCli { secret, .. }) => Some(secret.clone()),
+            Some(
+                Provider::AnthropicApi {
+                    secret: Some(secret),
+                    ..
+                }
+                | Provider::OpenAiApi {
+                    secret: Some(secret),
+                    ..
+                },
+            ) => Some(secret.clone()),
             _ => None,
         })
         .collect()
@@ -102,7 +123,14 @@ pub fn has_private_triggers(snapshot: &Snapshot) -> bool {
 /// 프로필이 허용한 별칭 중 `claude-cli`가 있는데 호스트 설정에 모델 VM(`sandbox.apple`)이 없으면 안내 문구. worker는 이 호스트에서 시작하지 않는다
 /// (다른 샌드박스로 대신하지 않는다).
 pub fn missing_model_sandbox(snapshot: &Snapshot, host: &HostFile) -> Option<String> {
-    (!model_secrets(snapshot, host).is_empty() && host.sandbox.apple.is_none()).then(|| {
+    let uses_claude_cli = host
+        .catalog
+        .models
+        .get(&snapshot.id.0)
+        .into_iter()
+        .flatten()
+        .any(|alias| matches!(host.providers.get(alias), Some(Provider::ClaudeCli { .. })));
+    (uses_claude_cli && host.sandbox.apple.is_none()).then(|| {
         format!(
             "{}: claude-cli 별칭을 허용했지만 호스트 설정에 sandbox.apple(다이제스트로 고정한 이미지와 호스트 전용 망)이 없어요 — docs/model-image.md",
             snapshot.id.0
@@ -261,21 +289,22 @@ pub async fn run(settings: &Settings) -> Result<(), String> {
     // 점검이 모두 끝나기 전에는 «통과»를 내보내지 않는다. 결과 줄은 모아 두었다가 문제가 없을 때만 찍는다.
     let mut report = Vec::new();
     // 도구 서버: 설치 폴더를 읽어 판본을 계산한다(복사 없이). 위치·시각이 달라도 내용이 같으면 같은 판본이다.
-    let revisions = match crate::install::measure(&loaded.host.servers) {
-        Ok(revisions) => {
-            for (alias, revision) in &revisions {
-                report.push(format!(
-                    "서버 {alias}: 판본 {}",
-                    revision.0.get(..12).unwrap_or(&revision.0)
-                ));
+    let revisions =
+        match crate::install::measure_all(&loaded.host.servers, &loaded.host.remote_servers) {
+            Ok(revisions) => {
+                for (alias, revision) in &revisions {
+                    report.push(format!(
+                        "서버 {alias}: 판본 {}",
+                        revision.0.get(..12).unwrap_or(&revision.0)
+                    ));
+                }
+                revisions
             }
-            revisions
-        }
-        Err(problem) => {
-            problems.push(problem);
-            Default::default()
-        }
-    };
+            Err(problem) => {
+                problems.push(problem);
+                Default::default()
+            }
+        };
     for snapshot in active.values() {
         problems.extend(missing_model_sandbox(snapshot, &loaded.host));
         problems.extend(missing_secrets(&*store, snapshot, &loaded.host, &settings.secrets).await);
@@ -314,6 +343,8 @@ pub fn known_profile(active: &bot_gateway::routes::Active, name: &str) -> bool {
     active.contains_key(&ProfileId(name.to_owned()))
 }
 
+#[cfg(test)]
+mod api_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

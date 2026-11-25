@@ -350,7 +350,7 @@ fn rejects_tool_declarations() {
             &[(
                 TOOLS,
                 "{type: string, minLength: 1}",
-                "{type: string, format: email}",
+                "{type: string, uniqueItems: true}",
             )],
             "schema",
         ),

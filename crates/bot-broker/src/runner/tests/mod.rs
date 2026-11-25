@@ -4,6 +4,8 @@ mod effect_secret;
 mod env;
 mod limits;
 mod network;
+mod pin;
+mod remote;
 mod secrets;
 use crate::{resolve::Resolved, testing::*};
 use bot_core::{
@@ -76,6 +78,7 @@ pub(super) fn rig(
         ("personal", "reader", "value-personal-1"),
         ("other", "reader", "value-other-2"),
         ("personal", "password", "pw1"),
+        ("personal", "numeric", "123456789012"),
     ]));
     let journal = Arc::new(MemJournal::new());
     let resolver = Arc::new(FakeResolver::new(&[

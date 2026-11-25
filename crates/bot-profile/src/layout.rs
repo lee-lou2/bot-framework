@@ -7,6 +7,8 @@ pub struct SkillFiles {
     pub dir: String,
     pub skill_md: Option<String>,
     pub tools: Option<String>,
+    /// `tools.lock.yaml`(서버가 내세우는 도구 정의를 적어 둔 파일, `bot mcp sync`가 만든다)
+    pub lock: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -141,11 +143,12 @@ fn skills(tree: &Tree, dir: &str, limits: &Limits, issues: &mut Issues) -> Vec<S
             match file {
                 "SKILL.md" => skill.skill_md = Some(join(&path, file)),
                 "tools.yaml" => skill.tools = Some(join(&path, file)),
+                crate::lock::FILE => skill.lock = Some(join(&path, file)),
                 _ => unknown(
                     issues,
                     "unknown-file",
                     &join(&path, file),
-                    "스킬 폴더에는 SKILL.md·tools.yaml만 둘 수 있어요",
+                    "스킬 폴더에는 SKILL.md·tools.yaml·tools.lock.yaml만 둘 수 있어요",
                 ),
             }
         }

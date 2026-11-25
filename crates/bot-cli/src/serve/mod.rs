@@ -11,6 +11,7 @@ mod gateway;
 mod guard;
 mod models;
 mod quiesce;
+pub mod remote;
 mod restore;
 mod runner;
 mod scheduler;
@@ -25,6 +26,8 @@ mod watched;
 mod worker;
 
 use self::activation::{commit_with_refresh, plan_activation};
+/// `bot doctor`가 worker 시작과 같은 판정을 쓰도록 내보낸다(따로 판정하지 않는다).
+pub(crate) use self::runner::refuse_required_state;
 use crate::{
     cli::Role,
     host::HostFile,
@@ -49,6 +52,24 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, io::IsTerminal, sync::Arc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+/// 프로필이 허용한 모델 별칭마다 실행 방법이 있는지 본다 — worker 시작이 쓰는 `models::build`와 같은 판정이다(별칭의 실행 방법, API 직접 호출의
+/// 주소·서비스 키 이름 규칙). 모델 CLI 실행기와 API 직접 호출 조각은 조립된 것으로 친다(자리만 채우고 키를 읽거나 요청을 보내지 않는다).
+pub(crate) fn check_model_aliases(host: &HostFile) -> Result<(), String> {
+    /// 요청을 보내지 않으므로 판본 확인은 늘 통과한다
+    struct Open;
+    impl bot_runtime::model::SendGate for Open {
+        fn verify(&self) -> bot_core::port::Reply<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    let claude: Arc<dyn bot_runtime::model::ModelRunner> = Arc::new(bot_runtime::model::DemoModel);
+    let api = models::ApiParts {
+        secrets: trace::inert_secrets(),
+        gate: Arc::new(Open),
+    };
+    models::build(host, Some(claude), Some(&api)).map(|_| ())
+}
 
 /// 시작하지 않는 역할과 이유. 브로커(도구 실행·승인)는 worker 안에서 같은 프로세스로 돌기 때문에 별도 역할이 아니다 —
 /// 요청하면 이유를 밝히고 거절한다.
@@ -204,7 +225,7 @@ pub async fn run_with(
     }
     // 도구 서버: 승인 결정만 하는 역할은 설치 판본만 읽는다(복사 없음). 도구를 실행하는 역할(broker·worker)이 조립되면
     // 그쪽이 `install::install`로 읽기 전용 설치본을 만들어 같은 판본으로 실행한다.
-    let revisions = crate::install::measure(&loaded.host.servers)?;
+    let revisions = crate::install::measure_all(&loaded.host.servers, &loaded.host.remote_servers)?;
     // 자격 보관소와 관측: 모든 역할이 같은 수집기(Exporter)를 쓴다(단독 gateway도). 잘못된 수집기 설정이면 여기서 멈춘다.
     let secrets = match overrides.secrets {
         Some(secrets) => secrets,
@@ -289,6 +310,7 @@ pub async fn run_with(
             decisions: decisions.clone(),
             tracer: observe.tracer(),
             slack_base: overrides.slack_base.clone(),
+            active: active.clone(),
         };
         Some(gateway::prepare(&deps).await?)
     } else {

@@ -25,7 +25,7 @@ impl HostPort {
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub id: ToolId,
-    /// MCP 도구 이름(tools.yaml tools[].id). 도구 ID `skill.tool`의 `tool` 부분이다.
+    /// 서버가 내세우는 MCP 도구 이름: tools.yaml `name`, 생략하면 도구 ID `skill.tool`의 `tool` 부분(tools[].id)이다.
     pub name: String,
     pub tool: Tool,
     pub egress: Vec<HostPort>,
@@ -33,7 +33,10 @@ pub struct Resolved {
 
 impl Resolved {
     pub fn new(id: ToolId, tool: Tool) -> Option<Self> {
-        let name = id.0.split_once('.')?.1.to_owned();
+        let name = match &tool.mcp_name {
+            Some(given) => given.clone(),
+            None => id.0.split_once('.')?.1.to_owned(),
+        };
         let egress = tool
             .egress
             .iter()
@@ -113,6 +116,8 @@ pub fn effective_tool(pinned: &Tool, current: &Tool) -> Result<Tool, Error> {
         && pinned.effects == current.effects
         && same_destination(&pinned.destination, &current.destination)
         && pinned.input == current.input
+        && pinned.definition == current.definition
+        && pinned.mcp_name == current.mcp_name
         && pinned.env == current.env;
     if !same_definition {
         return Err(Error::Conflict);
@@ -141,6 +146,22 @@ mod tests {
 
     fn set(items: &[&str]) -> BTreeSet<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_explicit_server_name_wins_over_the_id_part() {
+        let mut named = tool(Risk::Read, &["a"]);
+        named.mcp_name = Some("get_forecast".into());
+        let resolved = Resolved::new(ToolId("weather.get-forecast".into()), named).unwrap();
+        assert_eq!(resolved.name, "get_forecast");
+        assert_eq!(resolved.id.0, "weather.get-forecast");
+        // 이름이 없으면 id의 도구 부분(옛 동작)
+        let plain = Resolved::new(
+            ToolId("weather.get-forecast".into()),
+            tool(Risk::Read, &["a"]),
+        )
+        .unwrap();
+        assert_eq!(plain.name, "get-forecast");
     }
 
     #[test]
@@ -209,6 +230,8 @@ mod tests {
             |t| t.effects = true,
             |t| t.input = JsonPayload("{}".into()),
             |t| t.destination = Some(Destination::Reply),
+            |t| t.definition = Some("b".repeat(64)),
+            |t| t.mcp_name = Some("get_forecast".into()),
         ];
         for change in changes {
             let mut current = pinned.clone();
@@ -232,5 +255,34 @@ mod tests {
             content: "args.body".into(),
         });
         assert!(matches!(effective_tool(&a, &b), Err(Error::Conflict)));
+    }
+
+    #[test]
+    fn a_pinned_definition_hash_must_match_exactly_to_merge() {
+        let mut pinned = tool(Risk::Read, &["a"]);
+        pinned.definition = Some("a".repeat(64));
+        let mut same = pinned.clone();
+        same.revision = Revision("t2".into());
+        same.scopes = set(&["b"]);
+        let merged = effective_tool(&pinned, &same).unwrap();
+        assert_eq!(merged.definition, pinned.definition);
+        // 해시가 달라졌거나 없어졌거나 새로 생겼다
+        for other in [Some("b".repeat(64)), None] {
+            let mut current = same.clone();
+            current.definition = other;
+            assert!(matches!(
+                effective_tool(&pinned, &current),
+                Err(Error::Conflict)
+            ));
+        }
+        let mut inline = pinned.clone();
+        inline.definition = None;
+        let mut locked = inline.clone();
+        locked.revision = Revision("t2".into());
+        locked.definition = Some("a".repeat(64));
+        assert!(matches!(
+            effective_tool(&inline, &locked),
+            Err(Error::Conflict)
+        ));
     }
 }

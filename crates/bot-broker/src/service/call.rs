@@ -234,7 +234,10 @@ impl BrokerService {
         // 반복해서 읽게 만드는 호출을 막는다). 이미 기록한 호출(재전달·복구)은 기록대로 이어 간다: 자격이 사라졌어도 끝난 결과를 숨기지 않는다.
         // 읽지 못한 보관소는 «없음»이 아니다(실행기가 자기 규칙으로 다룬다).
         let mut held = None;
-        if !resolved.tool.secrets.is_empty()
+        // 원격 서버의 bearer처럼 호스트가 서버에 묶은 자격도 같은 자리에서 본다(없는 자격으로 사람에게 승인을 받지 않게). 원격 도구는 `secrets`를 선언하지 못하므로
+        // 이 자격만 있는 호출도 이 점검을 거친다.
+        let bound = self.parts.runner.server_secrets(&resolved.tool.server);
+        if (!resolved.tool.secrets.is_empty() || !bound.is_empty())
             && forbidden_secret(&resolved.tool, &snapshot).is_none()
             && ledger
                 .lookup(attempt.clone(), call.clone())
@@ -248,7 +251,8 @@ impl BrokerService {
                     .admit(&attempt.profile, &ctx.principal)
                     .map_err(|_| Self::limited())?,
             );
-            let names: Vec<_> = resolved.tool.secrets.values().cloned().collect();
+            let mut names: Vec<_> = resolved.tool.secrets.values().cloned().collect();
+            names.extend(bound);
             if matches!(
                 self.parts
                     .runner

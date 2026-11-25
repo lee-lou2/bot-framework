@@ -25,6 +25,9 @@ pub struct HostCatalog {
     pub openai_endpoints: BTreeMap<String, BTreeSet<String>>,
     /// 프로필 → egress 상한(`host:port`). 항목이 없으면 호스트 상한 없이 도구 선언만 따른다.
     pub egress: BTreeMap<String, BTreeSet<String>>,
+    /// 원격(Streamable HTTP) 서버 별칭 → 접속 대상 `host:port`(`servers`에도 있다). 그 서버의 도구는 선언한 egress에 이 대상이 있어야 하고(운영자 상한 안에서),
+    /// 단계 원장(`effects`)·`secrets`·`env`를 쓸 수 없다(원격 서버에는 전달할 길이 없다).
+    pub remote_servers: BTreeMap<String, String>,
 }
 
 impl HostCatalog {
