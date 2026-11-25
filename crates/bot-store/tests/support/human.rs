@@ -40,6 +40,7 @@ pub fn confirm_trigger(approvers: &[&str]) -> Trigger {
         conditions: BTreeMap::new(),
         input: BTreeMap::new(),
         private: false,
+        private_pass: false,
         target: TriggerTarget::Tool {
             tool: ToolId(TOOL.into()),
             args: JsonPayload(ARGS.into()),

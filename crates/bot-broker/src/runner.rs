@@ -46,6 +46,8 @@ pub struct HostRegistry {
     pub servers: BTreeMap<String, String>,
     /// 프로필 → 운영자가 정한 egress 상한. 없으면 도구가 선언한 호스트만 허용한다.
     pub egress_caps: BTreeMap<ProfileId, Vec<HostPort>>,
+    /// 프로필 → 운영자가 명시한 사설/로컬 고정 목적지 `(host, port) -> SocketAddr`.
+    pub private_egress: BTreeMap<ProfileId, BTreeMap<(String, u16), std::net::SocketAddr>>,
     /// 원격(Streamable HTTP) 서버 별칭 → 접속 대상. 이 별칭은 `servers`에도 있다(판본은 `Remote::revision`). 원격 서버는 샌드박스를 거치지 않고 브로커가 직접 연결한다.
     pub remote: BTreeMap<String, Remote>,
 }
@@ -281,6 +283,9 @@ impl McpRunner {
             }
             let password = hex(&raw);
             let mut proxy_cfg = self.cfg.proxy(policy, password.clone(), budget);
+            if let Some(routes) = self.host.private_egress.get(&job.attempt.profile) {
+                proxy_cfg.private_routes = routes.clone();
+            }
             // 프록시 암호도 이 호출이 쓰는 자격이다(결과와 단계 보고 검사에 함께 쓴다)
             credentials.push(password.clone().into_bytes());
             if via_proxy {

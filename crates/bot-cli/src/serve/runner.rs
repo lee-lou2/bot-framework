@@ -156,6 +156,11 @@ pub(super) async fn build(
         HostRegistry {
             servers,
             egress_caps,
+            private_egress: host
+                .private_egress
+                .iter()
+                .map(|(profile, routes)| (ProfileId(profile.clone()), routes.clone()))
+                .collect(),
             remote: host.remote_servers.clone(),
         },
         runner_config(host),

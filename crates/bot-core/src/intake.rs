@@ -32,9 +32,16 @@ pub struct PrivateCall {
     pub args: JsonPayload,
 }
 
+/// 민감 DM 입구의 처리 결과. `Pass`는 `private_pass: true` 트리거의 도구가 민감 입력이 아님을 확인하고 일반 대화로 넘겼을 때만 돌려준다.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrivateDecision {
+    Consumed,
+    Pass,
+}
+
 pub trait PrivateIntake: Send + Sync {
     /// 동일 접수는 한 작업만 실행한다. 재점유에 원문이 필요한 동안에는 재전달 신호를 반환한다.
-    fn receive(&self, call: PrivateCall) -> Reply<'_, ()>;
+    fn receive(&self, call: PrivateCall) -> Reply<'_, PrivateDecision>;
 }
 
 /// worker의 리스와 독립적으로 잡은 회신 예약. call은 재시도에도 고정된다.

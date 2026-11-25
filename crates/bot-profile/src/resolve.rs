@@ -245,6 +245,14 @@ fn trigger_refs(p: &ProfileParts, agent: &Agent, t: &Trigger, file: &str, issues
     let binding =
         t.on.binding()
             .and_then(|id| binding_of(p, id, t, file, &at, issues));
+    if t.private_pass && !t.private {
+        issues.error_at(
+            "private-pass-needs-private",
+            file,
+            &at,
+            "private_pass는 private 트리거에만 쓸 수 있어요",
+        );
+    }
     if t.private
         && t.on.binding().is_some()
         && !matches!(binding.map(|b| &b.kind), Some(Adapter::SlackDm { .. }))

@@ -24,13 +24,13 @@ use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
 /// 결과에서 떼어 낸 표식
-pub(super) struct Marker {
+pub(crate) struct Marker {
     /// 규칙에 맞는 표식인가
     pub valid: bool,
 }
 
 /// 결과에서 `_meta["bot/pass"]`를 떼어 낸다(다른 `_meta` 항목은 그대로, 비면 `_meta`도 뺀다). 표식이 없으면 결과는 바이트 그대로다.
-pub(super) fn split(payload: &JsonPayload) -> (JsonPayload, Option<Marker>) {
+pub(crate) fn split(payload: &JsonPayload) -> (JsonPayload, Option<Marker>) {
     let Some(Value::Object(mut map)) = parse(&payload.0) else {
         return (payload.clone(), None);
     };

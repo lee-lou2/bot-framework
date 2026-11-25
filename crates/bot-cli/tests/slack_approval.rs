@@ -97,6 +97,7 @@ async fn rig() -> Option<Rig> {
                 conditions: BTreeMap::new(),
                 input: BTreeMap::new(),
                 private: false,
+                private_pass: false,
                 target: TriggerTarget::Tool {
                     tool: ToolId(TOOL.into()),
                     args: JsonPayload(r#"{"report":"daily"}"#.into()),

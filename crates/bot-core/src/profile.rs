@@ -241,6 +241,7 @@ pub struct Trigger {
     /// 인자 이름 → 봉투의 점 경로.
     pub input: BTreeMap<String, String>,
     pub private: bool,
+    pub private_pass: bool,
     pub target: TriggerTarget,
     /// 운영자가 활성화 때 사전 승인한 정적 호출(cron 고정 도구 트리거만).
     pub preapproved: Option<crate::grant::Preapproval>,

@@ -328,6 +328,7 @@ impl SnapshotBuilder {
                 conditions: BTreeMap::new(),
                 input: BTreeMap::new(),
                 private: true,
+                private_pass: false,
                 target: TriggerTarget::Tool {
                     tool: ToolId(tool.into()),
                     args: JsonPayload("{}".into()),
@@ -364,6 +365,7 @@ impl SnapshotBuilder {
                 conditions: BTreeMap::new(),
                 input: BTreeMap::new(),
                 private: false,
+                private_pass: false,
                 target: TriggerTarget::Tool {
                     tool: ToolId("agenda.list".into()),
                     args: JsonPayload("{}".into()),

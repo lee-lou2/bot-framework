@@ -43,6 +43,52 @@ pub(super) fn profile_map(
         .collect()
 }
 
+/// `private_egress`: 프로필 → `{ "host:port": "ip:port" }` (사설/로컬 고정 목적지 매핑).
+pub(super) fn private_egress_map(
+    value: &Value,
+) -> Result<BTreeMap<String, BTreeMap<(String, u16), std::net::SocketAddr>>, HostFileError> {
+    let Value::Object(profiles) = value else {
+        return Err(bad(
+            "private_egress: 프로필 이름을 키로 하는 객체여야 해요",
+        ));
+    };
+    profiles
+        .iter()
+        .map(|(profile, routes)| {
+            if !bot_core::id::is_name(profile) {
+                return Err(bad("private_egress: 프로필 이름이 올바르지 않아요"));
+            }
+            let Value::Object(entries) = routes else {
+                return Err(bad(format!(
+                    "private_egress.{profile}: `host:port -> ip:port` 객체여야 해요"
+                )));
+            };
+            let mapped = entries
+                .iter()
+                .map(|(from, to)| {
+                    let hp = bot_broker::resolve::HostPort::parse(from).ok_or_else(|| {
+                        bad(format!(
+                            "private_egress.{profile}: 올바르지 않은 호스트예요: {from}"
+                        ))
+                    })?;
+                    let addr_str = to.as_str().ok_or_else(|| {
+                        bad(format!(
+                            "private_egress.{profile}.{from}: `ip:port` 문자열이어야 해요"
+                        ))
+                    })?;
+                    let addr: std::net::SocketAddr = addr_str.parse().map_err(|_| {
+                        bad(format!(
+                            "private_egress.{profile}.{from}: 올바르지 않은 `ip:port`예요: {addr_str}"
+                        ))
+                    })?;
+                    Ok(((hp.host, hp.port), addr))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            Ok((profile.clone(), mapped))
+        })
+        .collect()
+}
+
 /// `host:port` (소문자·숫자·`.`·`-`, 포트 1~5자리)
 pub(super) fn is_egress(text: &str) -> bool {
     let Some((host, port)) = text.rsplit_once(':') else {

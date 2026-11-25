@@ -87,6 +87,9 @@ pub struct ProxyConfig {
     pub policy: EgressPolicy,
     /// 운영자가 사설망을 명시적으로 열었을 때만 true.
     pub allow_private: bool,
+    /// 운영자가 호스트 설정에 명시한 사설/로컬 고정 목적지 `(host, port) -> SocketAddr`.
+    /// `policy`를 통과한 정확한 대상에만 적용되며, 공개 도메인의 DNS 재바인딩 보호는 그대로 유지된다.
+    pub private_routes: std::collections::BTreeMap<(String, u16), SocketAddr>,
     pub user: String,
     pub password: String,
     pub head_timeout: Duration,
@@ -103,6 +106,7 @@ impl ProxyConfig {
         Self {
             policy,
             allow_private: false,
+            private_routes: std::collections::BTreeMap::new(),
             user,
             password,
             head_timeout: Duration::from_secs(10),
@@ -331,15 +335,20 @@ async fn serve(mut client: TcpStream, shared: &Shared, mut stop: watch::Receiver
         c.policy.fetch_add(1, Ordering::Relaxed);
         return reply(&mut client, "403 Forbidden", "").await;
     }
-    let Ok(resolved) = shared.resolver.resolve(&host).await else {
-        c.failed.fetch_add(1, Ordering::Relaxed);
-        return reply(&mut client, "502 Bad Gateway", "").await;
+    let dest = if let Some(&addr) = shared.cfg.private_routes.get(&(host.clone(), port)) {
+        addr
+    } else {
+        let Ok(resolved) = shared.resolver.resolve(&host).await else {
+            c.failed.fetch_add(1, Ordering::Relaxed);
+            return reply(&mut client, "502 Bad Gateway", "").await;
+        };
+        let Some(ip) = vet_resolved(&resolved, shared.cfg.allow_private) else {
+            c.address.fetch_add(1, Ordering::Relaxed);
+            return reply(&mut client, "403 Forbidden", "").await;
+        };
+        SocketAddr::new(ip, port)
     };
-    let Some(ip) = vet_resolved(&resolved, shared.cfg.allow_private) else {
-        c.address.fetch_add(1, Ordering::Relaxed);
-        return reply(&mut client, "403 Forbidden", "").await;
-    };
-    let connecting = shared.connector.connect(SocketAddr::new(ip, port));
+    let connecting = shared.connector.connect(dest);
     let Ok(Ok(mut upstream)) = timeout(shared.cfg.connect_timeout, connecting).await else {
         c.failed.fetch_add(1, Ordering::Relaxed);
         return reply(&mut client, "502 Bad Gateway", "").await;

@@ -191,6 +191,7 @@ pub struct Trigger {
     pub target: TriggerTarget,
     pub order: i64,
     pub private: bool,
+    pub private_pass: bool,
     pub matches: Vec<Match>,
     /// 도구 인자 이름 → 봉투의 점 경로
     pub input: BTreeMap<String, String>,

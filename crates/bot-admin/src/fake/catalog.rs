@@ -135,6 +135,7 @@ pub fn personal() -> Snapshot {
         conditions: BTreeMap::new(),
         input: BTreeMap::new(),
         private: false,
+        private_pass: false,
         target: TriggerTarget::Tool {
             tool: ToolId("agenda.list".into()),
             args: JsonPayload("{}".into()),
@@ -227,6 +228,7 @@ pub fn work() -> Snapshot {
         conditions: BTreeMap::new(),
         input: BTreeMap::new(),
         private: false,
+        private_pass: false,
         target: TriggerTarget::Instruction("handle".into()),
         preapproved: None,
         human_approval: None,

@@ -488,6 +488,7 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
         conditions: BTreeMap::new(),
         input: BTreeMap::new(),
         private: false,
+        private_pass: false,
         target: TriggerTarget::Instruction("오늘 일정을 알려줘".into()),
         preapproved: None,
         human_approval: None,
@@ -504,6 +505,7 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
         conditions: BTreeMap::new(),
         input: BTreeMap::new(),
         private: false,
+        private_pass: false,
         target: TriggerTarget::Tool {
             tool: bot_core::id::ToolId("agenda.list".into()),
             args: JsonPayload("{}".into()),
@@ -521,6 +523,7 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
         conditions: BTreeMap::new(),
         input: BTreeMap::new(),
         private: false,
+        private_pass: false,
         target: TriggerTarget::Instruction("x".into()),
         preapproved: None,
         human_approval: None,

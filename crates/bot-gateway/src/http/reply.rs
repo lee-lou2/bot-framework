@@ -49,10 +49,35 @@ pub fn with_header(mut response: Response, name: header::HeaderName, value: &str
     response
 }
 
-/// 도구 결과를 그대로 HTTP 응답으로 쓴다. 정확히 `{status, body}`이고 상태가 허용 집합 안이며
+/// MCP `CallToolResult`(`{"content":[{"type":"text","text":"..."}],"isError":false}` 또는 `structuredContent`)에서
+/// 도구 본문 JSON을 꺼낸다. `isError: true`면 거절한다(`None`). 이미 `{status, body}`이면 그대로 쓴다.
+fn unwrap_mcp(value: Value) -> Option<Value> {
+    let Value::Object(map) = &value else {
+        return Some(value);
+    };
+    if map.len() == 2 && map.contains_key("status") && map.contains_key("body") {
+        return Some(value);
+    }
+    if map.get("isError").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    if let Some(sc) = map.get("structuredContent") {
+        return Some(sc.clone());
+    }
+    if let Some([only]) = map.get("content").and_then(Value::as_array).map(Vec::as_slice)
+        && only.get("type").and_then(Value::as_str) == Some("text")
+        && let Some(text) = only.get("text").and_then(Value::as_str)
+    {
+        return serde_json::from_str(text).ok();
+    }
+    Some(value)
+}
+
+/// 도구 결과를 그대로 HTTP 응답으로 쓴다. 정확히 `{status, body}`(또는 이를 감싼 정상 MCP 결과)이고 상태가 허용 집합 안이며
 /// 본문이 크기 한도 안일 때만 응답이 된다(204는 본문 `null`). 아니면 None.
 pub fn tool_result(result: &JsonPayload) -> Option<Response> {
-    let Value::Object(map) = serde_json::from_str(&result.0).ok()? else {
+    let raw: Value = serde_json::from_str(&result.0).ok()?;
+    let Value::Object(map) = unwrap_mcp(raw)? else {
         return None;
     };
     if map.len() != 2 {
@@ -111,6 +136,23 @@ mod tests {
         }
         let huge = format!(r#"{{"status":200,"body":"{}"}}"#, "x".repeat(RESULT_LIMIT));
         assert_eq!(status_of(&huge), None);
+        // MCP CallToolResult로 감싼 {status, body}도 정상 결과만 풀어 쓴다.
+        assert_eq!(
+            status_of(r#"{"content":[{"type":"text","text":"{\"status\":404,\"body\":{\"ok\":false}}"}],"isError":false}"#),
+            Some(404)
+        );
+        assert_eq!(
+            status_of(r#"{"structuredContent":{"status":200,"body":{"ok":true}},"isError":false}"#),
+            Some(200)
+        );
+        assert_eq!(
+            status_of(r#"{"content":[{"type":"text","text":"{\"status\":200,\"body\":{\"ok\":true}}"}],"isError":true}"#),
+            None
+        );
+        assert_eq!(
+            status_of(r#"{"content":[{"type":"text","text":"{\"status\":500,\"body\":{}}"}],"isError":false}"#),
+            None
+        );
     }
 
     #[test]

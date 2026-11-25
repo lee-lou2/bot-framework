@@ -14,7 +14,7 @@ use crate::{
 use bot_core::{
     command::{Accept, AcceptExtras, Envelope, HttpRoute, JsonPayload, Target},
     id::{PrincipalId, ProfileId, Revision, RunId},
-    intake::{PrivateCall, PrivateIntake, RequestKey},
+    intake::{PrivateCall, PrivateDecision, PrivateIntake, RequestKey},
     port::{Error, RunStore},
     profile::{ProfileCatalog, ResponseMode, Snapshot, TriggerSource, TriggerTarget},
     slack::SlackSource,
@@ -355,7 +355,30 @@ impl Ingress {
         };
         let plan = match chosen {
             Some(bound) if bound.trigger.private => {
-                return self.private(&route, bound, key, &inbound, &envelope).await;
+                match self
+                    .private(&route, bound, key.clone(), &inbound, &envelope)
+                    .await
+                {
+                    Ok(PrivateDecision::Consumed) => return Admission::Private,
+                    Err(rejection) => return Admission::Rejected(rejection),
+                    Ok(PrivateDecision::Pass) => {
+                        let text = inbound
+                            .body
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.trim().is_empty());
+                        let Some(text) = text else {
+                            return Admission::Rejected(Rejection::Invalid);
+                        };
+                        Plan {
+                            target: Target::Agent {
+                                agent: route.binding.agent.clone(),
+                                instruction: text.to_owned(),
+                            },
+                            respond: Respond::Accepted,
+                        }
+                    }
+                }
             }
             Some(bound) => match plan_of(bound, &envelope) {
                 Some(plan) => plan,
@@ -454,12 +477,12 @@ impl Ingress {
         key: RequestKey,
         inbound: &Inbound,
         envelope: &Value,
-    ) -> Admission {
+    ) -> Result<PrivateDecision, Rejection> {
         let TriggerTarget::Tool { tool, .. } = &bound.trigger.target else {
-            return Admission::Rejected(Rejection::Invalid);
+            return Err(Rejection::Invalid);
         };
         let Some(args) = trigger::tool_args(&bound.trigger, envelope) else {
-            return Admission::Rejected(Rejection::Invalid);
+            return Err(Rejection::Invalid);
         };
         let call = PrivateCall {
             key,
@@ -469,10 +492,10 @@ impl Ingress {
             tool: tool.clone(),
             args: JsonPayload(args),
         };
-        match self.private.receive(call).await {
-            Ok(()) => Admission::Private,
-            Err(error) => Admission::Rejected(private_rejection(error)),
-        }
+        self.private
+            .receive(call)
+            .await
+            .map_err(private_rejection)
     }
 }
 

@@ -22,7 +22,7 @@ use crate::{
 };
 use bot_core::{
     id::*,
-    intake::{PrivateCall, PrivateIntake},
+    intake::{PrivateCall, PrivateDecision, PrivateIntake},
     ledger::{PrivateLedger, PrivateOutcome, PrivatePermit, PrivateRequest, PrivateStart},
     port::{Error, Reply, SecretStore},
     profile::{Adapter, Destination, ProfileCatalog, TriggerSource, TriggerTarget},
@@ -68,6 +68,7 @@ struct Exec {
     fingerprint: [u8; 32],
     checked_revision: Revision,
     reply_to: Option<Conversation>,
+    private_pass: bool,
 }
 
 fn error_class(error: &Error) -> &'static str {
@@ -81,7 +82,7 @@ fn error_class(error: &Error) -> &'static str {
 }
 
 impl PrivateIntake for PrivateGate {
-    fn receive(&self, call: PrivateCall) -> Reply<'_, ()> {
+    fn receive(&self, call: PrivateCall) -> Reply<'_, PrivateDecision> {
         Box::pin(async move {
             let (profile, request) = (call.key.profile.clone(), call.key.request.0.clone());
             let mut label = "rejected";
@@ -108,7 +109,7 @@ impl PrivateGate {
         &self,
         call: PrivateCall,
         label: &mut &'static str,
-    ) -> Result<(), Error> {
+    ) -> Result<PrivateDecision, Error> {
         let PrivateCall {
             key,
             revision,
@@ -123,23 +124,24 @@ impl PrivateGate {
         if revision != snapshot.revision {
             return Err(Error::Stale);
         }
-        // 민감 입력은 1:1 대화(DM)로만 받는다: 대화 종류가 Direct이고 바인딩이 이 에이전트의 Slack DM이어야 한다.
-        let dm = snapshot
-            .bindings
-            .get(&key.binding)
-            .is_some_and(|b| b.agent == agent && matches!(b.source, Adapter::SlackDm { .. }));
+        // 민감 입력은 1:1 대화(DM)로만 받는다: 대화 종류가 Direct이고 바인딩이 이 에이전트(또는 조상)의 Slack DM이어야 한다.
+        let dm = snapshot.bindings.get(&key.binding).is_some_and(|b| {
+            (b.agent == agent || agent.0.starts_with(&format!("{}/", b.agent.0)))
+                && matches!(b.source, Adapter::SlackDm { .. })
+        });
         if conversation.kind != ConversationKind::Direct || !dm {
             return Err(Error::Denied);
         }
         // 지금 판본에 이 바인딩·에이전트·도구를 가리키는 private 트리거가 있어야 한다.
         let owner = snapshot.agents.get(&agent).ok_or(Error::Denied)?;
-        let declared = owner.triggers.iter().any(|t| {
+        let trigger = owner.triggers.iter().find(|t| {
             t.private
                 && matches!(&t.on, TriggerSource::Event { binding, .. } if *binding == key.binding)
                 && matches!(&t.target, TriggerTarget::Tool { tool: target, .. } if *target == tool)
         });
+        let private_pass = trigger.is_some_and(|t| t.private_pass);
         let declared_tool = find_tool(&snapshot, &agent, &tool)
-            .filter(|_| declared)
+            .filter(|_| trigger.is_some())
             .ok_or(Error::Denied)?;
         // 승인 카드는 인자를 보여 줘야 하고, 단계 원장은 입력이 섞인 인자 해시를 저장하므로 둘 다 민감 입력에는 쓰지 않는다.
         if declared_tool.effects
@@ -225,6 +227,7 @@ impl PrivateGate {
                     fingerprint,
                     checked_revision: snapshot.revision.clone(),
                     reply_to,
+                    private_pass,
                 };
                 let result = self.execute(run).await;
                 if result.is_err() {
@@ -240,7 +243,7 @@ impl PrivateGate {
             // 이미 끝났거나 내구 보류다. 호출을 늘리지 않는다.
             PrivatePermit::Completed | PrivatePermit::Held => {
                 *label = "duplicate";
-                Ok(())
+                Ok(PrivateDecision::Consumed)
             }
             PrivatePermit::Rejected => {
                 *label = "duplicate";
@@ -251,7 +254,7 @@ impl PrivateGate {
 
     /// 리스를 쥔 접수 한 건을 실행한다. 시작 기록 전의 실패는 리스를 반납해 같은 입력의 재전달이 이어 가게 하고,
     /// 시작한 뒤에는 결과 종류만 고정 어휘로 남긴다(도구가 돌려준 본문·오류·영수증은 버린다).
-    async fn execute(&self, run: Exec) -> Result<(), Error> {
+    async fn execute(&self, run: Exec) -> Result<PrivateDecision, Error> {
         let (ledger, profile) = (&self.parts.ledger, run.attempt.profile.clone());
         let release = |attempt: Attempt| async move {
             let _ = ledger
@@ -300,23 +303,29 @@ impl PrivateGate {
                 run.attempt.run.0, run.attempt.generation.0
             ),
         };
-        let outcome = match self.parts.runner.run(job).await {
+        let (outcome, passed) = match self.parts.runner.run(job).await {
             // 도구가 오류로 끝났다고 알려도(`isError`) 일부 효과가 났을 수 있다: 성공으로 적지 않고 보류한다.
-            Ok(Ran::Done(payload)) if reports_error(&payload.0) => PrivateOutcome::Held,
-            // 민감 DM 전용 도구가 «처리하지 않음» 표식을 돌려줬다: 넘길 곳이 없다(본문은 일반 run·감사·모델로 가지 않는다). 실패로 닫고 다시 실행하지 않는다.
+            Ok(Ran::Done(payload)) if reports_error(&payload.0) => (PrivateOutcome::Held, false),
+            // 민감 DM 전용 도구가 «처리하지 않음» 표식을 돌려줬다: `private_pass: true`이고 유효한 빈 표식일 때만 일반 DM 대화로 넘긴다.
             Ok(Ran::Done(payload)) if crate::service::pass::carries_marker(&payload.0) => {
-                PrivateOutcome::Held
+                let (_, marker) = crate::service::pass::split(&payload);
+                if run.private_pass && marker.is_some_and(|m| m.valid) {
+                    (PrivateOutcome::Completed, true)
+                } else {
+                    (PrivateOutcome::Held, false)
+                }
             }
-            Ok(Ran::Done(_)) => PrivateOutcome::Completed,
+            Ok(Ran::Done(_)) => (PrivateOutcome::Completed, false),
             // 서버가 실행 전에 확정적으로 거절했다(잘못된 요청·인자): 외부 효과가 없다.
-            Ok(Ran::Rejected | Ran::Refused(_)) => PrivateOutcome::Rejected,
-            Ok(Ran::NotSent) => PrivateOutcome::NotSent,
+            Ok(Ran::Rejected | Ran::Refused(_)) => (PrivateOutcome::Rejected, false),
+            Ok(Ran::NotSent) => (PrivateOutcome::NotSent, false),
             // 결과를 막았어도 도구는 이미 실행됐다(외부 효과가 불명이다): 거절로 단정하지 않고 보류한다.
             // 보냈는지 모르거나 실행기가 실패했을 때도 보류하고 원문으로 다시 실행하지 않는다.
-            Ok(Ran::Blocked(_) | Ran::Unknown(_)) | Err(_) => PrivateOutcome::Held,
+            Ok(Ran::Blocked(_) | Ran::Unknown(_)) | Err(_) => (PrivateOutcome::Held, false),
         };
         let result = match outcome {
-            PrivateOutcome::Completed | PrivateOutcome::Held => Ok(()),
+            PrivateOutcome::Completed if passed => Ok(PrivateDecision::Pass),
+            PrivateOutcome::Completed | PrivateOutcome::Held => Ok(PrivateDecision::Consumed),
             PrivateOutcome::NotSent | PrivateOutcome::RetryBeforeStart => Err(Error::Unavailable),
             PrivateOutcome::Rejected => Err(Error::Denied),
         };

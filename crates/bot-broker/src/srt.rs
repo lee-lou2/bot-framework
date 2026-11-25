@@ -133,6 +133,7 @@ pub fn settings(spec: &SandboxSpec, work: &Path, install: &Path, cfg: &SrtConfig
         "deniedDomains": [],
         "strictAllowlist": true,
         "allowLocalBinding": false,
+        "allowUnixSockets": [work.display().to_string()],
     });
     if let Some(endpoint) = &spec.egress {
         network["parentProxy"] = json!({"http": endpoint.url, "https": endpoint.url});

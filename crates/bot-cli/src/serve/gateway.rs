@@ -25,7 +25,7 @@ use bot_core::{
     api::ApiRuns,
     cards::CardOutbox,
     id::Revision,
-    intake::{Outbox, PrivateCall, PrivateIntake},
+    intake::{Outbox, PrivateCall, PrivateDecision, PrivateIntake},
     ledger::{CallLedger, PrivateLedger},
     port::{Broker, EffectJournal, Error, Reply, RunStore},
     profile::{ActiveRevisions, Adapter, ProfileBundles, ProfileCatalog},
@@ -71,7 +71,7 @@ pub struct Deps {
 struct UnwiredPrivate;
 
 impl PrivateIntake for UnwiredPrivate {
-    fn receive(&self, _: PrivateCall) -> Reply<'_, ()> {
+    fn receive(&self, _: PrivateCall) -> Reply<'_, PrivateDecision> {
         Box::pin(std::future::ready(Err(Error::Unavailable)))
     }
 }
@@ -123,7 +123,7 @@ struct Held {
 }
 
 impl PrivateIntake for Held {
-    fn receive(&self, call: PrivateCall) -> Reply<'_, ()> {
+    fn receive(&self, call: PrivateCall) -> Reply<'_, PrivateDecision> {
         self.gate.receive(call)
     }
 }

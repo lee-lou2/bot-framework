@@ -118,7 +118,10 @@ pub(super) fn delivery(
     }
 }
 
-pub(super) async fn receive(r: &Rig, call: PrivateCall) -> Result<(), Error> {
+pub(super) async fn receive(
+    r: &Rig,
+    call: PrivateCall,
+) -> Result<bot_core::intake::PrivateDecision, Error> {
     r.gate.receive(call).await
 }
 

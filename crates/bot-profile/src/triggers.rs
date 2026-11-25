@@ -118,6 +118,10 @@ fn parse_one(
         target,
         order: obj.get("order").and_then(Value::as_i64).unwrap_or(0),
         private: obj.get("private").and_then(Value::as_bool).unwrap_or(false),
+        private_pass: obj
+            .get("private_pass")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         matches,
         input,
         preapproved: declared.preapproved,

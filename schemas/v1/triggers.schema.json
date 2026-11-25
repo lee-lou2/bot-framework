@@ -158,6 +158,9 @@
         "private": {
           "type": "boolean"
         },
+        "private_pass": {
+          "type": "boolean"
+        },
         "match": {
           "type": "object",
           "additionalProperties": {

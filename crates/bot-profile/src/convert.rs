@@ -164,6 +164,7 @@ fn trigger(t: &model::Trigger) -> Trigger {
             .collect(),
         input: t.input.clone(),
         private: t.private,
+        private_pass: t.private_pass,
         target,
         preapproved: t.preapproved.clone(),
         human_approval: t.human_approval.clone(),

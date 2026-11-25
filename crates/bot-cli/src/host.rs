@@ -35,7 +35,7 @@ use std::{
 
 mod lists;
 
-use lists::{is_egress, profile_map};
+use lists::{is_egress, private_egress_map, profile_map};
 
 const MAX_BYTES: u64 = 1024 * 1024;
 
@@ -70,6 +70,8 @@ pub struct HostFile {
     pub sandbox: Sandbox,
     /// 도구 호출 시간 한도의 천장(`limits` 절). 활성화 지문에 든다.
     pub limits: HostLimits,
+    /// 프로필별 사설/로컬 고정 egress 매핑(`private_egress` 절). 비어 있지 않으면 활성화 지문에 든다.
+    pub private_egress: BTreeMap<String, BTreeMap<(String, u16), std::net::SocketAddr>>,
     /// 파일 없이 내장 데모로 만든 것인가
     pub demo: bool,
 }
@@ -95,6 +97,10 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
     };
     let egress = match top.remove("egress") {
         Some(value) => profile_map(&value, "egress", is_egress)?,
+        None => BTreeMap::new(),
+    };
+    let private_egress = match top.remove("private_egress") {
+        Some(value) => private_egress_map(&value)?,
         None => BTreeMap::new(),
     };
     let providers = match top.remove("providers") {
@@ -139,6 +145,7 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         providers,
         sandbox,
         limits,
+        private_egress,
         demo: false,
     })
 }
@@ -160,6 +167,21 @@ impl HostFile {
         );
         // 도구 호출 시간 한도의 천장도 권한이다(천장을 바꾸면 활성화 사건). 기본 천장이면 지문이 그대로다.
         let base = crate::tool_limits::bind(base, &self.limits);
+        let base = if self.private_egress.is_empty() {
+            base
+        } else {
+            let mut hash = Sha256::new();
+            hash.update(b"bot-authority-private-egress-v1\0");
+            hash.update(base);
+            for (profile, routes) in &self.private_egress {
+                hash.update(profile.as_bytes());
+                hash.update(b"\0");
+                for ((host, port), addr) in routes {
+                    hash.update(format!("{host}:{port}={addr}\0").as_bytes());
+                }
+            }
+            hash.finalize().into()
+        };
         // 수집(OTLP) 설정도 권한이다: 어디로 무엇을(내용·식별자 표기·표본) 내보내는지가 바뀌거나 거두어지면 활성화 사건이라, 옛 설정으로 남은 프로세스가
         // 구판이 되어 그 프로세스의 내보내기 문이 닫힌다(`serve`가 `Exporter::set_gate`로 잇는다). 수집을 쓰지 않는 호스트는 지문이 그대로다.
         Ok(match bot_admin::trace::fingerprint(&self.admin.trace) {
@@ -310,6 +332,7 @@ pub fn demo(uid: u32) -> HostFile {
         providers: BTreeMap::from([("assistant".to_owned(), Provider::Demo)]),
         sandbox: Sandbox::default(),
         limits: HostLimits::default(),
+        private_egress: BTreeMap::new(),
         demo: true,
     }
 }

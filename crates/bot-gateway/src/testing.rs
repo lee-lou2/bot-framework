@@ -14,7 +14,7 @@ use bot_core::{
         Turn,
     },
     id::*,
-    intake::{PrivateCall, PrivateIntake, RequestKey, RequestState},
+    intake::{PrivateCall, PrivateDecision, PrivateIntake, RequestKey, RequestState},
     pass::PassChain,
     port::{Error, ProfileSecrets, Reply, RunStore, SecretStore, SecretValue},
     profile::*,
@@ -159,6 +159,7 @@ pub fn event_trigger(id: &str, binding: &str, target: TriggerTarget) -> Trigger 
         conditions: BTreeMap::new(),
         input: BTreeMap::new(),
         private: false,
+        private_pass: false,
         target,
         preapproved: None,
         human_approval: None,
@@ -194,6 +195,7 @@ pub fn http_trigger(
         conditions: BTreeMap::new(),
         input: BTreeMap::new(),
         private: false,
+        private_pass: false,
         target,
         preapproved: None,
         human_approval: None,
@@ -456,7 +458,7 @@ impl MemoryPrivate {
 }
 
 impl PrivateIntake for MemoryPrivate {
-    fn receive(&self, call: PrivateCall) -> Reply<'_, ()> {
+    fn receive(&self, call: PrivateCall) -> Reply<'_, PrivateDecision> {
         let mut inner = self.inner.lock().unwrap();
         let result = if let Some(error) = inner.fail_next.take() {
             Err(error)
@@ -466,7 +468,7 @@ impl PrivateIntake for MemoryPrivate {
                 call.args.0,
                 call.agent.0,
             ));
-            Ok(())
+            Ok(PrivateDecision::Consumed)
         };
         Box::pin(std::future::ready(result))
     }
