@@ -1,6 +1,7 @@
 //! API 직접 호출 제공자(`anthropic-api`·`openai-api`): 모양 검사(주소 규칙·키 생략은 loopback만·출력 한도)와 활성화 지문(종류·모델·기준 주소 전체·자격 이름).
 
 use super::*;
+use bot_runtime::model::LimitField;
 use serde_json::json;
 
 fn parsed(entry: Value) -> Result<Provider, String> {
