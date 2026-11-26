@@ -1,3 +1,5 @@
+#[path = "queue/order.rs"]
+mod order;
 mod support;
 #[path = "queue/terminal.rs"]
 mod terminal;
@@ -35,7 +37,7 @@ async fn claims_oldest_first_and_raises_the_generation() {
     for n in 0..3 {
         let run = accepted(&db, &format!("req-{n}")).await;
         db.sql(&format!(
-            "update bot_runs set created_ms = {} where id = '{}'",
+            "update bot_runs set not_before_ms = 1000, created_ms = {} where id = '{}'",
             1000 + n,
             run.0
         ))
@@ -89,14 +91,14 @@ async fn due_retry_precedes_newer_ready_arrivals() {
         .unwrap();
     let backlog = accepted(&db, "backlog").await;
     let locked = accepted(&db, "locked").await;
-    // 구판 ready 행은 준비 시각이 0이어서 생성 시각으로 순서를 복원한다.
+    // 잠긴 작업과 그다음 작업은 현재 유입보다 먼저 준비됐다.
     db.sql(&format!(
-        "update bot_runs set not_before_ms = 0, created_ms = 2 where id = '{}'",
+        "update bot_runs set not_before_ms = 2 where id = '{}'",
         backlog.0
     ))
     .await;
     db.sql(&format!(
-        "update bot_runs set not_before_ms = 0, created_ms = 1 where id = '{}'",
+        "update bot_runs set not_before_ms = 1 where id = '{}'",
         locked.0
     ))
     .await;

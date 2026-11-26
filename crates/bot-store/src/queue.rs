@@ -38,25 +38,9 @@ struct Cand {
 /// 가장 오래 기다린 집을 수 있는 run 하나를 잠근다(SKIP LOCKED): 때가 된 ready·retry, 또는 리스가 끝난 leased.
 /// 직렬 키는 고유 색인과 같이 leased 상태가 소유한다. 만료된 소유자 자신은 인계할 수 있다.
 async fn pick(tx: &mut Tx<'_>) -> R<Option<Cand>> {
-    let row = sqlx::query(
-        "with clock(ms) as (select bot_now_ms())
-         select r.profile, r.id, r.state, r.attempts, r.generation, r.parent, r.parent_step, r.cancel_requested, r.claim_set
-         from bot_runs r
-         cross join lateral (values (case when r.state = 'ready' and r.not_before_ms = 0 then r.created_ms
-                                          else coalesce(r.lease_until_ms, r.not_before_ms) end)) due(ms)
-         where not r.private and r.state in ('ready', 'retry', 'leased')
-           and due.ms <= (select ms from clock)
-           and (r.state <> 'leased' or r.lease_until_ms < (select ms from clock))
-           and (r.serial_key is null or not exists (
-                 select 1 from bot_runs o
-                 where o.profile = r.profile and o.serial_key = r.serial_key and o.id <> r.id
-                   and o.state = 'leased'))
-         order by due.ms, r.created_ms, r.id
-         limit 1
-         for update of r skip locked",
-    )
-    .fetch_optional(&mut **tx)
-    .await?;
+    let row = sqlx::query(include_str!("queue/pick.sql"))
+        .fetch_optional(&mut **tx)
+        .await?;
     Ok(row.map(|r| Cand {
         profile: r.get("profile"),
         id: r.get("id"),
