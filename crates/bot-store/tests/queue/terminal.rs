@@ -194,3 +194,52 @@ async fn terminal_retry_and_expiry_consume_the_last_attempt() {
         );
     }
 }
+
+#[tokio::test]
+async fn success_permanent_failure_and_cancellation_preserve_already_spent_attempts() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    for end in ["succeeded", "dead", "cancelled"] {
+        let first = leased(&db, end).await.attempt;
+        assert!(matches!(
+            db.store
+                .fail(first.clone(), Failure::Transient("network"))
+                .await
+                .unwrap(),
+            Retry::After(_)
+        ));
+        db.make_due(&first.run).await;
+        let next = db.store.claim().await.unwrap().unwrap().attempt;
+        assert_eq!(next.run, first.run);
+        match end {
+            "succeeded" => {
+                db.store.finish(next.clone(), done("완료")).await.unwrap();
+            }
+            "dead" => {
+                db.store
+                    .fail(next.clone(), Failure::Permanent("invalid"))
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                cancel(&db, &next).await;
+                assert_eq!(
+                    db.store
+                        .finish(next.clone(), done("늦은 답"))
+                        .await
+                        .unwrap(),
+                    Completion::Cancelled
+                );
+            }
+        }
+        let (state, spent): (String, i32) = sqlx::query_as(
+            "select state, attempts from bot_runs where profile = 'personal' and id = $1",
+        )
+        .bind(&next.run.0)
+        .fetch_one(db.store.pool())
+        .await
+        .unwrap();
+        assert_eq!((state.as_str(), spent), (end, 1));
+    }
+}

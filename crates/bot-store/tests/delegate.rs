@@ -1,3 +1,5 @@
+#[path = "delegate/cancellation.rs"]
+mod cancellation;
 mod support;
 
 use bot_core::{command::*, id::*, port::*, state::*};
