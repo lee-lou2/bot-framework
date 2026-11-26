@@ -52,6 +52,15 @@ fn routes_for(host: &str) -> HostRoutes {
             },
             "main",
         )
+        .binding(
+            "compat",
+            Adapter::OpenAi {
+                endpoint: "openai".into(),
+                model: "bot".into(),
+                approvers: std::collections::BTreeMap::new(),
+            },
+            "main",
+        )
         .build();
     let work = profile("work")
         .binding(
@@ -171,8 +180,8 @@ fn recipients_outside_the_profiles_registered_channel_are_refused() {
 #[test]
 fn dm_http_and_cli_entrances_and_non_channel_conversations_are_never_recipients() {
     let routes = routes_for(HOST);
-    // DM(수신자를 하나로 정할 수 없다)·CLI·HTTP 바인딩은 어떤 종류·ID로도 거절
-    for binding in ["dm", "desk", "hook"] {
+    // DM(수신자를 하나로 정할 수 없다)·CLI·HTTP·OpenAI 바인딩은 어떤 종류·ID로도 거절
+    for binding in ["dm", "desk", "hook", "compat"] {
         for kind in [ConversationKind::Channel, ConversationKind::Direct] {
             for id in ["D1", "C1", "T1/C1", "planning"] {
                 let got = run(
@@ -257,4 +266,38 @@ fn the_route_helpers_only_accept_slack_shaped_paths_and_thread_timestamps() {
         assert_eq!(split_route(bad), None, "{bad:?}");
     }
     assert!(is_ts("1700000000.000100") && !is_ts("1700000000") && !is_ts(""));
+}
+
+#[test]
+fn explicit_destination_guard_only_accepts_slack_channels_with_slack_transport() {
+    let channel = Adapter::SlackChannel {
+        workspace: "home".into(),
+        channel: "planning".into(),
+        events: bot_core::slack::default_channel_events(),
+    };
+    assert_eq!(
+        slack_destination(&channel).unwrap(),
+        ("home", "planning", PushTransportId::SLACK)
+    );
+    for other in [
+        Adapter::SlackDm {
+            workspace: "home".into(),
+        },
+        Adapter::Cli {
+            account: "me".into(),
+        },
+        Adapter::Http {
+            endpoint: "inbox".into(),
+        },
+        Adapter::OpenAi {
+            endpoint: "openai".into(),
+            model: "bot".into(),
+            approvers: std::collections::BTreeMap::new(),
+        },
+    ] {
+        assert!(
+            matches!(slack_destination(&other), Err(Error::Denied)),
+            "{other:?}"
+        );
+    }
 }

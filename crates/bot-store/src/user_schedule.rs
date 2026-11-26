@@ -336,6 +336,8 @@ pub(crate) async fn insert(tx: &mut Tx<'_>, profile: &str, n: &New<'_>) -> R<Str
 }
 
 /// 명시 목적지는 같은 프로필의 푸시 대화(direct·channel)만 받는다.
+/// 현재 호스트 등록부(`bot-gateway/src/schedule_routes.rs`)와 목적지 적재(`delivery::push_to`)는 Slack으로 한정돼 있다.
+/// 다른 푸시 어댑터로 명시 목적지를 열려면 목적지 발송 키(`dest_transport`)도 함께 저장해야 한다.
 pub(crate) fn destination_ok(dest: &DeliveryTarget) -> R<()> {
     ids_ok(&[&dest.binding.0, &dest.conversation.id])?;
     if dest
@@ -343,14 +345,17 @@ pub(crate) fn destination_ok(dest: &DeliveryTarget) -> R<()> {
         .thread
         .as_deref()
         .is_some_and(|t| !id_ok(t))
-        || !matches!(
-            dest.conversation.kind,
-            bot_core::state::ConversationKind::Direct | bot_core::state::ConversationKind::Channel
-        )
     {
         return invalid();
     }
-    Ok(())
+    match dest.conversation.kind {
+        bot_core::state::ConversationKind::Direct | bot_core::state::ConversationKind::Channel => {
+            Ok(())
+        }
+        bot_core::state::ConversationKind::Cli
+        | bot_core::state::ConversationKind::Http
+        | bot_core::state::ConversationKind::Scheduled => invalid(),
+    }
 }
 
 pub(crate) fn summary_of(row: &PgRow) -> R<ScheduleSummary> {

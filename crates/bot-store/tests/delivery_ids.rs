@@ -23,15 +23,21 @@ async fn a_destination_id_reaches_the_outbox_exactly_as_it_was_sealed() {
         let (attempt, start) = approved_start(&db, &approval).await;
         replies(&db).enqueue(start).await.unwrap();
         assert_eq!(state_of_run(&db, &attempt.run).await, "succeeded");
-        let sent: Vec<(String, String, Option<String>)> =
-            sqlx::query_as("select binding, conv_kind, thread from bot_outbox where conv_id = $1")
-                .bind(dest)
-                .fetch_all(db.store.pool())
-                .await
-                .unwrap();
+        let sent: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+            "select binding, conv_kind, thread, transport from bot_outbox where conv_id = $1",
+        )
+        .bind(dest)
+        .fetch_all(db.store.pool())
+        .await
+        .unwrap();
         assert_eq!(
             sent,
-            [("slack".into(), "direct".into(), Some("t1".into()))],
+            [(
+                "slack".into(),
+                "direct".into(),
+                Some("t1".into()),
+                "slack".into()
+            )],
             "{dest}"
         );
         assert_eq!(db.store.verify().await.unwrap().first_bad, None);

@@ -10,6 +10,7 @@
 use crate::host::{HostConfig, is_slack_id};
 use bot_core::{
     id::ProfileId,
+    intake::PushTransportId,
     port::Error,
     profile::{Adapter, ProfileCatalog},
     schedule::{DeliveryTarget, ScheduleRoutes},
@@ -50,6 +51,28 @@ impl HostRoutes {
     }
 }
 
+/// 명시 목적지로 허용하는 어댑터의 Slack 채널 별칭과 발송 키를 돌려준다.
+/// 현재 저장소(`bot-store/src/delivery.rs::push_to`·`approval_open.rs`)는 명시 목적지를 `PushTransportId::SLACK`으로
+/// 고정한다. 새 푸시 어댑터의 명시 목적지를 열려면 `bot_user_schedules`·`bot_deliveries`에 목적지 발송 키를 함께 저장한 뒤
+/// 이 분기와 저장소 고정을 같이 바꿔야 한다. 새 `Adapter` 변종이 추가되면 컴파일러가 멈추게 와일드카드를 두지 않는다.
+fn slack_destination(adapter: &Adapter) -> Result<(&str, &str, PushTransportId), Error> {
+    match adapter {
+        Adapter::SlackChannel {
+            workspace, channel, ..
+        } => {
+            let transport = crate::routes::reply_transport(adapter).ok_or(Error::Denied)?;
+            if transport != PushTransportId::SLACK {
+                return Err(Error::Denied);
+            }
+            Ok((workspace.as_str(), channel.as_str(), transport))
+        }
+        Adapter::SlackDm { .. }
+        | Adapter::Cli { .. }
+        | Adapter::Http { .. }
+        | Adapter::OpenAi { .. } => Err(Error::Denied),
+    }
+}
+
 impl ScheduleRoutes for HostRoutes {
     fn resolve(
         &self,
@@ -65,8 +88,12 @@ impl ScheduleRoutes for HostRoutes {
             return Err(Error::Invalid);
         }
         // 채널만 수신자가 될 수 있다: 직접 대화(DM)는 수신자를 하나로 정할 수 없고, CLI·HTTP·예약 대화는 원래 대화에만 답한다
-        if conversation.kind != ConversationKind::Channel {
-            return Err(Error::Denied);
+        match conversation.kind {
+            ConversationKind::Channel => {}
+            ConversationKind::Direct
+            | ConversationKind::Cli
+            | ConversationKind::Http
+            | ConversationKind::Scheduled => return Err(Error::Denied),
         }
         // 같은 프로필의 현재 바인딩만(다른 프로필·없는 바인딩은 거절). 입구는 Slack 채널이어야 한다
         let snapshot = self.catalog.current(profile).ok_or(Error::Denied)?;
@@ -74,12 +101,7 @@ impl ScheduleRoutes for HostRoutes {
             .bindings
             .get(&target.binding)
             .ok_or(Error::Denied)?;
-        let Adapter::SlackChannel {
-            workspace, channel, ..
-        } = &binding.source
-        else {
-            return Err(Error::Denied);
-        };
+        let (workspace, channel, _transport) = slack_destination(&binding.source)?;
         // 호스트 등록부의 실제 팀·채널
         let registered = self
             .host

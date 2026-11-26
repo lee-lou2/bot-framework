@@ -21,7 +21,7 @@ use bot_core::{
     ledger::StartCall,
     port::Error,
     schedule::{DELIVER_CALL, DELIVER_TOOL, DeliveryDraft, DeliveryTarget, quiet_completion},
-    state::Conversation,
+    state::{Conversation, ConversationKind},
 };
 use sqlx::{Row, postgres::PgRow};
 
@@ -194,8 +194,17 @@ fn shown_row(card: &str, label: &str) -> Option<String> {
 }
 
 /// 목적지 대화로 회신 행을 쌓는다. 순번은 이 run의 기존 행 다음부터 잇는다(원래 대화로 간 승인 카드가 앞선 순번을 쓴다).
+/// 명시 목적지 등록부(`bot-gateway/src/schedule_routes.rs`)와 승인 카드(`approval_open.rs`)가 Slack으로 한정돼 있어
+/// 여기서는 `PushTransportId::SLACK`으로 고정한다. 다른 푸시 어댑터의 명시 목적지를 열려면 `bot_user_schedules`·`bot_deliveries`에
+/// 목적지 발송 키를 함께 저장하고 이 고정을 제거해야 한다.
 async fn push_to(tx: &mut Tx<'_>, row: &PgRow, principal: &str, body: &str) -> R<()> {
-    // 명시 목적지 승인과 등록부의 계약은 Slack으로 한정한다. 원래 대화의 발송 책임과 독립적이다.
+    let dest_kind: String = row.get("dest_kind");
+    match kind_from(&dest_kind)? {
+        ConversationKind::Direct | ConversationKind::Channel => {}
+        ConversationKind::Cli | ConversationKind::Http | ConversationKind::Scheduled => {
+            return invalid();
+        }
+    }
     sqlx::query(
         "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body, transport)
          select $1, $2, n.seq, 'reply:' || $2 || ':' || n.seq::text, $3, $4, $5, $6, $7, $8, $9
@@ -205,7 +214,7 @@ async fn push_to(tx: &mut Tx<'_>, row: &PgRow, principal: &str, body: &str) -> R
     .bind(row.get::<String, _>("run"))
     .bind(row.get::<String, _>("dest_binding"))
     .bind(principal)
-    .bind(row.get::<String, _>("dest_kind"))
+    .bind(&dest_kind)
     .bind(row.get::<String, _>("dest_id"))
     .bind(row.get::<Option<String>, _>("dest_thread"))
     .bind(body)
