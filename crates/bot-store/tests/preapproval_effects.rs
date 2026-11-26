@@ -317,14 +317,14 @@ async fn a_recorded_step_with_other_args_is_stale_without_a_valid_grant_and_a_co
     assert_eq!(r.used().await, 2, "충돌·낡은 요청은 사용량을 올리지 않는다");
 }
 
-async fn say(channel: &bot_broker::effects::EffectChannel, text: String) -> String {
+async fn say(channel: &bot_broker::testing::EffectChannel, text: String) -> String {
     channel.handle(text.as_bytes()).await
 }
 
 /// 실제 `EffectChannel`이 PG 위에서 내는 응답: 새 허가·재전달·미실행 판정 뒤 재허가·분류된 오류.
 #[tokio::test]
 async fn the_effect_channel_answers_new_and_restarted_permits_and_typed_errors() {
-    use bot_broker::effects::EffectChannel;
+    use bot_broker::testing::EffectChannel;
     use std::sync::Arc;
     let Some(r) = rig(3, PAIRS).await else {
         return;

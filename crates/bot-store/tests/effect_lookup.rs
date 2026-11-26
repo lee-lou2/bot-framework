@@ -5,7 +5,7 @@
 
 mod support;
 
-use bot_broker::effects::EffectChannel;
+use bot_broker::testing::EffectChannel;
 use bot_core::{admin::*, command::*, id::*, ledger::*, port::*, state::*};
 use std::sync::Arc;
 use support::{admin::*, *};

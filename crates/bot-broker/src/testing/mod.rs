@@ -16,6 +16,7 @@ mod turns;
 mod wire;
 mod world;
 
+pub use crate::effects::EffectChannel;
 pub use exec::write_executable;
 pub use fakes::{FakeCatalog, FakeEffects, FakeRunner, MemAudit, RecordingTracer};
 pub use journal::MemJournal;
