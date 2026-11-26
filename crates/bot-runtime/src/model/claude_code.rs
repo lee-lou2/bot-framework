@@ -64,7 +64,7 @@ const FIXED_ENV: [(&str, &str); 6] = [
     ("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1"),
 ];
 
-/// 도구 서버 설정 파일의 쓰기 공간(`/work`) 안 위치. 모델이 읽는 입력 폴더(`/bot`) 밖이다. Pi용과 형식이 달라 따로 둔다.
+/// 도구 서버 설정 파일의 쓰기 공간(`/work`) 안 위치. 모델이 읽는 입력 폴더(`/bot`) 밖이다.
 pub const MCP_CONFIG: &str = "mcp.claude.json";
 
 pub struct ClaudeCodeRunner {

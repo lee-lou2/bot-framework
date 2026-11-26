@@ -1,4 +1,4 @@
-//! CLI 실행기(Claude Code·Pi) 공통: 설정, 호출별 폴더, 결과 변환.
+//! CLI 실행기(Claude Code) 공통: 설정, 호출별 폴더, 결과 변환.
 //! 호출마다 `<workspace>/<이름>/in`(읽기 전용으로 마운트: 지침·도구 설정)과 `.../work`(호출 전용 쓰기 공간)를 만들고 끝나면 지운다.
 //! 폴더는 매번 **새로 배타적으로**(이미 있으면 만들지 않고 다른 이름으로 다시) 0700으로 만든다: 프로세스를 다시 띄웠거나 같은 run·세대에 claim만 다른
 //! 두 프로세스가 서로의 폴더를 읽거나 지우지 못한다. 정리는 자기가 만든 폴더만 한다.
@@ -34,10 +34,8 @@ pub struct CliConfig {
     pub models: BTreeMap<String, CliModel>,
     /// 호출별 입력·임시 폴더를 만드는 호스트 폴더
     pub workspace: PathBuf,
-    /// 실행 파일 이름 덮어쓰기(기본 `claude` / `pi`)
+    /// 실행 파일 이름 덮어쓰기(기본 `claude`)
     pub program: Option<String>,
-    /// Pi가 모델 설정에 쓰는 프로바이더 이름
-    pub pi_provider: String,
     /// 샌드박스가 CLI의 파일 읽기를 마운트한 입력 폴더 안으로 가둔다고 호스트가 보증한다(VM 어댑터). 읽기 전용 내장 도구(`Agent.builtin`)는
     /// 이 보증이 있을 때만 켠다: 가둘 수 없으면 내장 도구를 요구하는 실행을 거절한다.
     pub confined_reads: bool,
@@ -49,7 +47,6 @@ impl CliConfig {
             models: BTreeMap::new(),
             workspace: workspace.into(),
             program: None,
-            pi_provider: "relay".into(),
             confined_reads: false,
         }
     }

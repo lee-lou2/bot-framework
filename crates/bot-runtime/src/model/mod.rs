@@ -5,7 +5,7 @@
 //! - **Step**(API 직접 호출 `api`·데모): 워커가 맥락(`context::assemble`)과 이전 교환(`Exchange`)으로 `ModelRequest`를 만들어 `step`을 **차례마다** 부른다.
 //!   돌아온 `ModelStep::Calls`는 워커가 `Broker::call`로 중계하고(승인 대기·보류도 워커 몫), 모델 차례와 호출 결과를 체크포인트에 적은 뒤
 //!   다음 차례를 부른다. `ModelStep::Final`이면 답을 `Finish`로 올린다. 이 방식의 실행기는 도구를 직접 부르지 않는다.
-//! - **Loop**(CLI: Claude Code·Pi): CLI가 자기 도구 순환을 가지므로 워커는 차례를 제어하지 않는다. `step`은 한 번만 부르고 항상 `Final`(또는 오류)을 받는다.
+//! - **Loop**(CLI: Claude Code): CLI가 자기 도구 순환을 가지므로 워커는 차례를 제어하지 않는다. `step`은 한 번만 부르고 항상 `Final`(또는 오류)을 받는다.
 //!   모델 요청과 도구는 run별 브로커 프런트(`ModelRequest::relay`: HTTP 주소 + 이 시도에 발급한 세션 토큰)로 CLI가 브로커에 직접 낸다.
 //!   실행기는 그 주소·토큰으로 CLI의 MCP 설정 파일과 환경을 만들어 줄 뿐이다. 프런트 없이는 CLI가 모델에 닿지 못하므로 채널이 없으면 실행하지 않는다. 승인 대기·보류로 저장소가 run을 멈추면(리스를 놓는다)
 //!   워커의 `renew`가 `Stale`이 되므로 워커는 `cancel`로 CLI를 끝내야 한다.
@@ -21,7 +21,6 @@ pub mod container;
 mod demo;
 mod driver;
 mod exchange;
-mod pi;
 mod prompt;
 mod relay;
 mod sandbox;
@@ -33,7 +32,6 @@ pub use cli::{CliConfig, CliModel};
 pub use demo::DemoModel;
 pub use driver::{Event, Output, Parser, classify, is_transient};
 pub use exchange::{CallEnd, DoneCall, Exchange};
-pub use pi::PiRunner;
 pub use relay::{RelayChannel, RelayGrant, TOKEN_ENV};
 pub use sandbox::{FakeSandbox, Script};
 pub use session::{PortFuture, Session, SessionError, SessionPort, Slot, ToolOutput};

@@ -5,16 +5,15 @@
 //! 세션 토큰**으로 인증한다. 토큰은 실제 제공자 자격이 아니다: 세대가 바뀌거나 시도가 끝나면 브로커가 폐기하고, 호스트는 자기가 발급받은
 //! 토큰만 폐기한다(`RelayGrant`를 놓을 때) — 새 claim의 토큰을 끊지 않는다.
 //!
-//! 설정 파일 모양(실제 CLI로 확인한 형식):
-//! - Claude Code `--mcp-config`: `{"mcpServers":{"<이름>":{"type":"http","url":"<주소>/mcp","headers":{"Authorization":"Bearer ${RELAY_TOKEN}"}}}}`.
-//! - Pi `mcp.json`: 같은 `mcpServers`에 `exposure: "deferred"`(필요한 도구만 `tool_search`로 불러 쓴다).
+//! 설정 파일 모양(실제 CLI로 확인한 형식): Claude Code `--mcp-config`는
+//! `{"mcpServers":{"<이름>":{"type":"http","url":"<주소>/mcp","headers":{"Authorization":"Bearer ${RELAY_TOKEN}"}}}}`.
 //!
-//! **토큰은 어떤 파일에도 쓰지 않는다.** 두 CLI 모두 설정의 `${이름}`을 프로세스 환경에서 채우므로(실제 Claude Code 2.1.331로 확인), 파일에는 자리표시
+//! **토큰은 어떤 파일에도 쓰지 않는다.** Claude Code는 설정의 `${이름}`을 프로세스 환경에서 채우므로(실제 Claude Code 2.1.331로 확인), 파일에는 자리표시
 //! `${RELAY_TOKEN}`만 있고 값은 실행기가 환경변수 [`TOKEN_ENV`]로만 준다. 모델이 읽는 폴더(내장 Read를 켠 구성)를 아무리 훑어도 토큰은 나오지 않는다.
 //! (`ANTHROPIC_API_KEY`는 쓸 수 없다: Claude Code가 설정 확장에서 그 값을 비워 `Bearer `만 나간다.)
 
 use super::ModelError;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::fmt;
 
 /// 설정 파일의 `${…}` 자리표시가 가리키는 환경변수 이름. 값(이 시도의 세션 토큰)은 이 변수로만 CLI에 간다.
@@ -123,21 +122,12 @@ impl RelayChannel {
     pub fn claude_allowed_tools(&self) -> String {
         format!("mcp__{}", self.name)
     }
-
-    /// Pi `mcp.json` 본문
-    pub fn pi_config(&self) -> String {
-        let server: Value = json!({
-            "url": self.mcp_url(),
-            "headers": {"Authorization": Self::bearer()},
-            "exposure": "deferred",
-        });
-        json!({"mcpServers": {&self.name: server}}).to_string()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -166,15 +156,6 @@ mod tests {
     }
 
     #[test]
-    fn pi_config_defers_tools_and_uses_the_same_endpoint_and_token_variable() {
-        let config: Value = serde_json::from_str(&channel().pi_config()).unwrap();
-        let server = &config["mcpServers"]["relay"];
-        assert_eq!(server["exposure"], "deferred");
-        assert_eq!(server["url"], "http://192.168.64.1:8787/mcp");
-        assert_eq!(server["headers"]["Authorization"], "Bearer ${RELAY_TOKEN}");
-    }
-
-    #[test]
     fn no_config_ever_contains_the_token_itself() {
         // 비밀 스캔(gitleaks)이 합성 값도 비밀로 읽으므로 값을 실행 시 잇는다
         let sample = ["tok_9f3a", "1c77d2e84b60"].concat();
@@ -182,10 +163,9 @@ mod tests {
             token: sample.clone(),
             ..channel()
         };
-        for config in [relay.claude_config(), relay.pi_config()] {
-            assert!(!config.contains(&sample), "{config}");
-            assert!(config.contains("Bearer ${RELAY_TOKEN}"), "{config}");
-        }
+        let config = relay.claude_config();
+        assert!(!config.contains(&sample), "{config}");
+        assert!(config.contains("Bearer ${RELAY_TOKEN}"), "{config}");
     }
 
     #[test]

@@ -4,8 +4,8 @@ use super::*;
 
 #[test]
 fn every_variable_that_carries_the_session_token_is_treated_as_a_secret() {
-    // 세션 토큰은 `-e 이름`(값 없이)으로만 가고 값은 클라이언트 프로세스 환경으로 간다: 모델 요청이 싣는 이름 셋 모두 비밀로 본다
-    for name in ["ANTHROPIC_API_KEY", "RELAY_TOKEN", "PI_API_KEY"] {
+    // 세션 토큰은 `-e 이름`(값 없이)으로만 가고 값은 클라이언트 프로세스 환경으로 간다: 모델 요청이 싣는 이름 둘 모두 비밀로 본다
+    for name in ["ANTHROPIC_API_KEY", "RELAY_TOKEN"] {
         assert!(crate::model::container::args::secret_like(name), "{name}");
     }
     assert!(!crate::model::container::args::secret_like("HOME"));
