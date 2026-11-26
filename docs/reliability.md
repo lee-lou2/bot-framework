@@ -139,8 +139,8 @@ CLI·HTTP 결과는 인증된 상태 조회로 전달한다. 결과 커밋 때 p
 `0026` 이행과 발송 키가 빈 회신의 처리는 아래 규칙을 따른다.
 
 - **적용 절차와 잠금**: `0026`은 `bot_runs`·`bot_outbox`에 열을 더하고 기존 행을 채운 뒤 `bot_outbox_pending` 인덱스를 동시 옵션 없이 다시 만든다. 대용량 DB에서는 이 구간 동안 `ACCESS EXCLUSIVE` 및 쓰기 잠금이 유지되므로 운영 규모 사본에서 소요 시간을 먼저 측정한다. 적용 전에 구판 쓰기·점유를 중단하고 이미 시작한 발송의 정산을 마친 뒤, 이행이 끝나면 새 게이트웨이로 발송을 재개한다.
-- **기존 자료 승계와 점검**: 공식 구판의 Slack 원래 대화와 승인된 명시 목적지만 `slack`으로 승계한다. 증거가 모자란 회신은 `bot_outbox.transport = ''`로 남아 자동 점유에서 제외되므로 이행 뒤 `SELECT profile, run, seq, state, reason FROM bot_outbox WHERE transport = '' AND state IN ('pending', 'sending', 'held')`로 남은 행을 확인한다. 개조판의 추가 발송 경로는 기존 자료로 확인한 뒤 별도로 매핑한다.
-- **누락 키 보호**: 구판·미매핑 푸시 실행(`reply_transport IS NULL`)이 회신이나 예약 종료 안내를 남길 때는 실행 완료·예약 종료를 실패시키지 않고 회신을 `state = 'held'`, `reason = 'missing_transport'`로 즉시 열어 보류 목록(`bot_holds`)과 감사(`outbox.held`)에 남긴다. 같은 조건의 푸시 원천 실행에서 새 사용자 예약 발화(`Fire`)를 일으키는 것은 `Invalid`로 거절한다. `transport = ''`인 보류 회신은 `confirmed` 수동 확인만 허용하고 `not_executed` 재전송은 `Conflict`로 거절한다.
+- **기존 자료 승계와 점검**: 공식 구판의 Slack 원래 대화와 승인된 명시 목적지만 `slack`으로 승계한다. 증거가 모자란 회신은 `bot_outbox.transport = ''`로 남아 자동 점유에서 제외되므로 이행 뒤 `SELECT profile, run, seq, state, reason FROM bot_outbox WHERE transport = '' AND state IN ('pending', 'sending', 'held')`로 남은 행을 확인한다. 개조판의 추가 발송 경로는 기존 자료로 확인한 뒤 별도로 매핑한다. 발송 키가 빈 구판 보류(`owner_lost` 등)도 `bot_outbox.transport`를 채우기 전에는 다시 보낼 수 없다.
+- **누락 키 보호**: 구판·미매핑 푸시 실행(`reply_transport IS NULL`)이 회신이나 예약 종료 안내를 남길 때는 실행 완료·예약 종료를 실패시키지 않고 회신을 `state = 'held'`, `reason = 'missing_transport'`로 즉시 열어 보류 목록(`bot_holds`)과 감사(`outbox.held`)에 남긴다. 같은 조건의 푸시 원천 실행에서 새 사용자 예약 발화(`Fire`)를 일으키는 것은 `Invalid`로 거절한다. `transport = ''`인 보류 회신은 `not_executed` 재전송을 `Conflict`로 거절하므로, DB에서 해당 회신 행의 `bot_outbox.transport`를 채운 뒤 «미실행»으로 판정해 다시 보내거나 `bot_outbox.body`를 확인해 직접 전달한 뒤 «처리됨»으로 닫는다.
 - **명시 목적지 범위**: 원래 대화로 가는 예약 답과 종료 안내는 예약을 만든 실행의 키를 쓰고, 명시 목적지는 현재 지원하는 Slack 채널 경로(`slack`)에 고정한다.
 
 HTTP는 최초 접수에 메서드·경로·응답 방식을 함께 저장한다. `/_requests/{id}`는 최초 방식으로 렌더링한다. 응답 방식은 재시도 해시에서 제외하고, 방식 기록이 없는 이전 HTTP 요청은 accepted 형식으로 조회한다.

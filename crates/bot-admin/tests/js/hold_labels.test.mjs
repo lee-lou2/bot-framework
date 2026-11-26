@@ -70,3 +70,28 @@ test("the not-executed form explains what will happen to the call", async () => 
     assert.equal(summary.includes("같은 호출 ID로"), i === 2);
   });
 });
+
+test("a missing_transport reply hold hides the retry form and explains recovery", async () => {
+  const items = [
+    { kind: "reply", hold_id: "hold-1", profile: "personal", run: "r1", call: "reply:r1:0", tool: "reply", reason: "missing_transport", since_ms: 0, steps: [] },
+    { kind: "reply", hold_id: "hold-2", profile: "personal", run: "r2", call: "reply:r2:0", tool: "reply", reason: "owner_lost", since_ms: 0, steps: [] },
+  ];
+  window.BotApi = { q: () => "", get: async (path) => ({ items: path.endsWith("/holds") ? items : [] }) };
+  load("holdpin.js", "decide.js");
+  const box = document.createElement("section");
+  const view = window.BotDecide.create({ me: () => ({ operator: true }), profile: () => "personal", noteProfiles() {} }, box);
+  await view.load({ profile: "personal", current: () => true });
+
+  const cards = all(box, (node) => node.classList.contains("hcard"));
+  assert.equal(cards.length, 2);
+
+  const missingForms = all(cards[0], (node) => node.localName === "form");
+  assert.equal(missingForms.length, 1);
+  assert.ok(missingForms[0].getAttribute("aria-labelledby").startsWith("hf-confirmed-"));
+  const missingText = textOf(cards[0]);
+  assert.ok(!missingText.includes("미실행으로 기록"), missingText);
+  assert.ok(missingText.includes("자동으로 다시 보낼 수 없습니다"), missingText);
+
+  const normalForms = all(cards[1], (node) => node.localName === "form");
+  assert.equal(normalForms.length, 2);
+});

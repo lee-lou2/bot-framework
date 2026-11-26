@@ -184,7 +184,10 @@
       const sel = P.retarget(f.effect, f.holdId, x);
       if (sel.changed) f.text = { confirmed: "", not_executed: "" };
       f.effect = sel.effect; f.holdId = sel.holdId;
-      const parts = {}, verdicts = Object.keys(KIND[kind]);
+      // 발송 어댑터가 없는 회신은 서버가 미실행 재전송을 거절한다: 다시 보내기 폼을 숨기고 복구 방법을 안내한다.
+      const unroutedReply = kind === "reply" && x.reason === "missing_transport";
+      const parts = {}, verdicts = unroutedReply ? ["confirmed"] : Object.keys(KIND[kind]);
+      const unroutedNote = unroutedReply ? h("p", { class: "warnbox", text: "발송 어댑터가 없어 자동으로 다시 보낼 수 없습니다. DB에서 발송 키를 채운 뒤 다시 보내거나, 본문을 직접 전달하고 처리됨으로 닫으세요." }) : null;
       // 판정할 보류 식별자가 없는 대상: 판정 단추를 끄고 목록을 다시 불러오게 한다(서버도 식별자 없는 판정을 받지 않는다).
       const nid = "hn-" + tid;
       const noid = h("div", { class: "rf-noid", id: nid, role: "status", hidden: true }, [h("p", { class: "warnbox", text: P.WHY.noid }), h("button", { type: "button", class: "btn", onclick: () => app.refresh(true) }, [icon("arrow", { size: 14 }), h("span", { text: "다시 불러오기" })])]);
@@ -268,7 +271,7 @@
       const node = h("article", { class: "hcard", "aria-labelledby": tid }, [
         h("header", { class: "ac-h" }, [h("h4", { class: "ac-title", id: tid }, [code(x.tool)]), KIND_PILL[kind] ? D.pill(KIND_PILL[kind], "off", null) : null, D.pill(B.holdReason(x.reason), "warn", "held"), h("span", { class: "ac-left" }, [D.timeEl(x.since_ms), "부터 멈춤"])]),
         h("p", { class: "ac-meta" }, [app.profile() ? null : "프로필 " + x.profile + " · ", "실행 ", runLink(x.profile, x.run), " · 호출 ", code(x.call), " · 보류 시각 ", D.when(x.since_ms)]),
-        stepsTable(x), pick, noid,
+        stepsTable(x), pick, noid, unroutedNote,
         h("div", { class: "hc-forms" }, verdicts.map(formNode)),
       ]);
       sync();
