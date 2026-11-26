@@ -1,11 +1,11 @@
 //! 프로필 검증, 입구 표, 필요한 자격 이름 점검. 자격은 **이름**만 보고하고 값은 출력하지 않는다.
-//! 보관소가 sops이면 복호화가 필요해(외부 프로그램·키 서비스 접속 가능) 확인하지 않고 «미검사»로 둔다.
+//! 보관소가 복호화를 요구하면(`SecretsKind::decryptor`, 지금은 sops: 외부 프로그램·키 서비스 접속 가능) 확인하지 않고 «미검사»로 둔다.
 use super::{Item, State, capped, host::Checked};
 use crate::{
     host::HostFile,
     load::{check_entrances, secret_store},
     serve::{Publication, seed},
-    settings::{SecretsKind, Settings},
+    settings::Settings,
     validate::{
         missing_model_sandbox, missing_named, needed_secrets, weak_http_keys, weak_openai_keys,
     },
@@ -111,10 +111,12 @@ fn profiles(
 }
 
 async fn secrets(settings: &Settings, host: &HostFile, set: &Arc<ProfileSet>) -> Item {
-    if matches!(settings.secrets, SecretsKind::Sops(_)) {
+    if let Some(program) = settings.secrets.decryptor() {
         return Item::skipped(
             SECRETS,
-            "sops 보관소는 복호화가 필요해 확인하지 않았어요 — `bot validate`가 확인해요",
+            &format!(
+                "{program} 보관소는 복호화가 필요해 확인하지 않았어요 — `bot validate`가 확인해요"
+            ),
         );
     }
     let store = match secret_store(settings) {

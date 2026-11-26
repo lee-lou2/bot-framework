@@ -6,7 +6,7 @@ use super::{decide::InstalledOnly, guard::GuardedWire, watched::Watched};
 use crate::{
     host::HostFile,
     install::{self, Installs},
-    settings::{SecretsKind, Settings},
+    settings::Settings,
 };
 use bot_broker::{
     ports::ToolRunner,
@@ -61,9 +61,7 @@ fn denied(settings: &Settings, base: &Path) -> Vec<PathBuf> {
     paths.extend(std::env::var_os("HOME").map(PathBuf::from));
     paths.extend(settings.profiles.clone());
     paths.extend(settings.host_config.clone());
-    if let SecretsKind::Sops(file) = &settings.secrets {
-        paths.push(file.clone());
-    }
+    paths.extend(settings.secrets.protected_paths());
     paths.extend(settings.socket.as_deref().map(PathBuf::from));
     paths.extend(settings.admin_token_file.clone());
     paths.retain(|path| path.is_absolute() && path.exists());

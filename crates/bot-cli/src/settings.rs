@@ -17,6 +17,7 @@ const DEFAULT_REREAD_SECS: u64 = 60;
 /// 주기의 상한(초): 하루
 const MAX_REREAD_SECS: u64 = 86_400;
 
+/// 자격 보관소 종류. 종류마다 달라지는 사실(보호할 파일·누락 힌트·복호화 여부)은 `secrets/mod.rs`의 `impl SecretsKind`에 있다.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SecretsKind {
     Env,

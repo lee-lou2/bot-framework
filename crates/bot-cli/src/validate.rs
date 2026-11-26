@@ -4,7 +4,6 @@ use crate::{
     execution::Provider,
     host::HostFile,
     load::{check_entrances, load, secret_store},
-    secrets::env::variable_name,
     settings::{SecretsKind, Settings},
 };
 use bot_core::{
@@ -156,12 +155,7 @@ pub async fn missing_named(
         match found {
             Ok(_) => {}
             Err(Error::Missing) => {
-                let hint = match kind {
-                    SecretsKind::Env => {
-                        format!(" (환경 변수 {})", variable_name(&profile.0, &name))
-                    }
-                    _ => String::new(),
-                };
+                let hint = kind.missing_hint(&profile.0, &name);
                 missing.push(format!("{}: 자격 {name}이(가) 없어요{hint}", profile.0));
             }
             Err(_) => missing.push(format!(
