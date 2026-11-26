@@ -141,6 +141,8 @@ async fn upgrading_a_db_with_both_kinds_held_under_one_call_id_opens_two_holds_t
     let reply = db.scalar::<String>("select call from bot_outbox").await;
     // 구판 모양: 같은 호출 ID의 도구 호출과 회신 발송이 둘 다 보류이고 발생 ID는 없다
     rewind_holds(&db).await;
+    db.sql("update bot_runs set state = 'waiting', wait_kind = 'hold', finished_ms = null")
+        .await;
     db.sql("update bot_outbox set state = 'held'").await;
     db.sql("update bot_calls set state = 'held', call = (select call from bot_outbox)")
         .await;
@@ -256,6 +258,71 @@ async fn upgrading_an_orphaned_held_call_opens_one_final_decision() {
     db.store.migrate().await.unwrap();
     assert_eq!(db.scalar::<i64>("select count(*) from bot_holds").await, 1);
     assert_eq!(confirm(&db, target).await.unwrap(), HoldDecision::Applied);
+}
+
+#[tokio::test]
+async fn upgrading_terminal_runs_closes_old_tool_holds_without_opening_new_ones() {
+    for state in ["dead", "succeeded", "cancelled"] {
+        let Some(db) = TestDb::new().await else {
+            return;
+        };
+        let at = held_steps(&db, true, true).await;
+        // 구판의 미실행 단계에는 보류 ID가 열려 있고, 호출 전체에는 보류 ID가 없다.
+        db.sql("update bot_effects set resolution = 'not_executed' where state = 'held'")
+            .await;
+        db.sql(&format!(
+            "update bot_runs set state = '{state}', wait_kind = null, finished_ms = 42"
+        ))
+        .await;
+        assert_eq!(
+            db.scalar::<i64>(
+                "select count(*) from bot_holds where effect is not null and closed_ms is null"
+            )
+            .await,
+            1
+        );
+
+        db.store.migrate().await.unwrap();
+
+        assert_eq!(state_of_run(&db, &at.run).await, state);
+        assert_eq!(
+            db.scalar::<i64>(
+                "select count(*) from bot_holds where kind = 'tool' and effect is null"
+            )
+            .await,
+            0,
+            "{state}"
+        );
+        assert_eq!(
+            db.scalar::<Option<i64>>("select closed_ms from bot_holds where effect is not null")
+                .await,
+            Some(42),
+            "{state}"
+        );
+        assert!(db.store.holds(&operator(), None).await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn upgrading_preserves_the_recorded_verdict_of_a_terminal_call() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    held_steps(&db, true, false).await;
+    db.sql("update bot_calls set resolution = 'not_executed'")
+        .await;
+    db.sql("update bot_runs set state = 'cancelled', wait_kind = null, finished_ms = 42")
+        .await;
+
+    db.store.migrate().await.unwrap();
+
+    assert_eq!(
+        db.scalar::<Option<String>>("select resolution from bot_calls")
+            .await
+            .as_deref(),
+        Some("not_executed")
+    );
+    assert_eq!(db.scalar::<i64>("select count(*) from bot_holds").await, 0);
 }
 
 #[tokio::test]

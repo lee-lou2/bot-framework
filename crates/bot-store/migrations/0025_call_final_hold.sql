@@ -35,6 +35,8 @@ create trigger bot_effects_call_hold after update of state, resolution on bot_ef
 with corrected as (
     update bot_calls c set resolution = null, receipt = null
     where c.state = 'held' and c.resolution = 'not_executed'
+      and exists (select 1 from bot_runs r where (r.profile, r.id) = (c.profile, c.run)
+                  and r.state in ('ready', 'retry', 'leased', 'waiting') and not r.cancel_requested and not r.private)
       and exists (select 1 from bot_effects e where e.profile = c.profile and e.run = c.run and e.call = c.call and e.state = 'confirmed')
     returning c.profile, c.run
 )
@@ -46,15 +48,15 @@ from corrected c where (r.profile, r.id) = (c.profile, c.run)
 -- 단계가 모두 끝나 최초부터 발생조차 없었던 구판 호출에는 원래 보류 시각을 사용한다.
 insert into bot_holds (id, profile, run, call, effect, kind, opened_ms)
 select 'hold-' || nextval('bot_hold_seq'), c.profile, c.run, c.call, null, 'tool', c.updated_ms
-from bot_calls c
+from bot_calls c join bot_runs r on (r.profile, r.id) = (c.profile, c.run)
 where c.state = 'held' and c.resolution is null
-  and not exists (select 1 from bot_runs r where r.profile = c.profile and r.id = c.run and (r.private or r.state = 'cancelled'))
+  and r.state in ('ready', 'retry', 'leased', 'waiting') and not r.cancel_requested and not r.private
   and not exists (select 1 from bot_effects e where e.profile = c.profile and e.run = c.run and e.call = c.call
                   and (e.state = 'started' or (e.state = 'held' and e.resolution is null)))
   and not exists (select 1 from bot_holds h where h.profile = c.profile and h.run = c.run and h.call = c.call
                   and h.kind = 'tool' and h.effect is null and h.closed_ms is null);
 
--- 구판에서 취소한 실행은 더 이상 판정할 수 없다. 보류의 발생·증거 기록은 보존한다.
+-- 구판의 종결도 end_run처럼 열린 도구 보류를 닫는다. 별도 회신 보류와 기존 증거는 보존한다.
 update bot_holds h set closed_ms = coalesce(r.finished_ms, bot_now_ms())
 from bot_runs r where (r.profile, r.id) = (h.profile, h.run)
-  and r.state = 'cancelled' and h.kind = 'tool' and h.closed_ms is null;
+  and r.state in ('succeeded', 'dead', 'cancelled') and h.kind = 'tool' and h.closed_ms is null;

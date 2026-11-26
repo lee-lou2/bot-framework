@@ -133,15 +133,15 @@
       not_executed: { title: "미실행 확인", label: "근거", ph: "예: 수신처 조회에서 해당 요청 없음", field: "evidence", need: "근거를 한 줄(1~512자)로 적어 주세요." },
     };
     const FIELDS = { confirmed: FORMS.confirmed.field, not_executed: FORMS.not_executed.field };
-    // «미실행»의 결과는 보류의 종류마다 다르다. 도구 호출은 옛 도구 종료와 수신처의 미실행 증거가 둘 다 확인돼야 같은 호출로 다시 이어 가고,
-    // 회신은 같은 회신을 다시 보내며, 민감 DM은 본문을 보관하지 않아 다시 실행하지 못하고 종료한다(새 요청이 필요하다).
+    // 도구의 미실행 판정 뒤에는 남은 단계와 이미 확인된 실행에 따라 다음 조치가 달라진다.
+    // 회신은 같은 회신을 다시 보내고, 민감 DM은 종료한다(새 요청이 필요하다).
     const KIND = {
       final: {
         confirmed: { help: "기록된 단계의 실행은 확인됐습니다. 옛 도구가 끝났고 수신처에서 호출 전체의 처리를 확인했을 때 전체 영수증을 적으세요.", btn: "호출 결과 확인", then: "호출 전체의 결과로 확정합니다." },
       },
       tool: {
         confirmed: { help: "수신처에서 실제로 처리된 것을 확인했다면 영수증 번호를 적습니다.", btn: "처리됨으로 기록", then: "확정합니다." },
-        not_executed: { help: "옛 도구가 완전히 끝났고 수신처에 처리 기록이 없음을 둘 다 확인했을 때만 근거를 적습니다. 그러면 같은 호출 ID로 다시 이어 갑니다.", btn: "미실행으로 기록", then: "실행되지 않은 것으로 기록하고 같은 호출을 다시 이어 갑니다(옛 도구 종료와 수신처 미실행 증거 확인 필요)." },
+        not_executed: { help: "옛 도구가 완전히 끝났고 수신처에 처리 기록이 없음을 둘 다 확인했을 때만 근거를 적습니다.", btn: "미실행으로 기록", then: "실행되지 않은 것으로 기록합니다(옛 도구 종료와 수신처 미실행 증거 확인 필요)." },
       },
       reply: {
         confirmed: { help: "수신처에 회신이 간 것을 확인했다면 영수증 번호를 적습니다.", btn: "처리됨으로 기록", then: "확정합니다." },
@@ -165,12 +165,18 @@
       if (reason) { f.err = P.WHY[reason] || P.WHY.gone; f.errKind = was; }
     }
     function stepsTable(x) {
-      const notExecuted = P.receiptOnly(x) ? "미실행으로 판정됨" : "미실행으로 판정됨 · 재개 대기";
       if (!x.steps.length) return h("p", { class: "sec-h", text: "호출 하나가 통째로 보류됐습니다(단계 기록 없음)." });
-      return D.table(["단계", "상태", "영수증", "사유"], x.steps.map((s) => ({ cls: P.open(s) ? "is-held" : s.receipt ? "is-kept" : "", cells: [s.step, B.effectPill(s.state), s.receipt ? h("span", { class: "kept" }, [code(s.receipt), h("span", { class: "kept-t", text: "보존됨" })]) : "-", s.resolution === "not_executed" ? notExecuted : s.state === "held" ? B.holdReason(s.reason) : "-"] })), { narrow: [1], label: "보류된 호출의 단계 표" });
+      return D.table(["단계", "상태", "영수증", "사유"], x.steps.map((s) => ({ cls: P.open(s) ? "is-held" : s.receipt ? "is-kept" : "", cells: [s.step, B.effectPill(s.state), s.receipt ? h("span", { class: "kept" }, [code(s.receipt), h("span", { class: "kept-t", text: "보존됨" })]) : "-", s.resolution === "not_executed" ? "미실행으로 판정됨" : s.state === "held" ? B.holdReason(s.reason) : "-"] })), { narrow: [1], label: "보류된 호출의 단계 표" });
     }
     function holdCard(x) {
       const f = formState(x), held = x.steps.filter(P.open), tid = "hold-t-" + holdKey(x).replace(/[^A-Za-z0-9_-]/g, "_"), kind = kindOf(x);
+      const lastStep = kind === "tool" && held.length === 1 && !x.steps.some((s) => s.state === "started");
+      let afterNotExecuted = " 같은 호출 ID로 다시 이어 갑니다.";
+      if (kind === "tool" && held.length) {
+        if (!lastStep) afterNotExecuted = " 남은 단계가 끝날 때까지 대기합니다.";
+        else if (x.steps.some((s) => s.state === "confirmed")) afterNotExecuted = " 호출 최종 결과 카드가 열립니다. 그 카드에서 호출 전체의 영수증을 확인하세요.";
+      }
+      const next = (k) => kind === "tool" && k === "not_executed" ? afterNotExecuted : "";
       // 첫 확인에 고정한 단계가 그 사이 다른 곳에서 처리됐으면 확인과 입력을 모두 해제한다(같은 영수증이 다른 단계에 기록되면 안 된다).
       const check = P.reconcile(f.pin, x);
       if (!check.ok) release(f, check.reason);
@@ -185,7 +191,7 @@
       const at = () => (f.pin ? f.pin.effect : f.effect);
       const target = () => (at() ? x.tool + " · " + (held.filter((s) => s.effect === at())[0] || {}).step + " (" + at() + ")" : x.tool + " (호출 전체)");
       const said = () => (f.pin ? f.pin.text : f.text[f.arm]).trim();
-      const summary = (k) => "되돌릴 수 없습니다. " + target() + "을(를) " + (k === "confirmed" ? "영수증 «" + said() + "»(으)로 " : "") + KIND[kind][k].then + (k === "not_executed" ? " 근거: " + said() : "");
+      const summary = (k) => "되돌릴 수 없습니다. " + target() + "을(를) " + (k === "confirmed" ? "영수증 «" + said() + "»(으)로 " : "") + KIND[kind][k].then + next(k) + (k === "not_executed" ? " 근거: " + said() : "");
       function sync() {
         const blocked = f.holdId === null || f.holdId === undefined;
         noid.hidden = !blocked;
@@ -242,7 +248,7 @@
       }
       const formNode = (k) => {
         const spec = FORMS[k], fid = "hf-" + k + "-" + tid;
-        const help = KIND[kind][k].help + (kind === "tool" && k === "confirmed" && held.length === 1 ? " 마지막 단계의 영수증을 기록하면 호출 최종 결과 카드가 열립니다. 그 카드에서 호출 전체의 영수증을 확인하세요." : "");
+        const help = KIND[kind][k].help + next(k) + (k === "confirmed" && lastStep ? " 마지막 단계의 영수증을 기록하면 호출 최종 결과 카드가 열립니다. 그 카드에서 호출 전체의 영수증을 확인하세요." : "");
         const input = h("input", { type: "text", id: fid, class: "in", maxlength: "512", autocomplete: "off", spellcheck: "false", placeholder: spec.ph, "aria-describedby": fid + "-h", oninput: (e) => { f.text[k] = e.target.value; if (f.err && f.errKind === k) { f.err = ""; sync(); } } });
         input.value = f.text[k];
         const btnText = h("span", { text: KIND[kind][k].btn }), btn = h("button", { type: "submit", class: "btn danger" }, [icon("check", { size: 14 }), btnText]);

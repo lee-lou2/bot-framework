@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { all, install, load, textOf } from "./support/fakedom.mjs";
+import { all, button, install, load, textOf } from "./support/fakedom.mjs";
 
 install();
 load("dom.js", "labels.js");
@@ -30,4 +30,42 @@ test("the last pending step warns that the final call needs its own receipt", as
   assert.equal(cards.length, 2);
   assert.ok(textOf(cards[0]).includes(hint));
   assert.ok(!textOf(cards[1]).includes(hint));
+});
+
+test("the not-executed form explains what will happen to the call", async () => {
+  const tool = { kind: "tool", profile: "personal", call: "call", tool: "fixture.post", reason: "effects_unresolved", since_ms: 0 };
+  const step = { effect: "step", step: "post", state: "held", hold_id: "hold-2" };
+  const confirmed = { effect: "first", step: "prepare", state: "confirmed", receipt: "receipt-1" };
+  const started = { effect: "other", step: "other", state: "started" };
+  const cases = [
+    { steps: [confirmed, step], next: "호출 최종 결과 카드가 열립니다." },
+    { steps: [confirmed, step, started], next: "남은 단계가 끝날 때까지 대기합니다." },
+    { steps: [step], next: "같은 호출 ID로 다시 이어 갑니다." },
+  ];
+  const items = cases.map(({ steps }, i) => ({ ...tool, run: "run-" + i, steps }));
+  window.BotApi = { q: () => "", get: async (path) => ({ items: path.endsWith("/holds") ? items : [] }) };
+  load("holdpin.js", "decide.js");
+  const box = document.createElement("section");
+  const view = window.BotDecide.create({ me: () => ({ operator: true }), profile: () => "personal", noteProfiles() {} }, box);
+  await view.load({ profile: "personal", current: () => true });
+
+  const cards = all(box, (node) => node.classList.contains("hcard"));
+  assert.equal(cards.length, cases.length);
+  cards.forEach((card, i) => {
+    const form = all(card, (node) => node.localName === "form" && node.getAttribute("aria-labelledby").startsWith("hf-not_executed-"))[0];
+    const help = textOf(all(form, (node) => node.classList.contains("rf-help"))[0]);
+    const input = all(form, (node) => node.localName === "input")[0];
+    input.value = "수신처 조회에서 해당 요청 없음";
+    form.dispatch("submit");
+    const sum = all(form, (node) => node.classList.contains("rf-sum"))[0];
+    const summary = textOf(sum);
+    assert.equal(sum.hidden, false);
+    button(form, "취소").click();
+    const { next } = cases[i];
+    assert.ok(help.includes(next), help);
+    assert.ok(summary.includes(next), summary);
+    assert.ok(summary.includes(input.value), summary);
+    assert.equal(help.includes("같은 호출 ID로"), i === 2);
+    assert.equal(summary.includes("같은 호출 ID로"), i === 2);
+  });
 });
