@@ -147,6 +147,22 @@ mod tests {
         );
     }
 
+    /// Slack 워크스페이스의 모든 필드(소켓 수신을 명시, 서명 비밀 이름, 채널)와 워크스페이스 둘을 갖춘 호스트의 지문 바이트가 바뀌지 않는다.
+    /// 수신 방식 표지·서명 비밀을 다루는 코드를 고쳐도 이미 활성화된 호스트가 재활성화를 요구받지 않는다는 고정점이다.
+    #[test]
+    fn a_host_with_slack_workspaces_keeps_its_fingerprint_bytes() {
+        let mut value = base();
+        let workspaces = &mut value["slack"]["workspaces"];
+        workspaces["home"]["receive"] = json!("socket");
+        workspaces["home"]["signing_secret"] = json!("signing-secret");
+        workspaces["team"] =
+            json!({"team_id": "T2", "bot_token": "team-bot", "app_token": "team-app"});
+        assert_eq!(
+            hex(print(value)),
+            "59b4cb137574eadc4047467f56bf2deadeb1a9e983d0ab13f3ec61aa2f7b9cf7"
+        );
+    }
+
     fn with_openai() -> Value {
         let mut value = base();
         value["http"]["endpoints"]["openai"] = json!({"kind": "openai", "keys": {
