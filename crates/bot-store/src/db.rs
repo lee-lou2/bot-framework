@@ -192,9 +192,9 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         include_str!("../migrations/0026_reply_transport.sql"),
     ),
     (
-        30,
+        27,
         "run command receipt",
-        include_str!("../migrations/0030_run_command_receipt.sql"),
+        include_str!("../migrations/0027_run_command_receipt.sql"),
     ),
 ];
 

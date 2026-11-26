@@ -456,7 +456,7 @@ async fn the_command_index_upgrade_preserves_the_existing_audit_chain() {
     };
     db.sql("alter table bot_audit drop column run_command_id")
         .await;
-    db.sql("delete from _sqlx_migrations where version = 30")
+    db.sql("delete from _sqlx_migrations where version = 27")
         .await;
     let first = leased(&db, "old-audit").await;
     let run = first.attempt.run.clone();
