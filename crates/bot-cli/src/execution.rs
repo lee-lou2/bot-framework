@@ -521,4 +521,6 @@ pub fn authority_fingerprint(
 #[cfg(test)]
 mod api_tests;
 #[cfg(test)]
+mod fingerprint_tests;
+#[cfg(test)]
 mod tests;
