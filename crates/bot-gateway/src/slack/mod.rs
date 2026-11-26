@@ -130,14 +130,18 @@ impl SlackGateway {
         }
     }
 
-    /// 소켓으로 받을 설치 목록을 만들고 모두 검사한다: 자격을 읽을 수 있는지, 토큰이 설정한 워크스페이스의 것인지,
+    /// 소켓으로 받을 설치 목록을 만들고 모두 검사한다: 설정이 검증을 통과하는지, 자격을 읽을 수 있는지, 토큰이 설정한 워크스페이스의 것인지,
     /// 같은 앱 토큰을 프로필 둘이 쓰지 않는지. 하나라도 어긋나면 Err(값은 싣지 않는다).
     pub async fn plan(&self) -> Result<Vec<Installation>, SlackError> {
+        let host = self.ingress.host().clone();
+        // 이 계획은 모든 워크스페이스를 소켓으로 받는다고 본다. 그 보장은 설정 검증의 규칙(`receive: "http"`는 거절)이므로, 검증을 거치지 않은 설정이 들어와도
+        // 소켓으로 잘못 읽지 않고 자격을 읽거나 Slack을 부르기 전에 같은 규칙으로 멈춘다(건너뛰면 메시지와 승인 버튼이 사라진다). 규칙을 여기에 다시 쓰지 않는다.
+        host.validate()
+            .map_err(|error| SlackError(error.to_string()))?;
         let routes = self
             .ingress
             .routes()
             .map_err(|error| SlackError(error.to_string()))?;
-        let host = self.ingress.host().clone();
         let mut wanted: BTreeMap<(ProfileId, String), ()> = BTreeMap::new();
         for snapshot in routes.profiles() {
             for binding in snapshot.bindings.values() {

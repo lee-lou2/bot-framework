@@ -38,11 +38,13 @@ pub fn fingerprint(config: &HostConfig) -> Result<[u8; 32], HostError> {
     fingerprint_with(config, &resolve_uid)
 }
 
-/// OS 사용자 해석을 바꿔 지문을 만든다(시험용·재사용).
+/// OS 사용자 해석을 바꿔 지문을 만든다(시험용·재사용). 설정 검증이 거절하는 설정에는 지문이 없다(Err):
+/// 수신 방식 표지가 상수라서 검증을 거치지 않은 `receive: "http"`가 소켓 설정과 같은 지문을 얻는 일을 막는다.
 pub fn fingerprint_with(
     config: &HostConfig,
     uid_of: &dyn Fn(&CliAccount) -> Result<u32, HostError>,
 ) -> Result<[u8; 32], HostError> {
+    config.validate()?;
     let mut hash = Sha256::new();
     hash.update(b"bot-gateway-mapping-v1\0");
     hash.update(b"cli");
@@ -364,6 +366,26 @@ mod tests {
             print(ws("w", "T", json!({}))),
             print(ws("w", "T", json!({"app_id": "A1"})))
         );
+    }
+
+    /// 설정 검증이 거절하는 설정에는 지문이 없다. 수신 방식 표지가 상수라서, 막지 않으면 검증을 거치지 않은 `receive: "http"`가 소켓 설정과 같은 지문을 얻는다.
+    #[test]
+    fn a_config_that_validation_refuses_has_no_fingerprint() {
+        let uid_of = |account: &CliAccount| Ok(account.uid.unwrap_or(502));
+        let mut declared = base();
+        declared["slack"]["workspaces"]["home"]["receive"] = json!("http");
+        // 검증을 거치지 않고 만든 설정(`HostConfig`는 `Deserialize`로 그대로 만들 수 있다)
+        let unvalidated: HostConfig = serde_json::from_value(declared).unwrap();
+        let error = fingerprint_with(&unvalidated, &uid_of).unwrap_err();
+        assert!(
+            error
+                .0
+                .starts_with("gateway.slack.workspaces.home.receive: "),
+            "{error}"
+        );
+        // 선언만 빼면 같은 설정에서 지문이 나온다
+        let socket: HostConfig = serde_json::from_value(base()).unwrap();
+        assert_eq!(fingerprint_with(&socket, &uid_of).unwrap(), print(base()));
     }
 
     #[test]

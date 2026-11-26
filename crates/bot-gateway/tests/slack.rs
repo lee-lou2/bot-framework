@@ -342,3 +342,39 @@ async fn a_message_is_admitted_under_the_table_that_proved_its_owner() {
     assert!(rig.slack.until(|s| s.acks().len() == 2).await);
     assert_eq!(rig.store.accepted().len(), 1);
 }
+
+/// 소켓이 아닌 수신 방식은 받아 줄 곳이 없다. 설정 검증이 먼저 거르지만(`bot validate`·시작), 검증을 거치지 않은 설정이 들어와도 Slack 게이트웨이는
+/// 그 설치를 **조용히 소켓으로 읽지 않고** 검증과 같은 사유(워크스페이스 별칭·필드 경로)로 시작을 거절한다. 자격을 읽거나 Slack을 부르기 전이다.
+#[tokio::test]
+async fn an_unvalidated_http_receive_declaration_stops_the_gateway_instead_of_being_read_as_socket()
+{
+    let declared = |receive: Option<&str>| {
+        let mut home = json!({"team_id": "T1", "app_id": "A1", "dm": true,
+            "bot_token": "bot-token", "app_token": "app-token", "signing_secret": "signing",
+            "channels": {"planning": "C1"}});
+        if let Some(receive) = receive {
+            home["receive"] = json!(receive);
+        }
+        json!({"slack": {"workspaces": {"home": home}}})
+    };
+    // 검증을 거치지 않은 설정(`HostConfig`는 `Deserialize`로 그대로 만들 수 있다)
+    let config: bot_gateway::host::HostConfig =
+        serde_json::from_value(declared(Some("http"))).unwrap();
+    assert!(config.validate().is_err(), "설정 검증이 먼저 거른다");
+    let mut rig = rig_with(vec![personal()], default_secrets(), config, |_| {}).await;
+    let error = startup_failure(&mut rig).await;
+    assert!(
+        error
+            .0
+            .starts_with("gateway.slack.workspaces.home.receive: "),
+        "{error}"
+    );
+    assert!(
+        rig.slack.all_calls().is_empty(),
+        "Slack에 아무것도 부르지 않았어요"
+    );
+    // 선언만 빼면 같은 설정이 검증을 통과해 받는다
+    let config = bot_gateway::host::HostConfig::from_value(declared(None)).unwrap();
+    let rig = rig_with(vec![personal()], default_secrets(), config, |_| {}).await;
+    assert!(rig.slack.connected().await);
+}
