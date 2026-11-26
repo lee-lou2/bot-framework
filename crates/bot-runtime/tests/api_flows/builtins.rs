@@ -2,6 +2,7 @@ use super::*;
 use bot_core::{
     command::MemorySeed,
     id::{AgentId, ProfileId},
+    intake::PushTransportId,
     port::{Error, MemoryStore, RunStore},
     schedule::{DeliveryTarget, ScheduleRoutes},
     state::{ConversationKind, Visibility},
@@ -52,6 +53,10 @@ async fn builtin_world() -> Option<World> {
 
 async fn accept(w: &World, request: &str, kind: ConversationKind) -> RunId {
     let mut cmd = command(request, "요청을 처리해 주세요");
+    cmd.reply_transport = match kind {
+        ConversationKind::Direct | ConversationKind::Channel => Some(PushTransportId::SLACK),
+        ConversationKind::Cli | ConversationKind::Http | ConversationKind::Scheduled => None,
+    };
     cmd.event.conversation.kind = kind;
     cmd.scopes = SCOPES.iter().map(|s| (*s).into()).collect();
     w.pg.store.accept(cmd).await.unwrap()
