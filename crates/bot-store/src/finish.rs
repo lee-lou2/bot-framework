@@ -206,6 +206,15 @@ pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: 
     .await?;
     // 끝난 run의 열린 승인은 쓸 수 없다
     crate::approvals::close_for_run(tx, &run.profile, &run.id).await?;
+    // 실행 중인 도구의 판정은 닫는다. 별도 회신 원장의 전달 판정은 독립적이다.
+    sqlx::query(
+        "update bot_holds set closed_ms = bot_now_ms()
+         where profile = $1 and run = $2 and kind = 'tool' and closed_ms is null",
+    )
+    .bind(&run.profile)
+    .bind(&run.id)
+    .execute(&mut **tx)
+    .await?;
     let mut woke = None;
     if let (Some(parent), Some(step)) = (&run.parent, &run.parent_step)
         && wake(tx, &run.profile, parent, "child", Some(&run.id)).await?

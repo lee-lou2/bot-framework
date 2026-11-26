@@ -242,6 +242,7 @@
       }
       const formNode = (k) => {
         const spec = FORMS[k], fid = "hf-" + k + "-" + tid;
+        const help = KIND[kind][k].help + (kind === "tool" && k === "confirmed" && held.length === 1 ? " 마지막 단계의 영수증을 기록하면 호출 최종 결과 카드가 열립니다. 그 카드에서 호출 전체의 영수증을 확인하세요." : "");
         const input = h("input", { type: "text", id: fid, class: "in", maxlength: "512", autocomplete: "off", spellcheck: "false", placeholder: spec.ph, "aria-describedby": fid + "-h", oninput: (e) => { f.text[k] = e.target.value; if (f.err && f.errKind === k) { f.err = ""; sync(); } } });
         input.value = f.text[k];
         const btnText = h("span", { text: KIND[kind][k].btn }), btn = h("button", { type: "submit", class: "btn danger" }, [icon("check", { size: 14 }), btnText]);
@@ -249,7 +250,7 @@
         const sum = h("p", { class: "rf-sum", role: "status", hidden: true }), err = h("p", { class: "rf-err", role: "alert", hidden: true });
         parts[k] = { input, btn, btnText, cancel, sum, err };
         // 확인 단계에서 Esc를 누르면 취소한다.
-        return h("form", { class: "rform", "aria-labelledby": fid + "-t", onsubmit: (ev) => submit(k, ev), onkeydown: (ev) => { if (ev.key === "Escape" && f.arm && !f.busy) { ev.stopPropagation(); disarm(); } } }, [h("h5", { id: fid + "-t", text: spec.title }), h("p", { class: "rf-help", id: fid + "-h", text: KIND[kind][k].help }), h("label", { class: "rf-field", for: fid }, [h("span", { text: spec.label }), input]), sum, err, h("div", { class: "rf-act" }, [btn, cancel])]);
+        return h("form", { class: "rform", "aria-labelledby": fid + "-t", onsubmit: (ev) => submit(k, ev), onkeydown: (ev) => { if (ev.key === "Escape" && f.arm && !f.busy) { ev.stopPropagation(); disarm(); } } }, [h("h5", { id: fid + "-t", text: spec.title }), h("p", { class: "rf-help", id: fid + "-h", text: help }), h("label", { class: "rf-field", for: fid }, [h("span", { text: spec.label }), input]), sum, err, h("div", { class: "rf-act" }, [btn, cancel])]);
       };
       let pick = null;
       if (held.length > 1) {

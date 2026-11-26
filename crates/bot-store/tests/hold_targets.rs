@@ -8,7 +8,7 @@ use bot_core::{
     admin::{AdminAct, AdminRead, HoldDecision, HoldKind, HoldRef, HoldVerdict},
     id::*,
     ledger::{FinishCall, Outcome},
-    port::Error,
+    port::{Error, RunAdmin},
     state::ConversationKind,
 };
 use support::{admin::*, *};
@@ -306,6 +306,126 @@ async fn upgrading_retracts_a_legacy_whole_not_executed_mark_and_parks_the_run()
     );
     assert_eq!(confirm(&db, target).await.unwrap(), HoldDecision::Applied);
     assert_eq!(state_of_run(&db, &at.run).await, "ready");
+}
+
+#[tokio::test]
+async fn settling_the_last_started_step_opens_the_call_hold() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let at = held_steps(&db, false, true).await;
+    // 구판과 섞인 보류에서 단계가 아직 started인 상태를 재현한다.
+    db.sql("update bot_effects set state = 'started' where step = 'next'")
+        .await;
+    assert_eq!(
+        db.scalar::<i64>("select count(*) from bot_holds where closed_ms is null")
+            .await,
+        0
+    );
+    db.sql(
+        "update bot_effects set state = 'confirmed', receipt = 'late-receipt' where step = 'next'",
+    )
+    .await;
+    let target = hold_ref(&db, HoldKind::Tool, &at.run, &call("c1"), None).await;
+    assert_eq!(confirm(&db, target).await.unwrap(), HoldDecision::Applied);
+}
+
+#[tokio::test]
+async fn cancelling_a_held_run_closes_its_tool_holds_and_keeps_receipts() {
+    for pending in [false, true] {
+        let Some(db) = TestDb::new().await else {
+            return;
+        };
+        let at = held_steps(&db, false, pending).await;
+        let mut views = db.store.holds(&operator(), None).await.unwrap();
+        let view = views.pop().unwrap();
+        let step = view
+            .steps
+            .iter()
+            .find(|s| s.step == "next")
+            .map(|s| &s.effect);
+        let target = hold_ref(&db, HoldKind::Tool, &at.run, &call("c1"), step).await;
+        db.store
+            .cancel(
+                at.profile.clone(),
+                at.run.clone(),
+                operator().principal,
+                "종료".into(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(state_of_run(&db, &at.run).await, "cancelled");
+        assert!(db.store.holds(&operator(), None).await.unwrap().is_empty());
+        assert_eq!(
+            db.scalar::<i64>("select count(*) from bot_holds where closed_ms is null")
+                .await,
+            0
+        );
+        assert_eq!(
+            db.scalar::<String>("select receipt from bot_effects where step = 'first'")
+                .await,
+            "step-receipt"
+        );
+        assert!(matches!(confirm(&db, target).await, Err(Error::Conflict)));
+    }
+}
+
+#[tokio::test]
+async fn a_legacy_admin_cannot_commit_a_whole_call_as_not_executed_after_a_confirmed_step() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let at = held_steps(&db, false, true).await;
+    let mut old = db.store.pool().begin().await.unwrap();
+    // 구판 관리자가 마지막 단계와 발생을 판정한 뒤 호출 전체까지 미실행으로 쓴다.
+    sqlx::query("update bot_holds set closed_ms=bot_now_ms() where effect is not null")
+        .execute(&mut *old)
+        .await
+        .unwrap();
+    sqlx::query("update bot_effects set resolution='not_executed' where state='held'")
+        .execute(&mut *old)
+        .await
+        .unwrap();
+    let error = sqlx::query("update bot_calls set resolution='not_executed'")
+        .execute(&mut *old)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23514")
+    );
+    old.rollback().await.unwrap();
+
+    let view = db
+        .store
+        .holds(&operator(), None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let step = view.steps.iter().find(|s| s.step == "next").unwrap();
+    let step = hold_ref(
+        &db,
+        HoldKind::Tool,
+        &at.run,
+        &call("c1"),
+        Some(&step.effect),
+    )
+    .await;
+    let verdict = HoldVerdict::NotExecuted {
+        evidence: "수신처 기록 없음".into(),
+    };
+    assert_eq!(
+        db.store
+            .resolve_hold(operator().principal, step, verdict)
+            .await
+            .unwrap(),
+        HoldDecision::Applied
+    );
+    assert_eq!(state_of_run(&db, &at.run).await, "waiting");
+    let target = hold_ref(&db, HoldKind::Tool, &at.run, &call("c1"), None).await;
+    assert_eq!(confirm(&db, target).await.unwrap(), HoldDecision::Applied);
 }
 
 #[tokio::test]
