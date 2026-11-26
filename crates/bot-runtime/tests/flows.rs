@@ -55,6 +55,8 @@ async fn the_agenda_flow_lists_events_through_the_real_broker_and_leaves_one_tra
         .iter()
         .find(|s| s.name == "broker.tool.call")
         .expect("도구 스팬");
+    assert_eq!(tool.str(key::GEN_AI_OPERATION_NAME), Some("execute_tool"));
+    assert_eq!(tool.str(key::GEN_AI_TOOL_TYPE), Some("function"));
     assert_eq!(
         (tool.ids.trace, tool.ids.parent),
         (root.ids.trace, Some(root.ids.span))

@@ -360,3 +360,43 @@ fn values_added_later_are_masked_by_every_clone_and_never_unlearned() {
         "짧은 값 `secret`이 긴 값의 일부를 먼저 지워 조각이 남지 않는다"
     );
 }
+
+#[test]
+fn execute_tool_standard_attributes_pass_allowed_vocabulary_policy() {
+    let red = Redactor::default();
+    let rec = || {
+        span(vec![
+            (key::GEN_AI_OPERATION_NAME, "execute_tool".into()),
+            (key::GEN_AI_TOOL_TYPE, "function".into()),
+            (key::GEN_AI_TOOL_NAME, "agenda.list".into()),
+            (key::GEN_AI_TOOL_CALL_ID, "c-1".into()),
+            (key::BOT_ATTEMPT_GENERATION, 1u64.into()),
+            (key::BOT_CALL_STATE, "done".into()),
+            (key::BOT_TOOL_RISK, "read".into()),
+        ])
+    };
+    for policy in [
+        OFF,
+        Policy {
+            ids: Ids::Hash,
+            content: false,
+            private: false,
+        },
+    ] {
+        let o = apply(rec(), &policy, &red);
+        assert_eq!(
+            get(&o, key::GEN_AI_OPERATION_NAME),
+            Some(&Val::Str("execute_tool".into()))
+        );
+        assert_eq!(
+            get(&o, key::GEN_AI_TOOL_TYPE),
+            Some(&Val::Str("function".into()))
+        );
+        assert_eq!(
+            get(&o, key::GEN_AI_TOOL_NAME),
+            Some(&Val::Str("agenda.list".into()))
+        );
+        assert_eq!(o.dropped, 0);
+        assert!(get(&o, key::BOT_DROPPED).is_none());
+    }
+}

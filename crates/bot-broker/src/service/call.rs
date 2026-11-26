@@ -159,6 +159,8 @@ impl BrokerService {
         )
         .kind(SpanKind::Internal)
         .started_at(started)
+        .attr(key::GEN_AI_OPERATION_NAME, "execute_tool")
+        .attr(key::GEN_AI_TOOL_TYPE, "function")
         .attr(key::GEN_AI_TOOL_NAME, tool.0.clone())
         .attr(key::GEN_AI_TOOL_CALL_ID, call.0.clone())
         .attr(key::BOT_ATTEMPT_GENERATION, attempt.generation.0)

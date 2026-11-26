@@ -158,11 +158,12 @@ fn the_owner_sees_the_whole_draft_and_it_is_sent_once_after_approval() {
     assert_eq!(w.replies.outbox().len(), 1);
     // 스팬: 호스트 전용 호출도 일반 호출과 같은 모양으로 남고 내용은 싣지 않는다
     let spans = w.tracer.spans();
-    assert!(
-        spans
-            .iter()
-            .all(|s| s.str(key::GEN_AI_TOOL_NAME) == Some(DELIVER_TOOL))
-    );
+    assert!(spans.iter().all(|s| {
+        s.str(key::GEN_AI_OPERATION_NAME) == Some("execute_tool")
+            && s.str(key::GEN_AI_TOOL_TYPE) == Some("function")
+            && s.str(key::GEN_AI_TOOL_NAME) == Some(DELIVER_TOOL)
+            && s.attrs.iter().all(|(k, _)| key::ALLOWED.contains(k))
+    }));
     assert_eq!(spans[0].str(key::BOT_CALL_STATE), Some("awaiting"));
     assert_eq!(spans[0].str(key::BOT_TOOL_RISK), Some("irreversible"));
     assert!(format!("{spans:?}").find(TEXT).is_none());

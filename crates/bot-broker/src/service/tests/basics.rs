@@ -205,19 +205,27 @@ fn every_call_leaves_one_span_with_fixed_vocabulary_only() {
     let w = World::new();
     done(w.call("c1", "agenda.list", "{}"));
     let _ = w.call("c2", "agenda.delete", "{\"event\":\"walk\"}");
+    assert!(matches!(
+        w.call("c3", "agenda.nope", "{}"),
+        Err(Error::Missing)
+    ));
     let spans = w.tracer.spans();
-    assert_eq!(spans.len(), 2);
+    assert_eq!(spans.len(), 3);
     assert_eq!(spans[0].str(key::GEN_AI_TOOL_NAME), Some("agenda.list"));
     assert_eq!(spans[0].str(key::BOT_CALL_STATE), Some("done"));
     assert_eq!(spans[0].str(key::BOT_TOOL_RISK), Some("read"));
     assert_eq!(spans[1].str(key::BOT_CALL_STATE), Some("awaiting"));
     assert_eq!(spans[1].str(key::BOT_TOOL_RISK), Some("irreversible"));
     assert_eq!(spans[1].int(key::BOT_ATTEMPT_GENERATION), Some(1));
-    assert!(
-        spans
-            .iter()
-            .all(|s| s.error.is_none() && s.ids.trace == spans[0].ids.trace)
-    );
+    assert_eq!(spans[2].str(key::BOT_CALL_STATE), Some("failed"));
+    assert_eq!(spans[2].error, Some("missing"));
+    assert!(spans.iter().all(|s| {
+        s.str(key::GEN_AI_OPERATION_NAME) == Some("execute_tool")
+            && s.str(key::GEN_AI_TOOL_TYPE) == Some("function")
+            && s.ids.trace == spans[0].ids.trace
+            && s.attrs.iter().all(|(k, _)| key::ALLOWED.contains(k))
+    }));
+    assert!(spans[0].error.is_none() && spans[1].error.is_none());
     // 승인 nonce와 인자 원문은 스팬에 싣지 않는다
     let nonce = w.ledger.pending_approval("r1", "c2").unwrap().0;
     let dump = format!("{spans:?}");

@@ -344,6 +344,8 @@ async fn spans_of_one_attempt_from_different_components_join_one_trace() {
         "execute_tool agenda.delete",
         SpanIds::attempt(&a).child("tool", "c-1"),
     )
+    .attr(key::GEN_AI_OPERATION_NAME, "execute_tool")
+    .attr(key::GEN_AI_TOOL_TYPE, "function")
     .attr(key::GEN_AI_TOOL_NAME, "agenda.delete")
     .attr(key::GEN_AI_TOOL_CALL_ID, "c-1")
     .attr(key::BOT_TOOL_RISK, "irreversible")
@@ -383,6 +385,14 @@ async fn spans_of_one_attempt_from_different_components_join_one_trace() {
         "도구 스팬은 시도 루트의 자식이다"
     );
     assert_ne!(w2.trace, w.trace, "세대가 바뀌면 새 추적이다");
+    assert_eq!(t.str(key::GEN_AI_OPERATION_NAME), Some("execute_tool"));
+    assert_eq!(t.str(key::GEN_AI_TOOL_TYPE), Some("function"));
+    assert_eq!(t.str(key::GEN_AI_TOOL_NAME), Some("agenda.delete"));
+    assert_eq!(t.str(key::GEN_AI_TOOL_CALL_ID), Some("c-1"));
+    assert!(
+        t.int(key::BOT_DROPPED).is_none(),
+        "표준 속성은 허용 어휘를 그대로 통과한다"
+    );
     assert_eq!(t.status, (2, "tool_failed".to_owned()));
     assert_eq!(
         (t.links.len(), t.events.len(), t.events[0].0.as_str()),
