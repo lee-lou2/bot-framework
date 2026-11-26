@@ -7,11 +7,20 @@ use crate::{
 };
 use bot_core::{
     id::{AgentId, BindingId, ProfileId},
+    intake::PushTransportId,
     profile::{Adapter, Binding, Snapshot, Trigger, TriggerSource, TriggerTarget},
 };
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 pub type Active = Arc<BTreeMap<ProfileId, Arc<Snapshot>>>;
+
+/// 인증된 바인딩의 원래 대화에 답하는 발송 어댑터.
+pub(crate) fn reply_transport(adapter: &Adapter) -> Option<PushTransportId> {
+    match adapter {
+        Adapter::SlackDm { .. } | Adapter::SlackChannel { .. } => Some(PushTransportId::SLACK),
+        Adapter::Cli { .. } | Adapter::Http { .. } | Adapter::OpenAi { .. } => None,
+    }
+}
 
 /// HTTP 요청 상태 조회가 쓰는 예약 경로. 트리거가 이 아래를 쓸 수 없다.
 pub const STATUS_SEGMENT: &str = "_requests";

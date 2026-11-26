@@ -116,6 +116,7 @@ fn unix_ms(t: SystemTime) -> i64 {
 /// 접수 명령. 구간의 저장된 정의를 그대로 옮긴다(저장소가 정의와 같은지 다시 대조한다).
 fn accept_for(trigger: &ScheduledTrigger, segment: &Segment, at: SystemTime) -> Accept {
     Accept {
+        reply_transport: None,
         event: Envelope {
             profile: trigger.profile.clone(),
             request: RequestId(format!("cron:{}:{}", trigger.trigger, unix_ms(at))),

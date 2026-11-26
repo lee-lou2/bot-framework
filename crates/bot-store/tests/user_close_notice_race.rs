@@ -20,6 +20,8 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
         return;
     };
     let origin = run_in(&db, "r1", OWNER, ConversationKind::Direct).await;
+    db.sql("update bot_runs set reply_transport = 'fixture-push'")
+        .await;
     let id = make(&db, &origin, "c1", spec_in(&db, 3_600_000).await)
         .await
         .unwrap();
@@ -88,8 +90,8 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
     .expect("닫는 쪽이 예약 행을 쥔 채 run을 기다린다");
     // 일반 회신: 다음 순번에 쓰고 커밋한다
     sqlx::query(&format!(
-        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, body)
-         select 'personal', '{run}', n.seq, 'reply:{run}:' || n.seq::text, 'desk', '{OWNER}', 'direct', 'c1', '{{\"text\":\"답\"}}'
+        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, body, transport)
+         select 'personal', '{run}', n.seq, 'reply:{run}:' || n.seq::text, 'desk', '{OWNER}', 'direct', 'c1', '{{\"text\":\"답\"}}', 'fixture-push'
          from (select coalesce(max(seq) + 1, 0) as seq from bot_outbox where run = '{run}') n"
     ))
     .execute(&mut other)
@@ -108,12 +110,13 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
     .unwrap();
     let expected: Vec<i32> = (0..i32::try_from(rows_before).unwrap() + 2).collect();
     assert_eq!(seqs, expected, "순번이 이어지고 겹치지 않는다");
-    let last: String = sqlx::query_scalar(&format!(
-        "select body from bot_outbox where run = '{run}' order by seq desc limit 1"
+    let (last, transport): (String, String) = sqlx::query_as(&format!(
+        "select body, transport from bot_outbox where run = '{run}' order by seq desc limit 1"
     ))
     .fetch_one(db.store.pool())
     .await
     .unwrap();
     assert!(last.contains("멈췄어요"), "{last}");
+    assert_eq!(transport, "fixture-push");
     assert_eq!(column::<String>(&db, &id, "state").await, "closed");
 }

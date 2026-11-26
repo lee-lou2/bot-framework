@@ -455,6 +455,7 @@ impl Ingress {
             Event::Message | Event::ThreadReply | Event::Reaction => None,
         };
         let command = Accept {
+            reply_transport: crate::routes::reply_transport(&route.binding.source),
             approver: approver_of(&inbound.principal),
             revision: route.snapshot.revision.clone(),
             target: plan.target,

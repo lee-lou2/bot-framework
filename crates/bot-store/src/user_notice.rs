@@ -42,9 +42,10 @@ pub(crate) async fn push(tx: &mut Tx<'_>, schedule: &PgRow, text: &str) -> R<()>
     ))?;
     let (profile, run): (String, String) = (schedule.get("profile"), schedule.get("origin_run"));
     sqlx::query(
-        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body)
-         select $1, $2, n.seq, 'reply:' || $2 || ':' || n.seq::text, $3, $4, $5, $6, $7, $8
-         from lateral (select coalesce(max(o.seq) + 1, 0) as seq from bot_outbox o where o.profile = $1 and o.run = $2) n",
+        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body, transport)
+         select $1, $2, n.seq, 'reply:' || $2 || ':' || n.seq::text, $3, $4, $5, $6, $7, $8, coalesce(r.reply_transport, '')
+         from bot_runs r, lateral (select coalesce(max(o.seq) + 1, 0) as seq from bot_outbox o where o.profile = $1 and o.run = $2) n
+         where r.profile = $1 and r.id = $2",
     )
     .bind(&profile)
     .bind(&run)

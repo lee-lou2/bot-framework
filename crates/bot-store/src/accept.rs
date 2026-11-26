@@ -9,7 +9,7 @@ use crate::{
 use bot_core::{
     command::{Accept, AcceptExtras, HttpRoute},
     id::*,
-    intake::{RequestKey, RequestState},
+    intake::{PushTransportId, RequestKey, RequestState},
     port::Error,
     profile::ResponseMode,
     state::{ConversationKind, RunOrigin},
@@ -85,6 +85,9 @@ pub(crate) fn check(a: &Accept) -> R<Checked> {
     {
         return invalid();
     }
+    if a.reply_transport.is_some() && !push_conversation(&e.conversation.kind) {
+        return invalid();
+    }
     attachments_ok(&e.attachments)?;
     let scopes: Vec<String> = a.scopes.iter().cloned().collect();
     if scopes.iter().any(|s| !id_ok(s)) || a.approver.as_ref().is_some_and(|p| !id_ok(&p.0)) {
@@ -100,6 +103,13 @@ pub(crate) fn check(a: &Accept) -> R<Checked> {
     })
 }
 
+fn push_conversation(kind: &ConversationKind) -> bool {
+    match kind {
+        ConversationKind::Direct | ConversationKind::Channel => true,
+        ConversationKind::Cli | ConversationKind::Http | ConversationKind::Scheduled => false,
+    }
+}
+
 /// run 한 줄을 넣는다. 호출자가 트랜잭션을 쥐고 있다.
 pub(crate) async fn insert_run(
     tx: &mut Tx<'_>,
@@ -113,8 +123,9 @@ pub(crate) async fn insert_run(
     let e = &a.event;
     sqlx::query(
         "insert into bot_runs (profile, id, root, agent, principal, scopes, revision, binding,
-                               conv_kind, conv_id, thread, attachments, target, input, approver, trigger, serial_key, run_origin)
-         values ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
+                               conv_kind, conv_id, thread, attachments, target, input, approver, trigger, serial_key, run_origin,
+                               reply_transport)
+         values ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
     )
     .bind(&e.profile.0)
     .bind(id)
@@ -133,6 +144,7 @@ pub(crate) async fn insert_run(
     .bind(trigger)
     .bind(serial_key)
     .bind(origin.as_str())
+    .bind(a.reply_transport.as_ref().map(|key| key.as_str()))
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -142,6 +154,11 @@ impl Store {
     /// 같은 키·같은 입력 해시는 최초 run을 돌려주며 내용이 바뀌면 `Conflict`다.
     /// 새 접수에는 어댑터가 넘긴 후보 사슬·커서와 인증된 원천을 같은 커밋에 남긴다.
     pub(crate) async fn accept_run_with(&self, a: Accept, extras: AcceptExtras) -> R<RunId> {
+        if (push_conversation(&a.event.conversation.kind) && a.reply_transport.is_none())
+            || (extras.source.is_some() && a.reply_transport != Some(PushTransportId::SLACK))
+        {
+            return invalid();
+        }
         let chain = extras.chain.as_ref();
         let c = check(&a)?;
         let e = &a.event;

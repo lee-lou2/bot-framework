@@ -351,6 +351,7 @@ pub fn key(request: &str) -> RequestKey {
 
 pub fn command(request: &str, text: &str) -> Accept {
     Accept {
+        reply_transport: None,
         event: Envelope {
             profile: ProfileId("personal".into()),
             request: RequestId(request.into()),

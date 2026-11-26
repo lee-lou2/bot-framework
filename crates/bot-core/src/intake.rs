@@ -2,9 +2,10 @@
 use crate::{
     command::{HttpRoute, JsonPayload},
     id::*,
-    port::Reply,
+    port::{Error, Reply},
     state::*,
 };
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct RequestKey {
@@ -61,6 +62,56 @@ pub trait PrivateIntake: Send + Sync {
     fn receive(&self, call: PrivateCall) -> Reply<'_, PrivateDecision>;
 }
 
+/// 호스트 코드에서 정하는 영속 발송 어댑터 식별자.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PushTransportId(Cow<'static, str>);
+
+impl PushTransportId {
+    pub const SLACK: Self = Self(Cow::Borrowed("slack"));
+
+    pub fn new(name: impl Into<String>) -> Result<Self, Error> {
+        let name = name.into();
+        let bytes = name.as_bytes();
+        if (1..=64).contains(&bytes.len())
+            && bytes[0].is_ascii_lowercase()
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        {
+            Ok(Self(Cow::Owned(name)))
+        } else {
+            Err(Error::Invalid)
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 이 발송자가 책임지는 어댑터 전체 또는 그 어댑터의 특정 프로필·바인딩.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryScope {
+    pub transport: PushTransportId,
+    pub binding: Option<(ProfileId, BindingId)>,
+}
+
+impl DeliveryScope {
+    pub const fn all(transport: PushTransportId) -> Self {
+        Self {
+            transport,
+            binding: None,
+        }
+    }
+
+    pub fn contains(&self, item: &Outgoing) -> bool {
+        self.transport == item.transport
+            && self.binding.as_ref().is_none_or(|(profile, binding)| {
+                *profile == item.key.profile && *binding == item.binding
+            })
+    }
+}
+
 /// worker의 리스와 독립적으로 잡은 회신 예약. call은 재시도에도 고정된다.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveryKey {
@@ -72,6 +123,7 @@ pub struct DeliveryKey {
 
 pub struct Outgoing {
     pub key: DeliveryKey,
+    pub transport: PushTransportId,
     pub call: CallId,
     pub binding: BindingId,
     pub principal: PrincipalId,
@@ -102,7 +154,7 @@ pub enum DeliveryOutcome {
 
 pub trait Outbox: Send + Sync {
     /// 발송 예약을 리스로 점유한다. sending 불명 항목은 자동 claim 대상에서 제외한다.
-    fn claim(&self, kinds: &[ConversationKind], limit: u32) -> Reply<'_, Vec<Outgoing>>;
+    fn claim<'a>(&'a self, scope: &'a DeliveryScope, limit: u32) -> Reply<'a, Vec<Outgoing>>;
     /// 현재 리스·현 게시 자격 확인과 sending 기록을 원자적으로 처리한다.
     /// 최초 전송자만 Ok를 받는다. 실패하거나 응답을 잃으면 전송할 수 없다.
     fn begin(&self, key: DeliveryKey, checked_revision: Revision) -> Reply<'_, ()>;

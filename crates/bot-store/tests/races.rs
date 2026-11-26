@@ -81,7 +81,10 @@ async fn a_revision_change_in_flight_blocks_a_send_until_it_commits_and_then_rej
     let got = runs(&db).claim().await.unwrap().unwrap();
     runs(&db).finish(got.attempt, done("답")).await.unwrap();
     let key = outbox(&db)
-        .claim(&[ConversationKind::Direct], 1)
+        .claim(
+            &bot_core::intake::DeliveryScope::all(bot_core::intake::PushTransportId::SLACK),
+            1,
+        )
         .await
         .unwrap()
         .remove(0)

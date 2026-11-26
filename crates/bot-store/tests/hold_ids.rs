@@ -6,7 +6,7 @@ use bot_core::{
     admin::*,
     command::*,
     id::*,
-    intake::DeliveryOutcome,
+    intake::{DeliveryOutcome, DeliveryScope, PushTransportId},
     ledger::*,
     port::*,
     state::{ConversationKind, EffectState},
@@ -333,9 +333,9 @@ async fn a_reply_hold_closed_by_a_late_receipt_cannot_be_judged_afterwards() {
         )
         .await
         .unwrap();
-    let dm = [ConversationKind::Direct];
+    let slack = DeliveryScope::all(PushTransportId::SLACK);
     let sent = (&db.store as &dyn bot_core::intake::Outbox)
-        .claim(&dm, 1)
+        .claim(&slack, 1)
         .await
         .unwrap()
         .remove(0);
@@ -347,7 +347,7 @@ async fn a_reply_hold_closed_by_a_late_receipt_cannot_be_judged_afterwards() {
         .await;
     // 리스를 잃은 전송은 다음 claim 때 보류가 된다
     (&db.store as &dyn bot_core::intake::Outbox)
-        .claim(&dm, 1)
+        .claim(&slack, 1)
         .await
         .unwrap();
     let call_id = CallId(db.scalar::<String>("select call from bot_outbox").await);
@@ -443,7 +443,7 @@ async fn upgrading_gives_every_unresolved_old_hold_an_id_and_skips_judged_ones()
     .await;
     db.sql("update bot_outbox set state = 'held'").await;
     db.sql(&format!(
-        "update bot_runs set private = true, state = 'waiting', wait_kind = 'hold', lease_until_ms = null, lease_owner = null where id = '{}'",
+        "update bot_runs set private = true, reply_transport = null, state = 'waiting', wait_kind = 'hold', lease_until_ms = null, lease_owner = null where id = '{}'",
         private_run.attempt.run.0
     ))
     .await;

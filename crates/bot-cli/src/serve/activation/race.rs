@@ -154,6 +154,7 @@ fn publication(set: &ProfileSet, revision: &str) -> Publication {
 /// 옛 프로세스가 옛 판본으로 받는 새 실행 접수(CLI 대화).
 fn accept(request: &str, revision: &Revision) -> Accept {
     Accept {
+        reply_transport: None,
         event: Envelope {
             profile: personal(),
             request: RequestId(request.into()),

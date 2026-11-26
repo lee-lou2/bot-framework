@@ -15,7 +15,13 @@ const TOKEN: &str = "test-operator";
 
 async fn hold_next_delivery(db: &TestDb) {
     let outbox = outbox(db);
-    let deliveries = outbox.claim(&[ConversationKind::Direct], 1).await.unwrap();
+    let deliveries = outbox
+        .claim(
+            &bot_core::intake::DeliveryScope::all(bot_core::intake::PushTransportId::SLACK),
+            1,
+        )
+        .await
+        .unwrap();
     assert_eq!(deliveries.len(), 1);
     let key = deliveries.into_iter().next().unwrap().key;
     outbox

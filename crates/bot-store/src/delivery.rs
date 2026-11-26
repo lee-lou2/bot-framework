@@ -17,6 +17,7 @@ use crate::{
 use bot_core::{
     command::{Finish, JsonPayload},
     id::*,
+    intake::PushTransportId,
     ledger::StartCall,
     port::Error,
     schedule::{DELIVER_CALL, DELIVER_TOOL, DeliveryDraft, DeliveryTarget, quiet_completion},
@@ -194,9 +195,10 @@ fn shown_row(card: &str, label: &str) -> Option<String> {
 
 /// 목적지 대화로 회신 행을 쌓는다. 순번은 이 run의 기존 행 다음부터 잇는다(원래 대화로 간 승인 카드가 앞선 순번을 쓴다).
 async fn push_to(tx: &mut Tx<'_>, row: &PgRow, principal: &str, body: &str) -> R<()> {
+    // 명시 목적지 승인과 등록부의 계약은 Slack으로 한정한다. 원래 대화의 발송 책임과 독립적이다.
     sqlx::query(
-        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body)
-         select $1, $2, n.seq, 'reply:' || $2 || ':' || n.seq::text, $3, $4, $5, $6, $7, $8
+        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body, transport)
+         select $1, $2, n.seq, 'reply:' || $2 || ':' || n.seq::text, $3, $4, $5, $6, $7, $8, $9
          from lateral (select coalesce(max(o.seq) + 1, 0) as seq from bot_outbox o where o.profile = $1 and o.run = $2) n",
     )
     .bind(row.get::<String, _>("profile"))
@@ -207,6 +209,7 @@ async fn push_to(tx: &mut Tx<'_>, row: &PgRow, principal: &str, body: &str) -> R
     .bind(row.get::<String, _>("dest_id"))
     .bind(row.get::<Option<String>, _>("dest_thread"))
     .bind(body)
+    .bind(PushTransportId::SLACK.as_str())
     .execute(&mut **tx)
     .await?;
     Ok(())

@@ -10,9 +10,9 @@ use crate::{
 use bot_core::{
     command::JsonPayload,
     id::*,
-    intake::{DeliveryKey, DeliveryOutcome, NotSentReason, Outgoing},
+    intake::{DeliveryKey, DeliveryOutcome, DeliveryScope, NotSentReason, Outgoing},
     port::Error,
-    state::{Conversation, ConversationKind},
+    state::Conversation,
 };
 use sqlx::Row;
 
@@ -34,15 +34,16 @@ fn bind_key<'q>(
 
 impl Store {
     /// 발송 예약을 리스로 점유한다. 리스가 끝난 sending은 불명이므로 먼저 held로 옮기고 자동 claim 대상에서 뺀다.
-    pub(crate) async fn outbox_claim(
-        &self,
-        kinds: &[ConversationKind],
-        limit: u32,
-    ) -> R<Vec<Outgoing>> {
-        if kinds.is_empty() || limit == 0 {
+    pub(crate) async fn outbox_claim(&self, scope: &DeliveryScope, limit: u32) -> R<Vec<Outgoing>> {
+        if limit == 0 {
             return Ok(vec![]);
         }
-        let kinds: Vec<&str> = kinds.iter().map(kind_str).collect();
+        let (profile, binding) = scope
+            .binding
+            .as_ref()
+            .map_or((None, None), |(profile, binding)| {
+                (Some(profile.0.as_str()), Some(binding.0.as_str()))
+            });
         let mut tx = self.begin_authorized().await?;
         let lost = sqlx::query(
             "update bot_outbox set state = 'held', reason = 'owner_lost', updated_ms = bot_now_ms()
@@ -62,7 +63,8 @@ impl Store {
         // 같은 run의 앞선 회신이 아직 나가는 중이면 뒤의 것을 잡지 않는다(순서 유지)
         let rows = sqlx::query(
             "select o.profile, o.run, o.seq from bot_outbox o
-             where o.state = 'pending' and o.conv_kind = any($1)
+             where o.state = 'pending' and o.transport = $1
+               and ($3::text is null or (o.profile = $3 and o.binding = $4))
                and o.not_before_ms <= (select bot_now_ms())
                and (o.lease_until_ms is null or o.lease_until_ms < (select bot_now_ms()))
                and not exists (select 1 from bot_outbox p
@@ -71,8 +73,10 @@ impl Store {
              order by o.created_ms, o.profile, o.run, o.seq
              limit $2 for update of o skip locked",
         )
-        .bind(&kinds)
+        .bind(scope.transport.as_str())
         .bind(i64::from(limit.min(MAX_BATCH)))
+        .bind(profile)
+        .bind(binding)
         .fetch_all(&mut *tx)
         .await?;
         let mut out = Vec::new();
@@ -91,6 +95,7 @@ impl Store {
             .fetch_one(&mut *tx)
             .await?;
             out.push(Outgoing {
+                transport: scope.transport.clone(),
                 key: DeliveryKey {
                     profile: ProfileId(profile),
                     run: RunId(run),

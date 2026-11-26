@@ -161,6 +161,7 @@ impl Ingress {
             return ApiVerdict::Unavailable;
         };
         let accept = Accept {
+            reply_transport: crate::routes::reply_transport(&route.binding.source),
             // 기록용: 승인 경로가 없으면 None이다. 실제 경로는 브로커가 고정 판본·현재 판본에서 다시 풀어 확인한다.
             approver: snapshot
                 .approval_route(route.binding_id, &inbound.principal)

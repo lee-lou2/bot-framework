@@ -20,7 +20,8 @@ use bot_core::{
     },
     id::*,
     intake::{
-        DeliveryKey, DeliveryOutcome, Outbox, Outgoing, RequestKey, RequestState, RunProgress,
+        DeliveryKey, DeliveryOutcome, DeliveryScope, Outbox, Outgoing, RequestKey, RequestState,
+        RunProgress,
     },
     ledger::{
         ApprovalState, CallLedger, CallRecord, Decision, FinishCall, OpenApproval, PrivateLedger,
@@ -35,7 +36,7 @@ use bot_core::{
         AdvanceSchedule, DeliveryDraft, DeliveryFence, DeliveryTarget, DueKey, DuePage,
         ScheduleSpec, ScheduleSummary, ScheduledReplies, UnsentReason, UserSchedules, Wake,
     },
-    state::{ConversationKind, RunContext},
+    state::RunContext,
 };
 use std::collections::BTreeMap;
 
@@ -158,9 +159,8 @@ impl DelegationStore for Store {
 }
 
 impl Outbox for Store {
-    fn claim(&self, kinds: &[ConversationKind], limit: u32) -> Reply<'_, Vec<Outgoing>> {
-        let kinds = kinds.to_vec();
-        reply!(async move { self.outbox_claim(&kinds, limit).await })
+    fn claim<'a>(&'a self, scope: &'a DeliveryScope, limit: u32) -> Reply<'a, Vec<Outgoing>> {
+        reply!(self.outbox_claim(scope, limit))
     }
 
     fn begin(&self, key: DeliveryKey, checked_revision: Revision) -> Reply<'_, ()> {

@@ -227,6 +227,7 @@ async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quie
         rig.query("select revision from {s}.bot_active_profiles where profile = 'personal'"),
     );
     let accept = |request: &str, text: &str| Accept {
+        reply_transport: Some(bot_core::intake::PushTransportId::SLACK),
         event: Envelope {
             profile: ProfileId("personal".into()),
             request: RequestId(request.into()),

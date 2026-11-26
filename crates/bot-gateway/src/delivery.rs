@@ -1,12 +1,11 @@
-//! 회신 발송. outbox에서 자기 대화 종류의 회신을 `claim`하고, 현재 판본으로 바인딩·주체·대상을 확인한 뒤 `begin`이 Ok일 때만
+//! 회신 발송. outbox에서 자기 책임 범위의 회신을 `claim`하고, 현재 판본으로 바인딩·주체·대상을 확인한 뒤 `begin`이 Ok일 때만
 //! **한 번** 보내고 결과를 `settle`한다. 숨은 재전송은 없다 — 결과가 불명이면 `Held`로 두고, 미실행이 확정된 일시 실패만
 //! `NotSent`로 정산해 저장소가 백오프 뒤 새 세대로 다시 잡게 한다. CLI·HTTP는 상태 조회로 받으므로 여기 오지 않는다.
 use crate::{inbound::kind_name, ingress::Ingress, observe, reply::ReplyBody};
 use bot_core::{
-    intake::{DeliveryOutcome, NotSentReason, Outbox, Outgoing},
+    intake::{DeliveryOutcome, DeliveryScope, NotSentReason, Outbox, Outgoing},
     port::{Error, Gateway, Reply},
     profile::Snapshot,
-    state::ConversationKind,
     trace::now_nano,
 };
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
@@ -33,10 +32,10 @@ pub enum Delivery {
     Held,
 }
 
-/// push 어댑터 하나(예: Slack). 자기 대화 종류의 회신만 맡는다.
+/// push 발송자 하나. 선언한 범위의 회신을 맡는다.
 pub trait Sender: Send + Sync {
-    fn kinds(&self) -> Vec<ConversationKind>;
-    /// 현재 판본의 바인딩이 이 대상(대화)으로의 발송을 허용하는가. 아니면 보내지 않고 거절로 정산한다.
+    fn scope(&self) -> DeliveryScope;
+    /// 현재 판본에서 같은 어댑터가 그 바인딩과 목적지로 발송할 수 있는가. 아니면 거절로 정산한다.
     fn allows(&self, snapshot: &Snapshot, item: &Outgoing) -> bool;
     fn send<'a>(
         &'a self,
@@ -65,7 +64,7 @@ impl Deliverer {
 
     /// 한 번 훑는다. 처리한 항목 수를 돌려준다.
     pub async fn tick(&self) -> Result<usize, Error> {
-        let items = self.outbox.claim(&self.sender.kinds(), BATCH).await?;
+        let items = self.outbox.claim(&self.sender.scope(), BATCH).await?;
         let count = items.len();
         for item in items {
             self.deliver_one(item).await;

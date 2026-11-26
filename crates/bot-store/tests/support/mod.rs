@@ -242,6 +242,8 @@ pub fn accept_as(
         response: bot_core::profile::ResponseMode::Accepted,
     });
     Accept {
+        reply_transport: matches!(kind, ConversationKind::Direct | ConversationKind::Channel)
+            .then_some(bot_core::intake::PushTransportId::SLACK),
         event: Envelope {
             profile: ProfileId(profile.into()),
             request: RequestId(request.into()),
@@ -292,6 +294,7 @@ pub fn occurrence_accept(
     scopes: &[&str],
 ) -> Accept {
     Accept {
+        reply_transport: None,
         event: Envelope {
             profile: ProfileId(profile.into()),
             request: RequestId(format!("cron:{trigger}:{at_ms}")),

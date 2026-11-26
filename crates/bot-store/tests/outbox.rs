@@ -1,10 +1,12 @@
+#[path = "outbox/routing.rs"]
+mod routing;
 mod support;
 
 use bot_core::{command::*, id::*, intake::*, port::*, profile::ActiveRevisions, state::*};
 use std::{collections::BTreeMap, time::Duration};
 use support::*;
 
-const DM: &[ConversationKind] = &[ConversationKind::Direct];
+const SLACK: DeliveryScope = DeliveryScope::all(PushTransportId::SLACK);
 
 // Store는 RunStore와 Outbox를 모두 구현해 `claim`이 겹친다. 시험은 트레이트 객체로 경계를 그대로 쓴다.
 fn runs(db: &TestDb) -> &dyn RunStore {
@@ -57,13 +59,16 @@ async fn claims_in_order_and_sends_only_after_begin_commits() {
     let run = two_replies(&db).await;
     assert!(
         ob(&db)
-            .claim(&[ConversationKind::Channel], 10)
+            .claim(
+                &DeliveryScope::all(PushTransportId::new("test-push").unwrap()),
+                10
+            )
             .await
             .unwrap()
             .is_empty(),
-        "자기 대화 종류만 점유한다"
+        "자기 어댑터의 회신만 점유한다"
     );
-    let sent = ob(&db).claim(DM, 10).await.unwrap();
+    let sent = ob(&db).claim(&SLACK, 10).await.unwrap();
     assert_eq!(
         sent.len(),
         1,
@@ -82,7 +87,7 @@ async fn claims_in_order_and_sends_only_after_begin_commits() {
     );
     assert_eq!(first.body.0, r#"{"text":"첫째"}"#);
     assert!(
-        ob(&db).claim(DM, 10).await.unwrap().is_empty(),
+        ob(&db).claim(&SLACK, 10).await.unwrap().is_empty(),
         "점유 중인 건은 다시 잡히지 않는다"
     );
 
@@ -104,7 +109,7 @@ async fn claims_in_order_and_sends_only_after_begin_commits() {
         "재호출은 보낼 수 없다"
     );
     assert!(
-        ob(&db).claim(DM, 10).await.unwrap().is_empty(),
+        ob(&db).claim(&SLACK, 10).await.unwrap().is_empty(),
         "sending 건은 자동 claim에서 빠진다"
     );
 
@@ -144,7 +149,7 @@ async fn claims_in_order_and_sends_only_after_begin_commits() {
         "1700.0001"
     );
 
-    let next = ob(&db).claim(DM, 10).await.unwrap();
+    let next = ob(&db).claim(&SLACK, 10).await.unwrap();
     assert_eq!(next[0].key.seq, 1, "앞의 건이 끝나면 다음 건을 잡는다");
     assert_eq!(db.store.verify().await.unwrap().first_bad, None);
 }
@@ -155,10 +160,10 @@ async fn lease_expiry_before_begin_reclaims_with_a_new_delivery_generation() {
         return;
     };
     two_replies(&db).await;
-    let old = ob(&db).claim(DM, 1).await.unwrap().remove(0);
+    let old = ob(&db).claim(&SLACK, 1).await.unwrap().remove(0);
     db.sql("update bot_outbox set lease_until_ms = bot_now_ms() - 1 where seq = 0")
         .await;
-    let fresh = ob(&db).claim(DM, 1).await.unwrap().remove(0);
+    let fresh = ob(&db).claim(&SLACK, 1).await.unwrap().remove(0);
     assert_eq!((fresh.key.seq, fresh.key.generation), (0, Generation(2)));
     assert_eq!(fresh.call, old.call, "같은 호출·같은 순번");
     assert!(
@@ -177,12 +182,12 @@ async fn lost_response_after_begin_is_held_and_late_evidence_confirms_it() {
         return;
     };
     two_replies(&db).await;
-    let sent = ob(&db).claim(DM, 1).await.unwrap().remove(0);
+    let sent = ob(&db).claim(&SLACK, 1).await.unwrap().remove(0);
     ob(&db).begin(sent.key.clone(), rev("r1")).await.unwrap();
     db.sql("update bot_outbox set lease_until_ms = bot_now_ms() - 1 where seq = 0")
         .await;
     // 불명 건은 자동으로 다시 보내지 않는다. 보류(held)는 순서를 막지 않으므로 다음 건(seq 1)만 점유된다
-    let next = ob(&db).claim(DM, 10).await.unwrap();
+    let next = ob(&db).claim(&SLACK, 10).await.unwrap();
     assert_eq!(next.iter().map(|o| o.key.seq).collect::<Vec<_>>(), [1]);
     assert_eq!(state_of(&db, 0).await, "held");
     assert_eq!(
@@ -219,7 +224,7 @@ async fn not_sent_failures_retry_with_the_longer_of_backoff_and_retry_after_then
         return;
     };
     two_replies(&db).await;
-    let mut key = ob(&db).claim(DM, 1).await.unwrap().remove(0).key;
+    let mut key = ob(&db).claim(&SLACK, 1).await.unwrap().remove(0).key;
     ob(&db).begin(key.clone(), rev("r1")).await.unwrap();
     ob(&db)
         .settle(
@@ -240,14 +245,14 @@ async fn not_sent_failures_retry_with_the_longer_of_backoff_and_retry_after_then
         "백오프 약 10초 ±25%: {wait}"
     );
     assert!(
-        ob(&db).claim(DM, 10).await.unwrap().is_empty(),
+        ob(&db).claim(&SLACK, 10).await.unwrap().is_empty(),
         "대기 시간 전에는 잡지 않는다"
     );
 
     // 수신처가 더 긴 대기를 요구하면 그쪽이 하한이다
     db.sql("update bot_outbox set not_before_ms = 0 where seq = 0")
         .await;
-    key = ob(&db).claim(DM, 1).await.unwrap().remove(0).key;
+    key = ob(&db).claim(&SLACK, 1).await.unwrap().remove(0).key;
     assert_eq!(key.generation, Generation(2), "새 발송 세대, 같은 순번");
     ob(&db).begin(key.clone(), rev("r1")).await.unwrap();
     let retry_after = Some(Duration::from_secs(120));
@@ -269,7 +274,7 @@ async fn not_sent_failures_retry_with_the_longer_of_backoff_and_retry_after_then
     // 재시도를 다 쓰면 운영자에게 최종 실패(보류)로 보인다
     db.sql("update bot_outbox set not_before_ms = 0 where seq = 0")
         .await;
-    key = ob(&db).claim(DM, 1).await.unwrap().remove(0).key;
+    key = ob(&db).claim(&SLACK, 1).await.unwrap().remove(0).key;
     ob(&db).begin(key.clone(), rev("r1")).await.unwrap();
     ob(&db)
         .settle(
@@ -295,7 +300,7 @@ async fn stale_and_unsent_settlements_change_nothing() {
         return;
     };
     two_replies(&db).await;
-    let key = ob(&db).claim(DM, 1).await.unwrap().remove(0).key;
+    let key = ob(&db).claim(&SLACK, 1).await.unwrap().remove(0).key;
     // begin 전의 settle은 받지 않는다
     let early = ob(&db).settle(key.clone(), DeliveryOutcome::Rejected).await;
     assert!(matches!(early, Err(Error::Stale)));
@@ -334,7 +339,7 @@ async fn publishing_a_new_active_revision_invalidates_a_checked_begin() {
         return;
     };
     two_replies(&db).await;
-    let key = ob(&db).claim(DM, 1).await.unwrap().remove(0).key;
+    let key = ob(&db).claim(&SLACK, 1).await.unwrap().remove(0).key;
     // 게이트웨이가 r1로 자격을 검사한 뒤 판본이 r2로 교체되면 begin은 Stale이다
     db.store
         .replace(

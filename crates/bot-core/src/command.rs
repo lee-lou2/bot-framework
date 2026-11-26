@@ -2,7 +2,7 @@
 //! → 위임(`Delegate`) → 기억·예약·감사. 데이터 모양이 중심이고, 이 값들을 어떻게 저장하고 판정하는지는 `port.rs`의 포트를 구현하는 크레이트의 몫이다.
 //! 이름에 주의한다: `port::Reply<'a, T>`는 회신이 아니라 포트 메서드의 비동기 반환형 별칭이다(`docs/glossary.md`).
 
-use crate::{id::*, state::*};
+use crate::{id::*, intake::PushTransportId, state::*};
 use std::{
     collections::BTreeSet,
     time::{Duration, SystemTime},
@@ -51,6 +51,8 @@ pub enum Target {
 /// scopes는 접수 시점 요청자 권한의 스냅샷이다. 브로커는 호출마다 현재 정책과 교집합을 취한다.
 #[derive(Clone, Debug)]
 pub struct Accept {
+    /// 인증된 입구가 정한 원래 대화의 발송 책임. 조회로 받는 입구와 정적 예약은 None이다.
+    pub reply_transport: Option<PushTransportId>,
     pub event: Envelope,
     pub approver: Option<PrincipalId>,
     pub revision: Revision,

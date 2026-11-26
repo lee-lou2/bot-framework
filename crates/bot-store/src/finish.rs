@@ -256,12 +256,12 @@ pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: 
 /// 순번은 이 run의 기존 행(승인 카드 포함) 다음부터 잇는다. 호출자가 run을 잠갔다.
 pub(crate) async fn push_reply(tx: &mut Tx<'_>, profile: &str, run: &str, body: &str) -> R<()> {
     sqlx::query(
-        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body)
+        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body, transport)
          select r.profile, r.id, n.seq, 'reply:' || r.id || ':' || n.seq::text, r.binding, r.principal,
-                r.conv_kind, r.conv_id, r.thread, $3
+                r.conv_kind, r.conv_id, r.thread, $3, coalesce(r.reply_transport, '')
          from bot_runs r,
               lateral (select coalesce(max(o.seq) + 1, 0) as seq from bot_outbox o where o.profile = r.profile and o.run = r.id) n
-         where r.profile = $1 and r.id = $2 and r.conv_kind in ('direct', 'channel')",
+         where r.profile = $1 and r.id = $2 and not r.private and r.conv_kind in ('direct', 'channel')",
     )
     .bind(profile)
     .bind(run)

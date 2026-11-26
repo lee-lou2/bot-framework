@@ -18,7 +18,7 @@ use crate::{
     schedule_routes::{is_ts, split_route},
 };
 use bot_core::{
-    intake::{NotSentReason, Outgoing},
+    intake::{DeliveryScope, NotSentReason, Outgoing, PushTransportId},
     profile::{Adapter, Snapshot},
     slack::{BotThread, BotThreads},
     state::ConversationKind,
@@ -397,14 +397,18 @@ impl SlackSender {
 }
 
 impl Sender for SlackSender {
-    fn kinds(&self) -> Vec<ConversationKind> {
-        vec![ConversationKind::Channel, ConversationKind::Direct]
+    fn scope(&self) -> DeliveryScope {
+        DeliveryScope::all(PushTransportId::SLACK)
     }
 
     /// 바인딩이 받을 수 있는 곳에만 보낸다: 채널 바인딩은 **지금 등록부의** 그 채널로(원래 대화의 채널 ID 또는 고정된 정규 경로
     /// `팀ID/채널ID` — 팀과 채널이 모두 지금 등록부와 같아야 한다), DM 바인딩은 DM 채널로만. 스레드는 `ts` 모양이어야 한다.
     fn allows(&self, snapshot: &Snapshot, item: &Outgoing) -> bool {
-        let Some(binding) = snapshot.bindings.get(&item.binding) else {
+        let Some(binding) = snapshot
+            .bindings
+            .get(&item.binding)
+            .filter(|_| item.transport == PushTransportId::SLACK)
+        else {
             return false;
         };
         let destination = &item.destination;

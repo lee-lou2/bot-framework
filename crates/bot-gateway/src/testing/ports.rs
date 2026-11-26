@@ -4,14 +4,14 @@ use bot_core::{
     cards::CardReceipt,
     command::{CallResult, JsonPayload, MemorySeed, ToolCall, TriggerSpec},
     id::*,
-    intake::{DeliveryKey, DeliveryOutcome, Outbox, Outgoing},
+    intake::{DeliveryKey, DeliveryOutcome, DeliveryScope, Outbox, Outgoing, PushTransportId},
     ledger::{
         ApprovalState, CallLedger, CallRecord, Decision, FinishCall, OpenApproval, StartCall,
         StoredApproval,
     },
     port::{Broker, Error, Reply},
     profile::ActiveRevisions,
-    state::{Approval, ConversationKind, Risk, RunContext},
+    state::{Approval, Risk, RunContext},
 };
 use std::{
     collections::BTreeMap,
@@ -256,12 +256,12 @@ impl MemoryOutbox {
 }
 
 impl Outbox for MemoryOutbox {
-    fn claim(&self, kinds: &[ConversationKind], limit: u32) -> Reply<'_, Vec<Outgoing>> {
+    fn claim<'a>(&'a self, scope: &'a DeliveryScope, limit: u32) -> Reply<'a, Vec<Outgoing>> {
         let mut inner = self.inner.lock().unwrap();
         let mut taken = Vec::new();
         let mut rest = Vec::new();
         for item in std::mem::take(&mut inner.pending) {
-            if taken.len() < limit as usize && kinds.contains(&item.destination.kind) {
+            if taken.len() < limit as usize && scope.contains(&item) {
                 inner.leased.push(item.key.clone());
                 taken.push(item);
             } else {
@@ -304,6 +304,7 @@ pub fn outgoing(
     body: &str,
 ) -> Outgoing {
     Outgoing {
+        transport: PushTransportId::SLACK,
         key: DeliveryKey {
             profile: ProfileId(profile.into()),
             run: RunId("run-1".into()),

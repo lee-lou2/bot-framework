@@ -14,7 +14,9 @@ use bot_core::{
         Step, Target, Turn,
     },
     id::*,
-    intake::{PrivateCall, PrivateDecision, PrivateIntake, RequestKey, RequestState},
+    intake::{
+        PrivateCall, PrivateDecision, PrivateIntake, PushTransportId, RequestKey, RequestState,
+    },
     pass::PassChain,
     port::{Error, ProfileSecrets, Reply, RunStore, SecretStore, SecretValue},
     profile::*,
@@ -220,6 +222,7 @@ pub fn tool_target(tool: &str, args: &str) -> TriggerTarget {
 /// 접수된 요청 한 건(원문 확인용)
 #[derive(Clone, Debug)]
 pub struct Accepted {
+    pub reply_transport: Option<PushTransportId>,
     pub run: RunId,
     pub key: RequestKey,
     pub body: String,
@@ -320,6 +323,7 @@ impl RunStore for MemoryStore {
             route.clone().unwrap_or_default()
         );
         let record = Accepted {
+            reply_transport: command.reply_transport,
             run: RunId(String::new()),
             key: key.clone(),
             body: command.event.body.0.clone(),

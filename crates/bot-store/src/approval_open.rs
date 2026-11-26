@@ -193,8 +193,8 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         // 푸시 대화에는 승인 카드를 회신 행으로 같은 커밋에 쌓는다(브로커가 만든 카드만 허용한다)
-        let (kind, binding, revision): (String, String, String) = sqlx::query_as(
-            "select conv_kind, binding, revision from bot_runs where profile = $1 and id = $2",
+        let (kind, binding, revision, transport): (String, String, String, Option<String>) = sqlx::query_as(
+            "select conv_kind, binding, revision, reply_transport from bot_runs where profile = $1 and id = $2",
         )
         .bind(&run.profile)
         .bind(&run.id)
@@ -222,6 +222,9 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         } else if kind == "channel" && routed {
+            if transport.as_deref() != Some(bot_core::intake::PushTransportId::SLACK.as_str()) {
+                return Err(Error::Denied.into());
+            }
             // 채널 출처의 명시 목적지 생성·전송 초안 카드는 공개 채널에 올리지 않는다: 소유자 1:1 DM으로만 전달한다. 같은 커밋에 전달 작업을 쌓아 두면
             // 카드는 영수증(DM 채널·메시지 ts)이 확정될 때까지 열리지 않는다(결정·목록·클릭 대상 아님). 공개 안내는 그 확정 커밋의 한 줄뿐이다
             sqlx::query(

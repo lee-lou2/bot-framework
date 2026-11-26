@@ -13,6 +13,7 @@ use bot_core::{
     command::{Accept, Envelope, JsonPayload, Target},
     cron::Cron,
     id::*,
+    intake::PushTransportId,
     port::Error,
     schedule::*,
     state::Conversation,
@@ -73,11 +74,18 @@ fn due_of(row: &PgRow) -> R<Result<DueSchedule, CloseReason>> {
 }
 
 /// 발화한 run의 접수 명령: 저장된 정의와 원래 대화에서 만든다(호출자가 바꿔 끼울 수 없다).
-fn accept_of(row: &PgRow, revision: &Revision, at_ms: i64, scopes: &BTreeSet<String>) -> R<Accept> {
+fn accept_of(
+    row: &PgRow,
+    revision: &Revision,
+    at_ms: i64,
+    scopes: &BTreeSet<String>,
+    reply_transport: Option<PushTransportId>,
+) -> R<Accept> {
     let id: String = row.get("id");
     let agent = AgentId(row.get("agent"));
     let instruction: String = row.get("instruction");
     Ok(Accept {
+        reply_transport,
         event: Envelope {
             profile: ProfileId(row.get("profile")),
             request: RequestId(format!("usr:{id}:{at_ms}")),
@@ -327,7 +335,16 @@ impl Store {
                     return invalid();
                 }
                 let revision = cmd.checked_revision.clone().ok_or(Error::Invalid)?;
-                let accept = accept_of(&row, &revision, at_ms, &scopes)?;
+                // 원래 대화의 발송 책임은 예약을 만든 실행에 고정돼 있다.
+                let origin_transport: Option<String> = sqlx::query_scalar(
+                    "select reply_transport from bot_runs where profile = $1 and id = $2",
+                )
+                .bind(profile)
+                .bind(row.get::<String, _>("origin_run"))
+                .fetch_one(&mut *tx)
+                .await?;
+                let reply_transport = origin_transport.map(PushTransportId::new).transpose()?;
+                let accept = accept_of(&row, &revision, at_ms, &scopes, reply_transport)?;
                 let checked = check(&accept)?;
                 let run: String = sqlx::query_scalar("select gen_random_uuid()::text")
                     .fetch_one(&mut *tx)

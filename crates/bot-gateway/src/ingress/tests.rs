@@ -158,6 +158,7 @@ async fn chat_goes_to_the_bound_agent_with_the_requesters_scope_snapshot() {
     assert_eq!(records[0].approver.as_deref(), Some("local:owner"));
     assert_eq!(records[0].revision, "personal-r1");
     assert_eq!(records[0].body, r#"{"text":"오늘 일정 알려줘"}"#);
+    assert_eq!(records[0].reply_transport, None);
 }
 
 #[tokio::test]
@@ -409,6 +410,10 @@ async fn private_pass_uses_distinct_request_id_for_normal_dm() {
     );
     let record = &rig.store.accepted()[0];
     assert_eq!(record.key.request.0, "D1.100.1:pass");
+    assert_eq!(
+        record.reply_transport,
+        Some(bot_core::intake::PushTransportId::SLACK)
+    );
     assert_eq!(record.target, "agent main 안녕?");
 }
 

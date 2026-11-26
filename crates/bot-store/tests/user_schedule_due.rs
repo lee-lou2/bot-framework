@@ -57,8 +57,9 @@ async fn firing_makes_one_run_in_the_original_conversation_and_closes_a_one_shot
         return;
     };
     let origin = run_in(&db, "r1", OWNER, ConversationKind::Direct).await;
-    db.sql("update bot_runs set private_memory_read = true")
-        .await; // 원 요청 트리가 private 기억을 읽었다
+    // 원 요청 트리는 private 기억을 읽었고 Slack과 다른 입구에서 들어왔다.
+    db.sql("update bot_runs set private_memory_read = true, reply_transport = 'fixture-push'")
+        .await;
     let spec = spec_in(&db, 3_600_000).await;
     begin_tool(&db, &origin, "c1", "schedule.create", sealed(&spec)).await;
     let recall = StartCall {
@@ -120,6 +121,11 @@ async fn firing_makes_one_run_in_the_original_conversation_and_closes_a_one_shot
     assert_eq!(
         (got.conversation.kind, got.conversation.id.as_str()),
         (ConversationKind::Direct, "c1")
+    );
+    assert_eq!(
+        db.scalar::<String>("select reply_transport from bot_runs where trigger is not null")
+            .await,
+        "fixture-push"
     );
     assert_eq!(
         got.scopes,

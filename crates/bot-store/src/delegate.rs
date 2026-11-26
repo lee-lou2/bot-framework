@@ -47,7 +47,8 @@ impl Store {
             return Err(Error::Denied.into());
         }
         let p = sqlx::query(
-            "select root, depth, agent, principal, approver, scopes, revision, binding, conv_kind, conv_id, thread
+            "select root, depth, agent, principal, approver, scopes, revision, binding, conv_kind, conv_id, thread,
+                    reply_transport
              from bot_runs where profile = $1 and id = $2",
         )
         .bind(&parent.profile)
@@ -91,8 +92,8 @@ impl Store {
         let scopes: Vec<String> = d.scopes.iter().cloned().collect();
         sqlx::query(
             "insert into bot_runs (profile, id, root, parent, parent_step, depth, agent, principal, approver, scopes, revision,
-                                   binding, conv_kind, conv_id, thread, target, input)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
+                                   binding, conv_kind, conv_id, thread, target, input, reply_transport)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
         )
         .bind(&parent.profile)
         .bind(&child)
@@ -111,6 +112,7 @@ impl Store {
         .bind(p.get::<Option<String>, _>("thread"))
         .bind(&target)
         .bind(&input)
+        .bind(p.get::<Option<String>, _>("reply_transport"))
         .execute(&mut *tx)
         .await?;
         park(&mut tx, &parent, &Wait::Child(child.clone())).await?;

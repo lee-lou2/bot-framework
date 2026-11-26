@@ -186,6 +186,13 @@ async fn the_approved_draft_reaches_the_destination_and_ends_the_run_in_one_comm
         return;
     };
     let run = destination_run(&db, ConversationKind::Direct).await;
+    // 원래 회신 어댑터와 승인한 명시 목적지의 어댑터는 서로 다를 수 있다.
+    sqlx::query("update bot_runs set reply_transport = 'test-push' where profile = $1 and id = $2")
+        .bind(&run.attempt.profile.0)
+        .bind(&run.attempt.run.0)
+        .execute(db.store.pool())
+        .await
+        .unwrap();
     let (draft, approval) =
         request_delivery(&db, &run, answers(&["아침 요약", "두 번째 답"])).await;
     assert_eq!(state_of_run(&db, &run.attempt.run).await, "waiting");
@@ -228,6 +235,18 @@ async fn the_approved_draft_reaches_the_destination_and_ends_the_run_in_one_comm
     );
     // 원래 대화에는 답이 가지 않는다(승인 카드 한 건만 있다)
     assert_eq!(outbox_rows(&db, "c1").await, 1);
+    assert_eq!(
+        db.scalar::<String>("select transport from bot_outbox where conv_id = 'c1'")
+            .await,
+        "test-push"
+    );
+    assert_eq!(
+        db.scalar::<i64>(
+            "select count(*) from bot_outbox where conv_id = 'D9' and transport = 'slack'"
+        )
+        .await,
+        2
+    );
     // 승인 소비·호출 완료·초안 확정·감사가 같은 커밋이다
     assert_eq!(
         calls(&db)

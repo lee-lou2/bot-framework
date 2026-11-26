@@ -3,7 +3,7 @@ mod support;
 use bot_core::{
     admin::{AdminAct, HoldRef, HoldVerdict},
     id::*,
-    intake::{DeliveryOutcome, Outbox, RequestKey},
+    intake::{DeliveryOutcome, DeliveryScope, Outbox, PushTransportId, RequestKey},
     ledger::{ApprovalState, CallLedger, Decision, PrivateLedger, PrivateOutcome},
     port::{Error, RunAdmin, RunStore},
     profile::ActiveRevisions,
@@ -161,8 +161,8 @@ async fn remapping_fences_private_and_reply_starts_but_accepts_prior_receipts() 
         let run = leased_in(&db, name, ConversationKind::Direct).await;
         runs(&db).finish(run.attempt, done(name)).await.unwrap();
     }
-    let kinds = &[ConversationKind::Direct];
-    let mut replies = Outbox::claim(&old, kinds, 2).await.unwrap();
+    let scope = DeliveryScope::all(PushTransportId::SLACK);
+    let mut replies = Outbox::claim(&old, &scope, 2).await.unwrap();
     assert_eq!(replies.len(), 2);
     let sent = replies.pop().unwrap().key;
     let unsent = replies.pop().unwrap().key;
@@ -181,7 +181,7 @@ async fn remapping_fences_private_and_reply_starts_but_accepts_prior_receipts() 
         Err(Error::Stale)
     ));
     assert!(matches!(
-        Outbox::claim(&old, kinds, 1).await,
+        Outbox::claim(&old, &scope, 1).await,
         Err(Error::Stale)
     ));
     assert!(matches!(
