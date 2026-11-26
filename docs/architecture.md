@@ -2,6 +2,15 @@
 
 일정을 묻는 CLI 요청을 예로 든다. 게이트웨이가 로컬 사용자를 확인해 접수하면 워커가 main을 실행한다. 모델이 agenda.list를 요청하면 브로커가 권한을 확인한 뒤 일정 도구를 실행한다. 예약도 같은 경로로 도구를 직접 부를 수 있다.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/runtime-architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="diagrams/runtime-architecture-light.svg">
+  <img alt="Bot Framework 전체 런타임 아키텍처 및 신뢰 경계" src="diagrams/runtime-architecture-light.svg" width="100%">
+</picture>
+
+<details>
+<summary>텍스트 흐름도 (Mermaid)</summary>
+
 ```mermaid
 flowchart LR
   G[Gateway] -->|접수| D[(PostgreSQL)]
@@ -23,6 +32,8 @@ flowchart LR
   W -->|결과와 회신 예약| D
   D -->|원래 대화로 회신| G
 ```
+
+</details>
 
 ## 각 역할이 맡는 일
 
@@ -57,6 +68,12 @@ flowchart LR
 ### 모델 실행기 선택
 
 대화와 브로커 도구를 쓰는 에이전트는 API 직접 호출을 기본으로 권장한다. 에이전트가 `builtin: [read]`로 작업 공간의 파일을 읽어야 하면 그 읽기 격리를 보증하는 Claude CLI VM을 쓴다.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/model-execution-paths-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="diagrams/model-execution-paths-light.svg">
+  <img alt="모델 실행 2경로 비교 (직접 API vs 일회용 VM)" src="diagrams/model-execution-paths-light.svg" width="100%">
+</picture>
 
 | 실행기 | 워커 호스트 | 모델 프로세스 | 공급자 키 | 사용할 수 있는 내장 도구 |
 |---|---|---|---|---|
@@ -99,6 +116,12 @@ Rust 어댑터는 열린 리스너의 실제 주소 하나로 init용 `BOT_RELAY
 스케줄러는 예약만 접수한다. 데모 모델에는 VM이나 상류 서비스 키가 필요하지 않으며, 데모 도구에는 실제 도구와 같은 설치·격리·승인 규칙이 적용된다.
 
 ## Rust 크레이트
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/crate-dependencies-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="diagrams/crate-dependencies-light.svg">
+  <img alt="Rust 워크스페이스 크레이트 의존 구조 (8 Crates)" src="diagrams/crate-dependencies-light.svg" width="100%">
+</picture>
 
 | 크레이트 | 책임 | 내부 의존 |
 |---|---|---|

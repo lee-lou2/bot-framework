@@ -4,6 +4,16 @@
 
 OpenAI 호환 HTTP 입구를 구성하면 공식 Python·Node SDK의 `base_url`을 `http://127.0.0.1:8788/v1`로 바꾸고 발급받은 API 키로 에이전트에 요청할 수 있습니다. `models.list()`로 호출할 모델을 찾고 `chat.completions.create()`로 대화합니다. [SDK 연결 예시](docs/gateway.md#openai-호환-api) · [모델 바인딩 설정](docs/profile-spec.md#openai-모델-바인딩)
 
+## 전체 구조
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/runtime-architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/diagrams/runtime-architecture-light.svg">
+  <img alt="Bot Framework 전체 런타임 아키텍처" src="docs/diagrams/runtime-architecture-light.svg" width="100%">
+</picture>
+
+모델은 호스트와 서비스 키에 닿지 못하며, 모든 요청은 PostgreSQL에 먼저 커밋되고 모든 도구 호출은 브로커(`Broker::call`) 한 곳에서 인가·승인·감사됩니다. 모델 실행 2경로(직접 API·일회용 VM) 비교와 Rust 크레이트 의존 구조는 [전체 구조 문서](docs/architecture.md)에서 볼 수 있습니다.
+
 ## 로컬 데모 시작
 
 예시는 외부 계정 없이 로컬 데모 모델과 합성 일정 서버를 씁니다. rustup, Node.js와 npm, Python 3, 실행 중인 PostgreSQL을 준비합니다. rustup은 저장소에 고정된 Rust 1.98.1과 Cargo를 사용합니다. Linux에서는 `bubblewrap`, `socat`, `ripgrep`도 설치합니다. 저장소 루트에서 실행하세요.
