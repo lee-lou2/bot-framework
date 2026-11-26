@@ -25,6 +25,7 @@ bot serve --role all
 ```sh
 PG_DEMO_PASS="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
 docker run -d --rm --name bot-demo-pg -p 127.0.0.1:5432:5432 -e POSTGRES_DB=bot_demo -e POSTGRES_PASSWORD="$PG_DEMO_PASS" postgres:16
+until docker exec bot-demo-pg pg_isready -h 127.0.0.1 -U postgres -d bot_demo >/dev/null 2>&1; do sleep 1; done
 export BOT_DATABASE_URL="postgres://postgres:${PG_DEMO_PASS}@127.0.0.1:5432/bot_demo"
 ```
 

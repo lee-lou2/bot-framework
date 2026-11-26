@@ -123,7 +123,7 @@ policy:
 
 ### SKILL.md front matter와 크기 상한
 
-`SKILL.md` 맨 위에는 선택적으로 Agent Skills 형식의 YAML front matter(`---`로 열고 `---`로 닫는다)를 둘 수 있다([skill.schema.json](../schemas/v1/skill.schema.json)). front matter가 없는 기존 `SKILL.md`는 파일 전체를 본문으로 읽는다. 맨 위 `---`를 닫지 않으면(단독 `---` 한 줄로 파일이 끝나는 경우 포함) 오타나 잘못된 메타데이터가 프롬프트로 흘러가지 않도록 `front-matter-unclosed` 오류로 거절한다.
+`SKILL.md` 맨 위에는 선택적으로 Agent Skills 형식의 YAML front matter(`---`로 열고 `---`로 닫는다)를 둘 수 있다([skill.schema.json](../schemas/v1/skill.schema.json)). front matter가 없는 기존 `SKILL.md`는 파일 전체를 본문으로 읽는다. `SKILL.md`에서 맨 위 `---`를 닫지 않으면(단독 `---` 한 줄로 파일이 끝나는 경우 포함) 오타나 잘못된 메타데이터가 프롬프트로 흘러가지 않도록 `front-matter-unclosed` 오류로 거절한다(구판 `AGENT.md`의 단독 `---` 평문 호환은 그대로 유지한다).
 
 | front matter 키 | 규칙 |
 |---|---|
@@ -334,7 +334,7 @@ HTTP response 기본값 accepted는 커밋 후 202와 request_id를 준다. `{mo
 
 같은 프로필 ID를 다시 등록하면 그 시점에 남아 있는 참조로 필수 판본을 다시 계산한다. 재등록 자체가 끝난 실행이나 무효화된 카드를 다시 열지는 않는다. 필수 번들이 없거나 손상됐으면 프로필 ID와 SHA-256 전체 64자리를 알려 기동·교체를 중단한다. 기존 활성 집합, 카드 상태, 실행 시도 횟수는 보존한다.
 
-**구버전 DB의 누락 번들 보충.** `bot profile-bundle put <프로필 폴더>`는 폴더명과 프로필 ID, 파일 구조와 크기 한도를 검증한다. 파일을 경로순으로 인코딩한 정규 번들의 SHA-256을 계산해 `BOT_DATABASE_URL`이 가리키는 DB에 보관하고, 프로필 ID와 전체 해시를 출력한다. 구판(`BOTPROFILE1`) 판본이 저장소에 고정돼 있으면 같은 원본 폴더로 그 구판 SHA-256을 재생성해 보충하고, 고정되지 않은 폴더는 현행 검증 규칙을 그대로 적용한다. 이 작업은 호스트 등록부나 모델·도구 자격 없이 실행한다.
+**구버전 DB의 누락 번들 보충.** `bot profile-bundle put <프로필 폴더>`는 폴더명과 프로필 ID, 파일 구조와 크기 한도를 검증한다. 파일을 경로순으로 인코딩한 정규 번들의 SHA-256을 계산해 `BOT_DATABASE_URL`이 가리키는 DB에 보관하고, 프로필 ID와 전체 해시를 출력한다. 저장소에 고정된 구판(`BOTPROFILE1`)·신판(`BOTPROFILE2`) 판본 중 이 폴더가 생성하는 판본을 모두 보충하고(둘 다 고정돼 있으면 둘 다 보관), 어느 것도 고정되지 않은 폴더는 현행 검증 규칙을 그대로 적용한다. 이 작업은 호스트 등록부나 모델·도구 자격 없이 실행한다.
 
 기동 오류에 표시된 ID·해시와 보충 결과가 일치하면 원래 기동 명령을 다시 실행한다. 같은 원본을 여러 번 보관해도 번들은 하나다. 다른 판본의 폴더는 그 판본으로만 보관된다. 기존 키의 저장 바이트와 충돌하면 덮어쓰기 없이 실패한다. 보충 자체로는 활성 판본이나 실행·승인 상태가 바뀌지 않는다.
 
@@ -378,7 +378,7 @@ BOT_HOST_CONFIG는 CLI가 읽는 JSON이다. gateway 키는 게이트웨이가 �
 |---|---|---|
 | `triggers.yaml` `preapproved` | 닫힌 객체(`max_per_day`·`targets` 필수, 미지 키 금지), `max_per_day` 1..=65535 정수, `targets` 1..=64개 중복 없는 `{operation, target}`(각 1~128자, 와일드카드·URL·공백·`..` 금지) | 비-beat `cron` + `target.tool` 전용, `input`·`private`·`human_approval` 병용 금지, 대상 도구의 `effects: true` 여부(`preapproval_unenforceable`) |
 | `triggers.yaml` `human_approval` | 닫힌 객체(`approvers` 필수, 미지 키 금지), `approvers` 1..=16개 중복 없는 `slack:<워크스페이스>/<U\|W…>` 형식(최대 102자) | `on.event` + `target.tool` 전용, `match`의 정확한 확인 문구(`body.text`)·이모지(`body.reaction`) 고정, `private` 병용 금지, 바인딩 워크스페이스 일치·`profile.yaml` 멤버 여부·워크스페이스 63자 상한 |
-| `triggers.yaml` `on.cron` | 5칸 공백 구분 문자열 또는 지원 별칭 7종(`@hourly`·`@daily`·`@midnight`·`@weekly`·`@monthly`·`@yearly`·`@annually`) | 분(0~59)·시(0~23)·일(1~31)·월(1~12)·요일(0~7) 범위, 증분(`/n`), 시작≤끝, 일·요일 외 `?` 금지, 256바이트 상한 |
+| `triggers.yaml` `on.cron` | 5칸 공백 구분(유니코드 `White_Space` 포함) 문자열 또는 지원 별칭 7종(`@hourly`·`@daily`·`@midnight`·`@weekly`·`@monthly`·`@yearly`·`@annually`) | 분(0~59)·시(0~23)·일(1~31)·월(1~12)·요일(0~7) 범위, 증분(`/n`), 시작≤끝, 일·요일 외 `?` 금지, 256바이트 상한 |
 | `triggers.yaml` 기타 | 트리거 필수 필드, `on`·`target` 분기, cron 전용 키(`principal`·`approver`·`beat`)·`response`·`private` 기본 배치 | `private_pass`의 `private: true` 전제, `http.path` 정규화(`..`·`//`·공백·256바이트), 지원 이벤트(`message`·`thread-reply`·`reaction`), 봉투 경로 루트, `sync`+도구 조합, ID·`order` 중복, 바인딩·도구·주체·고정 `args`·`input` 대조 |
 | `profile.yaml` · `tools.yaml` · `env.yaml` · `AGENT.md` · `SKILL.md` | 닫힌 객체, 버전, 이름·식별자·스코프·입력 스키마 어휘 형식, `SKILL.md` front matter 키·길이·문자 규칙 | `id`/스킬 `name`=폴더명, IANA 시간대, 역할·스코프·비밀·바인딩·에이전트·도구 참조, 예약 도구 ID·예약 환경 변수, `SKILL.md` `allowed-tools` 전용 코드·본문 32 KiB 합계, `tools.lock.yaml` 해시, 호스트 등록부 대조 |
 
