@@ -2,7 +2,6 @@
 pub use bot_core::trace::*;
 mod export;
 mod fingerprint;
-mod http;
 mod otlp;
 mod policy;
 

@@ -168,7 +168,7 @@ fn bad_configuration_is_refused_before_anything_starts() {
         )
     };
     for (what, t) in [
-        ("https", backend("https://collector:4318", "X-A", None)),
+        ("ftp", backend("ftp://collector:4318", "X-A", None)),
         (
             "사용자 정보",
             backend("http://user:pw@collector:4318", "X-A", None),

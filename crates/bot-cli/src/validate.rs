@@ -15,7 +15,7 @@ use bot_gateway::{host::HostConfig, http::token::MIN_KEY_BYTES};
 use std::collections::BTreeSet;
 
 mod trace;
-pub use trace::trace_secrets;
+pub use trace::{all_needed_secrets, host_obs_secrets, trace_secrets};
 
 /// 이 프로필이 쓰는 자격 이름: 프로필이 선언한 것 + 도구가 환경으로 받는 것 + 바인딩한 입구가 쓰는 것(호스트가 정한 이름) + 수집 헤더가 받는 것
 /// + 프로필이 허용한 모델 별칭 중 서비스 키가 필요한 것(`claude-cli`·API 직접 호출)의 키(호스트가 정한 이름)
@@ -287,9 +287,11 @@ pub async fn run(settings: &Settings) -> Result<(), String> {
         };
     for snapshot in active.values() {
         problems.extend(missing_model_sandbox(snapshot, &loaded.host));
-        problems.extend(missing_secrets(&*store, snapshot, &loaded.host, &settings.secrets).await);
         problems.extend(weak_http_keys(&*store, snapshot, &loaded.host.gateway).await);
         problems.extend(crate::serve::seed::problems(snapshot));
+    }
+    for (profile, names) in all_needed_secrets(active.values().map(AsRef::as_ref), &loaded.host) {
+        problems.extend(missing_named(&*store, &profile, names, &settings.secrets).await);
     }
     let snapshots: Vec<_> = active.values().cloned().collect();
     problems.extend(weak_openai_keys(&*store, &snapshots, &loaded.host.gateway).await);

@@ -39,6 +39,10 @@ impl RunSpan {
             .attr(key::BOT_RUN_ID, attempt.run.0.clone())
             .attr(key::BOT_RUN_ROOT, ctx.root.0.clone())
             .attr(key::BOT_ATTEMPT_GENERATION, attempt.generation.0)
+            .attr(key::BOT_PRINCIPAL, ctx.principal.0.clone())
+            .attr(key::USER_ID, ctx.principal.0.clone())
+            .attr(key::GEN_AI_CONVERSATION_ID, ctx.conversation.id.clone())
+            .attr(key::SESSION_ID, ctx.conversation.id.clone())
             .attr(
                 key::BOT_CONVERSATION_KIND,
                 kind_code(&ctx.conversation.kind),

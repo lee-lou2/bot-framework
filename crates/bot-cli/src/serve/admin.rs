@@ -122,6 +122,8 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     let config = settings
         .config(addr)
         .traces(deps.observe.exporter.clone())
+        .logs(deps.observe.logs.clone())
+        .issues(deps.observe.issues.clone())
         .leak_redactor(deps.observe.redactor.clone())
         .fence(move || {
             let active = active.clone();

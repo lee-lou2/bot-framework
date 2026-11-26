@@ -16,7 +16,9 @@ use super::{
 };
 use crate::{
     context::{self, Assembled, ContextError, ContextInput},
-    model::{DoneCall, Exchange, ModelError, ModelRunner, ModelStep, RunnerKind, Session},
+    model::{
+        DoneCall, Exchange, ModelError, ModelMeta, ModelRunner, ModelStep, RunnerKind, Session,
+    },
 };
 use bot_core::{
     attachments,
@@ -25,7 +27,7 @@ use bot_core::{
     port::Error,
     profile::Snapshot,
     state::{ConversationKind, RunContext},
-    trace::{key, now_nano},
+    trace::{SpanKind, key, now_nano},
 };
 use serde_json::json;
 use std::{collections::HashSet, sync::Arc, time::SystemTime};
@@ -185,8 +187,9 @@ impl Worker {
             session,
         );
         let started = now_nano();
+        let meta = runner.meta(&alias);
         let result = runner.step(request).await;
-        self.model_span(span, 0, &alias, started, &result);
+        self.model_span(span, 0, &alias, meta.as_ref(), started, &result);
         match result {
             Ok(ModelStep::Final { text, outcome, .. }) => {
                 answer(ctx, &text, outcome, ctx.attempt.generation == Generation(1))
@@ -233,8 +236,16 @@ impl Worker {
                         None,
                     );
                     let started = now_nano();
+                    let meta = runner.meta(&assembled.model);
                     let result = runner.step(request).await;
-                    self.model_span(span, turn, &assembled.model, started, &result);
+                    self.model_span(
+                        span,
+                        turn,
+                        &assembled.model,
+                        meta.as_ref(),
+                        started,
+                        &result,
+                    );
                     match result {
                         Ok(ModelStep::Final { text, outcome, .. }) => {
                             // 이 응답의 사용량과 앞 차례들의 기록이 모두 있을 때만 run 전체의 합이다
@@ -357,14 +368,22 @@ impl Worker {
         span: &RunSpan,
         turn: usize,
         alias: &str,
+        meta: Option<&ModelMeta>,
         started: u64,
         result: &Result<ModelStep, ModelError>,
     ) {
         let mut record = span
             .child("model", &turn.to_string(), "worker.model")
+            .kind(SpanKind::Client)
             .started_at(started)
             .attr(key::GEN_AI_OPERATION_NAME, "chat")
             .attr(key::GEN_AI_REQUEST_MODEL, alias.to_owned());
+        if let Some(meta) = meta {
+            record = record.attr(key::GEN_AI_PROVIDER_NAME, meta.provider);
+            if result.is_ok() {
+                record = record.attr(key::GEN_AI_RESPONSE_MODEL, meta.model.clone());
+            }
+        }
         match result {
             Ok(ModelStep::Final { usage, .. } | ModelStep::Calls { usage, .. }) => {
                 // 상류가 보고하지 않은 사용량은 0으로 적지 않고 속성을 비운다(실제 요청은 입력도 출력도 0일 수 없다)

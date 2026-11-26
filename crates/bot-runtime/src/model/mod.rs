@@ -58,11 +58,22 @@ pub enum RunnerKind {
     Loop,
 }
 
+/// 계측용 공급자·상류 모델 정보(Langfuse·LangSmith 등 OTel GenAI 수집기에 싣는다).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelMeta {
+    pub provider: &'static str,
+    pub model: String,
+}
+
 /// 모델 실행 포트.
 pub trait ModelRunner: Send + Sync {
     fn kind(&self) -> RunnerKind;
     /// Step 방식은 모델 한 차례를, Loop 방식은 CLI 한 번 실행 전체를 돌려준다.
     fn step(&self, request: ModelRequest) -> StepFuture<'_>;
+    /// 프로필 별칭에 연결된 공급자·상류 모델 ID(관측 메타데이터 전용, 비밀 없음).
+    fn meta(&self, _alias: &str) -> Option<ModelMeta> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

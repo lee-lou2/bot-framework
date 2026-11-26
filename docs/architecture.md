@@ -92,7 +92,7 @@ flowchart LR
 
 `sandbox.apple`에서 활성화 지문에 포함하는 값은 `image`와 `network`다. 둘 중 하나를 바꾸면 새 집합을 활성화해야 한다. `relay_bind`, `work_root`, `instance`, `binary`는 워커별 로컬 설정이다.
 
-`admin.trace`(수집·OTLP) 설정도 활성화 지문에 포함한다(목적지·헤더·내용 허용·식별자 표기·표본 비율). 거두거나 바꾸면 새 집합을 활성화해야 하고, 옛 설정으로 남은 프로세스는 구판이 되어 내보내기를 멈춘다([관리 화면](admin.md#추적otlp)).
+`admin.trace`(OTLP 추적)·`admin.logs`(OTLP 로그)·`admin.issues`(Sentry 호환 이슈 트래커) 설정도 활성화 지문에 포함한다(목적지·헤더·자격·수준·내용 허용·식별자 표기·표본 비율). 거두거나 바꾸면 새 집합을 활성화해야 하고, 옛 설정으로 남은 프로세스는 구판이 되어 내보내기를 멈춘다([관리 화면](admin.md#추적otlp)).
 
 Rust 어댑터는 열린 리스너의 실제 주소 하나로 init용 `BOT_RELAY_IP`(RFC 1918 사설 IPv4)·`BOT_RELAY_PORT`(1~65535)와 Claude용 `ANTHROPIC_BASE_URL`(`http://IP:포트`)을 만든다. 호스트만 이 값을 설정한다. 모델 VM은 이미지 기본 진입점인 `bot-init`으로 시작하고, 닻 VM은 `bot-anchor`를 UID:GID `10001:10001`로 실행한다. [이미지와 어댑터의 실행 규약](model-image.md)
 
@@ -108,7 +108,7 @@ Rust 어댑터는 열린 리스너의 실제 주소 하나로 init용 `BOT_RELAY
 | bot-runtime | 워커·예약·위임 및 Apple container VM에서 모델 CLI 실행 | core |
 | bot-broker | 도구 인가·승인, 모델 프록시 및 srt에서 MCP 도구 실행 | core |
 | bot-gateway | CLI·Slack·HTTP 접수와 회신 | core |
-| bot-admin | 관리 API·UI와 OTLP 추적 내보내기(모든 역할이 쓴다) | core |
+| bot-admin | 관리 API·UI와 OTLP 추적·로그·이슈 트래커 내보내기(모든 역할이 쓴다) | core |
 | bot-cli | bot 바이너리, SecretStore 구현과 역할 조립 | 위 7개 |
 
 샌드박스 포트는 둘이다. 모델용 Apple container VM(`ContainerSandbox`)은 `bot_core::sandbox::Sandbox<ModelSpec>`을, 도구 서버용 srt(`SrtSandbox`)는 이름만 같은 별개의 `bot_broker::sandbox::Sandbox`를 구현한다. 둘을 묶는 공통 포트는 없고, CLI가 각각의 어댑터를 주입한다.

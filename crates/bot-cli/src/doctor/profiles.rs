@@ -7,7 +7,7 @@ use crate::{
     serve::{Publication, seed},
     settings::Settings,
     validate::{
-        missing_model_sandbox, missing_named, needed_secrets, weak_http_keys, weak_openai_keys,
+        all_needed_secrets, missing_model_sandbox, missing_named, weak_http_keys, weak_openai_keys,
     },
 };
 use bot_profile::{Limits, ProfileSet, Registry};
@@ -126,10 +126,11 @@ async fn secrets(settings: &Settings, host: &HostFile, set: &Arc<ProfileSet>) ->
     let active = set.active();
     let mut problems = Vec::new();
     let mut total = 0;
-    for snapshot in active.values() {
-        let names = needed_secrets(snapshot, host);
+    for (profile, names) in all_needed_secrets(active.values().map(AsRef::as_ref), host) {
         total += names.len();
-        problems.extend(missing_named(&*store, &snapshot.id, names, &settings.secrets).await);
+        problems.extend(missing_named(&*store, &profile, names, &settings.secrets).await);
+    }
+    for snapshot in active.values() {
         problems.extend(weak_http_keys(&*store, snapshot, &host.gateway).await);
     }
     let snapshots: Vec<_> = active.values().cloned().collect();

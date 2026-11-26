@@ -86,3 +86,68 @@ fn collection_for_another_profile_is_a_change_too() {
     )));
     assert_ne!(one, two);
 }
+
+#[test]
+fn logs_and_issues_change_the_fingerprint_and_leaving_them_off_preserves_existing_bytes() {
+    let bare = fingerprint(&host(""));
+    let trace_only = fingerprint(&host(&traced("personal", ENDPOINT)));
+    // 기존 배포(origin/main 34c860b)의 고정 입력 활성화 지문 골든 값 — 우연한 해시 변경을 막는다
+    assert_eq!(
+        bot_admin::json::hex(&bare),
+        "b5912597998a504ee0018a14e3b4910c39cd6c1f223d1b4e04e0e49629b0611d",
+        "기본 호스트 활성화 지문(logs·issues 꺼짐)이 기존 판본과 달라졌다"
+    );
+    assert_eq!(
+        bot_admin::json::hex(&trace_only),
+        "8b06e3e8736e594cce01431284dd3711c7f9adbe02c8e0b65e2db612f1034a4f",
+        "추적만 켠 호스트 활성화 지문이 기존 판본과 달라졌다"
+    );
+    // 기존 배포(logs·issues 없음)는 지문 바이트가 그대로다(null 명시도 같다)
+    assert_eq!(
+        fingerprint(&host(r#", "admin": {"logs": null, "issues": null}"#)),
+        bare
+    );
+    assert_eq!(
+        fingerprint(&host(&format!(
+            r#", "admin": {{"trace": {{"personal": {{{ENDPOINT}}}}}, "logs": null, "issues": null}}"#
+        ))),
+        trace_only
+    );
+
+    let with_logs = fingerprint(&host(
+        r#", "admin": {"logs": {"endpoint": "https://otlp.example.com/v1/logs", "level": "warn"}}"#,
+    ));
+    assert_ne!(with_logs, bare, "로그 내보내기를 켜면 활성화 사건이다");
+    assert_ne!(
+        fingerprint(&host(
+            r#", "admin": {"logs": {"endpoint": "https://otlp.example.com/v1/logs", "level": "error"}}"#,
+        )),
+        with_logs,
+        "로그 수준을 바꾸면 활성화 사건이다"
+    );
+    // 표시 이름만 바꿔서는 지문이 바뀌지 않는다
+    assert_eq!(
+        fingerprint(&host(
+            r#", "admin": {"logs": {"name": "renamed", "endpoint": "https://otlp.example.com/v1/logs", "level": "warn"}}"#,
+        )),
+        with_logs
+    );
+
+    let with_issues = fingerprint(&host(
+        r#", "admin": {"issues": {"kind": "sentry", "endpoint": "https://o0.ingest.sentry.io/api/1/envelope/", "key": {"secret": "sentry-key"}}}"#,
+    ));
+    assert_ne!(with_issues, bare, "이슈 트래커를 켜면 활성화 사건이다");
+    assert_ne!(
+        fingerprint(&host(
+            r#", "admin": {"issues": {"kind": "sentry", "endpoint": "https://o0.ingest.sentry.io/api/1/envelope/", "key": {"secret": "sentry-key"}, "environment": "prod"}}"#,
+        )),
+        with_issues,
+        "환경을 바꾸면 활성화 사건이다"
+    );
+    assert_eq!(
+        fingerprint(&host(
+            r#", "admin": {"issues": {"kind": "sentry", "name": "renamed", "endpoint": "https://o0.ingest.sentry.io/api/1/envelope/", "key": {"secret": "sentry-key"}}}"#,
+        )),
+        with_issues
+    );
+}

@@ -300,9 +300,9 @@ pub async fn run_with(
         fenced.clone() as Arc<dyn ActiveRevisions>,
         publication.revision.clone(),
     ));
-    // 수집(OTLP)을 거두거나 바꾸면(수집 설정은 활성화 지문에 든다) 옛 프로세스는 구판이 된다: 구판의 내보내기 문을 닫아, 큐에 남은 스팬까지 옛 허락(목적지·내용·
-    // 식별자 표기)으로 더 내보내지 않는다. 저장소를 확인하지 못하는 동안도 닫힌 것으로 본다.
-    observe.exporter.set_gate(
+    // 관측(OTLP 추적·로그·이슈 트래커)을 거두거나 바꾸면(설정이 활성화 지문에 든다) 옛 프로세스는 구판이 된다:
+    // 구판의 내보내기 문을 닫아 큐에 남은 스팬·로그·이슈까지 옛 허락으로 더 내보내지 않는다.
+    observe.set_gate(
         {
             let active = active.clone();
             Arc::new(move || {

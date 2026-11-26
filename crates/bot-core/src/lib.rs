@@ -5,7 +5,7 @@
 //! | 분류 | 모듈 |
 //! |---|---|
 //! | 데이터 어휘(타입·값) | `id` · `command` · `state` · `profile` · `identity` · `grant` · `pass` · `mcp` · `install` · `attachments` |
-//! | 포트(트레이트) | `port`(핵심) · `ledger` · `intake` · `schedule` · `admin` · `trace` · `sandbox`(모델 VM) |
+//! | 포트(트레이트) | `port`(핵심) · `ledger` · `intake` · `schedule` · `admin` · `trace` · `issue` · `sandbox`(모델 VM) |
 //! | 어댑터 고유 계약 | `slack` · `cards`(소유자 DM 승인 카드) · `api`(OpenAI 호환 입구) · `cli`(Claude CLI 호출 위치, CLI 입구가 아니다) |
 //! | 비트가 같아야 하는 알고리즘 | `cron` · `canon`(RFC 8785) · `json`(엄격한 읽기) · `scope`(인가 교집합) |
 //!
@@ -26,6 +26,7 @@ pub mod id;
 pub mod identity;
 pub mod install;
 pub mod intake;
+pub mod issue;
 pub mod json;
 pub mod ledger;
 pub mod mcp;

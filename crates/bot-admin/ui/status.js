@@ -24,15 +24,16 @@
   const strip = (hero, minis) => h("div", { class: "strip" }, [hero, h("div", { class: "minis" }, minis)]);
   const link = (label, n, tone, go) => h("button", { type: "button", class: "todo" + (n > 0 ? " " + tone : ""), onclick: go }, [h("b", { text: String(n) }), h("span", { text: label }), icon("chevron", { size: 14 })]);
 
-  function obsSection(o, isNew) {
-    if (!o || !o.enabled) return section("추적 내보내기", null, [D.empty("꺼져 있음", "이 프로필은 추적을 내보내지 않습니다.", "power")]);
+  function obsSection(o, isNew, title, offMsg) {
+    const heading = title || "추적 내보내기";
+    if (!o || !o.enabled) return section(heading, null, [D.empty("꺼져 있음", offMsg || "이 프로필은 추적을 내보내지 않습니다.", "power")]);
     const cells = {}, sent = o.sent || 0, queued = o.queued || 0, dropped = o.dropped || 0, failed = o.failed || 0;
     const hero = h("div", { class: "hero" }, [num(cells, "o.sent", sent, isNew), h("span", { text: "보냄" })]);
     const kids = [strip(hero, [mini(cells, "o.queued", "큐", queued, "", isNew), mini(cells, "o.dropped", "버림", dropped, dropped > 0 ? "warn" : "", isNew), mini(cells, "o.failed", "실패", failed, failed > 0 ? "bad" : "", isNew)])];
     if (o.circuit) kids.push(h("p", { class: "inline" }, [h("span", { class: "inl-t", text: "내보내기 회로" }), B.circuitPill(o.circuit)]));
-    kids.push(D.table(["목적지", "종류", "origin", "상태"], (o.backends || []).map((b) => [b.name, b.kind, b.origin, B.circuitPill(b.state)]), { narrow: [3], label: "추적 목적지 표", emptyTitle: "목적지가 없습니다", emptyIcon: "inbox" }));
+    kids.push(D.table(["목적지", "종류", "origin", "상태"], (o.backends || []).map((b) => [b.name, b.kind, b.origin, B.circuitPill(b.state)]), { narrow: [3], label: heading + " 목적지 표", emptyTitle: "목적지가 없습니다", emptyIcon: "inbox" }));
     if (o.last_error) kids.push(h("p", { class: "inline" }, [h("span", { class: "inl-t", text: "마지막 오류 분류" }), pill(o.last_error, "bad", "error")]));
-    return section("추적 내보내기", null, kids);
+    return section(heading, null, kids);
   }
 
   // ---------- 프로필 하나의 구역들 ----------
@@ -66,6 +67,12 @@
       const names = Object.keys(live.profiles || {}).sort(), shown = names.filter((p) => !app.profile() || p === app.profile());
       sub.textContent = "가동 " + D.uptime(live.process.uptime_secs) + " · 프로필 " + names.join(", ") + (live.build ? " · " + live.build.name + " " + live.build.version : "");
       let list = [];
+      if (live.process && live.process.logs && live.process.logs.enabled) {
+        list.push({ key: "host:logs", sig: JSON.stringify(live.process.logs), build: (isNew) => ({ cells: {}, node: obsSection(live.process.logs, isNew, "로그 내보내기(OTLP)", "로그를 내보내지 않습니다.") }) });
+      }
+      if (live.process && live.process.issues && live.process.issues.enabled) {
+        list.push({ key: "host:issues", sig: JSON.stringify(live.process.issues), build: (isNew) => ({ cells: {}, node: obsSection(live.process.issues, isNew, "이슈 트래커", "이슈를 내보내지 않습니다.") }) });
+      }
       shown.forEach((p) => { list = list.concat(profileSections(p, live.profiles[p], app)); });
       D.patch(body, list, memo, { stagger: true });
     }
