@@ -41,6 +41,7 @@ Rust를 고치지 않는다. 도구는 MCP 서버로 만들고 설정 네 곳을
 
 - `crates/bot-profile/src/model.rs`(입구의 정규 문자열 `entrance`와 종류 이름 `adapter_name`)와 `crates/bot-profile/src/activate.rs`(호스트 별칭 대조)
 - `crates/bot-gateway/src/entrance.rs`(`Entrance`로 바꾸는 곳. 이어서 `Entrance`·`Real` 변종과 `Conflict::fix`의 `match`도 같이 채운다)
+- `crates/bot-gateway/src/routes.rs`(`reply_transport` — 원래 대화의 발송 키 `PushTransportId` 매핑)와 `crates/bot-gateway/src/schedule_routes.rs`(`slack_destination` — 명시 목적지 어댑터 분기)
 - `crates/bot-admin/src/map.rs`
 - `crates/bot-cli/src/validate.rs`의 `entrance_secrets`와 `crates/bot-cli/src/serve/gateway.rs`(어느 입구 리스너를 여는지)
 
@@ -48,7 +49,7 @@ Rust를 고치지 않는다. 도구는 MCP 서버로 만들고 설정 네 곳을
 
 - 프로필 스키마 `schemas/v1/profile.schema.json`의 `bindings` `oneOf`에 항목을 더한다. 해석기 `crates/bot-profile/src/profile.rs`의 `adapter` `match`를 빠뜨리면 `unknown-adapter`로 거절된다(조용히 웹훅이 되지 않는다).
 - 호스트 설정 절: `crates/bot-gateway/src/host.rs`(구조체와 검증), `crates/bot-gateway/src/mapping.rs`(활성화 지문 — 새 절이 없는 설정의 지문 바이트는 그대로여야 한다), `crates/bot-profile/src/host.rs`의 `HostCatalog` 필드와 그것을 채우는 `crates/bot-cli/src/host.rs`의 `catalog()`.
-- 새 입구 어댑터 모듈(수신 → `Inbound` → `Ingress`)과 회신 `Sender`(포트는 `crates/bot-gateway/src/delivery.rs`), 조립은 `crates/bot-cli/src/serve/gateway.rs`.
+- 새 입구 어댑터 모듈(수신 → `Inbound` → `Ingress`)과 회신 `Sender`(포트는 `crates/bot-gateway/src/delivery.rs`, `Sender::scope()`가 고정 `PushTransportId`를 담은 `DeliveryScope`를 반환한다), 조립은 `crates/bot-cli/src/serve/gateway.rs`.
 - 채널 고유 표가 필요하면 마이그레이션(이벤트 중복 제거는 `crates/bot-store/migrations/0022_slack_events.sql`을 본다).
 - 문서: [게이트웨이 운영](gateway.md)의 호스트 설정 표, [프로필 명세](profile-spec.md)의 바인딩.
 
@@ -56,7 +57,12 @@ Rust를 고치지 않는다. 도구는 MCP 서버로 만들고 설정 네 곳을
 
 **새 신원 종류(`IdentityKind`)** 는 컴파일러가 아무 곳도 가리키지 않는다(모두 `==`·`matches!`로 쓰고 `RunOrigin::from_ingress`는 `_ =>`로 끝난다). 직접 찾아야 한다: `crates/bot-core/src/identity.rs`, `crates/bot-core/src/state.rs`, `crates/bot-profile/src/approval.rs`, `crates/bot-store/src/api.rs`(`grep -rn IdentityKind crates/*/src`).
 
-**함정: 회신 outbox의 교차 점유.** `Outbox::claim`은 대화 종류(`conv_kind = any(종류들)`)로 회신을 점유하고(`crates/bot-store/src/outbox.rs`) Slack 발송자는 `Channel`·`Direct`를 점유한다(`crates/bot-gateway/src/slack/send.rs`). 두 번째 push 어댑터가 같은 대화 종류를 쓰면 한 `Deliverer`가 상대 어댑터의 회신을 점유하고, `Sender::allows`가 거짓이면 그 회신을 **거절로 정산해 잃는다**(`crates/bot-gateway/src/delivery.rs`). 새 `ConversationKind`를 쓰면 위 CHECK가 막는다. 어느 쪽이든 점유 키를 대화 종류에서 어댑터 식별자로 올려야 한다. 그 변경이 들어오면 이 절을 갱신한다.
+**회신 outbox 라우팅 계약.** 새 push 어댑터는 아래 네 가지를 지켜야 한다.
+
+- **안정적인 발송 키(`PushTransportId`)**: 푸시 입구는 `crates/bot-gateway/src/routes.rs`의 `reply_transport`가 정한 고정 식별자(`crates/bot-core/src/intake.rs`)를 접수 시 `bot_runs.reply_transport`에 기록한다. 재전달·위임·원래 대화 예약 발화는 이 키를 계승한다.
+- **점유 격리(`Sender::scope`)**: `Outbox::claim`(`crates/bot-store/src/outbox.rs`)은 대화 종류가 아니라 `bot_outbox.transport`와 선택적 `(profile, binding)` 범위로 PostgreSQL에서 먼저 가른다. 두 번째 push 어댑터가 `Direct`·`Channel`을 함께 써도 상대 어댑터의 회신을 점유하거나 거절 정산하지 않는다.
+- **순번 순서**: 같은 `run`의 앞선 `pending`·`sending` 회신은 `transport`와 무관하게 뒤 순번을 막아 발송 순서를 지킨다.
+- **명시 목적지(`ScheduleRoutes`) 제약**: 현재 명시 목적지 등록부(`crates/bot-gateway/src/schedule_routes.rs`), 채널 소유자 승인 DM 경로(`crates/bot-store/src/approval_open.rs`), 목적지 적재(`crates/bot-store/src/delivery.rs`의 `push_to`)는 Slack 채널(`PushTransportId::SLACK`)로 한정돼 있다. 다른 push 어댑터의 명시 목적지를 열려면 `bot_user_schedules`·`bot_deliveries`에 목적지 발송 키를 함께 저장하고 위 세 곳의 Slack 고정을 같이 풀어야 한다.
 
 **빠진 곳 찾기.** `python3 scripts/parity_audit.py slack <새 이름> --skip crates/bot-gateway/src/slack/`은 Slack이 쓴 파일 중 새 이름이 아직 없는 것을 모아 보여 준다. 그 입구에만 있는 기능이면 지워도 되는 점검표다(`--strict`는 빠진 파일이 있으면 실패한다).
 
