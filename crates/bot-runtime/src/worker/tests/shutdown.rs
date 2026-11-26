@@ -1,7 +1,7 @@
 //! 종료 반납(워커): 종료 신호 뒤 유예가 지나도 남은 run은 실행기를 멈추고 정리(`Quiesce`)를 확인한 **뒤에만** `release_for_shutdown`으로 대기열에 돌아간다.
 //! 확인하지 못했거나 확인 입구가 없으면 반납하지 않는다. 유예 안에 끝난 run·취소 요청이 선 run은 반납하지 않는다.
 
-use super::fakes::*;
+use super::{fake_runs::FakeRuns, fakes::*};
 use crate::{
     host::{Deps, Quiesce, SingleModel, WorkerConfig},
     model::{ModelError, ModelRequest, ModelRunner, RunnerKind, StepFuture},
