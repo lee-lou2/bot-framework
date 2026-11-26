@@ -470,12 +470,7 @@ impl Ingress {
                 body: JsonPayload(body_text),
             },
         };
-        let accepted = if extras.is_empty() {
-            self.store.accept(command).await
-        } else {
-            self.store.accept_with(command, extras).await
-        };
-        match accepted {
+        match self.store.accept_with(command, extras).await {
             Ok(run) => Admission::Accepted {
                 run,
                 respond: plan.respond,

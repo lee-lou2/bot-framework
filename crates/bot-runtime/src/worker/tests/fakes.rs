@@ -223,7 +223,7 @@ impl FakeRuns {
 }
 
 impl RunStore for FakeRuns {
-    fn accept(&self, _: Accept) -> Reply<'_, RunId> {
+    fn accept_with(&self, _: Accept, _: AcceptExtras) -> Reply<'_, RunId> {
         Box::pin(async { Err(Error::Unavailable) })
     }
     fn status(&self, _: RequestKey) -> Reply<'_, Option<RequestState>> {

@@ -301,10 +301,6 @@ impl MemoryStore {
 }
 
 impl RunStore for MemoryStore {
-    fn accept(&self, command: Accept) -> Reply<'_, RunId> {
-        self.accept_with(command, AcceptExtras::default())
-    }
-
     fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId> {
         let key = RequestKey {
             profile: command.event.profile.clone(),

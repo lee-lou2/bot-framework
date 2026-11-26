@@ -28,8 +28,8 @@ struct Runs {
 }
 
 impl RunStore for Runs {
-    fn accept(&self, command: Accept) -> Reply<'_, RunId> {
-        self.inner.accept(command)
+    fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId> {
+        self.inner.accept_with(command, extras)
     }
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>> {
         self.inner.status(key)

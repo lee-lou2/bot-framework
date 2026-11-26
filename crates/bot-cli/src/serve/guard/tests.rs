@@ -21,7 +21,7 @@ fn unavailable<T: Send + 'static>() -> Reply<'static, T> {
 }
 
 impl RunStore for Spy {
-    fn accept(&self, _: Accept) -> Reply<'_, RunId> {
+    fn accept_with(&self, _: Accept, _: AcceptExtras) -> Reply<'_, RunId> {
         unavailable()
     }
     fn status(&self, _: RequestKey) -> Reply<'_, Option<RequestState>> {

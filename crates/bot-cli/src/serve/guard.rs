@@ -87,11 +87,6 @@ impl GuardedRuns {
 }
 
 impl RunStore for GuardedRuns {
-    fn accept(&self, command: Accept) -> Reply<'_, RunId> {
-        self.inner.accept(command)
-    }
-
-    /// 인증된 원천·넘김 사슬을 덧붙인 접수도 그대로 넘긴다(기본 구현은 덧붙인 것을 버려, 빠지면 사슬이 조용히 사라진다).
     fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId> {
         self.inner.accept_with(command, extras)
     }

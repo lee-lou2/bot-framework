@@ -47,10 +47,6 @@ macro_rules! reply {
 }
 
 impl RunStore for Store {
-    fn accept(&self, command: Accept) -> Reply<'_, RunId> {
-        reply!(self.accept_run(command))
-    }
-
     fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId> {
         reply!(self.accept_run_with(command, extras))
     }

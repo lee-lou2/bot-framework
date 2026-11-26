@@ -63,12 +63,6 @@ pub struct AcceptExtras {
     pub chain: Option<crate::pass::PassChain>,
 }
 
-impl AcceptExtras {
-    pub fn is_empty(&self) -> bool {
-        self.source.is_none() && self.chain.is_none()
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ToolCall {
     pub attempt: Attempt,

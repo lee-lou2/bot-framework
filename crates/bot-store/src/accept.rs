@@ -139,13 +139,8 @@ pub(crate) async fn insert_run(
 }
 
 impl Store {
-    /// 접수한다. 같은 키·같은 입력 해시는 기존 run, 다른 해시는 `Conflict`다.
-    pub(crate) async fn accept_run(&self, a: Accept) -> R<RunId> {
-        self.accept_run_with(a, AcceptExtras::default()).await
-    }
-
-    /// `accept_run`과 같되 어댑터가 덧붙인 것을 새 접수에만 같은 커밋에 남긴다: 넘김 사슬(F3)의 사슬과 커서, 인증된 원천(F4 증거).
-    /// 덧붙일 것이 없으면 `accept_run`과 같다. 중복 재전달은 최초 접수의 run으로 수렴한다(덧붙인 것은 최초 것이다).
+    /// 같은 키·같은 입력 해시는 최초 run을 돌려주며 내용이 바뀌면 `Conflict`다.
+    /// 새 접수에는 어댑터가 넘긴 후보 사슬·커서와 인증된 원천을 같은 커밋에 남긴다.
     pub(crate) async fn accept_run_with(&self, a: Accept, extras: AcceptExtras) -> R<RunId> {
         let chain = extras.chain.as_ref();
         let c = check(&a)?;

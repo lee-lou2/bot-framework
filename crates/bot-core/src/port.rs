@@ -24,12 +24,30 @@ pub trait ProfileSource: Send + Sync {
 }
 
 pub trait RunStore: Send + Sync {
-    fn accept(&self, command: Accept) -> Reply<'_, RunId>;
-    /// 어댑터가 인증한 원천·넘김 사슬(`AcceptExtras`)을 접수와 한 커밋에 남긴다. 덧붙일 것이 없으면 `accept`다.
-    /// 기본 구현은 덧붙인 것을 저장하지 않고 일반 접수로 처리한다(덧붙임은 증거와 후보를 늘릴 뿐이라 빠져도 더 허용하는 일은 없다).
-    fn accept_with(&self, command: Accept, _extras: AcceptExtras) -> Reply<'_, RunId> {
-        self.accept(command)
+    /// 원천·넘김 사슬이 없는 일반 접수도 같은 구현을 사용한다.
+    fn accept(&self, command: Accept) -> Reply<'_, RunId> {
+        self.accept_with(command, AcceptExtras::default())
     }
+
+    /// 어댑터가 인증한 원천·넘김 사슬(`AcceptExtras`)을 접수와 한 커밋에 남긴다. 저장할 수 없는 접수는 오류로 반환한다.
+    ///
+    /// 접수 저장소는 `accept_with`를 구현해야 한다.
+    ///
+    /// ```compile_fail,E0046
+    /// # use bot_core::{command::*, id::*, intake::{RequestKey, RequestState}, port::{Reply, RunStore}, state::RunContext};
+    /// # struct Store;
+    /// impl RunStore for Store {
+    ///     fn accept(&self, command: Accept) -> Reply<'_, RunId> { unimplemented!() }
+    /// #   fn status(&self, _: RequestKey) -> Reply<'_, Option<RequestState>> { unimplemented!() }
+    /// #   fn claim(&self) -> Reply<'_, Option<RunContext>> { unimplemented!() }
+    /// #   fn renew(&self, _: Attempt) -> Reply<'_, Beat> { unimplemented!() }
+    /// #   fn checkpoint_batch(&self, _: Attempt, _: Vec<Step>) -> Reply<'_, ()> { unimplemented!() }
+    /// #   fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, Completion> { unimplemented!() }
+    /// #   fn fail(&self, _: Attempt, _: Failure) -> Reply<'_, Retry> { unimplemented!() }
+    /// #   fn history(&self, _: Attempt, _: u32) -> Reply<'_, Vec<Turn>> { unimplemented!() }
+    /// }
+    /// ```
+    fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId>;
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>>;
     /// run 트리의 현재 진행 요약(하위 에이전트·실행 중인 도구·승인 대기 여부). 기본 구현은 `None`.
     fn progress(&self, _profile: ProfileId, _run: RunId) -> Reply<'_, Option<RunProgress>> {
