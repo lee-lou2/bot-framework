@@ -73,45 +73,23 @@ pub(crate) async fn append(tx: &mut Tx<'_>, profile: &str, e: &Entry<'_>) -> R<i
         (head.get("seq"), head.get("hash"), head.get("now_ms"));
     let seq = prev_seq + 1;
     let hash = link(profile, &prev, seq, now_ms, e);
-    match e.run_command_id {
-        Some(command_id) => {
-            sqlx::query(
-                "insert into bot_audit (seq, profile, at_ms, actor, action, target, args_sha256, verdict, prev_hash, hash, run_command_id)
-                 values ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-            )
-            .bind(seq)
-            .bind(profile)
-            .bind(now_ms)
-            .bind(e.actor)
-            .bind(e.action)
-            .bind(e.target)
-            .bind(e.args.as_ref().map(|a| a.as_slice()))
-            .bind(e.verdict)
-            .bind(&prev)
-            .bind(hash.as_slice())
-            .bind(command_id)
-            .execute(&mut **tx)
-            .await?;
-        }
-        None => {
-            sqlx::query(
-                "insert into bot_audit (seq, profile, at_ms, actor, action, target, args_sha256, verdict, prev_hash, hash)
-                 values ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, $10)",
-            )
-            .bind(seq)
-            .bind(profile)
-            .bind(now_ms)
-            .bind(e.actor)
-            .bind(e.action)
-            .bind(e.target)
-            .bind(e.args.as_ref().map(|a| a.as_slice()))
-            .bind(e.verdict)
-            .bind(&prev)
-            .bind(hash.as_slice())
-            .execute(&mut **tx)
-            .await?;
-        }
-    }
+    sqlx::query(
+        "insert into bot_audit (seq, profile, at_ms, actor, action, target, args_sha256, verdict, prev_hash, hash, run_command_id)
+         values ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(seq)
+    .bind(profile)
+    .bind(now_ms)
+    .bind(e.actor)
+    .bind(e.action)
+    .bind(e.target)
+    .bind(e.args.as_ref().map(|a| a.as_slice()))
+    .bind(e.verdict)
+    .bind(&prev)
+    .bind(hash.as_slice())
+    .bind(e.run_command_id)
+    .execute(&mut **tx)
+    .await?;
     sqlx::query("update bot_audit_head set seq = $1, hash = $2 where singleton")
         .bind(seq)
         .bind(hash.as_slice())

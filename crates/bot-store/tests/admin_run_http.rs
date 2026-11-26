@@ -468,16 +468,16 @@ async fn the_command_index_upgrade_preserves_the_existing_audit_chain() {
     let Some(db) = TestDb::new().await else {
         return;
     };
-    db.sql("alter table bot_audit drop column run_command_id")
-        .await;
-    db.sql("delete from _sqlx_migrations where version = 27")
-        .await;
     let first = leased(&db, "old-audit").await;
     let run = first.attempt.run.clone();
     runs(&db)
         .fail(first.attempt, Failure::Permanent("fixture"))
         .await
         .unwrap();
+    db.sql("alter table bot_audit drop column run_command_id")
+        .await;
+    db.sql("delete from _sqlx_migrations where version = 27")
+        .await;
     let http = Http::start(&db).await;
     let before = http.verify_audit().await;
     assert_eq!(before["ok"], true);
