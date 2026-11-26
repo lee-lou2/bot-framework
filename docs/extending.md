@@ -11,7 +11,7 @@
 | SecretStore 백엔드 | `bot-cli`만 | [SecretStore 백엔드](#secretstore-백엔드) |
 | 샌드박스 백엔드 | 도구용은 `bot-broker`와 `bot-cli`의 조립 | [샌드박스 백엔드](#샌드박스-백엔드) |
 | 트리거 종류 | 프로필·게이트웨이·관리 화면 | [트리거 종류](#트리거-종류) |
-| 내장 도구 | 여러 크레이트에 같은 이름이 복제돼 있다 | [내장 도구](#내장-도구) |
+| 내장 도구 | 단일 표(`bot-core`)와 각 크레이트의 처리기 | [내장 도구](#내장-도구) |
 
 ## 일반 도구
 
@@ -87,12 +87,9 @@ Rust를 고치지 않는다. 도구는 MCP 서버로 만들고 설정 네 곳을
 
 ## 내장 도구
 
-일반 도구와 달리 승인·DB와 얽혀 있어서 의도적으로 쉽게 만들지 않는다. ID 철자(`memory.share`, `schedule.create`·`schedule.list`·`schedule.cancel`·`schedule.deliver`, `delegate`)가 여러 크레이트에 문자열로 복제돼 있고 컴파일러는 모른다. 빠뜨려도 컴파일되고 그 경로만 조용히 깨진다. 전체 목록은 `grep -rlE '"memory\.share"|"schedule\.(create|list|cancel|deliver)"' crates/*/src`로 다시 센다. 크레이트별로 이런 곳이다.
+일반 도구와 달리 승인·DB와 얽혀 있어서 의도적으로 쉽게 만들지 않는다. 내장 도구 ID·설명·스키마·예약 판별(`reserved`)·승인 카드 본문 분류(`card_body`)는 `crates/bot-core/src/builtin.rs` 한 곳에 모여 있다. 새 내장 도구를 더할 때 손댈 곳은 크레이트별로 다음과 같다.
 
-- 예약 ID: `crates/bot-profile/src/tools.rs`(프로필이 같은 ID를 선언하지 못하게 한다)
-- 노출과 분기: `crates/bot-broker/src/front/mcp.rs`, `crates/bot-broker/src/service/{share,schedule,deliver}.rs`
-- 저장: `crates/bot-store/src/{share,user_schedule,delivery}.rs`
-- 승인 카드 본문을 소유자만 보는 도구 목록: `crates/bot-admin/src/json.rs`. 카드 본문을 가진 도구를 더하면 반드시 함께 고친다.
-- 조립과 맥락: `crates/bot-cli/src/serve/decide.rs`, `crates/bot-runtime/src/context.rs`
-
-ID를 한 곳에 모으는 변경이 들어오면 이 절을 갱신한다.
+- 단일 표·예약·카드 본문 분류: `crates/bot-core/src/builtin.rs` (`model_tools`·`reserved`·`card_body`·`delegate_schema`). 프로필 검증(`crates/bot-profile/src/tools.rs`)과 스캐폴드(`crates/bot-cli/src/scaffold/tool.rs`)는 `builtin::reserved`를 그대로 쓴다.
+- 모델 노출과 분기: API 실행기 `crates/bot-runtime/src/context.rs`·`crates/bot-runtime/src/worker/calls.rs`, VM 릴레이 `crates/bot-broker/src/front/{mcp,delegate}.rs`, 브로커 처리기 `crates/bot-broker/src/service/{share,schedule,deliver}.rs`.
+- 저장과 승인 카드: `crates/bot-store/src/{share,user_schedule,delivery,admin_approvals}.rs`, `crates/bot-admin/src/json.rs`(둘 다 `builtin::card_body`로 소유자 전용 본문 대상을 가른다).
+- 조립과 문서: `crates/bot-cli/src/serve/decide.rs`, `docs/architecture.md`·`docs/plugins.md`·`docs/profile-spec.md`(`.github/scripts/docs_contract.py`가 `crates/bot-core/src/builtin.rs`의 예약 ID가 문서에 적혔는지 확인한다).

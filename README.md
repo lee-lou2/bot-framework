@@ -47,7 +47,7 @@ export BOT_DATABASE_URL="postgres://postgres:${PG_DEMO_PASS}@127.0.0.1:5432/bot_
 
 내 프로필은 `bot init my-bot --template team`(`personal`·`team`·`company`)으로 호스트 설정 예시와 프로필 폴더를 만들고, 출력된 안내대로 환경 변수를 정한 뒤 `bot validate`와 `bot doctor`로 점검합니다. 에이전트·스킬·도구 뼈대는 `bot add agent main/cs`, `bot add skill triage --agent main/cs`, `bot add tool triage.lookup`으로 더합니다. 권한 상한은 자동으로 바꾸지 않습니다. [첫 도구 만들기](docs/first-tool.md) · [명령 안내](docs/gateway.md#자격-보관소와-명령)
 
-[왜 이렇게 만들었나](docs/why.md) · [전체 구조](docs/architecture.md) · [프로필 작성](docs/profile-spec.md) · [첫 도구 만들기](docs/first-tool.md) · [보안](docs/security.md) · [장애 복구](docs/reliability.md) · [MCP 도구](docs/plugins.md) · [관리·관측](docs/admin.md) · [게이트웨이](docs/gateway.md) · [배포 점검](docs/release.md) · [로드맵](docs/roadmap.md)
+[왜 이렇게 만들었나](docs/why.md) · [전체 구조](docs/architecture.md) · [용어집](docs/glossary.md) · [프로필 작성](docs/profile-spec.md) · [첫 도구 만들기](docs/first-tool.md) · [보안](docs/security.md) · [장애 복구](docs/reliability.md) · [MCP 도구](docs/plugins.md) · [관리·관측](docs/admin.md) · [게이트웨이](docs/gateway.md) · [확장 안내](docs/extending.md) · [배포 점검](docs/release.md) · [로드맵](docs/roadmap.md)
 
 ## 라이선스
 
