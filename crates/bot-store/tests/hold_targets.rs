@@ -262,7 +262,7 @@ async fn upgrading_an_orphaned_held_call_opens_one_final_decision() {
 
 #[tokio::test]
 async fn upgrading_terminal_runs_closes_old_tool_holds_without_opening_new_ones() {
-    for state in ["dead", "succeeded", "cancelled"] {
+    for state in ["cancelled", "dead", "succeeded"] {
         let Some(db) = TestDb::new().await else {
             return;
         };
@@ -270,10 +270,11 @@ async fn upgrading_terminal_runs_closes_old_tool_holds_without_opening_new_ones(
         // 구판의 미실행 단계에는 보류 ID가 열려 있고, 호출 전체에는 보류 ID가 없다.
         db.sql("update bot_effects set resolution = 'not_executed' where state = 'held'")
             .await;
-        db.sql(&format!(
-            "update bot_runs set state = '{state}', wait_kind = null, finished_ms = 42"
-        ))
-        .await;
+        let finished = db
+            .scalar::<i64>(&format!(
+                "update bot_runs set state = '{state}', wait_kind = null, finished_ms = bot_now_ms() returning finished_ms"
+            ))
+            .await;
         assert_eq!(
             db.scalar::<i64>(
                 "select count(*) from bot_holds where effect is not null and closed_ms is null"
@@ -296,7 +297,13 @@ async fn upgrading_terminal_runs_closes_old_tool_holds_without_opening_new_ones(
         assert_eq!(
             db.scalar::<Option<i64>>("select closed_ms from bot_holds where effect is not null")
                 .await,
-            Some(42),
+            Some(finished),
+            "{state}"
+        );
+        assert_eq!(
+            db.scalar::<String>("select receipt from bot_effects where step = 'first'")
+                .await,
+            "step-receipt",
             "{state}"
         );
         assert!(db.store.holds(&operator(), None).await.unwrap().is_empty());

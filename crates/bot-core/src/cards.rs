@@ -30,7 +30,8 @@ pub const DM_UNCONFIRMED_NOTICE: &str =
 /// 승인 카드를 소유자 DM으로 전달하지 못해 닫았다는 고정 낱말: 감사 결과이자 미발송 영수증 `{"status":"approval_dm_unavailable"}`의 값이다.
 pub const APPROVAL_DM_UNAVAILABLE: &str = "approval_dm_unavailable";
 
-/// 전달 작업을 점유할 때마다 시도가 오른다. 사람의 버튼은 기존 nonce를 계속 사용한다.
+/// 전달 작업을 점유할 때마다 시도가 오른다. 같은 nonce를 쓰는 동안 시도 번호는 단조 증가한다.
+/// 작업을 다시 열더라도 이전 시도의 번호를 재사용하면 옛 결과가 새 작업에 적용된다. 사람의 버튼은 기존 nonce를 계속 사용한다.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CardKey {
     pub nonce: ApprovalId,
