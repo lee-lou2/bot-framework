@@ -113,11 +113,22 @@ pub const MAX_TOOL_CALL_SECS: u32 = 900;
 
 impl Tool {
     /// 도구 목록에는 잠금의 설명을 우선 쓰고, 없으면 입력 스키마의 최상위 설명을 쓴다.
+    /// 모델에 보낼 설명 필드는 UTF-8 4 KiB까지다. 검증한 원문과 정의 해시는 유지한다.
     pub fn model_description(&self) -> Option<String> {
-        self.description.clone().or_else(|| {
-            let input: serde_json::Value = serde_json::from_str(&self.input.0).ok()?;
-            input.get("description")?.as_str().map(str::to_owned)
-        })
+        let mut text = self
+            .description
+            .clone()
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                let input: serde_json::Value = serde_json::from_str(&self.input.0).ok()?;
+                input
+                    .get("description")?
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+            })?;
+        text.truncate(text.floor_char_boundary(4 * 1024));
+        Some(text)
     }
 
     /// 실제로 적용하는 호출 시간 한도(초): 선언이 없으면 `DEFAULT_TOOL_CALL_SECS`.

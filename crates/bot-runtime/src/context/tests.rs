@@ -230,7 +230,7 @@ fn tools_are_filtered_by_request_agent_and_policy_scopes() {
         .unwrap();
     assert_eq!(
         (delete.class, delete.description.as_str()),
-        (Risk::Irreversible, "agenda.delete 도구")
+        (Risk::Irreversible, "agenda.delete")
     );
 
     // 요청자에게 읽기만 있으면 삭제는 보이지 않는다

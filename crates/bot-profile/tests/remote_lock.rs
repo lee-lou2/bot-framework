@@ -176,6 +176,22 @@ fn an_empty_lock_description_uses_the_schema_description() {
 }
 
 #[test]
+fn long_locked_descriptions_keep_their_hash_but_send_only_a_bounded_utf8_prefix() {
+    let description = "가".repeat(2000);
+    let snap = snapshot(&remote(
+        REMOTE_TOOLS,
+        Some(&lock_text("weather", &description)),
+    ));
+    let tool = forecast(&snap);
+    assert_eq!(
+        tool.definition.as_deref(),
+        Some(definition_hash(&description).as_str())
+    );
+    assert_eq!(tool.description.as_deref(), Some(description.as_str()));
+    assert_eq!(tool.model_description().unwrap(), "가".repeat(4096 / 3));
+}
+
+#[test]
 fn an_inline_input_wins_and_a_missing_lock_or_entry_is_an_error() {
     let host = remote_host();
     // 인라인 input이 있으면 잠금(다른 스키마)은 쓰이지 않는다

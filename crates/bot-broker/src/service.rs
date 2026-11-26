@@ -125,6 +125,8 @@ impl Broker for BrokerService {
             let (result, limited) = preflight::noting_limit(self.call(call.clone())).await;
             let error = match result {
                 Ok(result) => return Ok(ModelCall::Returned(result)),
+                // 리스와 판본은 워커가 다시 대조한다. 반납이나 재판정이 필요한 위치에 거절 표식을 만들지 않는다.
+                Err(Error::Stale) => return Err(Error::Stale),
                 Err(error) => error,
             };
             let Some(reason) = preflight::expected(&error, limited) else {

@@ -1,6 +1,13 @@
 use super::*;
 use bot_broker::seal::JcsSealer;
+use bot_core::{
+    command::{CallResult, JsonPayload, ToolCall},
+    id::{ProfileId, Revision, ToolId},
+    port::{Error, ModelCall, RunStore},
+    profile::ActiveRevisions,
+};
 use bot_profile::SchemaValidator;
+use std::collections::BTreeMap;
 
 async fn refusal_before_approval(kind: ApiKind) {
     let Some(w) = world_with(Arc::new(JcsSealer::new(Arc::new(SchemaValidator::new())))).await
@@ -79,6 +86,45 @@ async fn anthropic_replays_a_refusal_before_an_approval_wait() {
 #[tokio::test]
 async fn openai_replays_a_refusal_before_an_approval_wait() {
     refusal_before_approval(ApiKind::OpenAi).await;
+}
+
+#[tokio::test]
+async fn changing_the_active_revision_keeps_a_model_call_retryable_on_the_same_claim() {
+    let Some(w) = world().await else { return };
+    let run = w.accept("call-revision", "일정 조회").await;
+    let ctx = w.pg.store.claim().await.unwrap().unwrap();
+    w.pg.store
+        .replace(
+            Some(Revision("set-1".into())),
+            Revision("set-2".into()),
+            BTreeMap::from([(ProfileId("personal".into()), Revision("r2".into()))]),
+            Vec::new(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let req = ToolCall {
+        attempt: ctx.attempt.clone(),
+        call: bot_runtime::model::call_id(&run, 0, 0),
+        tool: ToolId("agenda.list".into()),
+        args: JsonPayload("{}".into()),
+    };
+    let result = w.broker.call_for_model(req.clone()).await;
+    if let Ok(ModelCall::Refused(reason)) = &result {
+        panic!("판본 교체 오류를 확정 거절로 저장할 수 없다: {reason:?}");
+    }
+    assert!(
+        matches!(result, Err(Error::Stale)),
+        "카탈로그의 옛 판본을 사용한 호출은 새 판본으로 다시 판정해야 한다"
+    );
+    assert!(w.runner.jobs().is_empty());
+    w.pg.store.renew(ctx.attempt).await.unwrap();
+    w.catalog.publish(profile_next());
+    assert!(matches!(
+        w.broker.call_for_model(req).await,
+        Ok(ModelCall::Returned(CallResult::Done(_)))
+    ));
+    assert_eq!(w.runner.jobs().len(), 1);
 }
 
 #[tokio::test]

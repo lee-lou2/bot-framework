@@ -5,13 +5,14 @@ use crate::{
     model::{ModelError, ModelRequest, ModelRunner, ModelStep, RunnerKind, StepFuture},
     worker::Worker,
 };
+use bot_broker::testing::tool;
 use bot_core::{
     command::*,
     id::*,
     intake::{RequestKey, RequestState},
     port::{Broker, DelegationStore, Error, Gateway, MemoryStore, Reply, RunStore},
-    profile::{Agent, Document, Policy, ProfileCatalog, Skill, Snapshot, Tool},
-    state::{Conversation, ConversationKind, RunContext},
+    profile::{Agent, Document, Policy, ProfileCatalog, Skill, Snapshot},
+    state::{Conversation, ConversationKind, Risk, RunContext},
     trace::{SpanRecord, Tracer},
 };
 use serde_json::json;
@@ -27,26 +28,6 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub(super) fn scopes(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_owned()).collect()
 }
-fn tool_decl(needs: &[&str]) -> Tool {
-    Tool {
-        server: "demo-agenda".into(),
-        revision: Revision("t1".into()),
-        class: bot_core::state::Risk::Read,
-        scopes: scopes(needs),
-        input: JsonPayload(r#"{"type":"object"}"#.into()),
-        description: None,
-        env: Default::default(),
-        secrets: BTreeMap::new(),
-        egress: BTreeSet::new(),
-        effects: false,
-        external: false,
-        destination: None,
-        definition: None,
-        mcp_name: None,
-        timeout_secs: None,
-    }
-}
-
 fn agent(parent: Option<&str>, skills: bool) -> Agent {
     let mut agent = Agent {
         description: String::new(),
@@ -71,7 +52,7 @@ fn agent(parent: Option<&str>, skills: bool) -> Agent {
                 },
                 tools: BTreeMap::from([(
                     ToolId("agenda.list".into()),
-                    tool_decl(&["calendar.read"]),
+                    tool(Risk::Read, &["calendar.read"]),
                 )]),
             },
         );

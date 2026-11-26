@@ -14,6 +14,8 @@ async fn mcp_lists_tool_descriptions_from_the_snapshot() {
     say.input = JsonPayload(r#"{"type":"object","description":"스키마 설명"}"#.into());
     let drop = tools.get_mut(&ToolId("echo.drop".into())).unwrap();
     drop.input = JsonPayload(r#"{"type":"object","description":"메시지를 지웁니다."}"#.into());
+    let locked = tools.get_mut(&ToolId("echo.locked".into())).unwrap();
+    locked.input = JsonPayload(r#"{"type":"object","description":""}"#.into());
     r.catalog.publish(Arc::new(source));
 
     let reply = rpc(&r, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;

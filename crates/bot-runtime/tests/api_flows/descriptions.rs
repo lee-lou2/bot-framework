@@ -16,6 +16,8 @@ async fn both_dialects_send_tool_descriptions_from_the_snapshot() {
     list.input = JsonPayload(r#"{"type":"object","description":"스키마 설명"}"#.into());
     let moved = tools.get_mut(&ToolId("agenda.move".into())).unwrap();
     moved.input = JsonPayload(r#"{"type":"object","description":"일정을 옮깁니다."}"#.into());
+    let deleted = tools.get_mut(&ToolId("agenda.delete".into())).unwrap();
+    deleted.input = JsonPayload(r#"{"type":"object","description":""}"#.into());
     w.catalog.publish(Arc::new(source));
 
     for kind in KINDS {
@@ -31,7 +33,7 @@ async fn both_dialects_send_tool_descriptions_from_the_snapshot() {
         for (id, description) in [
             ("agenda.list", locked_description),
             ("agenda.move", "일정을 옮깁니다."),
-            ("agenda.delete", "agenda.delete 도구"),
+            ("agenda.delete", "agenda.delete"),
         ] {
             let alias = seen[0].alias(id);
             let actual = declared

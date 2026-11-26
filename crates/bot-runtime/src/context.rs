@@ -290,9 +290,7 @@ fn visible_tools(agent: &Agent, effective: &BTreeSet<String>) -> Vec<(String, To
                 id: id.clone(),
                 kind: ToolKind::Skill,
                 class: tool.class,
-                description: tool
-                    .model_description()
-                    .unwrap_or_else(|| format!("{} 도구", id.0)),
+                description: tool.model_description().unwrap_or_else(|| id.0.clone()),
                 input: tool.input.clone(),
             };
             out.push((name.clone(), spec));
