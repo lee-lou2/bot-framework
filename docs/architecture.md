@@ -56,12 +56,18 @@ flowchart LR
 
 ### 모델 실행기 선택
 
+대화와 브로커 도구를 쓰는 에이전트는 API 직접 호출을 기본으로 권장한다. 에이전트가 `builtin: [read]`로 작업 공간의 파일을 읽어야 하면 그 읽기 격리를 보증하는 Claude CLI VM을 쓴다.
+
 | 실행기 | 워커 호스트 | 모델 프로세스 | 사용할 수 있는 내장 도구 |
 |---|---|---|---|
-| `anthropic-api` · `openai-api` | Linux · macOS | 워커가 상류 API에 HTTPS 요청을 보낸다. 워커에서 모델 프로세스를 띄우지 않는다. | `memory.share`, `schedule.create/list/cancel`, 직계 자식이 있으면 `delegate`. 파일 도구를 선언하면 `unsupported_builtin`으로 종료한다. |
-| `claude-cli` | Apple `container`를 실행할 수 있는 macOS | 실행별 VM에서 Claude Code를 띄우고 브로커 릴레이로 연결한다. | 같은 기억·예약·위임 도구. 프로필에서 허용하고 샌드박스가 격리를 보증하면 VM의 `read`도 쓸 수 있다. |
+| `anthropic-api` · `openai-api` | Linux · macOS | 워커가 상류 API에 직접 요청한다. 모델 실행용 프로세스와 VM 없이 동작한다. | 스코프 상한에 따른 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`과 직계 자식에 대한 `delegate`. 파일 도구 선언은 `unsupported_builtin`으로 거절한다. |
+| `claude-cli` | Apple `container`를 실행할 수 있는 macOS | 실행별 VM에서 Claude Code를 띄우고 브로커 릴레이로 연결한다. | 같은 기억·예약·위임 도구와, 읽기 격리가 보증된 VM에서 프로필이 허용한 `read`. |
 
-**API 직접 호출(`anthropic-api`·`openai-api`).** 워커는 모델 차례와 호출 계획을 저장한다. 여러 도구 중 하나가 승인을 기다리면 같은 계획에서 재개하고, 실행 전 확정 거절은 호출 ID로 재생한다. `schedule.deliver`는 호스트가 발화별 전송 승인을 처리할 때만 쓴다. [모델 실행기가 받는 내장 도구](plugins.md#모델-실행기가-받는-내장-도구)
+호스트는 발화별 전송 승인에 `schedule.deliver`를 쓴다. [모델 실행기가 받는 내장 도구](plugins.md#모델-실행기가-받는-내장-도구)
+
+### API 직접 호출
+
+단계형 워커는 모델 차례의 호출 계획을 저장한다. 여러 도구 중 하나가 승인을 기다리면 같은 계획에서 재개하고, 실행 전 확정 거절은 호출 ID로 재생한다. 비위임 도구의 인가·승인·실행·감사는 CLI 프런트와 같은 `Broker::call` 경로에서 처리한다. [거절 기록 계약](reliability.md#거절-기록-계약)
 
 `anthropic-api`는 `POST {endpoint}/v1/messages`(Anthropic Messages), `openai-api`는 `POST {endpoint}/chat/completions`(OpenAI 호환: OpenAI·Gemini 호환·Ollama·vLLM, `endpoint`는 `/v1`까지 포함한 기준 주소)다. 예: `{"kind":"anthropic-api","model":"<상류 모델 ID>","endpoint":"https://api.anthropic.com","secret":"<자격 이름>","max_tokens":4096}`. 출력 한도는 `max_tokens`이고, `openai-api`는 `max_completion_tokens`도 쓸 수 있다(둘 중 하나만, 적힌 이름 그대로 보낸다. OpenAI 공식 API의 새 모델은 `max_completion_tokens`만 받고 Ollama·vLLM·Gemini 호환 같은 호환 서버는 대개 `max_tokens`를 받는다). 모델은 호스트 파일·셸에 닿지 못하고 도구는 지금처럼 워커가 `Broker::call`(인가·승인·샌드박스·원장·감사)로만 부른다. 설정과 동작 규칙은 다음과 같다.
 

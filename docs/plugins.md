@@ -55,7 +55,9 @@
 
 서버가 내세우는 도구 이름이 tools.yaml `id`(소문자·숫자·`-`)와 다르면(실제 서버는 대개 `get_forecast`처럼 snake_case다) 도구에 선택 필드 `name`을 적는다(영문·숫자·`_`·`-`·`.` 128자 이하, 생략하면 `id`). 모델이 보는 도구 ID(`skill.id`)·승인·권한은 `id`를 따르고, 서버로 가는 `tools/list` 조회·`tools/call`·`Mcp-Name`은 `name`을 쓴다. `name`은 도구 판본에 들어가고, 잠금은 `id`로 묶어 서버 이름을 기록한다(둘이 다르면 `lock-name-mismatch`로 거절하니 `bot mcp sync`를 다시 실행한다).
 
-tools.yaml 도구의 `input`을 생략하면 같은 스킬 폴더의 `tools.lock.yaml`에서 입력 스키마를 가져온다. 인라인 `input`이 있으면 그 값이 우선하고 잠금 비교는 하지 않는다. `input`도 잠금 항목도 없으면 활성화를 거절한다(`missing-input`). 잠금 파일은 프로필 내용이라 프로필 판본과 도구 판본에 들어간다.
+`tools.yaml` 도구의 `input`을 생략하면 같은 스킬 폴더의 `tools.lock.yaml`에서 입력 스키마와 설명을 함께 가져온다. 정의 해시로 검증한 설명은 Claude CLI의 MCP 목록과 두 API 실행기의 도구 정의에 실린다. 잠금 설명이 비어 있으면 입력 스키마의 최상위 `description`을 쓰고, 그것도 없으면 도구 ID로 표시한다. 인라인 `input`을 선언한 도구는 그 스키마의 설명을 쓰며 잠금 항목을 사용하지 않는다. `input`도 잠금 항목도 없으면 활성화를 거절한다(`missing-input`).
+
+프로필 판본에는 번들에 담긴 잠금 파일이 포함된다. 잠금에서 입력을 가져온 도구의 판본에는 설명을 포함한 정의 해시가 이미 들어 있다. 기존 잠금의 설명이 모델에 전달돼도 도구 판본은 그대로다.
 
 ```bash
 bot mcp sync <BOT_PROFILES 아래 스킬 폴더>
@@ -117,19 +119,19 @@ bot mcp sync <BOT_PROFILES 아래 스킬 폴더>
 
 ## 모델 실행기가 받는 내장 도구
 
-`anthropic-api`, `openai-api`, `claude-cli`는 에이전트의 스코프 상한에 든 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`을 모델에 제공한다. 이 이름과 호스트 전용 `schedule.deliver`는 예약돼 있다. 프로필 도구의 전체 ID가 예약 이름과 겹치면 검증이 실패한다. Claude CLI의 MCP 이름은 `memory_share`처럼 점을 밑줄로 바꾸며, API 실행기는 요청의 도구 이름을 같은 전체 ID로 해석한다.
+`anthropic-api`, `openai-api`, `claude-cli`는 에이전트의 스코프 상한에 든 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`을 모델에 제공한다. 호스트는 발화별 전송 승인에 `schedule.deliver`를 쓴다. 이 다섯 이름과 `delegate`는 프레임워크에 예약돼 있다. 프로필 도구의 전체 ID가 예약 이름과 겹치면 검증이 실패한다. Claude CLI의 MCP 목록에는 `memory_share`처럼 점을 밑줄로 바꾼 이름이 나온다. API 실행기는 요청마다 별칭표를 만들어 응답의 도구 이름을 전체 ID로 되돌린다.
 
-브로커는 각 호출에서 요청자와 에이전트의 권한을 고정 판본과 현재 판본에 대조한다. 기억 공유는 소유자 본인의 DM이나 CLI 대화에서 기억 한 건의 본문을 승인해야 실행된다. 승인 대기 뒤에도 앞에서 확정한 거절은 같은 호출 ID로 재생한다. [거절 기록 계약](reliability.md#거절-기록-계약)
+브로커는 각 호출에서 요청자와 에이전트의 권한을 고정 판본과 현재 판본에 대조한다. 기억을 공유하려면 소유자가 자신의 DM 또는 `bot chat`으로 시작한 CLI 대화에서 기억 한 건의 본문을 확인하고 승인해야 한다. 승인 대기 뒤에도 앞에서 확정한 거절은 같은 호출 ID로 재생한다. [거절 기록 계약](reliability.md#거절-기록-계약)
 
 직계 자식이 있는 에이전트는 세 실행기에서 모두 `delegate`를 쓸 수 있다. `{"agent":"main/research","instruction":"일정 요약"}`처럼 자식과 지시를 지정하면 호스트가 부모의 신원·대화·권한을 이어받아 자식을 시작하고 같은 도구 호출에 결과를 돌려준다.
 
 ### 예약과 후속 확인
 
-대화에서 `schedule.create`로 “내일 한 번 자료가 도착했는지 확인해 줘”를 등록할 수 있다. 지시문과 `at`(UTC RFC 3339) 또는 `cron`(프로필 시간대, IANA 이름으로 재지정 가능) 중 하나를 보낸다. `quiet`의 기본값은 false다. `schedule.list`는 본인의 활성 예약 ID·시각·quiet를, `schedule.cancel`은 취소 결과를 돌려준다. 각 내장 도구는 같은 이름의 스코프가 필요하다.
+대화에서 `schedule.create`로 “내일 한 번 자료가 도착했는지 확인해 줘”를 등록할 수 있다. 지시문과 `at`(UTC RFC 3339) 또는 `cron`(프로필 시간대, IANA 이름으로 재지정 가능) 중 하나를 보낸다. `at`에는 지금보다 뒤인 시각을 최대 1,830일 뒤까지 지정할 수 있다. `quiet`의 기본값은 false다. `schedule.list`는 본인의 활성 예약 ID·시각·quiet를, `schedule.cancel`은 취소 결과를 돌려준다. 각 예약 도구는 같은 이름의 스코프가 필요하다.
 
 예를 들어 `schedule.create` 인자는 `{"at":"2030-01-01T12:00:00Z","instruction":"자료 도착 여부 확인","quiet":true}`이고, 반복은 `at` 대신 `"cron":"0 9 * * 1-5","timezone":"Asia/Seoul"`을 쓴다. 취소 인자는 `{"id":"<예약 ID>"}`다. 기본 목적지는 원래 대화다. 다른 수신자는 `destination: {binding, conversation: {kind, id, thread?}}`로 명시하며 호스트가 현재 바인딩으로 정확한 수신자에게 보낼 수 있을 때만 등록할 수 있다.
 
-등록부에 올린 수신자는 그 프로필 멤버 누구나 예약 목적지로 쓸 수 있다. 제한하려면 등록부에서 뺀다. 예약 도구를 쓰려면 멤버에게 `schedule.create` 권한이 있어야 한다. CLI 사용자는 원래 대화에만 예약할 수 있다. HTTP 주체와 서비스 계정은 사용자 예약을 생성·조회·취소할 수 없다.
+`schedule.create` 권한을 가진 프로필 멤버는 등록부에 올라 있는 수신자를 예약 목적지로 쓸 수 있다. 제한하려면 등록부에서 뺀다. CLI 사용자는 원래 대화에만 예약할 수 있다. HTTP 주체와 서비스 계정은 사용자 예약을 생성·조회·취소할 수 없다.
 
 Slack에서 다른 채널을 지정하면 호스트는 같은 프로필의 등록부에서 실제 팀과 채널을 확인한다. 소유자는 생성 때 바인딩·대화 종류·`팀ID/채널ID`·스레드·지시문을 승인하고, 발송할 때마다 완성된 전송 초안을 승인한다. DM 전체를 받는 바인딩에는 개별 수신자가 등록돼 있지 않으므로 다른 DM을 지정할 수 없다.
 
