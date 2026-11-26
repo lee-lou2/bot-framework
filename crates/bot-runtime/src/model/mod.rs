@@ -11,7 +11,7 @@
 //!   워커의 `renew`가 `Stale`이 되므로 워커는 `cancel`로 CLI를 끝내야 한다.
 //!
 //! 모델 샌드박스는 `bot_core::sandbox`의 포트(`Sandbox<ModelSpec>`)다. 모델 CLI는 **VM**(macOS는 Apple container, `--internal` 망)에서 돌고
-//! 외부와 통신하지 못하며 브로커 프런트 한 곳에만 닿는다(`container.rs`). 도구 서버의 격리(srt)는 별개이고 브로커 쪽이다. 여기에는 VM 어댑터와 가짜(`FakeSandbox`)가 있다.
+//! 외부와 통신하지 못하며 브로커 프런트 한 곳에만 닿는다(`container.rs`). 도구 서버의 격리(srt)는 별개이고 브로커 쪽이다. 여기에는 VM 어댑터(`container.rs`)가 있고, 시험용 가짜(`FakeSandbox`)는 이 크레이트의 시험에서만 컴파일된다.
 //! 오류는 고정 어휘 코드만 싣는다(로그·감사에 자유 문장·stderr를 남기지 않는다).
 
 pub mod api;
@@ -23,6 +23,7 @@ mod driver;
 mod exchange;
 mod prompt;
 mod relay;
+#[cfg(test)]
 mod sandbox;
 pub mod session;
 
@@ -33,7 +34,8 @@ pub use demo::DemoModel;
 pub use driver::{Event, Output, Parser, classify, is_transient};
 pub use exchange::{CallEnd, DoneCall, Exchange};
 pub use relay::{RelayChannel, RelayGrant, TOKEN_ENV};
-pub use sandbox::{FakeSandbox, Script};
+#[cfg(test)]
+pub(crate) use sandbox::{FakeSandbox, Script};
 pub use session::{PortFuture, Session, SessionError, SessionPort, Slot, ToolOutput};
 
 use bot_core::{

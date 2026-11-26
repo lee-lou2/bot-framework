@@ -2,7 +2,13 @@
 use crate::{id::Attempt, port::Reply};
 use std::{future::Future, path::PathBuf, pin::Pin, time::Duration};
 
-/// 신뢰 구역에 맞는 어댑터가 구현한다. OS 격리를 설정할 수 없으면 spawn은 실패한다.
+/// 신뢰 구역에 맞는 어댑터가 구현한다. 구현이 지킬 것(docs/security.md):
+/// - 호스트 환경을 상속하지 않고 `env`로 준 값만 보이게 한다.
+/// - 비밀 0, 네트워크 0, 현재 claim의 브로커 채널 외 소켓 없음.
+/// - `readonly_mounts`는 읽기 전용, `scratch`는 이 호출 전용 쓰기 공간.
+/// - `kill`은 자식 프로세스까지 끝낸다.
+/// - 설정에 실패하면 시작을 거절한다(샌드박스 없이 실행하는 대체 경로를 두지 않는다). OS 격리를 설정할 수 없으면 `spawn`은 실패한다.
+/// - `timeout`을 넘기면 스스로도 끝낸다(실행기의 시간 감시가 먼저 막지만 마지막 방어선이다).
 pub trait Sandbox<Spec>: Send + Sync {
     type Process: Send;
 

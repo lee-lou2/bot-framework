@@ -1,18 +1,13 @@
-//! 모델 샌드박스의 시험용 가짜. 포트(`Sandbox<ModelSpec>`·`ModelProcess`·`ModelSpec`)는 `bot_core::sandbox`가 소유한다.
-//! 실제 OS 격리 어댑터(srt)는 브로커 쪽 구현이고, 여기에는 각본대로 출력하는 `FakeSandbox`만 있다.
-//!
-//! 포트 구현이 지킬 것(docs/security.md): 호스트 환경을 상속하지 않고 `env`로 준 값만 보이게 한다 · 비밀 0, 네트워크 0, 현재 claim의 브로커 채널 외 소켓 없음 ·
-//! `readonly_mounts`는 읽기 전용, `scratch`는 이 호출 전용 쓰기 공간 · `kill`은 자식 프로세스까지 끝낸다 · 설정에 실패하면 시작을 거절한다
-//! (샌드박스 없이 실행하는 대체 경로를 두지 않는다) · `timeout`을 넘기면 스스로도 끝낸다(실행기의 시간 감시가 먼저 막지만 마지막 방어선이다).
+//! 모델 샌드박스의 시험용 가짜: 각본대로 출력하는 `FakeSandbox`. 이 크레이트의 시험(`cfg(test)`)에서만 컴파일되고 다른 크레이트는 쓰지 않는다.
+//! 포트(`Sandbox<ModelSpec>`·`ModelProcess`·`ModelSpec`)와 구현이 지킬 계약은 `bot_core::sandbox`가 소유한다.
 
 use bot_core::{
     port::{Error, Reply},
     sandbox::{ExitFuture, LineFuture, ModelProcess, ModelSpec, Sandbox, UnitFuture},
 };
-#[cfg(test)]
-use std::path::{Path, PathBuf};
 use std::{
     collections::VecDeque,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -98,10 +93,6 @@ impl FakeSandbox {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, FakeState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub fn push(&self, script: Script) {
-        self.lock().scripts.push_back(script);
     }
 
     /// 시작마다 명세를 들여다보는 훅(호출 폴더가 아직 있을 때 파일 내용을 확인하는 시험용).
@@ -208,7 +199,6 @@ impl ModelProcess for FakeProcess {
 
 /// 시험용: `roots` 아래 모든 파일에서 `needle`을 이름이나 내용에 담은 것의 경로를 모은다(심볼릭 링크는 따라가지 않는다).
 /// 모델이 읽을 수 있는 폴더 전체를 훑어 비밀 값이 0건인지 확인하는 데 쓴다.
-#[cfg(test)]
 pub(crate) fn files_holding(roots: &[&Path], needle: &str) -> Vec<PathBuf> {
     fn walk(dir: &Path, needle: &str, hits: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
