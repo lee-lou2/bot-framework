@@ -468,3 +468,27 @@ fn bad_runs_are_rejected_and_into_request_wires_every_field() {
     assert!(request.exchanges.is_empty() && request.relay.is_none() && !*request.cancel.borrow());
     drop(tx);
 }
+
+#[test]
+fn only_builtin_tools_inside_the_agent_ceiling_are_listed_once() {
+    let mut snap = snapshot();
+    let agent = snap.agents.get_mut(&AgentId("main".into())).unwrap();
+    agent.scopes.insert("schedule.list".into());
+    agent.scopes.insert("schedule.deliver".into());
+    // 호스트에서 잘못 만든 판본이 예약 이름을 스킬 도구로 넣어도 내장 선언 하나만 쓴다.
+    let skill = agent.skills.get_mut("agenda").unwrap();
+    for id in ["schedule.list", "schedule.deliver"] {
+        skill
+            .tools
+            .insert(ToolId(id.into()), tool(Risk::Read, &["run"], "{}"));
+    }
+    let input = build(&snap, &run_context("main", &FULL, "x"), &[], &[]);
+    let builtins: Vec<_> = input
+        .tools
+        .iter()
+        .filter(|t| t.id.0.starts_with("schedule."))
+        .collect();
+    assert_eq!(builtins.len(), 1);
+    assert_eq!(builtins[0].id.0, "schedule.list");
+    assert_eq!(builtins[0].input.0, bot_core::builtin::LIST.schema);
+}

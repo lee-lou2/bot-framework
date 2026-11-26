@@ -81,7 +81,7 @@ pub struct Message {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolKind {
-    /// 스킬이 선언한 도구. 호출은 `Broker::call`로 간다.
+    /// 브로커로 호출하는 도구. 스킬이 선언하거나 호스트가 내장 명세로 제공한다.
     Skill,
     /// 직계 하위 에이전트에게 맡기는 위임. 호출은 `DelegationStore::delegate`로 간다(워커가 가로챈다).
     Delegate,

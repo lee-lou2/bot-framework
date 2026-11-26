@@ -115,11 +115,13 @@ bot mcp sync <BOT_PROFILES 아래 스킬 폴더>
 
 도구의 scopes는 하나 이상이다. 입력 스키마의 지원 어휘는 type·enum·const·properties·required·additionalProperties·items·min/maxItems·min/maxLength·minimum/maximum·pattern·anyOf/oneOf/allOf 및 title·description·default다. 실제 서버의 스키마가 흔히 싣는 주석 키워드(`$schema`·`$comment`·`examples`·`format`·`deprecated`·`readOnly`·`writeOnly`)도 받되 검증에는 쓰지 않는다(`format`을 검사하지 않는다). 같은 문서 안의 `$defs`·`definitions`와 `#/$defs/<이름>`·`#/definitions/<이름>` 참조는 컴파일할 때 그 자리에 펼친다(고정한 입력과 해시는 받은 그대로이고 검증만 펼친 스키마로 한다). 참조의 조각은 퍼센트 부호를 먼저 풀고(`%20`은 공백) 그다음 JSON 포인터 이스케이프(`~1`→`/`, `~0`→`~`)를 푼다(잘못된 퍼센트 표기는 거절). `$ref` 옆에는 주석 키워드(`title`·`description`·`default`·`examples`·`$comment`·`deprecated`·`readOnly`·`writeOnly`·`$schema`·`format`)만 둘 수 있고, `allOf`·`type`·`minLength` 같은 조건 키워드가 함께 있으면 조건을 바꾸거나 버릴 수 있어 거절한다(정의 안으로 옮긴다). 재귀 참조(자기 자신·서로를 부름·`#`)·외부 참조·없는 정의·펼친 결과가 크기 한도(노드 2만 개)를 넘는 경우는 이유를 밝혀 거절한다. pattern은 길이가 제한된 Rust regex 공통 문법만 허용한다. 지원하지 않는 키워드는 활성화 때 거절한다. 호출 시에도 같은 InputValidator로 검증한다. reply 도구에는 호스트가 _meta의 bot/destination에 원래 대화 종류·ID·스레드를 넣는다.
 
-## 모델 CLI가 받는 내장 도구
+## 모델 실행기가 받는 내장 도구
 
-프로필 도구의 MCP 이름은 `skill_tool`이다. `memory_share`는 프레임워크의 기억 공유이므로 프로필에서 전체 도구 ID `memory.share`를 선언하면 검증에 실패한다. 같은 `memory` 스킬에 다른 도구를 둘 수 있다.
+`anthropic-api`, `openai-api`, `claude-cli`는 에이전트의 스코프 상한에 든 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`을 모델에 제공한다. 이 이름과 호스트 전용 `schedule.deliver`는 예약돼 있다. 프로필 도구의 전체 ID가 예약 이름과 겹치면 검증이 실패한다. Claude CLI의 MCP 이름은 `memory_share`처럼 점을 밑줄로 바꾸며, API 실행기는 요청의 도구 이름을 같은 전체 ID로 해석한다.
 
-`delegate`는 `{"agent":"main/research","instruction":"일정 요약"}`처럼 직계 자식과 지시를 받는다. 호스트가 부모의 신원·대화·권한을 이어받아 자식을 시작하고 같은 도구 사용에 결과를 돌려준다. 승인 대기나 위임을 거친 CLI 호출의 식별과 재개는 [실행 복구 규약](reliability.md#cli가-승인이나-자식을-기다릴-때)을 따른다.
+브로커는 각 호출에서 요청자와 에이전트의 권한을 고정 판본과 현재 판본에 대조한다. 기억 공유는 소유자 본인의 DM이나 CLI 대화에서 기억 한 건의 본문을 승인해야 실행된다. 승인 대기 뒤에도 앞에서 확정한 거절은 같은 호출 ID로 재생한다. [거절 기록 계약](reliability.md#거절-기록-계약)
+
+직계 자식이 있는 에이전트는 세 실행기에서 모두 `delegate`를 쓸 수 있다. `{"agent":"main/research","instruction":"일정 요약"}`처럼 자식과 지시를 지정하면 호스트가 부모의 신원·대화·권한을 이어받아 자식을 시작하고 같은 도구 호출에 결과를 돌려준다.
 
 ### 예약과 후속 확인
 

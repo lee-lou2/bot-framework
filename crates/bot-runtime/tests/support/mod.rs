@@ -232,7 +232,15 @@ pub async fn world() -> Option<World> {
 
 /// `world`와 같되 인자 봉인기를 고른다(실제 스키마 검증을 보려면 `JcsSealer`).
 pub async fn world_with(sealer: Arc<dyn bot_broker::ports::Sealer>) -> Option<World> {
-    let pg = Pg::new().await?;
+    world_with_routes(sealer, None).await
+}
+
+/// 명시 목적지 예약을 쓰는 호스트는 운영 조립과 같이 같은 활성 집합에 고정한 저장소와 등록부를 준다.
+pub async fn world_with_routes(
+    sealer: Arc<dyn bot_broker::ports::Sealer>,
+    routes: Option<Arc<dyn bot_core::schedule::ScheduleRoutes>>,
+) -> Option<World> {
+    let mut pg = Pg::new().await?;
     pg.store
         .replace(
             None,
@@ -248,26 +256,30 @@ pub async fn world_with(sealer: Arc<dyn bot_broker::ports::Sealer>) -> Option<Wo
     let runner = Arc::new(FakeRunner::new());
     runner.set_default_result(EVENTS);
     let spans = Arc::new(RecordingTracer::new());
+    if routes.is_some() {
+        pg.store = Arc::new(pg.store.for_activation(Revision("set-1".into())));
+    }
     let store = pg.store.clone();
-    let schedules = store.clone();
-    let broker = Arc::new(
-        BrokerService::new(
-            Parts {
-                catalog: catalog.clone(),
-                ledger: store.clone(),
-                effects: store.clone(),
-                memory: store.clone(),
-                audit: store,
-                runner: runner.clone(),
-                sealer,
-                tracer: spans.clone(),
-                clock: Arc::new(SystemClock),
-                entropy: Arc::new(OsEntropy),
-            },
-            BrokerConfig::default(),
-        )
-        .with_schedules(schedules),
-    );
+    let broker = BrokerService::new(
+        Parts {
+            catalog: catalog.clone(),
+            ledger: store.clone(),
+            effects: store.clone(),
+            memory: store.clone(),
+            audit: store.clone(),
+            runner: runner.clone(),
+            sealer,
+            tracer: spans.clone(),
+            clock: Arc::new(SystemClock),
+            entropy: Arc::new(OsEntropy),
+        },
+        BrokerConfig::default(),
+    )
+    .with_schedules(store.clone());
+    let broker = Arc::new(match routes {
+        Some(routes) => broker.with_routes(routes).with_replies(store),
+        None => broker,
+    });
     Some(World {
         pg,
         broker,

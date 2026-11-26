@@ -109,7 +109,7 @@ examples/profiles/team/
 ## 알아 둘 것
 
 - `builtin`은 읽기 전용 내장 도구 `read`·`grep`·`glob` 중에서 고른다. 현재 모델 실행기 `claude-cli`는 `read`만 열 수 있어 `grep`·`glob`을 요구하면 실행 전에 거절한다. 그래서 이 예시의 개발자는 `read`만 쓴다. 호스트가 읽기 격리를 보증하는 모델 샌드박스에서만 켜진다([파일 읽기 도구](profile-spec.md#에이전트의-파일-읽기-도구)).
-- 사용자가 대화에서 만드는 예약(`schedule.create`·`schedule.list`·`schedule.cancel`)은 호스트 내장 기능이라 프로필에 도구를 선언하지 않고 같은 이름의 스코프만 준다. 프로필에 미리 정해 두는 반복 실행은 `triggers.yaml`이다. 서비스 주체는 사용자 예약을 만들 수 없다.
+- 팀 리드와 `main/pm`은 `anthropic-api`, `openai-api`, `claude-cli`에서 같은 예약 도구를 쓴다. 예약 내역은 요청자별로 조회·취소한다. 이 예시의 `lead` 역할은 생성·조회·취소, `member` 역할은 조회 권한을 갖는다. 원래 대화에 답하는 것이 기본이고, Slack에서 다른 수신자를 지정하면 소유자가 생성 때와 발송 때마다 승인한다. 프로필에 미리 정해 두는 반복 실행은 `triggers.yaml`이다. 서비스 주체는 사용자 예약을 만들 수 없다.
 - 이 폴더의 모든 사람 이름(alice·bob 등)과 신원·채널 표기는 합성이다. 실제 신원은 호스트 설정과 `members`에서만 정하고, 비밀 값은 프로필에 쓰지 않는다.
 
 관련 문서: [프로필 작성](profile-spec.md) · [보안](security.md) · [MCP 도구](plugins.md) · [게이트웨이](gateway.md)

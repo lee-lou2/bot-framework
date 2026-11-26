@@ -1,6 +1,8 @@
 //! API 직접 호출 실행기(`RunnerKind::Step`)를 실제 PG 저장소·실제 BrokerService(가짜 도구 실행기)·실제 HTTP 가짜 상류 위에서 확인한다: 최종 답과 저장된 사용량, 도구 호출 왕복(브로커 경유),
 //! 승인 대기 뒤 재개(사용량·공급자 서명 보존), 위임, 구판 보호, 출력 한도, 키가 어디에도 남지 않음. 두 형식(Anthropic·OpenAI 호환)을 같은 시험으로 돌린다.
 
+#[path = "api_flows/builtins.rs"]
+mod builtins;
 #[path = "api_flows/checkpoints.rs"]
 mod checkpoints;
 #[path = "api_flows/refusal.rs"]

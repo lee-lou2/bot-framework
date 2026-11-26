@@ -287,7 +287,10 @@ fn visible_tools(agent: &Agent, effective: &BTreeSet<String>) -> Vec<(String, To
     let mut out = Vec::new();
     for (name, skill) in &agent.skills {
         for (id, tool) in &skill.tools {
-            if tool.scopes.is_empty() || !tool.scopes.iter().all(|s| effective.contains(s)) {
+            if bot_core::builtin::reserved(&id.0)
+                || tool.scopes.is_empty()
+                || !tool.scopes.iter().all(|s| effective.contains(s))
+            {
                 continue;
             }
             let spec = ToolSpec {
@@ -360,6 +363,15 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
     let effective = effective_scopes(snapshot, agent, run);
     let visible = visible_tools(agent, &effective);
     let mut tools: Vec<ToolSpec> = visible.iter().map(|(_, spec)| spec.clone()).collect();
+    tools.extend(
+        bot_core::builtin::model_tools(&agent.scopes).map(|spec| ToolSpec {
+            id: ToolId(spec.id.into()),
+            kind: ToolKind::Skill,
+            class: spec.class,
+            description: spec.description.into(),
+            input: JsonPayload(spec.schema.into()),
+        }),
+    );
     let children: Vec<(AgentId, String)> = snapshot
         .agents
         .iter()

@@ -54,7 +54,16 @@ flowchart LR
 
 `BOT_HOST_CONFIG`에서 `models`는 프로필마다 허용한 모델 별칭이고, `providers`는 각 별칭의 실행 방법이다. 예를 들어 `{"models":{"personal":["assistant"]},"providers":{"assistant":{"kind":"demo"}}}`는 합성 일정에 외부 계정 없이 쓰는 설정 조각이다. `claude-cli`에는 상류 `model`, HTTPS `endpoint`, 프로필 자격 이름 `secret`이 필요하다. 서비스 키는 브로커가 상류에만 보낸다.
 
-**API 직접 호출(`anthropic-api`·`openai-api`).** 파일·셸이 필요 없는 에이전트는 VM 없이 어느 OS에서나 워커가 상류 API를 직접 부른다. `anthropic-api`는 `POST {endpoint}/v1/messages`(Anthropic Messages), `openai-api`는 `POST {endpoint}/chat/completions`(OpenAI 호환: OpenAI·Gemini 호환·Ollama·vLLM, `endpoint`는 `/v1`까지 포함한 기준 주소)다. 예: `{"kind":"anthropic-api","model":"<상류 모델 ID>","endpoint":"https://api.anthropic.com","secret":"<자격 이름>","max_tokens":4096}`. 출력 한도는 `max_tokens`이고, `openai-api`는 `max_completion_tokens`도 쓸 수 있다(둘 중 하나만, 적힌 이름 그대로 보낸다. OpenAI 공식 API의 새 모델은 `max_completion_tokens`만 받고 Ollama·vLLM·Gemini 호환 같은 호환 서버는 대개 `max_tokens`를 받는다). 모델은 호스트 파일·셸에 닿지 못하고 도구는 지금처럼 워커가 `Broker::call`(인가·승인·샌드박스·원장·감사)로만 부른다. 설정과 동작 규칙은 다음과 같다.
+### 모델 실행기 선택
+
+| 실행기 | 워커 호스트 | 모델 프로세스 | 사용할 수 있는 내장 도구 |
+|---|---|---|---|
+| `anthropic-api` · `openai-api` | Linux · macOS | 워커가 상류 API에 HTTPS 요청을 보낸다. 워커에서 모델 프로세스를 띄우지 않는다. | `memory.share`, `schedule.create/list/cancel`, 직계 자식이 있으면 `delegate`. 파일 도구를 선언하면 `unsupported_builtin`으로 종료한다. |
+| `claude-cli` | Apple `container`를 실행할 수 있는 macOS | 실행별 VM에서 Claude Code를 띄우고 브로커 릴레이로 연결한다. | 같은 기억·예약·위임 도구. 프로필에서 허용하고 샌드박스가 격리를 보증하면 VM의 `read`도 쓸 수 있다. |
+
+**API 직접 호출(`anthropic-api`·`openai-api`).** 워커는 모델 차례와 호출 계획을 저장한다. 여러 도구 중 하나가 승인을 기다리면 같은 계획에서 재개하고, 실행 전 확정 거절은 호출 ID로 재생한다. `schedule.deliver`는 호스트가 발화별 전송 승인을 처리할 때만 쓴다. [모델 실행기가 받는 내장 도구](plugins.md#모델-실행기가-받는-내장-도구)
+
+`anthropic-api`는 `POST {endpoint}/v1/messages`(Anthropic Messages), `openai-api`는 `POST {endpoint}/chat/completions`(OpenAI 호환: OpenAI·Gemini 호환·Ollama·vLLM, `endpoint`는 `/v1`까지 포함한 기준 주소)다. 예: `{"kind":"anthropic-api","model":"<상류 모델 ID>","endpoint":"https://api.anthropic.com","secret":"<자격 이름>","max_tokens":4096}`. 출력 한도는 `max_tokens`이고, `openai-api`는 `max_completion_tokens`도 쓸 수 있다(둘 중 하나만, 적힌 이름 그대로 보낸다. OpenAI 공식 API의 새 모델은 `max_completion_tokens`만 받고 Ollama·vLLM·Gemini 호환 같은 호환 서버는 대개 `max_tokens`를 받는다). 모델은 호스트 파일·셸에 닿지 못하고 도구는 지금처럼 워커가 `Broker::call`(인가·승인·샌드박스·원장·감사)로만 부른다. 설정과 동작 규칙은 다음과 같다.
 
 - **목적지.** `https`만 쓴다. `http`는 호스트가 loopback IP 리터럴(127.0.0.0/8·`::1`)일 때만 받는다(로컬 Ollama). `localhost` 이름·사설망 `http`·자격(`user@`)·쿼리·조각이 있는 주소는 설정 단계에서 거절한다. `secret`은 loopback 주소에서만 생략할 수 있다. 종류·모델·기준 주소 전체·자격 이름은 활성화 지문에 들어가고(`max_tokens`는 아니다), 워커는 이 프로세스의 활성화 판본이 저장소의 활성 판본인지 키를 읽기 전과 키를 읽은 뒤 보내기 직전에 **두 번** 확인한다(기존 모델 중계 경로의 `GuardedUpstream`과 같은 규칙이고 그 경로도 전송 동안 가드를 쥐지 않는다). 구판은 철회된 목적지로 대화도 키도 보내지 않고 키를 읽지도 않으며, 키를 읽는 사이에 판본이 바뀌면 읽은 키를 버리고 보내지 않는다. 일시 오류(`stale_worker`)로 보고하면 저장소가 구판의 시도를 쓰지 않고 대기열로 돌려준다.
 - **전송.** 리다이렉트·숨은 재시도·연결 재사용을 끄고 연결 시간·전체 시간(`Limits::total`)·본문 크기 상한을 둔다. 취소 신호가 오면 요청을 끊는다. 키는 보내는 순간 보관소에서 읽어 요청 머리에만 싣고 비밀로 표시한다. 해당 요청의 키가 상류 응답(원문과, 이스케이프를 풀어 읽은 모든 글 — 최종 글·호출과 함께 온 글·인자·공급자 상태 포함)에 있으면 체크포인트·브로커에 아무것도 넘기지 않고 `secret_in_response`로 끝낸다.
