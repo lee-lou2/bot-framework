@@ -24,6 +24,8 @@ pub struct Limits {
     pub max_agent_depth: usize,
     /// 범위(프로필 또는 에이전트) 하나의 스킬 수, 스킬 하나의 도구 수, 에이전트 하나의 트리거 수
     pub max_skills: usize,
+    /// 에이전트 하나에게 보이는 스킬 본문(front matter 제외) 합계 상한(바이트)
+    pub max_skill_bytes: usize,
     pub max_tools: usize,
     pub max_triggers: usize,
     pub max_bindings: usize,
@@ -54,6 +56,7 @@ impl Default for Limits {
             max_agents: 128,
             max_agent_depth: 8,
             max_skills: 64,
+            max_skill_bytes: SKILL_MAX_BYTES,
             max_tools: 128,
             max_triggers: 128,
             max_bindings: 64,
@@ -69,3 +72,6 @@ impl Default for Limits {
 /// 한 요청이 읽는 지식 문서의 상한(profile-spec). 검색 구현이 이 값을 쓴다.
 pub const KNOWLEDGE_MAX_DOCS: usize = 8;
 pub const KNOWLEDGE_MAX_BYTES: usize = 32 * 1024;
+/// 에이전트 하나에게 보이는 스킬 본문(front matter 제외) 합계 상한(profile-spec).
+/// 한 요청의 지식 문서 상한(`KNOWLEDGE_MAX_BYTES`, 32 KiB)과 같은 수준으로 맞춘다.
+pub const SKILL_MAX_BYTES: usize = 32 * 1024;

@@ -45,7 +45,7 @@ mod yaml;
 pub use bot_core::cron::Cron;
 pub use host::{HostCatalog, SlackWorkspace};
 pub use issue::{Issue, Severity};
-pub use limits::{KNOWLEDGE_MAX_BYTES, KNOWLEDGE_MAX_DOCS, Limits};
+pub use limits::{KNOWLEDGE_MAX_BYTES, KNOWLEDGE_MAX_DOCS, Limits, SKILL_MAX_BYTES};
 pub use registry::{ProfileSet, Registry, Report, load};
 pub use restore::{Problem, ProblemKind, RestoreFailure, Restored, read_bundle};
 pub use schema::{Schema, Violation};

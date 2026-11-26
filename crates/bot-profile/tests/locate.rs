@@ -200,4 +200,29 @@ fn a_lock_is_verified_like_validate_before_it_may_be_written() {
     // 금지된 보이지 않는 글자(방향 전환 문자)가 든 설명은 프로필 로더가 거절하므로 쓰지 않는다
     let bidi = render("목록 \u{202e}evil");
     assert!(found.verify_lock(bidi.as_bytes(), &limits).is_err());
+    // SKILL.md 본문 상한과 allowed-tools 금지 역시 동기화 검증에서 그대로 집행한다
+    let ok_lock = render("목록");
+    let over = "a".repeat(bot_profile::SKILL_MAX_BYTES + 1);
+    let err = bot_profile::locate::check_skill(
+        "agenda",
+        over.as_bytes(),
+        tools.as_bytes(),
+        ok_lock.as_bytes(),
+        &limits,
+    )
+    .unwrap_err();
+    assert!(err.iter().any(|i| i.code == "skill-too-large"), "{err:?}");
+    let bad_fm = b"---\nname: agenda\nallowed-tools: Bash\n---\n\xec\x9d\xbc\xec\xa0\x95\n";
+    let err = bot_profile::locate::check_skill(
+        "agenda",
+        bad_fm,
+        tools.as_bytes(),
+        ok_lock.as_bytes(),
+        &limits,
+    )
+    .unwrap_err();
+    assert!(
+        err.iter().any(|i| i.code == "skill-allowed-tools"),
+        "{err:?}"
+    );
 }

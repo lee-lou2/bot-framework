@@ -76,4 +76,29 @@ fn check_assembled(built: &Built, limits: &Limits, issues: &mut Issues) {
             ),
         );
     }
+    let skill_bytes = |a: &crate::model::Agent| -> usize {
+        a.skills.iter().map(|s| s.instructions.text.len()).sum()
+    };
+    for agent in built.agents.values() {
+        let bytes = skill_bytes(agent);
+        if bytes > limits.max_skill_bytes {
+            // 부모가 이미 같은 합계로 한도를 넘겼으면 자식에게 중복 보고하지 않는다
+            let inherited_same = agent
+                .parent
+                .as_ref()
+                .and_then(|p| built.agents.get(p))
+                .is_some_and(|parent| skill_bytes(parent) == bytes);
+            if inherited_same {
+                continue;
+            }
+            issues.error(
+                "skill-too-large",
+                &layout::agent_dir(&agent.id.0),
+                format!(
+                    "에이전트 {}에게 보이는 스킬 본문 합계가 {bytes} 바이트라 한도({} 바이트)를 넘어요. SKILL.md를 줄이거나 필요한 하위 에이전트 아래로 옮기세요",
+                    agent.id.0, limits.max_skill_bytes
+                ),
+            );
+        }
+    }
 }

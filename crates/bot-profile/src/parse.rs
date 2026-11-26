@@ -158,8 +158,20 @@ pub(crate) fn skill(
     issues.extend(found);
     let parsed = parsed?;
     let mut ok = true;
-    if parsed.body.trim().is_empty() {
+    let body = parsed.body.trim();
+    if body.is_empty() {
         issues.error("empty-file", md_path, "SKILL.md에 지침이 없어요");
+        ok = false;
+    } else if body.len() > limits.max_skill_bytes {
+        issues.error(
+            "skill-too-large",
+            md_path,
+            format!(
+                "SKILL.md 본문이 {} 바이트라 한도({} 바이트)를 넘어요. 지침을 줄이거나 긴 참고 자료는 knowledge/로 옮기세요",
+                body.len(),
+                limits.max_skill_bytes
+            ),
+        );
         ok = false;
     }
     if let Some(declared) = parsed
@@ -237,7 +249,7 @@ pub(crate) fn skill(
         description,
         instructions: Document {
             relative_path: md_path.to_owned(),
-            text: parsed.body.trim().to_owned(),
+            text: body.to_owned(),
         },
         tools,
     }))

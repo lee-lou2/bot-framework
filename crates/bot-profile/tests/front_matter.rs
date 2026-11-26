@@ -276,3 +276,63 @@ fn invalid_skill_front_matter_is_rejected() {
         );
     }
 }
+
+#[test]
+fn skill_body_size_limit_is_enforced_per_agent_excluding_front_matter() {
+    let limit = bot_profile::SKILL_MAX_BYTES;
+    assert_eq!(limit, bot_profile::KNOWLEDGE_MAX_BYTES);
+    // 본문이 정확히 32 KiB이고 front matter가 덧붙어도 본문 기준이라 통과한다
+    let exact = format!(
+        "---\nname: agenda\ndescription: {}\n---\n{}\n",
+        "설명".repeat(200),
+        "a".repeat(limit)
+    );
+    let exact_files = edit(base(), SKILL_MD, "일정 목록은 list로 조회한다.\n", &exact);
+    let snap = snapshot(&exact_files);
+    assert_eq!(
+        snap.agents[&agent("main")].skills["agenda"]
+            .instructions
+            .text
+            .len(),
+        limit
+    );
+
+    // 단일 스킬 본문이 32 KiB를 1바이트 넘으면 거절한다
+    let over_one = edit(
+        base(),
+        SKILL_MD,
+        "일정 목록은 list로 조회한다.\n",
+        &"a".repeat(limit + 1),
+    );
+    assert_eq!(support::codes(&over_one), ["skill-too-large"]);
+
+    // 상속을 합친 에이전트별 합계가 32 KiB를 넘으면 그 에이전트 경로로 거절하고, 한도 안인 형제는 문제없다
+    let mut inherited = family();
+    inherited = edit(
+        inherited,
+        SKILL_MD,
+        "일정 목록은 list로 조회한다.\n",
+        &"a".repeat(20 * 1024),
+    );
+    inherited = edit(
+        inherited,
+        "agents/main/agents/research/skills/extra/SKILL.md",
+        "",
+        &"b".repeat(13 * 1024),
+    );
+    inherited = edit(
+        inherited,
+        "agents/main/agents/other/skills/small/SKILL.md",
+        "",
+        &"c".repeat(10 * 1024),
+    );
+    let report = support::check(&inherited).unwrap_err();
+    assert_eq!(report.codes(), ["skill-too-large"]);
+    let err = report.errors().next().unwrap();
+    assert_eq!(err.path, "personal/agents/main/agents/research");
+    assert!(
+        err.message.contains("main/research") && err.message.contains("32768"),
+        "{}",
+        err.message
+    );
+}
