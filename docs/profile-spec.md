@@ -123,7 +123,7 @@ policy:
 
 ### SKILL.md front matter와 크기 상한
 
-`SKILL.md` 맨 위에는 선택적으로 Agent Skills 형식의 YAML front matter(`---`로 열고 `---`로 닫는다)를 둘 수 있다([skill.schema.json](../schemas/v1/skill.schema.json)). front matter가 없는 기존 `SKILL.md`는 파일 전체를 본문으로 읽는다. 맨 위 `---`를 닫지 않으면 오타나 잘못된 메타데이터가 프롬프트로 흘러가지 않도록 `front-matter-unclosed` 오류로 거절한다.
+`SKILL.md` 맨 위에는 선택적으로 Agent Skills 형식의 YAML front matter(`---`로 열고 `---`로 닫는다)를 둘 수 있다([skill.schema.json](../schemas/v1/skill.schema.json)). front matter가 없는 기존 `SKILL.md`는 파일 전체를 본문으로 읽는다. 맨 위 `---`를 닫지 않으면(단독 `---` 한 줄로 파일이 끝나는 경우 포함) 오타나 잘못된 메타데이터가 프롬프트로 흘러가지 않도록 `front-matter-unclosed` 오류로 거절한다.
 
 | front matter 키 | 규칙 |
 |---|---|
@@ -334,7 +334,7 @@ HTTP response 기본값 accepted는 커밋 후 202와 request_id를 준다. `{mo
 
 같은 프로필 ID를 다시 등록하면 그 시점에 남아 있는 참조로 필수 판본을 다시 계산한다. 재등록 자체가 끝난 실행이나 무효화된 카드를 다시 열지는 않는다. 필수 번들이 없거나 손상됐으면 프로필 ID와 SHA-256 전체 64자리를 알려 기동·교체를 중단한다. 기존 활성 집합, 카드 상태, 실행 시도 횟수는 보존한다.
 
-**구버전 DB의 누락 번들 보충.** `bot profile-bundle put <프로필 폴더>`는 폴더명과 프로필 ID, 파일 구조와 크기 한도를 검증한다. 파일을 경로순으로 인코딩한 기존 정규 번들의 SHA-256을 계산해 `BOT_DATABASE_URL`이 가리키는 DB에 보관하고, 프로필 ID와 전체 해시를 출력한다. 이 작업은 호스트 등록부나 모델·도구 자격 없이 실행한다.
+**구버전 DB의 누락 번들 보충.** `bot profile-bundle put <프로필 폴더>`는 폴더명과 프로필 ID, 파일 구조와 크기 한도를 검증한다. 파일을 경로순으로 인코딩한 정규 번들의 SHA-256을 계산해 `BOT_DATABASE_URL`이 가리키는 DB에 보관하고, 프로필 ID와 전체 해시를 출력한다. 구판(`BOTPROFILE1`) 판본이 저장소에 고정돼 있으면 같은 원본 폴더로 그 구판 SHA-256을 재생성해 보충하고, 고정되지 않은 폴더는 현행 검증 규칙을 그대로 적용한다. 이 작업은 호스트 등록부나 모델·도구 자격 없이 실행한다.
 
 기동 오류에 표시된 ID·해시와 보충 결과가 일치하면 원래 기동 명령을 다시 실행한다. 같은 원본을 여러 번 보관해도 번들은 하나다. 다른 판본의 폴더는 그 판본으로만 보관된다. 기존 키의 저장 바이트와 충돌하면 덮어쓰기 없이 실패한다. 보충 자체로는 활성 판본이나 실행·승인 상태가 바뀌지 않는다.
 
@@ -347,7 +347,7 @@ HTTP response 기본값 accepted는 커밋 후 202와 request_id를 준다. `{mo
 
 **조회 계약.** bot_core::profile::ProfileCatalog는 같은 활성화 시점의 전체 맵(active), 현재 프로필(current), 지정 판본(lookup)을 제공한다. bot-profile이 검증한 스냅샷을 만들고 다른 역할은 Arc로 읽는다. ProfileSource::validate는 BOT_PROFILES 전체 집합의 판본을 돌려주며 Accept.revision에는 해당 프로필 하나의 판본을 기록한다.
 
-프로필 판본은 정렬한 상대 경로와 검증한 파일 바이트를 길이 구분해 SHA-256으로 계산한다. 정책 판본은 roles·members·policy와 승인자 매핑, 도구 판본은 서버 별칭을 포함한 정규화된 도구 선언에 묶는다. bot-profile은 원본 검증 바이트 묶음을 만들고 복원 때 구조·해시·프로필 ID를 재확인한다. 호스트 등록부는 활성화 때 대조하고, 옛 판본 실행도 현재 권한과 현재 설치 이미지·모델·자격·네트워크 상한 검사를 거친다. 승인 후 설치 이미지가 바뀌면 이전 승인을 무효화한다.
+프로필 판본은 정렬한 상대 경로와 검증한 파일 바이트를 길이 구분해 SHA-256으로 계산한다. 정책 판본은 roles·members·policy와 승인자 매핑, 도구 판본은 서버 별칭을 포함한 정규화된 도구 선언에 묶는다. bot-profile은 원본 검증 바이트 묶음을 만들고 복원 때 구조·해시·프로필 ID를 재확인한다. 프로필 번들은 `SKILL.md` front matter를 쓰는 경우 `BOTPROFILE2` 헤더를 사용해 구판 해석(`BOTPROFILE1`)과 판본 SHA-256을 분리하고, `SKILL.md` front matter가 없는 프로필은 기존 `BOTPROFILE1` 판본을 그대로 유지한다. 저장소에서 복원할 때는 헤더에 따라 구판 `BOTPROFILE1` 번들의 `SKILL.md`는 구판 규칙(원문 그대로·기존 크기)으로 복원해 업그레이드 호환성을 지키며, 새 폴더 검증과 `BOTPROFILE2` 번들에는 현행 `SKILL.md` 규칙을 적용한다. 호스트 등록부는 활성화 때 대조하고, 옛 판본 실행도 현재 권한과 현재 설치 이미지·모델·자격·네트워크 상한 검사를 거친다. 승인 후 설치 이미지가 바뀌면 이전 승인을 무효화한다.
 
 cron 전용 `beat: true`는 상태 확인 신호의 중복을 합친다. 생략하면 모든 발생을 개별 처리한다. 호스트는 프로필 활성 집합의 판본을 저장소에 원자적으로 게시한다. 시작 중이거나 호스트 설정이 반영되지 않은 동안 해당 입구는 접수를 보류한다.
 
@@ -363,7 +363,7 @@ BOT_HOST_CONFIG는 CLI가 읽는 JSON이다. gateway 키는 게이트웨이가 �
 
 | SKILL.md 검증 오류 코드 | 원인 |
 |---|---|
-| `front-matter-unclosed` | 맨 위 `---`로 연 front matter에 닫는 `---` 줄이 없음 |
+| `front-matter-unclosed` | 맨 위 `---`로 연 front matter에 닫는 `---` 줄이 없음(단독 `---` 파일 끝 포함) |
 | `skill-allowed-tools` | front matter에 `allowed-tools`를 적음(권한은 `tools.yaml`과 `profile.yaml` 정책에서만 선언) |
 | `skill-name-mismatch` | front matter의 `name`이 스킬 폴더 이름과 다름 |
 | `skill-too-large` | 단일 SKILL.md 본문 또는 에이전트별 보이는 스킬 본문 합계(front matter 제외)가 32 KiB 초과 |

@@ -533,6 +533,7 @@ class Examples(unittest.TestCase):
             "---\nname: agenda\nallowed-tools: Bash\n---\n일정\n",
             "---\nname: other\n---\n일정\n",
             "---\nname: agenda\n일정\n",
+            "---",
             "---\nextra: 1\n---\n일정\n",
         ):
             with self.assertRaises(Exception, msg=bad):
