@@ -1,7 +1,8 @@
 //! Anthropic Messages API(`POST {endpoint}/v1/messages`, tool use).
 //!
-//! 요청: `{"model","max_tokens","system"?,"messages":[…],"tools"?:[{"name","description","input_schema"}]}`. 이전 차례는 비서 메시지(`text`·`tool_use` 블록)와 사용자 메시지(`tool_result` 블록)로
-//! 이어 붙인다(도구 결과는 사용자 역할이다). 호출 ID는 이 요청 안에서만 쓰는 `t<차례>c<순번>`이다(워커의 멱등 호출 ID와 따로이고, 상류가 준 ID를 되돌려 보낼 필요가 없다).
+//! 요청: `{"model","max_tokens","system"?,"output_config"?:{"effort"},"messages":[…],"tools"?:[{"name","description","input_schema"}]}`. 이전 차례는 비서 메시지(`thinking`·`redacted_thinking`·`text`·`tool_use` 블록)와
+//! 사용자 메시지(`tool_result` 블록)로 이어 붙인다(도구 결과는 사용자 역할이다). 도구 호출과 함께 온 사고 블록(서명 포함)과 상류 호출 ID는 공급자 지문(`ApiSettings::fingerprint`)에 묶어 불투명 `state`에 남겼다가
+//! 같은 공급자의 다음 차례에만 되돌려 보낸다(없거나 공급자가 바뀌었으면 이 요청 안에서만 쓰는 `t<차례>c<순번>`을 쓰고 사고 블록은 뺀다).
 //!
 //! 응답: `stop_reason`이 `end_turn`·`stop_sequence`면 최종 글, `tool_use`면 호출이다. 종료 사유와 블록이 어긋나면(`end_turn`인데 `tool_use` 블록이 있거나 그 반대) 실패다 — 호출은
 //! `tool_use`로 끝난 응답에서만 나온다. `max_tokens`(출력 한도로 끊김)·`model_context_window_exceeded`·`refusal`은 부분 글이나 잘린 호출을 쓰지 않고 실패로 끝낸다. 호출이 하나라도
@@ -26,6 +27,123 @@ const VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// 최상위 조합자(`allOf`·`anyOf`·`oneOf`)를 펼칠 때의 중첩 깊이 상한
 const MAX_SCHEMA_FLATTEN_DEPTH: usize = 8;
+/// 불투명 공급자 상태의 형식 표지(다른 종류의 실행기가 남긴 상태는 읽지 않는다)
+const STATE_KIND: &str = "anthropic";
+/// 상류가 준 호출 ID의 길이 상한
+const MAX_ORIGINAL_ID: usize = 128;
+/// 한 차례에 보존할 사고 블록(`thinking`·`redacted_thinking`) 수 상한
+const MAX_THINKING_BLOCKS: usize = 16;
+/// 한 차례 공급자 상태의 최대 바이트(체크포인트 1 MiB 한도 보호)
+const MAX_STATE_BYTES: usize = 128 * 1024;
+
+fn id_ok(id: &str) -> bool {
+    (1..=MAX_ORIGINAL_ID).contains(&id.len()) && id.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+/// 서명이 있는 `thinking` 블록이나 `data`가 있는 `redacted_thinking` 블록만 되돌릴 수 있는 모양으로 추린다.
+fn thinking_block(block: &Value) -> Option<Value> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking") => {
+            let thinking = block.get("thinking").and_then(Value::as_str)?;
+            let signature = block.get("signature").and_then(Value::as_str)?;
+            (!signature.is_empty())
+                .then(|| json!({"type": "thinking", "thinking": thinking, "signature": signature}))
+        }
+        Some("redacted_thinking") => {
+            let data = block.get("data").and_then(Value::as_str)?;
+            (!data.is_empty()).then(|| json!({"type": "redacted_thinking", "data": data}))
+        }
+        _ => None,
+    }
+}
+
+struct TurnState {
+    thinking: Vec<Value>,
+    ids: Vec<Option<String>>,
+}
+
+fn encode_state(
+    thinking: &[Value],
+    ids: &[Option<String>],
+    provider: &str,
+) -> Result<Option<String>, ModelError> {
+    if thinking.len() > MAX_THINKING_BLOCKS {
+        return Err(fail("unsupported_tool_signature", false));
+    }
+    let has_ids = ids.iter().any(Option::is_some);
+    if thinking.is_empty() && !has_ids {
+        return Ok(None);
+    }
+    let mut obj = Map::new();
+    obj.insert("v".to_owned(), json!(1));
+    obj.insert("k".to_owned(), json!(STATE_KIND));
+    obj.insert("p".to_owned(), json!(provider));
+    if !thinking.is_empty() {
+        obj.insert("b".to_owned(), Value::Array(thinking.to_vec()));
+    }
+    if has_ids {
+        obj.insert(
+            "c".to_owned(),
+            Value::Array(
+                ids.iter()
+                    .map(|id| {
+                        id.as_deref()
+                            .map_or(Value::Null, |s| Value::String(s.into()))
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    let encoded = Value::Object(obj).to_string();
+    if encoded.len() > MAX_STATE_BYTES {
+        return Err(fail("unsupported_tool_signature", false));
+    }
+    Ok(Some(encoded))
+}
+
+fn decode_state(state: Option<&str>, calls: usize, provider: &str) -> TurnState {
+    let mut out = TurnState {
+        thinking: Vec::new(),
+        ids: vec![None; calls],
+    };
+    let Some(value) = state.and_then(|text| serde_json::from_str::<Value>(text).ok()) else {
+        return out;
+    };
+    if value.get("v").and_then(Value::as_u64) != Some(1)
+        || value.get("k").and_then(Value::as_str) != Some(STATE_KIND)
+        || value.get("p").and_then(Value::as_str) != Some(provider)
+    {
+        return out;
+    }
+    if let Some(items) = value.get("b").and_then(Value::as_array) {
+        out.thinking = items
+            .iter()
+            .take(MAX_THINKING_BLOCKS)
+            .filter_map(thinking_block)
+            .collect();
+    }
+    if let Some(items) = value.get("c").and_then(Value::as_array) {
+        for (slot, item) in out.ids.iter_mut().zip(items) {
+            *slot = item.as_str().filter(|id| id_ok(id)).map(str::to_owned);
+        }
+    }
+    out
+}
+
+fn pick_id(saved: Option<&str>, turn: usize, index: usize, used: &mut HashSet<String>) -> String {
+    if let Some(id) = saved
+        && used.insert(id.to_owned())
+    {
+        return id.to_owned();
+    }
+    let mut candidate = format!("t{turn}c{index}");
+    let mut round = 0u32;
+    while !used.insert(candidate.clone()) {
+        round += 1;
+        candidate = format!("t{turn}c{index}_{round}");
+    }
+    candidate
+}
 
 pub(super) fn headers(key: Option<&str>) -> Vec<Header> {
     let mut headers: Vec<Header> = vec![
@@ -48,14 +166,25 @@ pub(super) fn build(settings: &ApiSettings, request: &ModelRequest) -> Result<Bu
     if messages.is_empty() {
         return Err(fail("invalid_request", false));
     }
+    let mut used: HashSet<String> = HashSet::new();
+    let provider = settings.fingerprint();
     for (turn, exchange) in request.exchanges.iter().enumerate() {
         let mut blocks = Vec::new();
+        let state = if exchange.calls.is_empty() {
+            TurnState {
+                thinking: Vec::new(),
+                ids: Vec::new(),
+            }
+        } else {
+            decode_state(exchange.state.as_deref(), exchange.calls.len(), &provider)
+        };
+        blocks.extend(state.thinking);
         if !exchange.text.trim().is_empty() {
             blocks.push(json!({"type": "text", "text": exchange.text.trim()}));
         }
         let mut results = Vec::new();
-        for (index, call) in exchange.calls.iter().enumerate() {
-            let id = format!("t{turn}c{index}");
+        for (index, (call, saved_id)) in exchange.calls.iter().zip(state.ids).enumerate() {
+            let id = pick_id(saved_id.as_deref(), turn, index, &mut used);
             let name = names
                 .alias(&call.tool)
                 .ok_or_else(|| fail("invalid_request", false))?;
@@ -85,6 +214,9 @@ pub(super) fn build(settings: &ApiSettings, request: &ModelRequest) -> Result<Bu
         "max_tokens": settings.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         "messages": messages,
     });
+    if let Some(effort) = settings.effort {
+        body["output_config"] = json!({"effort": effort.as_str()});
+    }
     if !request.system.trim().is_empty() {
         body["system"] = Value::String(request.system.clone());
     }
@@ -300,6 +432,7 @@ fn usage_of(usage: Option<&Value>) -> (crate::model::Usage, Option<TokenUsage>) 
 }
 
 pub(super) fn parse(
+    settings: &ApiSettings,
     value: &Value,
     request: &ModelRequest,
     names: &NameTable,
@@ -323,6 +456,7 @@ pub(super) fn parse(
     let (usage, measured) = usage_of(value.get("usage"));
     let mut texts: Vec<&str> = Vec::new();
     let mut uses: Vec<&Value> = Vec::new();
+    let mut thinking: Vec<Value> = Vec::new();
     for block in content {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => texts.push(
@@ -332,7 +466,12 @@ pub(super) fn parse(
                     .ok_or_else(invalid)?,
             ),
             Some("tool_use") => uses.push(block),
-            // 생각·서버 도구 같은 다른 블록은 이 실행기가 요청하지 않았다: 읽지 않는다
+            Some("thinking" | "redacted_thinking") => {
+                if let Some(saved) = thinking_block(block) {
+                    thinking.push(saved);
+                }
+            }
+            // 서버 도구 같은 그 밖의 블록은 이 실행기가 요청하지 않았다: 읽지 않는다
             _ => {}
         }
     }
@@ -356,18 +495,20 @@ pub(super) fn parse(
     }
     let turn = request.exchanges.len();
     let mut calls = Vec::with_capacity(uses.len());
-    // 상류가 준 호출 ID는 쓰지 않지만 한 응답 안에서 겹치면 같은 호출을 둘로 부풀린 것이라 거절한다
+    let mut call_ids = Vec::with_capacity(uses.len());
+    // 상류가 준 호출 ID는 한 응답 안에서 겹치면 거절하고, 쓸 수 있는 모양이면 프롬프트 캐시·사고 블록 연속을 위해 공급자 상태에 담는다
     let mut upstream_ids: HashSet<&str> = HashSet::new();
     for (index, block) in uses.into_iter().enumerate() {
-        match block.get("id") {
-            None | Some(Value::Null) => {}
+        let original = match block.get("id") {
+            None | Some(Value::Null) => None,
             Some(Value::String(id)) => {
                 if !upstream_ids.insert(id.as_str()) {
                     return Err(invalid());
                 }
+                id_ok(id).then(|| id.clone())
             }
             Some(_) => return Err(invalid()),
-        }
+        };
         let name = block
             .get("name")
             .and_then(Value::as_str)
@@ -376,17 +517,19 @@ pub(super) fn parse(
             .tool(name)
             .ok_or_else(|| fail("unknown_tool", false))?;
         let input = block.get("input").cloned().unwrap_or(Value::Null);
+        call_ids.push(original);
         calls.push(PendingCall {
             call: call_id(&request.attempt.run, turn, index),
             tool: tool.clone(),
             args: JsonPayload(checked_args(input)?),
         });
     }
+    let state = encode_state(&thinking, &call_ids, &settings.fingerprint())?;
     Ok(ModelStep::Calls {
         text,
         calls,
         usage,
         measured,
-        state: None,
+        state,
     })
 }

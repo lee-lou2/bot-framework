@@ -51,12 +51,16 @@ fn the_description_shows_names_and_hosts_but_neither_paths_nor_values() {
             "a: claude-cli · 모델 m · 상류 h.example · 자격 이름 claude-key",
         ),
         (
-            json!({"kind": "anthropic-api", "model": "m", "endpoint": "https://h.example/v1", "secret": "a-key", "max_tokens": 100}),
-            "a: anthropic-api · 모델 m · 상류 h.example · 자격 이름 a-key · 최대 토큰 100",
+            json!({"kind": "claude-cli", "model": "m", "endpoint": "https://h.example/v1/private-path", "secret": "claude-key", "effort": "high"}),
+            "a: claude-cli · 모델 m · 상류 h.example · 자격 이름 claude-key · 사고 수준 high",
         ),
         (
-            json!({"kind": "openai-api", "model": "m", "endpoint": "https://h.example:8443/v1", "secret": "o-key", "max_completion_tokens": 7}),
-            "a: openai-api · 모델 m · 상류 h.example:8443 · 자격 이름 o-key · 최대 토큰 7(max_completion_tokens)",
+            json!({"kind": "anthropic-api", "model": "m", "endpoint": "https://h.example/v1", "secret": "a-key", "max_tokens": 100, "effort": "medium"}),
+            "a: anthropic-api · 모델 m · 상류 h.example · 자격 이름 a-key · 최대 토큰 100 · 사고 수준 medium",
+        ),
+        (
+            json!({"kind": "openai-api", "model": "m", "endpoint": "https://h.example:8443/v1", "secret": "o-key", "max_completion_tokens": 7, "effort": "low"}),
+            "a: openai-api · 모델 m · 상류 h.example:8443 · 자격 이름 o-key · 최대 토큰 7(max_completion_tokens) · 사고 수준 low",
         ),
         (
             json!({"kind": "openai-api", "model": "m", "endpoint": "http://127.0.0.1:11434/v1"}),

@@ -83,6 +83,7 @@ fn api_runner(
         secret,
         max_tokens: config.max_tokens,
         limit_field: config.limit_field,
+        effort: config.effort,
     };
     let runner = ApiRunner::new(settings, parts.secrets.clone(), parts.gate.clone())
         .map_err(|reason| format!("모델 별칭 {alias}: {reason}"))?;
@@ -230,6 +231,7 @@ mod tests {
                 secret: None,
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
+                effort: None,
             }),
         );
         let error = build(&forced, None, Some(&parts())).err().unwrap();
@@ -246,6 +248,7 @@ mod tests {
                 secret: Some("key".into()),
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
+                effort: None,
             }),
         );
         let error = build(&forced, None, Some(&parts())).err().unwrap();

@@ -24,7 +24,7 @@ mod transport;
 mod wire;
 
 pub use endpoint::ApiEndpoint;
-pub use runner::{ApiRunner, ApiSettings, LimitField, SendGate};
+pub use runner::{ApiRunner, ApiSettings, Effort, LimitField, SendGate};
 pub use transport::ApiClient;
 pub use wire::ApiKind;
 

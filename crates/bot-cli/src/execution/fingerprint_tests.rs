@@ -111,3 +111,12 @@ fn output_limits_are_not_authority_so_they_leave_the_bytes_alone() {
     limited["max_tokens"] = json!(2048);
     assert_eq!(print(json!({"a": limited})), print(json!({"a": openai()})));
 }
+
+#[test]
+fn effort_is_not_authority_so_it_leaves_the_bytes_alone() {
+    for base in [claude(), anthropic(), openai()] {
+        let mut tuned = base.clone();
+        tuned["effort"] = json!("medium");
+        assert_eq!(print(json!({"a": tuned})), print(json!({"a": base})));
+    }
+}

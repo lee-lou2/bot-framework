@@ -81,6 +81,7 @@ pub(super) fn settings(kind: ApiKind) -> ApiSettings {
         secret: SecretName::parse("model-key"),
         max_tokens: None,
         limit_field: Default::default(),
+        effort: None,
     }
 }
 

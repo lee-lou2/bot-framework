@@ -59,7 +59,7 @@ CLI가 명시 목적지를 거절해도 시도 한도 1에서 정상 종료하�
 
 ## v2.0 이후 모델 설정
 
-v2.0에서 Claude CLI의 `effort`는 `medium`, 최대 출력은 8,192토큰으로 고정한다. 이후에는 운영자가 정한 호스트 상한 안에서 에이전트마다 `effort`와 최대 출력 토큰 수를 설정할 수 있게 한다.
+호스트 `providers.<별칭>`에서는 `claude-cli`·`anthropic-api`·`openai-api` 모두 `effort`를 설정할 수 있고(`claude-cli`는 생략 시 `medium`, 최대 출력 8,192토큰), API 직접 호출은 `max_tokens`(`openai-api`는 `max_completion_tokens` 포함)도 설정할 수 있다. 이후에는 운영자가 정한 호스트 상한 안에서 에이전트마다 `effort`와 최대 출력 토큰 수를 개별 재정의할 수 있게 한다.
 
 v2.0에서 Pi CLI는 지원하지 않는다. 조립 경로가 없던 실행기 코드는 저장소에서 지웠고(Git 이력에 남아 있다), 호스트 설정의 `kind: "pi"`는 계속 거절한다. 다시 지원하려면 격리·재개 어댑터와 세션 토큰 보호를 먼저 검증한다.
 

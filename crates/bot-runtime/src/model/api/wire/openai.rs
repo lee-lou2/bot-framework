@@ -179,6 +179,9 @@ pub(super) fn build(settings: &ApiSettings, request: &ModelRequest) -> Result<Bu
     if let Some(limit) = settings.max_tokens {
         body[settings.limit_field.name()] = json!(limit);
     }
+    if let Some(effort) = settings.effort {
+        body["reasoning_effort"] = json!(effort.as_str());
+    }
     if !request.tools.is_empty() {
         let tools = request
             .tools

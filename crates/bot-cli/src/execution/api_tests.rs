@@ -1,7 +1,7 @@
 //! API 직접 호출 제공자(`anthropic-api`·`openai-api`): 모양 검사(주소 규칙·키 생략은 loopback만·출력 한도)와 활성화 지문(종류·모델·기준 주소 전체·자격 이름).
 
 use super::*;
-use bot_runtime::model::{ApiKind, LimitField};
+use bot_runtime::model::{ApiKind, Effort, LimitField};
 use serde_json::json;
 
 fn parsed(entry: Value) -> Result<Provider, String> {
@@ -27,6 +27,7 @@ fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_
             secret: Some("anthropic-key".into()),
             max_tokens: None,
             limit_field: LimitField::MaxTokens,
+            effort: None,
         })
     );
     assert_eq!(
@@ -38,6 +39,7 @@ fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_
             secret: Some("openai-key".into()),
             max_tokens: Some(2048),
             limit_field: LimitField::MaxTokens,
+            effort: None,
         })
     );
     // 로컬 서버(loopback IP 리터럴)는 `http`로도 쓰고 키(`secret`)를 생략할 수 있다
@@ -57,6 +59,7 @@ fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_
                 secret: None,
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
+                effort: None,
             })
         );
     }
@@ -201,6 +204,7 @@ fn api(
         secret,
         max_tokens,
         limit_field: LimitField::MaxTokens,
+        effort: None,
     })
 }
 
@@ -250,6 +254,7 @@ fn the_activation_fingerprint_binds_kind_model_whole_base_url_and_credential_nam
         model: "m".into(),
         endpoint: "https://h.example/v1".into(),
         secret: "key".into(),
+        effort: None,
     };
     assert_ne!(print(base.clone()), print(cli));
     assert_ne!(print(base), print(Provider::Demo));
@@ -278,6 +283,7 @@ fn openai_api_takes_max_completion_tokens_or_max_tokens_but_never_both() {
             secret: Some("openai-key".into()),
             max_tokens,
             limit_field,
+            effort: None,
         })
     };
     assert_eq!(
@@ -302,4 +308,76 @@ fn openai_api_takes_max_completion_tokens_or_max_tokens_but_never_both() {
     }
     // Anthropic은 `max_tokens`뿐이다
     assert!(parsed(anthropic(json!({"max_completion_tokens": 100}))).is_err());
+}
+
+#[test]
+fn effort_accepts_five_levels_on_non_demo_providers_and_refuses_bad_values() {
+    for (raw, expected) in [
+        ("low", Effort::Low),
+        ("medium", Effort::Medium),
+        ("high", Effort::High),
+        ("xhigh", Effort::Xhigh),
+        ("max", Effort::Max),
+    ] {
+        assert_eq!(
+            parsed(anthropic(json!({"effort": raw}))).unwrap(),
+            Provider::Api(ApiProvider {
+                kind: ApiKind::Anthropic,
+                model: "claude-x".into(),
+                endpoint: "https://api.anthropic.com".into(),
+                secret: Some("anthropic-key".into()),
+                max_tokens: None,
+                limit_field: LimitField::MaxTokens,
+                effort: Some(expected),
+            })
+        );
+        assert_eq!(
+            parsed(json!({
+                "kind": "openai-api",
+                "model": "gpt-x",
+                "endpoint": "https://api.openai.com/v1",
+                "secret": "openai-key",
+                "effort": raw
+            }))
+            .unwrap(),
+            Provider::Api(ApiProvider {
+                kind: ApiKind::OpenAi,
+                model: "gpt-x".into(),
+                endpoint: "https://api.openai.com/v1".into(),
+                secret: Some("openai-key".into()),
+                max_tokens: None,
+                limit_field: LimitField::MaxTokens,
+                effort: Some(expected),
+            })
+        );
+        assert_eq!(
+            parsed(json!({
+                "kind": "claude-cli",
+                "model": "claude-x",
+                "endpoint": "https://api.example.com/v1",
+                "secret": "claude-key",
+                "effort": raw
+            }))
+            .unwrap(),
+            Provider::ClaudeCli {
+                model: "claude-x".into(),
+                endpoint: "https://api.example.com/v1".into(),
+                secret: "claude-key".into(),
+                effort: Some(expected),
+            }
+        );
+    }
+    for bad in [
+        json!("minimal"),
+        json!("MEDIUM"),
+        json!(""),
+        json!(1),
+        json!(true),
+        json!(null),
+    ] {
+        let error = parsed(anthropic(json!({"effort": bad.clone()}))).unwrap_err();
+        assert!(error.contains("providers.a.effort"), "{bad} → {error}");
+    }
+    let error = parsed(json!({"kind": "demo", "effort": "medium"})).unwrap_err();
+    assert!(error.contains("알 수 없는 키"), "{error}");
 }

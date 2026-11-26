@@ -365,17 +365,25 @@ fn tool_use_blocks_become_calls_with_deterministic_ids_and_the_texts_beside_them
         })
     );
     assert_eq!((usage.input_tokens, usage.output_tokens), (7, 3));
-    assert_eq!(state, None, "Anthropic은 공급자 상태가 필요 없다");
-    // 호출 ID는 몇 번째 차례인지를 따른다
+    let saved = state.expect("사고 블록과 상류 호출 ID는 공급자 상태에 남는다");
+    assert!(
+        saved.contains("\"type\":\"thinking\"")
+            && saved.contains("\"signature\":\"x\"")
+            && saved.contains("toolu_A")
+            && saved.contains("toolu_B"),
+        "{saved}"
+    );
+    // 호출 ID는 몇 번째 차례인지를 따른다(사고 블록·상류 ID가 모두 없으면 상태는 None)
     let mut later = base();
     later.exchanges = vec![exchange("", vec![], None), exchange("", vec![], None)];
-    let content = json!([{"type": "tool_use", "id": "x", "name": "delegate", "input": {}}]);
+    let content = json!([{"type": "tool_use", "name": "delegate", "input": {}}]);
     let step = parse(&later, &message("tool_use", content, json!({}))).unwrap();
-    let ModelStep::Calls { calls, .. } = step else {
+    let ModelStep::Calls { calls, state, .. } = step else {
         panic!()
     };
     assert_eq!(calls[0].call, call_id(&run, 2, 0));
     assert_eq!(calls[0].args.0, "{}");
+    assert_eq!(state, None);
 }
 
 #[test]

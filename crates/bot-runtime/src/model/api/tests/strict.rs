@@ -252,3 +252,114 @@ fn the_output_limit_goes_out_under_the_field_name_the_operator_wrote() {
     assert_eq!(anthropic["max_tokens"], 321);
     assert!(anthropic.get("max_completion_tokens").is_none());
 }
+
+#[test]
+fn effort_goes_out_under_each_protocols_native_field_and_is_omitted_when_unset() {
+    use crate::model::api::Effort;
+    let body = |kind: ApiKind, effort: Option<Effort>| {
+        let mut with = settings(kind);
+        with.effort = effort;
+        let built = kind.build(&with, &base()).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&built.body).unwrap()
+    };
+    let a_none = body(ApiKind::Anthropic, None);
+    assert!(a_none.get("output_config").is_none());
+    let a_med = body(ApiKind::Anthropic, Some(Effort::Medium));
+    assert_eq!(
+        a_med["output_config"],
+        serde_json::json!({"effort": "medium"})
+    );
+
+    let o_none = body(ApiKind::OpenAi, None);
+    assert!(o_none.get("reasoning_effort").is_none());
+    let o_high = body(ApiKind::OpenAi, Some(Effort::High));
+    assert_eq!(o_high["reasoning_effort"], "high");
+}
+
+#[test]
+fn anthropic_thinking_blocks_and_ids_replay_only_to_the_issuing_provider() {
+    let kind = ApiKind::Anthropic;
+    let name = alias(kind);
+    let issued = anthropic(
+        "tool_use",
+        &format!(
+            r#"{{"type":"thinking","thinking":"검토","signature":"SIG-A"}},{{"type":"redacted_thinking","data":"ENC-B"}},{{"type":"thinking","thinking":"서명없음"}},{{"type":"text","text":"확인할게요"}},{{"type":"tool_use","id":"toolu_up_1","name":"{name}","input":{{}}}}"#
+        ),
+    );
+    let Ok(ModelStep::Calls {
+        state: Some(state), ..
+    }) = read(kind, &issued)
+    else {
+        panic!("Anthropic 사고 블록 상태가 있어야 해요");
+    };
+    assert!(
+        !state.contains("서명없음"),
+        "서명 없는 thinking 블록은 버린다"
+    );
+
+    let next = |to: &crate::model::api::ApiSettings| -> serde_json::Value {
+        let past = exchange(
+            "확인할게요",
+            vec![done_call(
+                "c1",
+                "agenda.list",
+                "{}",
+                CallEnd::Done(JsonPayload("{}".into())),
+            )],
+            Some(state.as_str()),
+        );
+        let req = request(vec![user("계속해")], base().tools, vec![past]);
+        serde_json::from_slice(&kind.build(to, &req).unwrap().body).unwrap()
+    };
+
+    // 같은 공급자: thinking · redacted_thinking이 text · tool_use 앞에 원래 순서대로 붙고 상류 호출 ID도 유지된다
+    let same = next(&settings(kind));
+    let assistant = same["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(assistant[0]["type"], "thinking");
+    assert_eq!(assistant[0]["signature"], "SIG-A");
+    assert_eq!(assistant[1]["type"], "redacted_thinking");
+    assert_eq!(assistant[1]["data"], "ENC-B");
+    assert_eq!(assistant[2]["type"], "text");
+    assert_eq!(assistant[3]["type"], "tool_use");
+    assert_eq!(assistant[3]["id"], "toolu_up_1");
+    assert_eq!(
+        same["messages"][2]["content"][0]["tool_use_id"],
+        "toolu_up_1"
+    );
+
+    // 모델·주소·자격 이름이 바뀐 공급자: 옛 사고 블록·ID를 싣지 않고 로컬 ID(`t0c0`)로 폴백한다
+    let mut other_model = settings(kind);
+    other_model.model = "model-y".into();
+    let mut other_endpoint = settings(kind);
+    other_endpoint.endpoint = ApiEndpoint::parse("https://other.example.com/v1").unwrap();
+    let mut other_secret = settings(kind);
+    other_secret.secret = SecretName::parse("other-key");
+    for (what, changed) in [
+        ("모델", other_model),
+        ("주소", other_endpoint),
+        ("자격 이름", other_secret),
+    ] {
+        let body = next(&changed);
+        let text = body.to_string();
+        assert!(
+            !text.contains("SIG-A") && !text.contains("ENC-B") && !text.contains("toolu_up_1"),
+            "{what}이 바뀐 공급자에게 옛 상태가 갔다: {text}"
+        );
+        assert_eq!(body["messages"][1]["content"][0]["type"], "text");
+        assert_eq!(body["messages"][1]["content"][1]["id"], "t0c0");
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "t0c0");
+    }
+
+    // 과대한 서명 블록은 호출을 하나도 부르지 않고 고정 코드로 거절한다
+    let huge = "S".repeat(130 * 1024);
+    let oversized = anthropic(
+        "tool_use",
+        &format!(
+            r#"{{"type":"thinking","thinking":"","signature":"{huge}"}},{{"type":"tool_use","id":"toolu_big","name":"{name}","input":{{}}}}"#
+        ),
+    );
+    assert_eq!(
+        read(kind, &oversized),
+        Err(wire::fail("unsupported_tool_signature", false))
+    );
+}

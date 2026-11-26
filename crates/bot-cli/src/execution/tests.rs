@@ -19,7 +19,8 @@ fn providers_are_demo_or_a_claude_cli_with_an_https_upstream_and_a_secret_name()
         Provider::ClaudeCli {
             model: "claude-x".into(),
             endpoint: "https://api.example.com:8443/v1/messages".into(),
-            secret: "upstream-key".into()
+            secret: "upstream-key".into(),
+            effort: None,
         }
     );
     assert!(parse_providers(&json!({})).unwrap().is_empty());
@@ -239,6 +240,7 @@ fn claude(endpoint: &str, secret: &str) -> BTreeMap<String, Provider> {
             model: "m".into(),
             endpoint: endpoint.into(),
             secret: secret.into(),
+            effort: None,
         },
     )]
     .into()

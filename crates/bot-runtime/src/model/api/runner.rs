@@ -51,6 +51,48 @@ impl LimitField {
     }
 }
 
+/// 모델 사고(추론) 수준. 호스트 설정 `providers.<별칭>.effort`로 지정한다.
+/// - `claude-cli`: `--effort <값>`(생략하면 `medium`)
+/// - `anthropic-api`: `output_config.effort`(생략하면 보내지 않는다)
+/// - `openai-api`: `reasoning_effort`(생략하면 보내지 않는다)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// 모델 별칭 하나의 상류 설정(호스트 설정의 `providers.<별칭>`).
 #[derive(Clone, Debug)]
 pub struct ApiSettings {
@@ -64,6 +106,8 @@ pub struct ApiSettings {
     pub max_tokens: Option<u32>,
     /// `max_tokens` 값을 실어 보내는 필드 이름(OpenAI 호환만 고를 수 있다)
     pub limit_field: LimitField,
+    /// 사고(추론) 수준. 생략하면 상류 요청에 넣지 않는다.
+    pub effort: Option<Effort>,
 }
 
 impl ApiSettings {
