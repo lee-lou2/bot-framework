@@ -1,5 +1,7 @@
 //! 보류 판정은 발생 ID가 가리키는 정확한 대상에만 적용한다. 구판의 같은 호출 ID(도구·회신 발송)도 종류로 갈린다.
 
+#[path = "hold_targets/final_result.rs"]
+mod final_result;
 mod support;
 
 use bot_core::{
@@ -178,4 +180,177 @@ async fn upgrading_a_db_with_both_kinds_held_under_one_call_id_opens_two_holds_t
             .await,
         0
     );
+}
+
+async fn held_steps(db: &TestDb, upgrade: bool, pending: bool) -> Attempt {
+    use bot_core::{
+        command::{EffectRequest, JsonPayload},
+        state::EffectState,
+    };
+    let at = leased(db, "steps").await.attempt;
+    begin_call(db, &at, "c1").await;
+    calls(db).start(start_call(&at, "c1", None)).await.unwrap();
+    for name in if pending {
+        &["first", "next"][..]
+    } else {
+        &["first"][..]
+    } {
+        let p = effects(db)
+            .request(EffectRequest {
+                attempt: at.clone(),
+                call: call("c1"),
+                step: (*name).into(),
+                args: JsonPayload("{}".into()),
+            })
+            .await
+            .unwrap();
+        if *name == "first" {
+            let mut status = p.status;
+            status.state = EffectState::Confirmed;
+            status.receipt = Some("step-receipt".into());
+            effects(db)
+                .record(at.clone(), call("c1"), status)
+                .await
+                .unwrap();
+        }
+    }
+    if upgrade {
+        // 0024 당시의 호출 트리거로 종결한다. 0025가 기존 고립 행을 실제로 보정해야 한다.
+        let sql = include_str!("../migrations/0011_holds.sql");
+        let func = sql
+            .split("create function bot_calls_hold()")
+            .nth(1)
+            .unwrap()
+            .split("create trigger bot_calls_hold")
+            .next()
+            .unwrap();
+        db.sql(&format!(
+            "create or replace function bot_calls_hold(){func}"
+        ))
+        .await;
+        db.sql("drop trigger if exists bot_effects_call_hold on bot_effects")
+            .await;
+        db.sql("delete from _sqlx_migrations where version=25")
+            .await;
+    }
+    calls(db)
+        .finish(FinishCall {
+            attempt: at.clone(),
+            call: call("c1"),
+            outcome: Outcome::Held("response_unknown".into()),
+        })
+        .await
+        .unwrap();
+    at
+}
+
+#[tokio::test]
+async fn upgrading_an_orphaned_held_call_opens_one_final_decision() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let at = held_steps(&db, true, false).await;
+    assert_eq!(db.scalar::<i64>("select count(*) from bot_holds").await, 0);
+    db.store.migrate().await.unwrap();
+    let target = hold_ref(&db, HoldKind::Tool, &at.run, &call("c1"), None).await;
+    db.store.migrate().await.unwrap();
+    assert_eq!(db.scalar::<i64>("select count(*) from bot_holds").await, 1);
+    assert_eq!(confirm(&db, target).await.unwrap(), HoldDecision::Applied);
+}
+
+#[tokio::test]
+async fn upgrading_retracts_a_legacy_whole_not_executed_mark_and_parks_the_run() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let at = held_steps(&db, true, true).await;
+    // 구판 관리 판정의 커밋 결과를 재현한다. 마지막 단계만 미실행이고 첫 단계에는 이미 영수증이 있다.
+    db.sql("update bot_holds set closed_ms=bot_now_ms(), operator='local:owner', verdict='not_executed', evidence_sha256=decode(repeat('00',32),'hex') where effect is not null").await;
+    db.sql("update bot_effects set resolution='not_executed' where state='held'")
+        .await;
+    db.sql("update bot_calls set resolution='not_executed'")
+        .await;
+    db.sql("update bot_runs set state='ready', wait_kind=null, keep_generation=true")
+        .await;
+    assert_eq!(state_of_run(&db, &at.run).await, "ready");
+    assert_eq!(
+        db.scalar::<i64>("select count(*) from bot_holds where closed_ms is null")
+            .await,
+        0
+    );
+    db.store.migrate().await.unwrap();
+    assert_eq!(state_of_run(&db, &at.run).await, "waiting");
+    let target = hold_ref(&db, HoldKind::Tool, &at.run, &call("c1"), None).await;
+    let view = db
+        .store
+        .holds(&operator(), None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        view.steps
+            .iter()
+            .find(|s| s.step == "first")
+            .unwrap()
+            .receipt
+            .as_deref(),
+        Some("step-receipt")
+    );
+    assert_eq!(
+        db.scalar::<i64>(
+            "select count(*) from bot_holds where operator='local:owner' and verdict='not_executed'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(confirm(&db, target).await.unwrap(), HoldDecision::Applied);
+    assert_eq!(state_of_run(&db, &at.run).await, "ready");
+}
+
+#[tokio::test]
+async fn a_mixed_call_exposes_its_final_decision_only_after_its_last_pending_step() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let at = held_steps(&db, false, true).await;
+    let h = db
+        .store
+        .holds(&operator(), None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(h.hold_id.is_none());
+    let last = h.steps.iter().find(|s| s.step == "next").unwrap();
+    let step = hold_ref(
+        &db,
+        HoldKind::Tool,
+        &at.run,
+        &call("c1"),
+        Some(&last.effect),
+    )
+    .await;
+    let verdict = HoldVerdict::NotExecuted {
+        evidence: "수신처에 다음 단계 기록 없음".into(),
+    };
+    assert_eq!(
+        db.store
+            .resolve_hold(operator().principal, step.clone(), verdict.clone())
+            .await
+            .unwrap(),
+        HoldDecision::Applied
+    );
+    assert_eq!(state_of_run(&db, &at.run).await, "waiting");
+    let whole = hold_ref(&db, HoldKind::Tool, &at.run, &call("c1"), None).await;
+    assert_ne!(whole.hold_id, step.hold_id);
+    assert_eq!(
+        db.store
+            .resolve_hold(operator().principal, step, verdict)
+            .await
+            .unwrap(),
+        HoldDecision::Repeated
+    );
+    assert_eq!(confirm(&db, whole).await.unwrap(), HoldDecision::Applied);
+    assert_eq!(state_of_run(&db, &at.run).await, "ready");
 }

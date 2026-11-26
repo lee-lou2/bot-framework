@@ -57,7 +57,8 @@ pub async fn hold_ref(
 /// 0011(보류 발생 ID)을 걷어 이전 판(0010)의 DB로 되돌린다. 구판 모양의 행을 만든 뒤 `store.migrate()`로 다시 올려 본다.
 pub async fn rewind_holds(db: &TestDb) {
     sqlx::raw_sql(
-        "drop trigger bot_calls_hold on bot_calls;
+        "drop trigger bot_effects_call_hold on bot_effects;
+         drop trigger bot_calls_hold on bot_calls;
          drop trigger bot_effects_hold on bot_effects;
          drop trigger bot_outbox_hold on bot_outbox;
          drop trigger bot_runs_hold on bot_runs;
@@ -65,7 +66,7 @@ pub async fn rewind_holds(db: &TestDb) {
                        bot_hold_open(text, text, text, text, text), bot_hold_close(text, text, text, text, text);
          drop table bot_holds;
          drop sequence bot_hold_seq;
-         delete from _sqlx_migrations where version = 11;",
+         delete from _sqlx_migrations where version in (11,25);",
     )
     .execute(db.store.pool())
     .await

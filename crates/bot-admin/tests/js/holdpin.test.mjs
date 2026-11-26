@@ -196,3 +196,11 @@ test("the lost-answer retry: H1 committed, the same target is held again as H2 �
   assert.equal(P.reconcile(pin, bundle(["A", "held", "h-2"])).ok, false);
   assert.equal(P.retarget("A", "h-1", bundle(["A", "held", "h-2"])).changed, true);
 });
+
+test("a confirmed step pins its separate final receipt without allowing a whole-call retry", () => {
+  const h = {hold_id: "h-final", steps: steps(["one", "confirmed"])};
+  const pin = P.arm("confirmed", null, "전체 영수증", h.hold_id);
+  assert.deepEqual(P.reconcile(pin, h), {ok: true});
+  assert.equal(P.reconcile(pin, {...h, hold_id:"h-next"}).ok, false);
+  assert.equal(P.reconcile(P.arm("not_executed", null, "근거", h.hold_id), h).ok, false);
+});

@@ -181,6 +181,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "queue order",
         include_str!("../migrations/0024_queue_order.sql"),
     ),
+    (
+        25,
+        "call final hold",
+        include_str!("../migrations/0025_call_final_hold.sql"),
+    ),
 ];
 
 fn migrator() -> Migrator {

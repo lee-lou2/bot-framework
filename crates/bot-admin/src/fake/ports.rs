@@ -342,7 +342,7 @@ impl Fake {
                 Err(Error::Conflict)
             };
         }
-        // 2) 열린 보류 중에서 이 식별자를 가진 것: 단계 없는 보류 자체의 식별자 또는 판정할 수 있는 단계의 식별자.
+        // 2) 열린 보류 중에서 이 식별자를 가진 것: 호출 전체의 식별자 또는 판정할 수 있는 단계의 식별자.
         let open: Vec<HoldView> = d.holds.iter().filter(|h| d.hold_open(h)).cloned().collect();
         let found = open.iter().find_map(|h| {
             if h.hold_id.as_ref() == Some(&hold.hold_id) {
@@ -356,7 +356,7 @@ impl Fake {
         let Some((h, step)) = found else {
             return Err(Error::Missing);
         };
-        // 다단계 보류의 묶음에는 식별자가 없다: 단계의 식별자를 단계 지정 없이 보낸 판정은 형식이 틀린 요청이다.
+        // 단계 발생의 식별자는 해당 단계를 지정한 판정에서만 쓴다.
         if step.is_some() && hold.effect.is_none() {
             return Err(Error::Invalid);
         }
@@ -366,8 +366,18 @@ impl Fake {
             return Err(Error::Conflict);
         }
         // 3) 적용: 단계는 확정(영수증) 또는 «시작함+미실행 판정 표지», 호출 전체 보류는 판정 표시.
+        let key = hold_key(&h);
         match &step {
-            None => d.resolved.push(hold_key(&h)),
+            None => {
+                if matches!(verdict, HoldVerdict::NotExecuted { .. })
+                    && d.steps_of(&h)
+                        .iter()
+                        .any(|s| s.state == EffectState::Confirmed)
+                {
+                    return Err(Error::Invalid);
+                }
+                d.resolved.push(key.clone());
+            }
             Some(id) => {
                 if let Some(e) = d.effects.iter_mut().find(|e| {
                     e.profile == h.profile && e.run == h.run && e.call == h.call && &e.effect == id
@@ -386,11 +396,24 @@ impl Fake {
                 }
             }
         }
-        if !d.hold_open(&h)
-            && let Some(r) = d
-                .runs
+        let steps = d.steps_of(&h);
+        let final_hold = step.is_some()
+            && !steps.iter().any(|s| s.state == EffectState::Held)
+            && steps.iter().any(|s| s.state == EffectState::Confirmed);
+        if final_hold {
+            let id = d.issue_hold();
+            let target = d
+                .holds
                 .iter_mut()
-                .find(|r| r.profile == h.profile && r.run == h.run)
+                .find(|v| hold_key(v) == key)
+                .expect("열린 보류");
+            target.hold_id = Some(id);
+        } else if !d.hold_open(&h)
+            && let Some(r) = d.runs.iter_mut().find(|r| {
+                r.profile == h.profile
+                    && r.run == h.run
+                    && (h.kind != HoldKind::Tool || matches!(r.waiting, Some(Waiting::Hold(_))))
+            })
         {
             r.waiting = None;
             // 민감 DM은 본문이 없어 다시 실행하지 못한다: 처리됨이면 완료, 미실행이면 거절로 끝내고 새 요청이 필요하다.

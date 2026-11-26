@@ -318,7 +318,7 @@ async fn holding_a_call_turns_its_started_steps_without_a_receipt_into_judgeable
         Some(EffectState::Confirmed),
         "영수증을 받은 단계는 그대로다"
     );
-    // 단계별로 판정하면 run이 이어진다
+    // 알림의 미실행 판정은 업로드 영수증이 있는 호출 전체를 재개하지 않는다.
     let target = step_ref(&db, &run, &unknown.status.effect).await;
     AdminAct::resolve_hold(
         &db.store,
@@ -330,5 +330,14 @@ async fn holding_a_call_turns_its_started_steps_without_a_receipt_into_judgeable
     )
     .await
     .unwrap();
-    assert_eq!(state_of_run(&db, &run.attempt.run).await, "ready");
+    assert_eq!(state_of_run(&db, &run.attempt.run).await, "waiting");
+    let final_hold = db
+        .store
+        .holds(&operator(), None)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(final_hold.hold_id.is_some());
+    assert_eq!(final_hold.steps.len(), 2);
 }

@@ -26,6 +26,8 @@ pub enum CallPhase {
     Started {
         generation: Generation,
         owner: String,
+        /// 이 호출에 수신처가 확정한 단계가 있다. 최종 결과 유실을 전체 미실행으로 해석할 수 없다.
+        confirmed_step: bool,
     },
     Done(JsonPayload),
     Denied,

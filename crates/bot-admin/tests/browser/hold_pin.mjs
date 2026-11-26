@@ -54,7 +54,26 @@ await p.waitForTimeout(500);
 ok("둘째 누름은 아무것도 보내지 않는다(빈 입력 거절)", posts.length === 0, JSON.stringify(posts));
 const state = await p.evaluate(async () => ((await (await fetch("/v1/admin/holds", { credentials: "same-origin" })).json()).items[0]?.steps ?? []).map((s) => s.effect + ":" + s.state + ":" + (s.receipt || "")));
 ok("e-3에는 어떤 영수증도 기록되지 않았다(보류가 그대로 남아 있다)", state.includes("e-3:held:"), state.length ? state.join(" ") : "보류가 닫혔다 — e-3이 판정됐다");
+// 마지막 단계에서 호출 전체 보류로 바뀌면 기존 영수증을 보존하고 호출 ID에 한 번만 판정한다.
+async function submitReceipt(form, receipt) {
+  await form.locator("input").fill(receipt);
+  const send = form.locator("button[type=submit]");
+  await send.click();
+  await p.waitForTimeout(650); // 화면의 두 번 누름 보호 시간(600ms)
+  await Promise.all([p.waitForResponse((r) => r.url().includes("/resolve") && r.request().method() === "POST" && r.ok()), send.click()]);
+}
+await submitReceipt(card2.locator("form").first(), "ARCHIVE-RECEIPT");
+const final = p.locator("article.hcard").filter({ hasText: "호출 최종 결과" });
+await final.waitFor();
+ok("최종 호출에는 전체 영수증 폼 하나만 있다", await final.locator("form").count() === 1 && await final.getByText("미실행으로 판정", { exact: true }).count() === 0);
+ok("호출 카드에 기존 단계 영수증이 남는다", await final.getByText("file-17", { exact: true }).count() === 1 && await final.getByText("ARCHIVE-RECEIPT", { exact: true }).count() === 1);
+await submitReceipt(final.locator("form"), "CALL-RECEIPT");
+await final.waitFor({ state: "detached" });
+const whole = posts.at(-1);
+ok("호출 전체 식별자로 최종 영수증을 보낸다", !whole.effect && whole.hold_id !== "h-e-3" && !!whole.hold_id && whole.receipt === "CALL-RECEIPT");
 ok("콘솔 오류·경고 0건", logs.length === 0, logs.join("|"));
 await b.close();
 for (const [s, n, e] of out) console.log(s, n, e ? "— " + e : "");
-console.log(out.some(([s]) => s === "FAIL") ? "\n결과: 실패 있음" : "\n결과: 모두 통과");
+const failed = out.some(([s]) => s === "FAIL");
+console.log(failed ? "\n결과: 실패 있음" : "\n결과: 모두 통과");
+if (failed) process.exitCode = 1;

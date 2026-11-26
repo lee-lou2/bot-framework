@@ -96,6 +96,7 @@ pub(crate) fn phase_of(row: &PgRow) -> R<CallPhase> {
                 row.get::<Option<i64>, _>("started_generation").unwrap_or(0) as u64
             ),
             owner: text("owner").unwrap_or_default(),
+            confirmed_step: row.get("confirmed_step"),
         },
         "done" => CallPhase::Done(JsonPayload(text("result").unwrap_or_default())),
         "denied" => CallPhase::Denied,
@@ -164,10 +165,15 @@ pub(crate) async fn tree_flagged(
     })
 }
 
+// 호출 행 잠금과 일반 조회가 같은 증거를 반환한다. 현재 claim이 run을 잠갔으므로 단계 정산과 엇갈리지 않는다.
+const CONFIRMED_STEP: &str = "case when c.state in ('started', 'held') then exists (
+    select 1 from bot_effects e where e.profile = c.profile and e.run = c.run and e.call = c.call and e.state = 'confirmed'
+) else false end as confirmed_step";
+
 /// 호출 행을 잠가 읽는다. 없으면 `Missing`.
 pub(crate) async fn lock_call(tx: &mut Tx<'_>, at: &Attempt, call: &CallId) -> R<PgRow> {
     sqlx::query(&format!(
-        "select {} from bot_calls where profile = $1 and run = $2 and call = $3 for update",
+        "select {}, {CONFIRMED_STEP} from bot_calls c where profile = $1 and run = $2 and call = $3 for update of c",
         crate::cols::CALLS
     ))
     .bind(&at.profile.0)
@@ -196,7 +202,7 @@ impl Store {
         self.check_pinned(&mut tx).await?;
         fence(&mut tx, at).await?;
         let row = sqlx::query(&format!(
-            "select {} from bot_calls where profile = $1 and run = $2 and call = $3",
+            "select {}, {CONFIRMED_STEP} from bot_calls c where profile = $1 and run = $2 and call = $3",
             crate::cols::CALLS
         ))
         .bind(&at.profile.0)
@@ -461,6 +467,9 @@ impl Store {
         let run = fence_settle(&mut tx, at).await?;
         let row = lock_call(&mut tx, at, &f.call).await?;
         let phase = phase_of(&row)?;
+        if matches!(f.outcome, Outcome::Released) && row.get::<bool, _>("confirmed_step") {
+            return Err(Error::Conflict.into());
+        }
         let allowed = match (&phase, &f.outcome) {
             (CallPhase::Open { .. }, Outcome::Blocked) => true,
             (CallPhase::Started { generation, .. }, _) => generation.0 <= at.generation.0,

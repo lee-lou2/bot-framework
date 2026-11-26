@@ -310,10 +310,9 @@ impl Store {
             &format!("select {} from bot_calls c
              where c.state = 'held' and ($1::text is null or c.profile = $1)
                and not exists (select 1 from bot_runs r where r.profile = c.profile and r.id = c.run and r.private)
-               and case when exists (select 1 from bot_effects e where e.profile = c.profile and e.run = c.run and e.call = c.call)
-                        then exists (select 1 from bot_effects e where e.profile = c.profile and e.run = c.run and e.call = c.call
-                                       and e.state = 'held' and e.resolution is null)
-                        else c.resolution is null end
+               and c.resolution is null and exists (
+                    select 1 from bot_holds h where h.profile = c.profile and h.run = c.run and h.call = c.call
+                      and h.kind = 'tool' and h.closed_ms is null)
              order by c.updated_ms, c.call", crate::cols::prefixed(crate::cols::CALLS, "c")),
         )
         .bind(profile)
@@ -333,12 +332,7 @@ impl Store {
                 c.get::<String, _>("call"),
             );
             let holds = step_holds(&mut *tx, &profile, &run, Some(&call)).await?;
-            // 호출 자체의 판정 ID는 단계가 없는 호출만 갖는다(다단계는 각 단계가 갖는다)
-            let hold_id = if steps.is_empty() {
-                call_hold(&mut *tx, &profile, &run, &call, "tool").await?
-            } else {
-                None
-            };
+            let hold_id = call_hold(&mut *tx, &profile, &run, &call, "tool").await?;
             out.push(HoldView {
                 kind: HoldKind::Tool,
                 hold_id,

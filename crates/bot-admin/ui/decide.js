@@ -136,6 +136,9 @@
     // «미실행»의 결과는 보류의 종류마다 다르다. 도구 호출은 옛 도구 종료와 수신처의 미실행 증거가 둘 다 확인돼야 같은 호출로 다시 이어 가고,
     // 회신은 같은 회신을 다시 보내며, 민감 DM은 본문을 보관하지 않아 다시 실행하지 못하고 종료한다(새 요청이 필요하다).
     const KIND = {
+      final: {
+        confirmed: { help: "기록된 단계의 실행은 확인됐습니다. 옛 도구가 끝났고 수신처에서 호출 전체의 처리를 확인했을 때 전체 영수증을 적으세요.", btn: "호출 결과 확인", then: "호출 전체의 결과로 확정합니다." },
+      },
       tool: {
         confirmed: { help: "수신처에서 실제로 처리된 것을 확인했다면 영수증 번호를 적습니다.", btn: "처리됨으로 기록", then: "확정합니다." },
         not_executed: { help: "옛 도구가 완전히 끝났고 수신처에 처리 기록이 없음을 둘 다 확인했을 때만 근거를 적습니다. 그러면 같은 호출 ID로 다시 이어 갑니다.", btn: "미실행으로 기록", then: "실행되지 않은 것으로 기록하고 같은 호출을 다시 이어 갑니다(옛 도구 종료와 수신처 미실행 증거 확인 필요)." },
@@ -149,8 +152,8 @@
         not_executed: { help: "민감 DM은 본문을 보관하지 않아 다시 실행할 수 없습니다. 미실행이면 요청을 종료하고, 사용자가 새로 요청해야 합니다.", btn: "미실행으로 종료 · 새 요청 필요", then: "미실행으로 종료합니다. 다시 실행되지 않으니 사용자가 새로 요청해야 합니다." },
       },
     };
-    const kindOf = (x) => (KIND[x.kind] ? x.kind : "tool");
-    const KIND_PILL = { reply: "회신", private: "민감 DM" };
+    const kindOf = (x) => P.receiptOnly(x) ? "final" : (KIND[x.kind] ? x.kind : "tool");
+    const KIND_PILL = { final: "호출 최종 결과", reply: "회신", private: "민감 DM" };
     // 같은 프로필·run·호출 ID 아래 도구 보류와 회신 보류가 함께 있을 수 있다(구판 데이터): 카드와 폼 상태의 키에 보류 종류까지 넣는다.
     const holdKey = P.keyOf;
     function formState(x) { return ui.forms[holdKey(x)] || (ui.forms[holdKey(x)] = { arm: null, busy: false, err: "", errKind: "", text: { confirmed: "", not_executed: "" }, effect: null, holdId: null, timer: 0, pin: null }); }
@@ -162,8 +165,9 @@
       if (reason) { f.err = P.WHY[reason] || P.WHY.gone; f.errKind = was; }
     }
     function stepsTable(x) {
+      const notExecuted = P.receiptOnly(x) ? "미실행으로 판정됨" : "미실행으로 판정됨 · 재개 대기";
       if (!x.steps.length) return h("p", { class: "sec-h", text: "호출 하나가 통째로 보류됐습니다(단계 기록 없음)." });
-      return D.table(["단계", "상태", "영수증", "사유"], x.steps.map((s) => ({ cls: P.open(s) ? "is-held" : s.receipt ? "is-kept" : "", cells: [s.step, B.effectPill(s.state), s.receipt ? h("span", { class: "kept" }, [code(s.receipt), h("span", { class: "kept-t", text: "보존됨" })]) : "-", s.resolution === "not_executed" ? "미실행으로 판정됨 · 재개 대기" : s.state === "held" ? B.holdReason(s.reason) : "-"] })), { narrow: [1], label: "보류된 호출의 단계 표" });
+      return D.table(["단계", "상태", "영수증", "사유"], x.steps.map((s) => ({ cls: P.open(s) ? "is-held" : s.receipt ? "is-kept" : "", cells: [s.step, B.effectPill(s.state), s.receipt ? h("span", { class: "kept" }, [code(s.receipt), h("span", { class: "kept-t", text: "보존됨" })]) : "-", s.resolution === "not_executed" ? notExecuted : s.state === "held" ? B.holdReason(s.reason) : "-"] })), { narrow: [1], label: "보류된 호출의 단계 표" });
     }
     function holdCard(x) {
       const f = formState(x), held = x.steps.filter(P.open), tid = "hold-t-" + holdKey(x).replace(/[^A-Za-z0-9_-]/g, "_"), kind = kindOf(x);
@@ -174,7 +178,7 @@
       const sel = P.retarget(f.effect, f.holdId, x);
       if (sel.changed) f.text = { confirmed: "", not_executed: "" };
       f.effect = sel.effect; f.holdId = sel.holdId;
-      const parts = {};
+      const parts = {}, verdicts = Object.keys(KIND[kind]);
       // 판정할 보류 식별자가 없는 대상: 판정 단추를 끄고 목록을 다시 불러오게 한다(서버도 식별자 없는 판정을 받지 않는다).
       const nid = "hn-" + tid;
       const noid = h("div", { class: "rf-noid", id: nid, role: "status", hidden: true }, [h("p", { class: "warnbox", text: P.WHY.noid }), h("button", { type: "button", class: "btn", onclick: () => app.refresh(true) }, [icon("arrow", { size: 14 }), h("span", { text: "다시 불러오기" })])]);
@@ -185,7 +189,7 @@
       function sync() {
         const blocked = f.holdId === null || f.holdId === undefined;
         noid.hidden = !blocked;
-        Object.keys(FORMS).forEach((k) => {
+        verdicts.forEach((k) => {
           const p = parts[k], armed = f.arm === k;
           p.input.readOnly = armed || f.busy;
           p.btn.disabled = f.busy || blocked || (!!f.arm && !armed);
@@ -258,7 +262,7 @@
         h("header", { class: "ac-h" }, [h("h4", { class: "ac-title", id: tid }, [code(x.tool)]), KIND_PILL[kind] ? D.pill(KIND_PILL[kind], "off", null) : null, D.pill(B.holdReason(x.reason), "warn", "held"), h("span", { class: "ac-left" }, [D.timeEl(x.since_ms), "부터 멈춤"])]),
         h("p", { class: "ac-meta" }, [app.profile() ? null : "프로필 " + x.profile + " · ", "실행 ", runLink(x.profile, x.run), " · 호출 ", code(x.call), " · 보류 시각 ", D.when(x.since_ms)]),
         stepsTable(x), pick, noid,
-        h("div", { class: "hc-forms" }, [formNode("confirmed"), formNode("not_executed")]),
+        h("div", { class: "hc-forms" }, verdicts.map(formNode)),
       ]);
       sync();
       return node;

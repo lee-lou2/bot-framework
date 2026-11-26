@@ -77,6 +77,18 @@ async fn holds_in(s: &Server, profile: &str) -> Vec<Value> {
         .collect()
 }
 
+async fn confirm_final(s: &Server, profile: &str) {
+    let holds = holds_in(s, profile).await;
+    let id = holds[0]["hold_id"].as_str().expect("호출 전체 보류");
+    let body = serde_json::json!({"verdict": "confirmed", "receipt": "all", "hold_id": id});
+    assert_eq!(
+        post(s, OPERATOR, &path(profile), &body.to_string())
+            .await
+            .status,
+        200
+    );
+}
+
 fn run_state(s: &Server, profile: &str) -> Option<RunState> {
     s.fake.edit(|d| {
         d.runs
@@ -132,6 +144,8 @@ async fn judging_one_profile_leaves_the_other_profiles_step_and_run_alone() {
             Some((EffectState::Held, None)),
             "{other}의 같은 ID 단계는 그대로 보류다"
         );
+        assert_eq!(run_state(&s, done), Some(RunState::Waiting));
+        confirm_final(&s, done).await;
         assert_eq!(run_state(&s, done), Some(RunState::Ready));
         assert_eq!(
             run_state(&s, other),
@@ -217,6 +231,7 @@ async fn re_holding_and_restarting_touch_only_the_named_profiles_step() {
         .await;
         assert_eq!(r.status, 200, "{profile}: {}", r.body);
     }
+    confirm_final(&s, "personal").await;
     let key = (
         ProfileId("work".into()),
         RunId("r-x".into()),

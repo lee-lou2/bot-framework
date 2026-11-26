@@ -219,9 +219,13 @@ impl BrokerService {
     /// 다시 실행해도 되면 호출을 `Open`으로 되돌린다(미실행 입증). 관리자 판정(`Held`의 `resolution`)은
     /// 옛 도구 종료와 수신처 미실행 증거 확인을 포함하므로 프로세스를 다시 확인하지 않는다.
     pub(super) async fn recover(&self, flow: &Flow, phase: &CallPhase) -> Result<Recovered, Error> {
-        let (reaped, resolution, started) = match phase {
+        let (reaped, resolution, started, confirmed_step) = match phase {
             // 원격 서버로 간 호출은 연결을 닫아도 원격 실행이 계속될 수 있어 `reap` 성공이 «끝났다»의 증명이 아니다(`reap_proves_end`)
-            CallPhase::Started { owner, .. } => (
+            CallPhase::Started {
+                owner,
+                confirmed_step,
+                ..
+            } => (
                 self.parts.runner.reap(owner.clone()).await.is_ok()
                     && self
                         .parts
@@ -229,8 +233,9 @@ impl BrokerService {
                         .reap_proves_end(&flow.resolved.tool.server),
                 None,
                 true,
+                *confirmed_step,
             ),
-            CallPhase::Held { resolution, .. } => (true, resolution.clone(), false),
+            CallPhase::Held { resolution, .. } => (true, resolution.clone(), false, false),
             _ => return Ok(Recovered::Open),
         };
         let tool = &flow.resolved.tool;
@@ -250,6 +255,7 @@ impl BrokerService {
             effects: tool.effects,
             reaped,
             unresolved,
+            confirmed_step,
             resolution,
         };
         match plan(&facts) {

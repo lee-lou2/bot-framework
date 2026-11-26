@@ -1,8 +1,6 @@
 //! 운영자 판정(AdminAct): 보류된 호출·단계·회신 발송·민감 DM 요청을 닫는다. 판정과 감사는 한 커밋이다.
 //! - 호출 단위 보류(단일 쓰기): 영수증이면 실행됨, 미실행 증거면 같은 호출 ID로 재개한다. 판정이 서면 run을 깨운다.
-//! - 다단계 보류: 어느 단계인지 지정해야 한다(`Invalid`). 요청 단계가 그 호출의 보류 단계일 때만 받고,
-//!   미결 보류 단계가 0개가 될 때만 run을 재개한다. 단계가 모두 정해지면 호출은 "미실행(이어서 실행)" 판정으로 닫힌다 —
-//!   이미 확정된 단계는 단계 원장이 영수증으로 되돌려주므로 다시 보내지 않는다.
+//! - 다단계 보류는 미결 단계부터 판정한다. 확정 단계가 하나라도 있으면 호출의 최종 결과는 별도 수신처 영수증으로만 확정한다.
 //! - 회신 발송(`reply:<run>:<seq>`)과 민감 DM(`private:<run>`)의 보류도 같은 입구로 판정한다.
 
 use crate::{
@@ -174,17 +172,12 @@ impl Store {
         if call_row.get::<String, _>("state") != "held" {
             return Err(Error::Conflict.into());
         }
-        let steps: i64 = sqlx::query_scalar(
-            "select count(*) from bot_effects where profile = $1 and run = $2 and call = $3",
-        )
-        .bind(profile)
-        .bind(run)
-        .bind(call)
-        .fetch_one(&mut **tx)
-        .await?;
         let target = match &hold.effect {
-            None if steps > 0 => return invalid(), // 다단계 보류는 어느 단계인지 지정해야 한다
             None => {
+                let (pending, confirmed) = step_evidence(tx, hold).await?;
+                if pending || (confirmed && matches!(verdict, HoldVerdict::NotExecuted { .. })) {
+                    return invalid();
+                }
                 if call_row.get::<Option<String>, _>("resolution").is_some() {
                     return Err(Error::Conflict.into());
                 }
@@ -226,16 +219,10 @@ impl Store {
                             .await?;
                     }
                 }
-                let open: i64 = sqlx::query_scalar(
-                    "select count(*) from bot_effects where profile = $1 and run = $2 and call = $3 and state = 'held' and resolution is null",
-                )
-                .bind(profile)
-                .bind(run)
-                .bind(call)
-                .fetch_one(&mut **tx)
-                .await?;
-                if open > 0 {
-                    return Ok(format!("{call}:{}", effect.0)); // 보류 단계가 남았다: run은 계속 기다린다
+                let (pending, confirmed) = step_evidence(tx, hold).await?;
+                if pending || confirmed {
+                    // 다음 미결 단계 또는 호출 전체 영수증을 기다린다. 단계 전이 트리거가 해당 발생을 열었다.
+                    return Ok(format!("{call}:{}", effect.0));
                 }
                 set_call_resolution(tx, hold, "not_executed", None).await?;
                 format!("{call}:{}", effect.0)
@@ -324,6 +311,17 @@ impl Store {
         .await?;
         Ok(hold.call.0.clone())
     }
+}
+
+/// 실행 여부가 아직 불명인 단계와 수신처 영수증이 확정된 단계가 각각 있는가.
+async fn step_evidence(tx: &mut Tx<'_>, hold: &HoldRef) -> R<(bool, bool)> {
+    Ok(sqlx::query_as(
+        "select coalesce(bool_or(state = 'started' or (state = 'held' and resolution is null)), false),
+                coalesce(bool_or(state = 'confirmed'), false)
+         from bot_effects where profile = $1 and run = $2 and call = $3",
+    )
+    .bind(&hold.profile.0).bind(&hold.run.0).bind(&hold.call.0)
+    .fetch_one(&mut **tx).await?)
 }
 
 async fn set_call_resolution(

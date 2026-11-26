@@ -361,6 +361,7 @@ impl MemLedger {
                 .phase = CallPhase::Started {
                 generation: Generation(generation),
                 owner: owner.into(),
+                confirmed_step: false,
             };
         });
     }

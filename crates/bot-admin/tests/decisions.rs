@@ -278,7 +278,7 @@ async fn hold_verdicts_are_operator_only_audited_and_idempotent() {
         (rs[0].verdict, rs[0].digest),
         ("confirmed", bot_admin::fake::digest("msg-9"))
     );
-    // 알림 단계가 확정되고 원래 업로드 영수증은 그대로다. 보류 목록에서는 사라진다.
+    // 알림 단계와 원래 업로드 영수증이 확정됐다. 목록에는 호출 전체 보류가 남는다.
     let d = get(&s, OPERATOR, "/v1/admin/runs/personal/r-4")
         .await
         .json();
@@ -290,12 +290,9 @@ async fn hold_verdicts_are_operator_only_audited_and_idempotent() {
         ),
         (Some("file-17"), Some("msg-9"), Some("confirmed"))
     );
-    assert_eq!(
-        get(&s, OPERATOR, "/v1/admin/holds").await.json()["items"]
-            .as_array()
-            .map(Vec::len),
-        Some(0)
-    );
+    let list = get(&s, OPERATOR, "/v1/admin/holds").await.json();
+    assert!(list["items"][0]["hold_id"].is_string());
+    assert_eq!(list["items"][0]["steps"][1]["receipt"], "msg-9");
     // 같은 보류 식별자로 같은 운영자·같은 판정을 다시 보내면 새로 기록하지 않고 «반복»으로 답한다(감사도 더하지 않는다).
     let again = post(&s, OPERATOR, path, body).await;
     assert_eq!(
@@ -340,7 +337,10 @@ async fn hold_verdicts_are_operator_only_audited_and_idempotent() {
 
 #[tokio::test]
 async fn not_executed_resumes_the_run_and_bad_verdicts_are_refused() {
-    let s = start(Fake::demo()).await;
+    let fake = Fake::demo();
+    // 모든 단계가 미실행인 경우의 재개. 확정 단계가 있는 경우는 holds 시험에서 다룬다.
+    fake.edit(|d| d.effects.retain(|e| e.effect.0 != "e-1"));
+    let s = start(fake).await;
     let path = "/v1/admin/holds/personal/r-4/c-9/resolve";
     // 각 본문은 보류 식별자를 갖추고도 다른 결함 하나 때문에 거절돼야 한다(식별자가 없으면 그것만으로 400이다).
     for bad in [

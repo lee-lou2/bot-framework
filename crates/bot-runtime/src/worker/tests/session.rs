@@ -373,6 +373,7 @@ async fn a_confirmed_refusal_mark_closes_the_slot_with_the_same_word_and_never_e
         CallPhase::Started {
             generation: Generation(1),
             owner: "o".into(),
+            confirmed_step: false,
         },
         CallPhase::Held {
             reason: "timeout".into(),

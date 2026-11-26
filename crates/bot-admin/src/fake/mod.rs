@@ -268,7 +268,7 @@ impl Data {
     }
 
     /// 같은 대상이 다시 보류된 것을 흉내 낸다: 새 식별자를 받아 열린 보류가 되고 run은 다시 기다린다.
-    /// 단계가 있으면 그 단계(`effect`)가, 없으면 호출 전체 보류가 새 보류가 된다. 새 식별자를 돌려준다.
+    /// `effect`를 지정하면 그 단계가, 생략하면 호출 전체가 새 보류가 된다. 새 식별자를 돌려준다.
     /// 호출 ID가 하나뿐인 시험을 위한 줄임이다: 그 호출 ID를 가진 첫 보류를 다시 보류시킨다(같은 ID가 여럿이면 `rehold_hold`).
     pub fn rehold(&mut self, call: &str, effect: Option<&str>) -> HoldId {
         match self.holds.iter().find(|h| h.call.0 == call).map(hold_key) {
@@ -281,21 +281,17 @@ impl Data {
     pub fn rehold_hold(&mut self, key: &HoldKey, effect: Option<&str>) -> HoldId {
         let new = self.issue_hold();
         let (profile, run, call, _) = key;
-        match effect {
-            Some(id) => {
-                if let Some(e) = self.effects.iter_mut().find(|e| {
-                    &e.profile == profile && &e.run == run && &e.call == call && e.effect.0 == id
-                }) {
-                    (e.state, e.resolution, e.receipt) = (EffectState::Held, None, None);
-                    (e.reason, e.hold_id) = (Some("outcome_unknown".to_owned()), Some(new.clone()));
-                }
-            }
-            None => {
-                self.resolved.retain(|k| k != key);
-                if let Some(h) = self.holds.iter_mut().find(|h| &hold_key(h) == key) {
-                    h.hold_id = Some(new.clone());
-                }
-            }
+        self.resolved.retain(|k| k != key);
+        if let Some(h) = self.holds.iter_mut().find(|h| &hold_key(h) == key) {
+            h.hold_id = effect.is_none().then(|| new.clone());
+        }
+        if let Some(id) = effect
+            && let Some(e) = self.effects.iter_mut().find(|e| {
+                &e.profile == profile && &e.run == run && &e.call == call && e.effect.0 == id
+            })
+        {
+            (e.state, e.resolution, e.receipt) = (EffectState::Held, None, None);
+            (e.reason, e.hold_id) = (Some("outcome_unknown".to_owned()), Some(new.clone()));
         }
         if let Some(r) = self
             .runs
@@ -332,11 +328,11 @@ impl Data {
             .collect()
     }
 
-    /// 보류가 아직 열려 있는가: 호출 단위 보류는 판정 전까지, 다단계 보류는 보류 단계가 남아 있는 동안.
+    /// 보류가 열려 있는가. 판정 전의 호출 단위 발생이나 미결 단계가 있으면 열려 있다.
     /// 같은 호출 ID의 다른 보류(다른 run, 같은 호출의 회신)는 이 보류의 상태에 영향을 주지 않는다.
     pub fn hold_open(&self, h: &HoldView) -> bool {
         let steps = self.steps_of(h);
-        if steps.is_empty() {
+        if steps.is_empty() || h.hold_id.is_some() {
             !self.resolved.contains(&hold_key(h))
         } else {
             steps.iter().any(|e| e.state == EffectState::Held)

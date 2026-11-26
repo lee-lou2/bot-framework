@@ -186,7 +186,7 @@ pub enum HoldKind {
 #[derive(Clone, Debug)]
 pub struct HoldView {
     pub kind: HoldKind,
-    /// 호출 자체를 판정할 때 사용한다. 다단계 호출은 각 단계에만 ID가 있다.
+    /// 호출 자체의 보류 발생. 미결 단계가 있으면 각 단계의 ID를, 단계가 정해진 뒤 최종 결과만 불명이면 이 ID를 쓴다.
     pub hold_id: Option<HoldId>,
     pub profile: ProfileId,
     pub run: RunId,
@@ -275,7 +275,7 @@ pub trait AdminRead: Send + Sync {
     }
 }
 
-/// 보류 대상. 단일 쓰기는 `effect`가 없고 호출 전체를 가리킨다.
+/// 보류 대상. `effect`가 없으면 호출 전체의 판정이다.
 #[derive(Clone, Debug)]
 pub struct HoldRef {
     pub hold_id: HoldId,

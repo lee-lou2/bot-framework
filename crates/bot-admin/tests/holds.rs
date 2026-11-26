@@ -1,5 +1,7 @@
-//! 보류 판정의 단계 검증: 요청한 단계가 그 호출의 보류 단계여야 하고, 모두 판정된 뒤에만 run을 재개한다.
+//! 보류 판정의 단계 검증: 요청한 단계가 그 호출의 보류 단계여야 하고, 확정된 단계가 있으면 호출 전체의 영수증을 기다린다.
 
+#[path = "holds/final_result.rs"]
+mod final_result;
 mod support;
 use bot_admin::fake::Fake;
 use bot_core::state::RunState;
@@ -103,85 +105,6 @@ async fn a_verdict_must_name_a_held_step_of_that_call() {
 }
 
 #[tokio::test]
-async fn the_run_resumes_only_after_every_held_step_is_decided() {
-    let s = start(held(&[("e-3", "archive")])).await;
-    let path = "/v1/admin/holds/personal/r-4/c-9/resolve";
-    let first = post(
-        &s,
-        OPERATOR,
-        path,
-        r#"{"verdict":"confirmed","receipt":"msg-9","effect":"e-2","hold_id":"h-e-2"}"#,
-    )
-    .await;
-    assert_eq!(first.status, 200, "{}", first.body);
-    // 한 단계만 판정했으니 나머지 보류가 남고 run은 계속 기다린다.
-    let h = get(&s, OPERATOR, "/v1/admin/holds").await.json();
-    let steps = h["items"][0]["steps"].as_array().expect("단계");
-    let states: Vec<(&str, &str)> = steps
-        .iter()
-        .filter_map(|x| Some((x["step"].as_str()?, x["state"].as_str()?)))
-        .collect();
-    assert_eq!(
-        states,
-        [
-            ("upload", "confirmed"),
-            ("notify", "confirmed"),
-            ("archive", "held")
-        ]
-    );
-    let state = s.fake.edit(|d| {
-        d.runs
-            .iter()
-            .find(|r| r.run.0 == "r-4")
-            .map(|r| (r.state, r.waiting.is_some()))
-    });
-    assert_eq!(state, Some((RunState::Waiting, true)));
-    assert_eq!(
-        get(&s, OPERATOR, "/v1/admin/status").await.json()["profiles"]["personal"]["holds"],
-        1
-    );
-    // 같은 단계를 다시 판정하면 거절한다.
-    assert_eq!(
-        post(
-            &s,
-            OPERATOR,
-            path,
-            r#"{"verdict":"confirmed","receipt":"again","effect":"e-2","hold_id":"h-e-2"}"#
-        )
-        .await
-        .status,
-        409
-    );
-    // 마지막 보류 단계를 판정하면 그때 재개한다.
-    let last = post(
-        &s,
-        OPERATOR,
-        path,
-        r#"{"verdict":"not_executed","evidence":"수신처에 기록 없음","effect":"e-3","hold_id":"h-e-3"}"#,
-    )
-    .await;
-    assert_eq!(last.status, 200);
-    assert_eq!(
-        get(&s, OPERATOR, "/v1/admin/holds").await.json()["items"]
-            .as_array()
-            .map(Vec::len),
-        Some(0)
-    );
-    let state = s.fake.edit(|d| {
-        d.runs
-            .iter()
-            .find(|r| r.run.0 == "r-4")
-            .map(|r| (r.state, r.waiting.is_some()))
-    });
-    assert_eq!(state, Some((RunState::Ready, false)));
-    assert_eq!(s.fake.resolutions().len(), 2);
-    assert_eq!(
-        get(&s, OPERATOR, "/v1/admin/status").await.json()["profiles"]["personal"]["holds"],
-        0
-    );
-}
-
-#[tokio::test]
 async fn a_step_judged_not_executed_stops_being_selectable_while_the_others_stay_held() {
     let s = start(held(&[("e-3", "archive")])).await;
     let path = "/v1/admin/holds/personal/r-4/c-9/resolve";
@@ -254,7 +177,7 @@ async fn a_step_judged_not_executed_stops_being_selectable_while_the_others_stay
         h["items"][0]["steps"][2]["receipt"].is_null(),
         "남은 단계에 영수증이 기록되지 않았다"
     );
-    // 마지막 미결 단계까지 판정하면 그때 재개한다.
+    // 마지막 미결 단계까지 미실행이어도 업로드 영수증이 있으므로 호출 전체를 기다린다.
     assert_eq!(
         post(
             &s,
@@ -272,7 +195,10 @@ async fn a_step_judged_not_executed_stops_being_selectable_while_the_others_stay
             .find(|r| r.run.0 == "r-4")
             .map(|r| (r.state, r.waiting.is_some()))
     });
-    assert_eq!(state, Some((RunState::Ready, false)));
+    assert_eq!(state, Some((RunState::Waiting, true)));
+    let view = get(&s, OPERATOR, "/v1/admin/holds").await.json();
+    assert!(view["items"][0]["hold_id"].is_string());
+    assert_eq!(view["items"][0]["steps"][0]["receipt"], "file-17");
 }
 
 /// 보류 종류별 판정 결과가 화면 안내와 같아야 한다: 민감 DM은 본문이 없어 다시 실행하지 않고 끝난다.

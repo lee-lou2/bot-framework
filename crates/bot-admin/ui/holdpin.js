@@ -10,13 +10,16 @@
   // 보류 단계 목록에서 아직 판정을 기다리는 단계의 id.
   const held = (steps) => (steps || []).filter(open).map((s) => s.effect);
 
-  // 보류 식별자(hold_id): 단계 없는 보류(도구·회신·민감 DM)는 보류 자체의 값이고, 여러 단계는 판정할 수 있는 각 단계의 값이다(묶음은 없다).
+  // 보류 식별자(hold_id): 미결 단계는 각 단계의 값이고, 호출 전체(최종 결과·단일 도구·회신·민감 DM)는 보류 자체의 값이다.
   // 저장소가 새 보류에 들어갈 때마다 새로 발급하므로 같은 단계가 다시 보류되면 값이 달라진다. 식별자가 없는 대상(null)은 판정할 수 없다.
   function holdIdFor(hold, effect) {
     if (effect === null || effect === undefined) return hold.hold_id || null;
     const step = (hold.steps || []).find((s) => s.effect === effect);
     return (step && step.hold_id) || null;
   }
+
+  // 호출 전체 판정에 이미 실행된 단계가 있으면 수신처의 전체 영수증만 받는다.
+  const receiptOnly = (hold) => !!hold.hold_id && (hold.steps || []).some((s) => s.state === "confirmed");
 
   // 보류 카드·판정 폼의 키. 구판 데이터는 같은 프로필·run·호출 ID 아래 도구와 회신을 따로 보류할 수 있어 보류 종류까지 넣는다.
   // 종류를 빼면 목록은 둘인데 카드는 하나로 합쳐지고 입력·확인 상태도 서로 섞인다.
@@ -49,13 +52,13 @@
   const STALE = { conflict: true, not_found: true };
   const staleWord = (word) => STALE[word] === true;
 
-  // 목록이 새로 그려질 때: 고정한 보류가 아직 같은 보류인가. 단일 호출(effect=null)은 호출 단위 보류라 단계가 없고 식별자가 같아야 한다.
+  // 목록이 새로 그려질 때: 고정한 보류가 아직 같은 보류인가. 호출 전체(effect=null)는 미결 단계가 없고 같은 발생 ID여야 한다.
   // 반환: { ok: true } 또는 { ok: false, reason } — ok가 아니면 호출하는 쪽이 확인과 모든 입력을 해제해야 한다.
   function reconcile(pin, hold) {
     if (!pin) return { ok: true };
     const steps = hold.steps || [];
     if (pin.effect === null) {
-      if (steps.length) return { ok: false, reason: "stepped" };
+      if (steps.some(open) || (steps.length && !hold.hold_id) || (pin.kind === "not_executed" && receiptOnly(hold))) return { ok: false, reason: "stepped" };
       return (hold.hold_id || null) === pin.hold ? { ok: true } : { ok: false, reason: "renewed" };
     }
     const now = steps.find((s) => s.effect === pin.effect && open(s));
@@ -81,7 +84,7 @@
     noid: "이 보류에는 판정에 쓸 식별자가 없어 판정할 수 없습니다. 목록을 다시 불러온 뒤 판정하세요.",
   };
 
-  const api = { open, held, holdIdFor, keyOf, decidable, arm, retarget, staleWord, reconcile, payload, WHY };
+  const api = { open, held, receiptOnly, holdIdFor, keyOf, decidable, arm, retarget, staleWord, reconcile, payload, WHY };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.BotHoldPin = api;
 })(typeof window !== "undefined" ? window : globalThis);

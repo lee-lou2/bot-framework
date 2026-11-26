@@ -1,7 +1,7 @@
 //! 복구 판정: 시작한 호출의 결과를 잃은 뒤 같은 호출 ID를 다시 실행해도 되는가.
 //!
 //! 쓰기를 다시 실행해도 되는 경우는 둘뿐이다. 이전 프로세스(자식 포함)가 끝난 것을 확인했고,
-//! 미실행이 증명되거나(관리자 판정·단계 원장에 미결 없음) 읽기 도구여서 반복해도 안전할 때다.
+//! 실행된 단계가 없으며 미실행이 증명됐거나, 외부 효과가 없는 읽기 도구일 때다.
 //! 증거가 없으면 보류하고 자동 재실행은 0회다. 시간이 지났다고 보류를 풀지 않는다.
 
 use bot_core::{ledger::Resolution, state::Risk};
@@ -15,6 +15,8 @@ pub struct Facts {
     pub reaped: bool,
     /// 단계 원장의 미결 단계 수. 조회하지 못했으면 `None`.
     pub unresolved: Option<usize>,
+    /// 시작 뒤 수신처 영수증을 기록한 단계가 있는가.
+    pub confirmed_step: bool,
     /// 관리자가 기록한 판정.
     pub resolution: Option<Resolution>,
 }
@@ -35,8 +37,11 @@ pub fn plan(facts: &Facts) -> Plan {
     }
     match &facts.resolution {
         Some(Resolution::Executed { receipt }) => return Plan::Complete(receipt.clone()),
-        Some(Resolution::NotExecuted) => return Plan::Resume,
-        None => {}
+        Some(Resolution::NotExecuted) if !facts.confirmed_step => return Plan::Resume,
+        Some(Resolution::NotExecuted) | None => {}
+    }
+    if facts.confirmed_step {
+        return Plan::Hold("response_unknown");
     }
     if facts.class == Risk::Read {
         return Plan::Resume;
@@ -60,6 +65,7 @@ mod tests {
             effects,
             reaped: true,
             unresolved: Some(0),
+            confirmed_step: false,
             resolution: None,
         }
     }
@@ -111,6 +117,20 @@ mod tests {
             ..facts(Risk::Irreversible, false)
         };
         assert_eq!(plan(&f), Plan::Complete("evt-9".into()));
+    }
+
+    #[test]
+    fn known_execution_needs_the_receipt_for_the_whole_call() {
+        let mut f = facts(Risk::Write, true);
+        f.confirmed_step = true;
+        for resolution in [None, Some(Resolution::NotExecuted)] {
+            f.resolution = resolution;
+            assert_eq!(plan(&f), Plan::Hold("response_unknown"));
+        }
+        f.resolution = Some(Resolution::Executed {
+            receipt: "all".into(),
+        });
+        assert_eq!(plan(&f), Plan::Complete("all".into()));
     }
 
     #[test]

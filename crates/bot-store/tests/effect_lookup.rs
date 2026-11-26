@@ -386,8 +386,8 @@ async fn a_real_admin_verdict_is_shown_without_being_consumed_and_the_next_reque
     let at = &run.attempt;
     let upload = open_step(&db, at, "upload", "{}").await;
     let notify = open_step(&db, at, "notify", "{}").await;
-    // 첫 단계는 영수증을 받아 확정, 둘째는 도구가 결과 불명으로 보고해 보류가 된다. 판정 전에는 보류 단계에 판정이 없다
-    report(&db, at, &upload, EffectState::Confirmed, Some("rcpt-1")).await;
+    // 첫 단계는 확정 거절, 둘째는 결과 불명이다. 실행된 단계가 없어 미실행 판정 후 재개할 수 있다. 판정 전에는 보류 단계에 판정이 없다
+    report(&db, at, &upload, EffectState::Rejected, None).await;
     report(&db, at, &notify, EffectState::Held, Some("timeout")).await;
     let seen = lookup(&db, at, "notify", "{}").await.unwrap().unwrap();
     assert_eq!((seen.state, seen.resolution), (EffectState::Held, None));
@@ -436,7 +436,7 @@ async fn a_real_admin_verdict_is_shown_without_being_consumed_and_the_next_reque
         .unwrap();
     assert_eq!(
         (done.state, done.receipt.as_deref(), done.resolution),
-        (EffectState::Confirmed, Some("rcpt-1"), None)
+        (EffectState::Rejected, None, None)
     );
     assert_eq!(snapshot(&db).await, before, "조회는 아무것도 쓰지 않는다");
     // 호출을 풀고 다시 시작한 현재 세대가 같은 단계를 요청하면 한 번만 점유하고 판정은 소비된다
@@ -475,13 +475,13 @@ async fn a_real_admin_verdict_is_shown_without_being_consumed_and_the_next_reque
         .unwrap();
     assert!(!again.send, "같은 점유의 재요청은 보내지 않는다");
     assert_eq!(again.status.state, EffectState::Held);
-    // 확정된 단계는 다시 보내지 않는다
+    // 거절을 기록한 단계는 다시 보내지 않는다
     let kept = effects(&db)
         .request(request(&second.attempt, "c1", "upload", "{}"))
         .await
         .unwrap();
     assert!(!kept.send);
-    assert_eq!(kept.status.state, EffectState::Confirmed);
+    assert_eq!(kept.status.state, EffectState::Rejected);
     assert_eq!(db.store.verify().await.unwrap().first_bad, None);
 }
 

@@ -13,8 +13,7 @@
 //!   복귀)·`Held`·`Blocked`, 판정이 있는 `Held`→`Done`(영수증)·`Released`(미실행).
 //! - 상태 전이마다 감사 한 줄을 같은 임계 구역에서 쌓는다(`audit_log`).
 
-use crate::approval::same_binding;
-use crate::sys::Clock;
+use crate::{approval::same_binding, sys::Clock};
 use bot_core::{
     api::ApprovalBlock,
     command::JsonPayload,
@@ -190,6 +189,7 @@ impl MemLedger {
         i.calls.get_mut(&key).expect("call").phase = CallPhase::Started {
             generation: start.attempt.generation,
             owner: start.owner,
+            confirmed_step: false,
         };
         i.audit.push("call.start".into());
         Ok(())
