@@ -15,6 +15,7 @@ pub mod map;
 pub mod port;
 pub mod preapproval;
 pub mod resp;
+mod run_control;
 pub mod settings;
 pub mod trace;
 
@@ -236,6 +237,14 @@ pub fn router(cfg: AdminConfig, deps: AdminDeps) -> Option<Router> {
         .route("/v1/admin/me", get(api::me))
         .route("/v1/admin/runs", get(api::runs))
         .route("/v1/admin/runs/{profile}/{run}", get(api::run_detail))
+        .route(
+            "/v1/admin/runs/{profile}/{run}/resume",
+            post(run_control::resume),
+        )
+        .route(
+            "/v1/admin/runs/{profile}/{run}/cancel",
+            post(run_control::cancel),
+        )
         .route("/v1/admin/approvals", get(api::approvals))
         .route("/v1/admin/approvals/{nonce}/decide", post(api::decide))
         .route("/v1/admin/holds", get(api::holds))

@@ -186,6 +186,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "call final hold",
         include_str!("../migrations/0025_call_final_hold.sql"),
     ),
+    (
+        30,
+        "run command receipt",
+        include_str!("../migrations/0030_run_command_receipt.sql"),
+    ),
 ];
 
 fn migrator() -> Migrator {

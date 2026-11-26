@@ -167,11 +167,45 @@ pub struct EffectView {
 #[derive(Clone, Debug)]
 pub struct RunDetail {
     pub run: RunView,
+    /// 운영자에게만 제공하는 일반 루트의 명령 조건.
+    pub control: Option<RunControlView>,
     /// 루트부터 이 run까지(자기 포함).
     pub lineage: Vec<RunView>,
     pub children: Vec<RunView>,
     pub calls: Vec<CallView>,
     pub effects: Vec<EffectView>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RunControlView {
+    /// 같은 세대를 다시 점유해도 증가한다.
+    pub claim_epoch: ClaimEpoch,
+    pub cancel_requested: bool,
+    /// 루트와 하위 실행에서 판정을 기다리는 보류가 있는가.
+    pub held: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunAction {
+    Resume,
+    Cancel,
+}
+
+#[derive(Clone, Debug)]
+pub struct RunCommand {
+    pub profile: ProfileId,
+    pub run: RunId,
+    pub id: String,
+    pub action: RunAction,
+    pub state: RunState,
+    pub generation: Generation,
+    pub claim_epoch: ClaimEpoch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunCommandOutcome {
+    Applied,
+    Held,
 }
 
 /// 저장소가 보류를 읽은 출처. 판정 후 도구 재개·회신 재전송·민감 DM 종료를 구분한다.
@@ -300,6 +334,15 @@ pub enum HoldDecision {
 }
 
 pub trait AdminAct: Send + Sync {
+    /// 인증된 운영자가 본 일반 루트의 상태·세대·claim으로 명령한다. 성공한 같은 명령은 재전송에도 성공 결과만 돌려준다.
+    fn control_run(
+        &self,
+        _actor: PrincipalId,
+        _command: RunCommand,
+    ) -> Reply<'_, RunCommandOutcome> {
+        Box::pin(async { Err(crate::port::Error::Unavailable) })
+    }
+
     /// 발생 ID와 대상을 함께 대조하고 판정·감사를 한 번만 커밋한다. 같은 운영자가
     /// 같은 판정과 증거로 재요청하면 새 보류가 있어도 Repeated다. 불일치는 Conflict다.
     fn resolve_hold(

@@ -59,6 +59,7 @@ impl AdminRead for Fake {
                 lineage.reverse();
                 RunDetail {
                     run: r.clone(),
+                    control: None,
                     lineage,
                     children: d
                         .runs

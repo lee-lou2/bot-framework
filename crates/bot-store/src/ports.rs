@@ -9,8 +9,8 @@ use crate::{
 use bot_core::{
     admin::{
         AdminAct, AdminRead, ApprovalQuery, ApprovalView, AuditCheck, AuditQuery, HoldDecision,
-        HoldRef, HoldVerdict, HoldView, Listing, ProfileStatus, RunDetail, RunQuery, RunView,
-        Viewer,
+        HoldRef, HoldVerdict, HoldView, Listing, ProfileStatus, RunCommand, RunCommandOutcome,
+        RunDetail, RunQuery, RunView, Viewer,
     },
     api::ApprovalBlock,
     command::*,
@@ -433,6 +433,10 @@ impl AdminRead for Store {
 }
 
 impl AdminAct for Store {
+    fn control_run(&self, actor: PrincipalId, command: RunCommand) -> Reply<'_, RunCommandOutcome> {
+        reply!(async move { self.control_root_run(&actor, &command).await })
+    }
+
     fn resolve_hold(
         &self,
         actor: PrincipalId,

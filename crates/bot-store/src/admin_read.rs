@@ -245,6 +245,18 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(Error::Missing)?;
+        let control = if viewer.operator
+            && !row.get::<bool, _>("private")
+            && row.get::<String, _>("root") == run.0
+        {
+            Some(RunControlView {
+                claim_epoch: ClaimEpoch(row.get::<i64, _>("claim_epoch") as u64),
+                cancel_requested: row.get("cancel_requested"),
+                held: crate::admin::tree_has_open_hold(&mut tx, &profile.0, &run.0).await?,
+            })
+        } else {
+            None
+        };
         let lineage = sqlx::query(&format!(
             "with recursive up as (
                  select profile, id, parent, 0 as n from bot_runs where profile = $1 and id = $2
@@ -282,6 +294,7 @@ impl Store {
         tx.rollback().await?;
         Ok(RunDetail {
             run: run_view(&row)?,
+            control,
             lineage: lineage.iter().map(run_view).collect::<R<_>>()?,
             children: children.iter().map(run_view).collect::<R<_>>()?,
             calls: calls.iter().map(call_view).collect::<R<_>>()?,

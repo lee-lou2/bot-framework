@@ -180,6 +180,11 @@ pub fn effect(e: &EffectView) -> Value {
 pub fn detail(d: &RunDetail) -> Value {
     json!({
         "run": run(&d.run),
+        "control": d.control.as_ref().map(|control| json!({
+            "claim_epoch": control.claim_epoch.0,
+            "cancel_requested": control.cancel_requested,
+            "held": control.held,
+        })),
         "lineage": d.lineage.iter().map(run).collect::<Vec<_>>(),
         "children": d.children.iter().map(run).collect::<Vec<_>>(),
         "calls": d.calls.iter().map(call).collect::<Vec<_>>(),

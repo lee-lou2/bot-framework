@@ -7,6 +7,7 @@
 
   function create(app, box) {
     const st = { items: [], next: null, state: "", sel: null, detail: null, detailErr: null, loaded: false, busyMore: false, epoch: 0, dkey: null };
+    const controls = root.BotRunControl.create(app);
     let memo = {}, dmemo = {}, body = null;
     const selKey = () => (st.sel ? st.sel.profile + "|" + st.sel.run : null);
 
@@ -129,14 +130,14 @@
       if (!href) return h("span", null, [id, h("span", { class: "dim", text: " (추적 링크 설정 없음)" })]);
       return h("span", { class: "trace" }, [h("a", { class: "xlink", href, target: "_blank", rel: "noreferrer noopener" }, [h("span", { text: "추적 열기" }), icon("external", { size: 12 })]), id]);
     }
-    function waitLine(r) {
+    function waitLine(r, rootHold) {
       const w = B.waiting(r.waiting);
       let kids = null;
       if (w) kids = [icon("pause", { size: 14 }), w];
       else if (r.state === "retry") kids = [icon("pause", { size: 14 }), h("span", { text: "오류가 난 뒤 다시 시도할 차례를 기다리는 중입니다." })];
       else if (r.state === "dead") kids = [icon("alert", { size: 14 }), h("span", null, ["더 시도하지 않고 멈췄습니다.", r.error ? [" 마지막 오류: ", code(r.error)] : null])];
       if (!kids) return null;
-      const go = r.waiting && (r.waiting.on === "approval" || (r.waiting.on === "hold" && app.me().operator));
+      const go = r.waiting && (r.waiting.on === "approval" || (r.waiting.on === "hold" && app.me().operator && !rootHold));
       if (go) kids.push(h("button", { type: "button", class: "btn sm", text: "승인·보류에서 보기", onclick: () => app.go("decide", { profile: r.profile }) }));
       return h("p", { class: "rd-wait" }, kids);
     }
@@ -152,10 +153,12 @@
     }
     function sections(d) {
       const r = d.run, k = (s) => s;
+      const action = root.BotRunControl.offered(d, app.me().operator);
       return [
         { key: k("head"), sig: JSON.stringify([r.run, r.state]), build: () => ({ node: h("header", { class: "rd-head" }, [h("button", { type: "button", class: "btn back", onclick: close }, [icon("back", { size: 14 }), h("span", { text: "목록" })]), h("div", { class: "rd-title" }, [h("p", { class: "ovl", text: "실행" }), h("h3", null, [code(r.run)])]), B.runPill(r.state)]) }) },
         { key: k("crumbs"), sig: JSON.stringify(d.lineage.map((x) => [x.run, x.agent])), build: () => ({ node: crumbs(d) }) },
-        { key: k("wait"), sig: JSON.stringify([r.state, r.waiting, r.error, app.me().operator]), build: () => ({ node: waitLine(r) || h("p", { class: "rd-wait is-none", text: "기다리는 중이 아닙니다." }) }) },
+        { key: k("wait"), sig: JSON.stringify([r.state, r.waiting, r.error, app.me().operator, action === "held"]), build: () => ({ node: waitLine(r, action === "held") || h("p", { class: "rd-wait is-none", text: "기다리는 중이 아닙니다." }) }) },
+        ...(action ? [{ key: k("control"), sig: JSON.stringify([r.profile, r.run, r.state, r.generation, d.control]), build: () => ({ node: controls.mount(d, action) }) }] : []),
         { key: k("facts"), sig: JSON.stringify(r), build: () => ({ node: h("dl", { class: "facts rd-facts" }, [].concat(
           line("프로필", r.profile), line("에이전트", code(r.agent)), line("요청 주체", code(r.principal)),
           line("시작 방식", h("span", null, [B.conversation(r.kind), r.trigger ? [" · 트리거 ", code(r.trigger)] : null])),
@@ -190,8 +193,8 @@
         if (arg && arg.run) open(arg.profile, arg.run, true);
         else if (arg && arg.state !== undefined) { st.state = arg.state || ""; stateSel.value = st.state; clearList(); }
       },
-      busy() { return false; },
-      show() {}, hide() {},
+      busy() { return controls.busy(); },
+      show() {}, hide() { controls.hide(); },
     };
   }
 
