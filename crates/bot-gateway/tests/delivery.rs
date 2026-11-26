@@ -2,6 +2,7 @@
 //! 결과는 Slack가 증명한 만큼만(확정·미실행·거절·불명) 정산한다.
 use bot_core::{
     id::{ProfileId, RunId},
+    intake::PushTransportId,
     port::Gateway,
     state::{Conversation, ConversationKind},
 };
@@ -481,28 +482,24 @@ async fn split_inline_attachments_post_markdown_first_and_upload_files_to_the_sa
 }
 
 #[tokio::test]
-async fn only_its_own_conversation_kinds_are_claimed() {
+async fn slack_does_not_claim_another_transport_in_the_same_kind_of_conversation() {
     let rig = rig().await;
-    for (seq, kind) in [
-        (1, ConversationKind::Cli),
-        (2, ConversationKind::Http),
-        (3, ConversationKind::Scheduled),
-    ] {
-        let destination = Conversation {
-            kind,
-            id: "x".into(),
-            thread: None,
-        };
-        rig.outbox.push(outgoing(
-            "personal",
-            seq,
-            "team",
-            "slack:home/U1",
-            destination,
-            r#"{"text":"x"}"#,
-        ));
-    }
+    let mut foreign = outgoing(
+        "personal",
+        1,
+        "team",
+        "slack:home/U1",
+        Conversation {
+            kind: ConversationKind::Channel,
+            id: "C1".into(),
+            thread: Some(THREAD.into()),
+        },
+        r#"{"text":"다른 발송자의 회신"}"#,
+    );
+    foreign.transport = PushTransportId::new("fixture-push").unwrap();
+    rig.outbox.push(foreign);
     assert_eq!(rig.deliverer.tick().await.unwrap(), 0);
+    assert!(rig.outbox.begun().is_empty());
     assert!(rig.slack.all_calls().is_empty() && settled(&rig).is_empty());
 }
 

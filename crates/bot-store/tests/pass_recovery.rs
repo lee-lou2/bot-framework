@@ -11,6 +11,7 @@ use bot_core::{
     pass::direct_call_id,
     port::{Broker, Error},
     slack::{SlackSource, SourceKind},
+    state::ConversationKind,
 };
 use support::{pass::*, *};
 
@@ -249,7 +250,14 @@ async fn a_reaction_chain_that_passes_everywhere_calls_the_default_agent_once_ev
         reaction: Some("white_check_mark".into()),
     };
     let deliver = |binding: &str| {
-        let mut command = tool_accept("personal", "Ev-R1", "agenda.list", "{}");
+        let mut command = accept_as(
+            "personal",
+            "Ev-R1",
+            "local:owner",
+            ConversationKind::Channel,
+            "C1",
+            input,
+        );
         command.target = built.candidates[0].target.clone();
         command.event.binding = BindingId(binding.into());
         let extras = AcceptExtras {
