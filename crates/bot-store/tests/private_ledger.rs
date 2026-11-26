@@ -429,4 +429,9 @@ async fn a_private_attempt_cannot_use_any_general_path() {
         assert_eq!(db.scalar::<i64>(&sql).await, 0, "{table}");
     }
     assert_eq!(row(&db).await, "leased:-:1:1:false");
+    db.expire_lease(&at.run).await;
+    assert!(matches!(
+        runs(&db).renew(Attempt { claim: None, ..at }).await,
+        Err(Error::Denied)
+    ));
 }

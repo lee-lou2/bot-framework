@@ -1,3 +1,5 @@
+#[path = "queue/heartbeat.rs"]
+mod heartbeat;
 #[path = "queue/order.rs"]
 mod order;
 mod support;

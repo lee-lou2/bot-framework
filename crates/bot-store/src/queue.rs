@@ -219,42 +219,42 @@ impl Store {
         Ok(None)
     }
 
-    /// heartbeat. 한 문장으로 소유자·세대·만료를 대조하고 리스를 늘린다. 옛 세대·만료 뒤는 `Stale`.
+    /// heartbeat. 다른 소유권 검사와 같이 행을 잠근 뒤 DB 시각을 확인하고 리스를 늘린다.
     pub(crate) async fn renew_run(&self, at: &Attempt) -> R<Beat> {
-        let row = sqlx::query(
-            "update bot_runs set lease_until_ms = bot_now_ms() + $4, updated_ms = bot_now_ms()
-             where profile = $1 and id = $2 and generation = $3 and claim_epoch = $5 and state = 'leased'
-               and lease_until_ms >= bot_now_ms() and not private
-             returning cancel_requested",
-        )
-        .bind(&at.profile.0)
-        .bind(&at.run.0)
-        .bind(at.generation.0 as i64)
-        .bind(self.cfg.lease.as_millis() as i64)
-        .bind(at.claim.map_or(-1, |c| c.0 as i64))
-        .fetch_optional(&self.pool)
-        .await?;
-        match row {
-            Some(r) => Ok(Beat {
-                cancel_requested: r.get("cancel_requested"),
-            }),
-            None => {
-                // 민감 DM 접수 기록은 일반 큐의 갱신 대상이 아니다(전용 원장이 리스를 다룬다)
+        let mut tx = self.pool.begin().await?;
+        let run = match lock_leased(&mut tx, at).await {
+            Ok(run) if run.private => return Err(Error::Denied.into()),
+            Err(Fail::Core(Error::Stale)) => {
+                // 민감 DM 접수의 갱신은 토큰이나 만료 상태와 무관하게 전용 원장만 받는다.
                 let private: Option<bool> = sqlx::query_scalar(
                     "select private from bot_runs where profile = $1 and id = $2",
                 )
                 .bind(&at.profile.0)
                 .bind(&at.run.0)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await?;
-                Err(if private == Some(true) {
+                return Err(if private == Some(true) {
                     Error::Denied
                 } else {
                     Error::Stale
                 }
-                .into())
+                .into());
             }
-        }
+            other => other?,
+        };
+        sqlx::query(
+            "update bot_runs set lease_until_ms = bot_now_ms() + $3, updated_ms = bot_now_ms()
+             where profile = $1 and id = $2",
+        )
+        .bind(&run.profile)
+        .bind(&run.id)
+        .bind(self.cfg.lease.as_millis() as i64)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Beat {
+            cancel_requested: run.cancel_requested,
+        })
     }
 
     /// 체크포인트 묶음을 현재 claim으로 한 트랜잭션에 기록한다. 같은 key의 재기록은 같은 내용일 때만 받고(멱등),
