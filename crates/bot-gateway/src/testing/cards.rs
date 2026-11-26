@@ -4,13 +4,13 @@ use crate::testing::TestCatalog;
 use crate::testing::ports::MemoryLedger;
 use bot_core::{
     api::ApprovalBlock,
-    cards::{CardJob, CardOrigin, CardOutbox, CardOutcome, CardReceipt},
+    cards::{CardJob, CardKey, CardOrigin, CardOutbox, CardOutcome, CardReceipt},
     id::{ApprovalId, Revision},
     port::{Error, Reply},
     profile::ProfileCatalog,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
@@ -25,9 +25,10 @@ pub struct MemoryCards {
 
 #[derive(Default)]
 struct Inner {
+    known: BTreeSet<ApprovalId>,
     pending: Vec<CardJob>,
     leased: Vec<CardJob>,
-    begun: Vec<(String, String)>,
+    begun: Vec<(CardKey, String)>,
     settled: Vec<(String, CardOutcome)>,
     receipts: BTreeMap<String, CardReceipt>,
     fail_begin: bool,
@@ -77,12 +78,21 @@ impl MemoryCards {
     }
 
     pub fn push(&self, job: CardJob) {
-        self.inner.lock().unwrap().pending.push(job);
+        let mut inner = self.inner.lock().unwrap();
+        if inner.known.insert(job.key.nonce.clone()) {
+            inner.pending.push(job);
+        }
     }
 
     /// `begin`이 기록한 (승인 식별자, 확인한 활성 판본)
     pub fn begun(&self) -> Vec<(String, String)> {
-        self.inner.lock().unwrap().begun.clone()
+        self.inner
+            .lock()
+            .unwrap()
+            .begun
+            .iter()
+            .map(|(key, revision)| (key.nonce.0.clone(), revision.clone()))
+            .collect()
     }
 
     /// 정산 기록 (승인 식별자, 결과) — 정산 순서대로
@@ -139,12 +149,19 @@ impl CardOutbox for MemoryCards {
             return ready(Err(Error::Unavailable));
         }
         let take = inner.pending.len().min(limit as usize);
-        let taken: Vec<CardJob> = inner.pending.drain(..take).collect();
+        let taken: Vec<CardJob> = inner
+            .pending
+            .drain(..take)
+            .map(|mut job| {
+                job.key.attempt += 1;
+                job
+            })
+            .collect();
         inner.leased.extend(taken.clone());
         ready(Ok(taken))
     }
 
-    fn begin(&self, nonce: ApprovalId, checked_revision: Revision) -> Reply<'_, ()> {
+    fn begin(&self, key: CardKey, checked_revision: Revision) -> Reply<'_, ()> {
         if let Some(hook) = self.before_begin.lock().unwrap().as_ref() {
             hook();
         }
@@ -154,7 +171,7 @@ impl CardOutbox for MemoryCards {
             let profile = inner
                 .leased
                 .iter()
-                .find(|job| job.nonce == nonce)
+                .find(|job| job.key == key)
                 .map(|job| job.profile.clone());
             let current = profile.and_then(|profile| {
                 catalog
@@ -166,21 +183,23 @@ impl CardOutbox for MemoryCards {
                 return ready(Err(Error::Stale));
             }
         }
-        let held = inner.leased.iter().any(|job| job.nonce == nonce);
-        let first = !inner.begun.iter().any(|(begun, _)| *begun == nonce.0);
-        if inner.fail_begin || !held || !first {
+        if !inner.leased.iter().any(|job| job.key == key) {
+            return ready(Err(Error::Stale));
+        }
+        let first = !inner.begun.iter().any(|(begun, _)| *begun == key);
+        if inner.fail_begin || !first {
             return ready(Err(Error::Conflict));
         }
-        inner.begun.push((nonce.0, checked_revision.0));
+        inner.begun.push((key, checked_revision.0));
         ready(Ok(()))
     }
 
-    fn settle(&self, nonce: ApprovalId, outcome: CardOutcome) -> Reply<'_, ()> {
+    fn settle(&self, key: CardKey, outcome: CardOutcome) -> Reply<'_, ()> {
         let mut inner = self.inner.lock().unwrap();
         if !inner.fail_settle.is_empty() {
             return ready(Err(inner.fail_settle.remove(0)));
         }
-        let Some(at) = inner.leased.iter().position(|job| job.nonce == nonce) else {
+        let Some(at) = inner.leased.iter().position(|job| job.key == key) else {
             return ready(Err(Error::Stale));
         };
         let job = inner.leased.remove(at);
@@ -195,18 +214,18 @@ impl CardOutbox for MemoryCards {
                     binding: job.binding.clone(),
                 };
                 if let Some(ledger) = &self.ledger {
-                    ledger.deliver(&nonce.0, receipt.clone());
+                    ledger.deliver(&key.nonce.0, receipt.clone());
                 }
-                inner.receipts.insert(nonce.0.clone(), receipt);
+                inner.receipts.insert(key.nonce.0.clone(), receipt);
             }
             // 아무것도 올라가지 않았다: 다시 잡히게 되돌리고 `begin` 기록을 지운다(다음 시도가 최초 전송자다)
             CardOutcome::NotSent { .. } => {
-                inner.begun.retain(|(begun, _)| *begun != nonce.0);
+                inner.begun.retain(|(begun, _)| *begun != key);
                 inner.pending.push(job);
             }
             CardOutcome::Unavailable | CardOutcome::Held => {}
         }
-        inner.settled.push((nonce.0, outcome));
+        inner.settled.push((key.nonce.0, outcome));
         ready(Ok(()))
     }
 
@@ -218,16 +237,16 @@ impl CardOutbox for MemoryCards {
         ready(Ok(inner.origins.get(&nonce.0).cloned()))
     }
 
-    fn block(&self, nonce: ApprovalId, why: ApprovalBlock) -> Reply<'_, ()> {
+    fn block(&self, key: CardKey, why: ApprovalBlock) -> Reply<'_, ()> {
         let mut inner = self.inner.lock().unwrap();
         if !inner.fail_settle.is_empty() {
             return ready(Err(inner.fail_settle.remove(0)));
         }
-        let Some(at) = inner.leased.iter().position(|job| job.nonce == nonce) else {
+        let Some(at) = inner.leased.iter().position(|job| job.key == key) else {
             return ready(Err(Error::Stale));
         };
         inner.leased.remove(at);
-        inner.blocked.push((nonce.0, why));
+        inner.blocked.push((key.nonce.0, why));
         ready(Ok(()))
     }
 }

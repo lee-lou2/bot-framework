@@ -105,12 +105,12 @@ async fn an_api_origin_card_is_staged_closed_keeps_the_original_evidence_and_pos
         ("team", APPROVER)
     );
     card(&db)
-        .begin(job.nonce.clone(), Revision("r1".into()))
+        .begin(job.key.clone(), Revision("r1".into()))
         .await
         .unwrap();
     card(&db)
         .settle(
-            job.nonce.clone(),
+            job.key.clone(),
             CardOutcome::Posted {
                 team: "T1".into(),
                 dm: "D1".into(),
@@ -212,9 +212,9 @@ async fn a_route_verdict_closes_the_card_before_posting_and_the_lookup_reads_the
         let (key, nonce) = (format!("k{n}"), format!("n{n}"));
         let (ctx, _) = waiting(&db, &key, &nonce, Some("T1")).await;
         let job = card(&db).claim(8).await.unwrap().remove(0);
-        assert_eq!(job.nonce.0, nonce);
+        assert_eq!(job.key.nonce.0, nonce);
         // 올리기 전에 승인 경로가 어긋났다: 카드를 올리지 않고 작업·승인을 닫는다
-        card(&db).block(job.nonce.clone(), why).await.unwrap();
+        card(&db).block(job.key.clone(), why).await.unwrap();
         assert_eq!(
             db.scalar::<String>(&format!(
                 "select state || '|' || closed_reason from bot_card_jobs where nonce = '{nonce}'"
@@ -237,7 +237,7 @@ async fn a_route_verdict_closes_the_card_before_posting_and_the_lookup_reads_the
             why.code()
         );
         // 같은 판정의 재전달은 같은 결과(감사 한 번), 닫힌 작업을 게시로 열 수는 없다
-        card(&db).block(job.nonce.clone(), why).await.unwrap();
+        card(&db).block(job.key.clone(), why).await.unwrap();
         assert_eq!(
             db.scalar::<i64>(&format!(
                 "select count(*) from bot_audit where action = 'approval.blocked' and target = '{nonce}'"
@@ -247,7 +247,7 @@ async fn a_route_verdict_closes_the_card_before_posting_and_the_lookup_reads_the
         );
         let posted = card(&db)
             .settle(
-                job.nonce.clone(),
+                job.key.clone(),
                 CardOutcome::Posted {
                     team: "T1".into(),
                     dm: "D1".into(),
@@ -271,15 +271,15 @@ async fn an_opened_card_cannot_be_blocked_later_and_a_dm_failure_is_the_dm_verdi
     let Some(db) = TestDb::new().await else {
         return;
     };
-    let (_, approval) = waiting(&db, "k1", "n1", Some("T1")).await;
+    waiting(&db, "k1", "n1", Some("T1")).await;
     let job = card(&db).claim(8).await.unwrap().remove(0);
     card(&db)
-        .begin(job.nonce.clone(), Revision("r1".into()))
+        .begin(job.key.clone(), Revision("r1".into()))
         .await
         .unwrap();
     card(&db)
         .settle(
-            job.nonce.clone(),
+            job.key.clone(),
             CardOutcome::Posted {
                 team: "T1".into(),
                 dm: "D1".into(),
@@ -289,9 +289,7 @@ async fn an_opened_card_cannot_be_blocked_later_and_a_dm_failure_is_the_dm_verdi
         .await
         .unwrap();
     // 열린 카드를 늦은 판정으로 닫지 않는다(지정된 사람의 클릭만 결정한다)
-    let late = card(&db)
-        .block(approval.nonce.clone(), ApprovalBlock::RouteChanged)
-        .await;
+    let late = card(&db).block(job.key, ApprovalBlock::RouteChanged).await;
     assert!(matches!(late, Err(Error::Conflict)), "{late:?}");
     assert_eq!(
         lookup(&db, "k1", "build").await.unwrap().state,
@@ -300,15 +298,12 @@ async fn an_opened_card_cannot_be_blocked_later_and_a_dm_failure_is_the_dm_verdi
     // 올리지 못한 카드(전달 실패)는 DM 전달 실패 판정이다
     let (_, _) = waiting(&db, "k2", "n2", Some("T1")).await;
     let job = card(&db).claim(8).await.unwrap().remove(0);
-    assert_eq!(job.nonce.0, "n2");
+    assert_eq!(job.key.nonce.0, "n2");
     card(&db)
-        .begin(job.nonce.clone(), Revision("r1".into()))
+        .begin(job.key.clone(), Revision("r1".into()))
         .await
         .unwrap();
-    card(&db)
-        .settle(job.nonce, CardOutcome::Held)
-        .await
-        .unwrap();
+    card(&db).settle(job.key, CardOutcome::Held).await.unwrap();
     assert_eq!(
         lookup(&db, "k2", "build").await.unwrap().state,
         ApiState::ApprovalBlocked(ApprovalBlock::ApprovalDmUnavailable)
@@ -365,12 +360,12 @@ async fn a_delegated_child_keeps_the_roots_origin_binding_and_delivery_team() {
     );
     let job = card(&db).claim(8).await.unwrap().remove(0);
     card(&db)
-        .begin(job.nonce.clone(), Revision("r1".into()))
+        .begin(job.key.clone(), Revision("r1".into()))
         .await
         .unwrap();
     card(&db)
         .settle(
-            job.nonce,
+            job.key,
             CardOutcome::Posted {
                 team: "T9".into(),
                 dm: "D1".into(),

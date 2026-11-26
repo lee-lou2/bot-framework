@@ -197,12 +197,12 @@ async fn post_card(rig: &Rig, team: &str) {
     let outbox: &dyn CardOutbox = &rig.db.store;
     let job = outbox.claim(8).await.unwrap().remove(0);
     outbox
-        .begin(job.nonce.clone(), Revision("r1".into()))
+        .begin(job.key.clone(), Revision("r1".into()))
         .await
         .unwrap();
     outbox
         .settle(
-            job.nonce,
+            job.key,
             CardOutcome::Posted {
                 team: team.into(),
                 dm: "D1".into(),

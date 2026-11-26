@@ -5,7 +5,7 @@ mod delivery_support;
 mod support;
 
 use bot_core::{
-    cards::{CardJob, CardOutcome},
+    cards::{CardJob, CardKey, CardOutcome},
     command::JsonPayload,
     id::{ApprovalId, BindingId, Generation, PrincipalId, ProfileId},
     intake::NotSentReason,
@@ -323,7 +323,10 @@ async fn a_rejected_token_never_makes_the_dm_card_unavailable() {
 
 fn job() -> CardJob {
     CardJob {
-        nonce: ApprovalId("n-1".into()),
+        key: CardKey {
+            nonce: ApprovalId("n-1".into()),
+            attempt: 0,
+        },
         profile: ProfileId("personal".into()),
         binding: BindingId("team".into()),
         owner: PrincipalId("slack:home/U1".into()),

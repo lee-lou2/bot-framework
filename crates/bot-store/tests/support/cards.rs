@@ -4,7 +4,7 @@
 use super::{admin::*, delivery::*, schedule::*, *};
 use bot_core::{
     admin::{AdminRead, ApprovalFilter, ApprovalQuery, Page},
-    cards::{CardJob, CardOutbox, CardOutcome, CardReceipt},
+    cards::{CardJob, CardKey, CardOutbox, CardOutcome, CardReceipt},
     intake::NotSentReason,
     port::Error,
     schedule::{DELIVER_CALL, DELIVER_TOOL, DeliveryTarget},
@@ -150,12 +150,12 @@ pub async fn claim(store: &Store, limit: u32) -> Result<Vec<CardJob>, Error> {
     CardOutbox::claim(store, limit).await
 }
 
-pub async fn begin(store: &Store, nonce: &ApprovalId, revision: Revision) -> Result<(), Error> {
-    CardOutbox::begin(store, nonce.clone(), revision).await
+pub async fn begin(store: &Store, key: &CardKey, revision: Revision) -> Result<(), Error> {
+    CardOutbox::begin(store, key.clone(), revision).await
 }
 
-pub async fn settle(store: &Store, nonce: &ApprovalId, outcome: CardOutcome) -> Result<(), Error> {
-    CardOutbox::settle(store, nonce.clone(), outcome).await
+pub async fn settle(store: &Store, key: &CardKey, outcome: CardOutcome) -> Result<(), Error> {
+    CardOutbox::settle(store, key.clone(), outcome).await
 }
 
 /// 게시를 확인한 영수증(`StoredApproval::delivery`). 확정 전이면 `None`.
@@ -168,6 +168,6 @@ pub async fn sending(db: &TestDb) -> CardJob {
     let mut jobs = claim(&db.store, 8).await.unwrap();
     assert_eq!(jobs.len(), 1, "{jobs:?}");
     let job = jobs.remove(0);
-    begin(&db.store, &job.nonce, rev()).await.unwrap();
+    begin(&db.store, &job.key, rev()).await.unwrap();
     job
 }

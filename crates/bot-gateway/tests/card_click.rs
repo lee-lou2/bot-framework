@@ -4,7 +4,7 @@
 mod support;
 
 use bot_core::{
-    cards::CardJob,
+    cards::{CardJob, CardKey},
     command::JsonPayload,
     id::{ApprovalId, BindingId, Generation, PrincipalId, ProfileId},
     ledger::ApprovalState,
@@ -44,7 +44,10 @@ fn card_json() -> String {
 
 fn job() -> CardJob {
     CardJob {
-        nonce: ApprovalId(NONCE.into()),
+        key: CardKey {
+            nonce: ApprovalId(NONCE.into()),
+            attempt: 0,
+        },
         profile: ProfileId("personal".into()),
         binding: BindingId("team".into()),
         owner: PrincipalId("slack:home/U1".into()),

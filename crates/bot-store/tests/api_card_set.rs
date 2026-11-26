@@ -8,7 +8,7 @@ mod support;
 
 use bot_core::{
     api::{ApiState, ApprovalBlock},
-    cards::{CardOutbox, CardOutcome},
+    cards::{CardKey, CardOutbox, CardOutcome},
     id::*,
     ledger::{ApprovalState, CallLedger, CallPhase, Decision, OpenApproval},
     port::Error,
@@ -266,12 +266,13 @@ fn posted(team: &str) -> CardOutcome {
 }
 
 /// 전달 작업을 점유하고 최초 전송자 확인까지 마친다(올리기 직전).
-async fn sending(db: &TestDb, nonce: &str) {
+async fn sending(db: &TestDb, nonce: &str) -> CardKey {
     let job = CardOutbox::claim(&db.store, 8).await.unwrap().remove(0);
-    assert_eq!(job.nonce.0, nonce);
-    CardOutbox::begin(&db.store, job.nonce, Revision("r1".into()))
+    assert_eq!(job.key.nonce.0, nonce);
+    CardOutbox::begin(&db.store, job.key.clone(), Revision("r1".into()))
         .await
         .unwrap();
+    job.key
 }
 
 #[tokio::test]
@@ -286,9 +287,9 @@ async fn a_receipt_from_another_team_is_no_receipt_and_closes_the_card_as_a_chan
     )
     .await
     .unwrap();
-    sending(&db, "n1").await;
+    let key = sending(&db, "n1").await;
     // 같은 별칭의 실제 팀이 바뀌어 다른 설치로 올라갔다: 영수증·카드가 없다
-    let got = CardOutbox::settle(&db.store, ApprovalId("n1".into()), posted("T2")).await;
+    let got = CardOutbox::settle(&db.store, key.clone(), posted("T2")).await;
     assert!(matches!(got, Err(Error::Stale)), "{got:?}");
     assert_eq!(
         db.scalar::<String>("select state || '|' || closed_reason from bot_card_jobs")
@@ -321,9 +322,9 @@ async fn a_receipt_from_another_team_is_no_receipt_and_closes_the_card_as_a_chan
         "denied|system"
     );
     // 같은 정산의 재전달도 열지 못한다
-    let again = CardOutbox::settle(&db.store, ApprovalId("n1".into()), posted("T2")).await;
+    let again = CardOutbox::settle(&db.store, key.clone(), posted("T2")).await;
     assert!(matches!(again, Err(Error::Conflict)), "{again:?}");
-    let right = CardOutbox::settle(&db.store, ApprovalId("n1".into()), posted("T1")).await;
+    let right = CardOutbox::settle(&db.store, key, posted("T1")).await;
     assert!(matches!(right, Err(Error::Conflict)), "{right:?}");
     assert_eq!(db.scalar::<i64>("select count(*) from bot_outbox").await, 0);
 }
@@ -342,8 +343,8 @@ async fn a_card_job_without_the_pinned_team_never_becomes_a_receipt() {
     .unwrap();
     // 고정한 team이 없는 작업(옛 형태의 행): 올라간 team이 무엇이든 영수증이 아니다
     db.sql("update bot_card_jobs set origin_team = null").await;
-    sending(&db, "n1").await;
-    let got = CardOutbox::settle(&db.store, ApprovalId("n1".into()), posted("T1")).await;
+    let key = sending(&db, "n1").await;
+    let got = CardOutbox::settle(&db.store, key, posted("T1")).await;
     assert!(matches!(got, Err(Error::Stale)), "{got:?}");
     assert_eq!(
         db.scalar::<String>("select state || '|' || closed_reason from bot_card_jobs")
@@ -376,8 +377,8 @@ async fn the_pinned_team_matches_the_receipt_and_a_redelivered_settlement_is_the
     )
     .await
     .unwrap();
-    sending(&db, "n1").await;
-    CardOutbox::settle(&db.store, ApprovalId("n1".into()), posted("T1"))
+    let key = sending(&db, "n1").await;
+    CardOutbox::settle(&db.store, key.clone(), posted("T1"))
         .await
         .unwrap();
     assert_eq!(
@@ -385,7 +386,7 @@ async fn the_pinned_team_matches_the_receipt_and_a_redelivered_settlement_is_the
         ApiState::NeedsHuman
     );
     // 같은 정산의 재전달은 같은 결과다
-    CardOutbox::settle(&db.store, ApprovalId("n1".into()), posted("T1"))
+    CardOutbox::settle(&db.store, key, posted("T1"))
         .await
         .unwrap();
     assert_eq!(

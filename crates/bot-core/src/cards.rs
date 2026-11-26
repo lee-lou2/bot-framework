@@ -30,10 +30,17 @@ pub const DM_UNCONFIRMED_NOTICE: &str =
 /// 승인 카드를 소유자 DM으로 전달하지 못해 닫았다는 고정 낱말: 감사 결과이자 미발송 영수증 `{"status":"approval_dm_unavailable"}`의 값이다.
 pub const APPROVAL_DM_UNAVAILABLE: &str = "approval_dm_unavailable";
 
+/// 전달 작업을 점유할 때마다 시도가 오른다. 사람의 버튼은 기존 nonce를 계속 사용한다.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CardKey {
+    pub nonce: ApprovalId,
+    pub attempt: u32,
+}
+
 /// 소유자 DM으로 가야 하는 승인 카드 한 건.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CardJob {
-    pub nonce: ApprovalId,
+    pub key: CardKey,
     pub profile: ProfileId,
     /// 원래 입력 바인딩(Slack 채널 바인딩): 카드를 올릴 설치를 정한다
     pub binding: BindingId,
@@ -92,17 +99,17 @@ pub struct CardOrigin {
 pub trait CardOutbox: Send + Sync {
     /// 전달 작업을 리스로 점유한다. `sending` 불명 작업은 자동으로 다시 잡지 않는다(오래되면 저장소가 닫는다).
     fn claim(&self, limit: u32) -> Reply<'_, Vec<CardJob>>;
-    /// 현재 활성 집합·카드 유효·세대·프로필 판본을 확인하고 `sending`을 기록한다. 최초 전송자만 Ok를 받는다(`Conflict`는 이미 시작됨, `Stale`은 낡음).
-    fn begin(&self, nonce: ApprovalId, checked_revision: Revision) -> Reply<'_, ()>;
+    /// 현재 발송 시도와 리스·활성 집합·카드 유효·세대·프로필 판본을 확인하고 `sending`을 기록한다. 최초 전송자만 Ok를 받는다.
+    fn begin(&self, key: CardKey, checked_revision: Revision) -> Reply<'_, ()>;
     /// 결과를 기록한다(`Posted`면 카드를 열고 공개 안내 한 줄, 아니면 닫는다). 같은 정산의 재전달은 같은 결과다.
-    fn settle(&self, nonce: ApprovalId, outcome: CardOutcome) -> Reply<'_, ()>;
+    fn settle(&self, key: CardKey, outcome: CardOutcome) -> Reply<'_, ()>;
     /// 이 카드가 이어받은 원래 요청의 고정 증거. HTTP(OpenAI 호환) 출처 카드에만 `Some`이다(기본 구현은 없음).
     fn origin(&self, _nonce: ApprovalId) -> Reply<'_, Option<CardOrigin>> {
         Box::pin(async { Ok(None) })
     }
     /// 올리기 전에 승인 경로가 어긋났음을 알았다(승인 지정·사람 멤버 철회, 전달 경로·설치·바인딩 재지정): 카드를 올리지 않고 작업과 승인을 닫으며
     /// 저장된 판정(`ApprovalBlock`)을 남긴다. 조회가 이 낱말로 «도구가 실행되지 않았다»를 알린다. 이 구분을 모르는 구현은 전달 실패로 정산한다(기본 구현).
-    fn block(&self, nonce: ApprovalId, _why: ApprovalBlock) -> Reply<'_, ()> {
-        self.settle(nonce, CardOutcome::Unavailable)
+    fn block(&self, key: CardKey, _why: ApprovalBlock) -> Reply<'_, ()> {
+        self.settle(key, CardOutcome::Unavailable)
     }
 }

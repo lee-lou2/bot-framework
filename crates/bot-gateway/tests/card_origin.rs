@@ -5,7 +5,7 @@ mod support;
 
 use bot_core::{
     api::ApprovalBlock,
-    cards::{CardJob, CardOrigin, CardOutcome},
+    cards::{CardJob, CardKey, CardOrigin, CardOutcome},
     command::JsonPayload,
     id::{ApprovalId, BindingId, Generation, PrincipalId, ProfileId, Revision},
     profile::{Adapter, ApprovalRoute},
@@ -86,7 +86,10 @@ fn api_profile_as(
 
 fn job(nonce: &str, binding: &str, owner: &str) -> CardJob {
     CardJob {
-        nonce: ApprovalId(nonce.into()),
+        key: CardKey {
+            nonce: ApprovalId(nonce.into()),
+            attempt: 0,
+        },
         profile: ProfileId("personal".into()),
         binding: BindingId(binding.into()),
         owner: PrincipalId(owner.into()),

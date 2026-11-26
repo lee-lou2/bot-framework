@@ -4,7 +4,7 @@ mod delivery_support;
 mod support;
 
 use bot_core::{
-    cards::{CardJob, CardOutcome, CardReceipt},
+    cards::{CardJob, CardKey, CardOutcome, CardReceipt},
     command::JsonPayload,
     id::{ApprovalId, BindingId, Generation, PrincipalId, ProfileId},
     intake::NotSentReason,
@@ -26,7 +26,10 @@ async fn fresh() -> Rig {
 
 fn job(nonce: &str, owner: &str, binding: &str) -> CardJob {
     CardJob {
-        nonce: ApprovalId(nonce.into()),
+        key: CardKey {
+            nonce: ApprovalId(nonce.into()),
+            attempt: 0,
+        },
         profile: ProfileId("personal".into()),
         binding: BindingId(binding.into()),
         owner: PrincipalId(owner.into()),
@@ -237,7 +240,7 @@ async fn a_job_that_no_longer_matches_the_current_profile_is_closed_without_any_
     ] {
         let rig = fresh().await;
         let cards = MemoryCards::new();
-        let nonce = bad.nonce.clone();
+        let nonce = bad.key.nonce.clone();
         cards.push(bad);
         rig.card_deliverer(cards.clone()).tick().await.unwrap();
         assert_eq!(

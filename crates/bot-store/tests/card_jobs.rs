@@ -4,7 +4,7 @@
 
 mod support;
 
-use bot_core::{admin::AdminRead, id::*, ledger::*, port::*, state::*};
+use bot_core::{admin::AdminRead, cards::CardKey, id::*, ledger::*, port::*, state::*};
 use std::collections::BTreeSet;
 use support::{admin::*, cards::*, delivery::*, *};
 
@@ -87,7 +87,7 @@ async fn a_confirmed_receipt_opens_the_card_and_adds_exactly_one_public_line() {
     let job = &jobs[0];
     assert_eq!(
         (
-            job.nonce.0.as_str(),
+            job.key.nonce.0.as_str(),
             job.owner.0.as_str(),
             job.profile.0.as_str(),
             job.binding.0.as_str()
@@ -102,22 +102,22 @@ async fn a_confirmed_receipt_opens_the_card_and_adds_exactly_one_public_line() {
     );
     // 점유한 작업은 리스 동안 다시 점유되지 않는다. begin 없이 한 게시 확인은 받지 않는다. 최초 전송자만 begin이 통과한다
     assert!(claim(&db.store, 8).await.unwrap().is_empty());
-    let early = settle(&db.store, &job.nonce, posted()).await;
+    let early = settle(&db.store, &job.key, posted()).await;
     assert!(matches!(early, Err(Error::Conflict)), "{early:?}");
-    begin(&db.store, &job.nonce, rev()).await.unwrap();
-    let again = begin(&db.store, &job.nonce, rev()).await;
+    begin(&db.store, &job.key, rev()).await.unwrap();
+    let again = begin(&db.store, &job.key, rev()).await;
     assert!(matches!(again, Err(Error::Conflict)), "{again:?}");
     // 올리는 중에는 아직 열리지 않았다. begin 없이 한 정산은 받지 않는다(점유만 하고 올린 적이 없다)
     assert!(matches!(
         decide_as_owner(&db, &approval).await,
         Err(Error::Conflict)
     ));
-    assert_eq!(receipt(&db, &job.nonce).await, None);
+    assert_eq!(receipt(&db, &job.key.nonce).await, None);
     assert!(public_lines(&db, &run).await.is_empty());
 
-    settle(&db.store, &job.nonce, posted()).await.unwrap();
+    settle(&db.store, &job.key, posted()).await.unwrap();
     // 영수증(클릭 대조용)과 공개 한 줄: 초안·수신자·해시·버튼·승인 식별자는 없다
-    let receipt = receipt(&db, &job.nonce).await.expect("영수증");
+    let receipt = receipt(&db, &job.key.nonce).await.expect("영수증");
     assert_eq!(
         (
             receipt.team.as_str(),
@@ -134,7 +134,7 @@ async fn a_confirmed_receipt_opens_the_card_and_adds_exactly_one_public_line() {
         vec![r#"{"text":"DM으로 승인 요청을 보냈어요"}"#.to_owned()]
     );
     // 같은 정산의 재전달은 같은 결과이고 줄이 늘지 않는다. 다른 영수증은 충돌이다
-    settle(&db.store, &job.nonce, posted()).await.unwrap();
+    settle(&db.store, &job.key, posted()).await.unwrap();
     assert_eq!(public_lines(&db, &run).await.len(), 1);
     let other = bot_core::cards::CardOutcome::Posted {
         team: "T1".into(),
@@ -142,7 +142,7 @@ async fn a_confirmed_receipt_opens_the_card_and_adds_exactly_one_public_line() {
         ts: "9.9".into(),
     };
     assert!(matches!(
-        settle(&db.store, &job.nonce, other).await,
+        settle(&db.store, &job.key, other).await,
         Err(Error::Conflict)
     ));
     // 열린 카드는 늦게 온 «전달 실패»로 닫지 않는다
@@ -150,7 +150,7 @@ async fn a_confirmed_receipt_opens_the_card_and_adds_exactly_one_public_line() {
         bot_core::cards::CardOutcome::Unavailable,
         bot_core::cards::CardOutcome::Held,
     ] {
-        let got = settle(&db.store, &job.nonce, late).await;
+        let got = settle(&db.store, &job.key, late).await;
         assert!(matches!(got, Err(Error::Conflict)), "{got:?}");
     }
     // 이제 열렸다: 관리 목록에 보이고 소유자가 결정한다. run은 같은 세대로 깨어난다
@@ -179,7 +179,7 @@ async fn concurrent_claimers_never_share_a_job_and_only_one_begin_passes() {
     let seen: BTreeSet<String> = first
         .iter()
         .chain(&second)
-        .map(|j| j.nonce.0.clone())
+        .map(|j| j.key.nonce.0.clone())
         .collect();
     assert_eq!(
         first.len() + second.len(),
@@ -188,8 +188,8 @@ async fn concurrent_claimers_never_share_a_job_and_only_one_begin_passes() {
     );
     assert_eq!(seen.len(), 4, "점유한 작업은 한 번씩이다: {seen:?}");
     // 같은 작업에 대한 begin은 한 번만 통과한다
-    let nonce = first[0].nonce.clone();
-    let (x, y) = tokio::join!(begin(&a, &nonce, rev()), begin(&b, &nonce, rev()));
+    let key = &first[0].key;
+    let (x, y) = tokio::join!(begin(&a, key, rev()), begin(&b, key, rev()));
     assert_eq!(
         [x.is_ok(), y.is_ok()].iter().filter(|ok| **ok).count(),
         1,
@@ -206,7 +206,7 @@ async fn a_card_that_went_stale_while_posting_is_never_opened() {
     let (run, approval) = channel_card(&db, "r1", "n1").await;
     let job = sending(&db).await;
     db.sql("update bot_active set revision = 'set-2'").await;
-    let got = settle(&db.store, &job.nonce, posted()).await;
+    let got = settle(&db.store, &job.key, posted()).await;
     assert!(matches!(got, Err(Error::Stale)), "{got:?}");
     assert_eq!(state(&db, "bot_card_jobs", "n1").await, "closed");
     assert_eq!(
@@ -215,7 +215,7 @@ async fn a_card_that_went_stale_while_posting_is_never_opened() {
         "stale"
     );
     assert!(public_lines(&db, &run).await.is_empty());
-    assert_eq!(receipt(&db, &job.nonce).await, None);
+    assert_eq!(receipt(&db, &job.key.nonce).await, None);
     assert!(matches!(
         decide_as_owner(&db, &approval).await,
         Err(Error::Conflict)
@@ -230,14 +230,14 @@ async fn an_expired_or_replaced_card_is_never_opened_and_begin_checks_the_profil
     // 판본이 다르면(게이트웨이가 본 프로필이 낡았다) begin이 거절하고 작업은 그대로다
     let (_, _) = channel_card(&db, "r1", "n1").await;
     let jobs = claim(&db.store, 8).await.unwrap();
-    let got = begin(&db.store, &jobs[0].nonce, Revision("r9".into())).await;
+    let got = begin(&db.store, &jobs[0].key, Revision("r9".into())).await;
     assert!(matches!(got, Err(Error::Stale)), "{got:?}");
     assert_eq!(state(&db, "bot_card_jobs", "n1").await, "leased");
-    begin(&db.store, &jobs[0].nonce, rev()).await.unwrap();
+    begin(&db.store, &jobs[0].key, rev()).await.unwrap();
     // 올리는 사이 카드가 만료됐다: 열지 않는다
     db.sql("update bot_approvals set expires_ms = bot_now_ms() - 1")
         .await;
-    let got = settle(&db.store, &jobs[0].nonce, posted()).await;
+    let got = settle(&db.store, &jobs[0].key, posted()).await;
     assert!(matches!(got, Err(Error::Stale)), "{got:?}");
     assert_eq!(state(&db, "bot_card_jobs", "n1").await, "closed");
 }
@@ -301,10 +301,14 @@ async fn begin_refuses_a_card_that_expired_after_the_claim() {
     // 점유한 뒤 카드가 만료됐다: 올리면 안 된다(작업은 점유 상태 그대로, 정리는 다음 점유가 한다)
     db.sql("update bot_approvals set expires_ms = bot_now_ms() - 1")
         .await;
-    let got = begin(&db.store, &job.nonce, rev()).await;
+    let got = begin(&db.store, &job.key, rev()).await;
     assert!(matches!(got, Err(Error::Stale)), "{got:?}");
     assert_eq!(state(&db, "bot_card_jobs", "n1").await, "leased");
     // 승인이 없는 작업은 알 수 없다
-    let none = begin(&db.store, &ApprovalId("nope".into()), rev()).await;
+    let key = CardKey {
+        nonce: ApprovalId("nope".into()),
+        attempt: 1,
+    };
+    let none = begin(&db.store, &key, rev()).await;
     assert!(matches!(none, Err(Error::Missing)), "{none:?}");
 }

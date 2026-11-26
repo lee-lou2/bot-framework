@@ -15,11 +15,11 @@ use super::{
     socket::Installation,
 };
 use crate::{identity, ingress::Ingress, reply::parse_card};
-pub use bot_core::cards::{CardJob, CardOutbox, CardOutcome, CardReceipt};
+pub use bot_core::cards::{CardJob, CardKey, CardOutbox, CardOutcome, CardReceipt};
 use bot_core::{
     api::ApprovalBlock,
     cards::CardOrigin,
-    id::{AgentId, ApprovalId, BindingId, PrincipalId, Revision},
+    id::{AgentId, BindingId, PrincipalId, Revision},
     port::Error,
     profile::{Adapter, ApprovalRoute, Snapshot},
 };
@@ -71,7 +71,7 @@ enum Settlement {
 
 /// 올렸거나 닫았는데 저장소가 정산을 받지 못한 결과: 저장소가 답할 때까지 같은 결과로 다시 기록한다(같은 정산의 재전달은 같은 결과다). 카드를 다시 올리지 않는다.
 struct Unsettled {
-    nonce: ApprovalId,
+    key: CardKey,
     settlement: Settlement,
 }
 
@@ -199,7 +199,7 @@ impl CardDeliverer {
     /// 점유한 작업을 올릴지·닫을지·건드리지 않을지 정한다. 현재 활성 프로필·바인딩·소유자 기준이다.
     async fn judge(&self, job: &CardJob) -> Verdict {
         // HTTP 출처의 고정 증거. 읽지 못하면 채널 출처인지 알 수 없으므로 올리지 않는다
-        let Ok(origin) = self.jobs.origin(job.nonce.clone()).await else {
+        let Ok(origin) = self.jobs.origin(job.key.nonce.clone()).await else {
             return Verdict::Leave;
         };
         let Ok(routes) = self.ingress.routes() else {
@@ -231,16 +231,15 @@ impl CardDeliverer {
     }
 
     async fn deliver_one(&self, job: CardJob) {
-        let nonce = job.nonce.clone();
         let (workspace, revision) = match self.judge(&job).await {
             Verdict::Leave => return,
             Verdict::Close => {
-                self.settle(nonce, Settlement::Outcome(CardOutcome::Unavailable))
+                self.settle(job.key, Settlement::Outcome(CardOutcome::Unavailable))
                     .await;
                 return;
             }
             Verdict::Block(why) => {
-                self.settle(nonce, Settlement::Block(why)).await;
+                self.settle(job.key, Settlement::Block(why)).await;
                 return;
             }
             Verdict::Post(workspace, revision) => (workspace, revision),
@@ -248,14 +247,14 @@ impl CardDeliverer {
         let card = serde_json::from_str(&job.card.0)
             .ok()
             .and_then(|value| parse_card(&value).ok())
-            .filter(|card| card.nonce == job.nonce.0);
+            .filter(|card| card.nonce == job.key.nonce.0);
         let Some(card) = card else {
-            self.settle(nonce, Settlement::Outcome(CardOutcome::Unavailable))
+            self.settle(job.key, Settlement::Outcome(CardOutcome::Unavailable))
                 .await;
             return;
         };
         // 최초 전송자만 올린다. 실패하거나 응답을 잃으면 올리지 않는다
-        if self.jobs.begin(nonce.clone(), revision).await.is_err() {
+        if self.jobs.begin(job.key.clone(), revision).await.is_err() {
             return;
         }
         let posted = tokio::time::timeout(
@@ -265,16 +264,16 @@ impl CardDeliverer {
         )
         .await
         .unwrap_or(CardPost::Held);
-        self.settle(nonce, Settlement::Outcome(outcome_of(posted)))
+        self.settle(job.key, Settlement::Outcome(outcome_of(posted)))
             .await;
     }
 
     /// 결과를 기록한다. 저장소가 일시적으로 받지 못하면(`Unavailable`) 같은 결과를 나중에 다시 기록한다 — 이미 올린 카드를 다시 올리지 않는다.
-    async fn settle(&self, nonce: ApprovalId, settlement: Settlement) {
+    async fn settle(&self, key: CardKey, settlement: Settlement) {
         self.unsettled
             .lock()
             .unwrap()
-            .push(Unsettled { nonce, settlement });
+            .push(Unsettled { key, settlement });
         self.resettle().await;
     }
 
@@ -284,9 +283,9 @@ impl CardDeliverer {
         for item in waiting {
             let recorded = match &item.settlement {
                 Settlement::Outcome(outcome) => {
-                    self.jobs.settle(item.nonce.clone(), outcome.clone()).await
+                    self.jobs.settle(item.key.clone(), outcome.clone()).await
                 }
-                Settlement::Block(why) => self.jobs.block(item.nonce.clone(), *why).await,
+                Settlement::Block(why) => self.jobs.block(item.key.clone(), *why).await,
             };
             match recorded {
                 Ok(()) => {}
