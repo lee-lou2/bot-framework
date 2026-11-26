@@ -85,6 +85,44 @@ pub(crate) fn yaml_of(
     found.is_empty().then_some(value)
 }
 
+/// `triggers.yaml`의 스키마 검증. `preapproved`·`human_approval` 객체 내부와 문자열 `on.cron`의
+/// 위반은 기존 고정 오류 코드(`invalid_preapproval`·`invalid_human_approval`·`bad-cron`)를 유지한다.
+fn triggers_yaml(tree: &Tree, path: &str, limits: &Limits, issues: &mut Issues) -> Option<Value> {
+    let value = yaml_value(tree, path, limits, issues)?;
+    let found = bundled().triggers.validate(&value);
+    for v in &found {
+        let code = trigger_schema_code(&value, &v.pointer);
+        issues.error_at(code, path, v.pointer.clone(), v.message.clone());
+    }
+    found.is_empty().then_some(value)
+}
+
+fn trigger_schema_code(doc: &Value, pointer: &str) -> &'static str {
+    let Some(rest) = pointer.strip_prefix("/triggers/") else {
+        return "schema";
+    };
+    let Some((idx, tail)) = rest.split_once('/') else {
+        return "schema";
+    };
+    if tail == "preapproved" || tail.starts_with("preapproved/") {
+        let base = format!("/triggers/{idx}/preapproved");
+        if doc.pointer(&base).is_some_and(Value::is_object) {
+            return bot_core::grant::reason::INVALID;
+        }
+    } else if tail == "human_approval" || tail.starts_with("human_approval/") {
+        let base = format!("/triggers/{idx}/human_approval");
+        if doc.pointer(&base).is_some_and(Value::is_object) {
+            return "invalid_human_approval";
+        }
+    } else if tail == "on/cron" {
+        let base = format!("/triggers/{idx}/on/cron");
+        if doc.pointer(&base).is_some_and(Value::is_string) {
+            return "bad-cron";
+        }
+    }
+    "schema"
+}
+
 pub fn parse_all(
     tree: &Tree,
     layout: &Layout,
@@ -314,7 +352,7 @@ fn agent(
     let triggers = files
         .triggers
         .as_deref()
-        .and_then(|p| Some((p, yaml_of(tree, p, &bundled().triggers, limits, issues)?)))
+        .and_then(|p| Some((p, triggers_yaml(tree, p, limits, issues)?)))
         .map(|(path, value)| triggers::parse(&value, path, limits, issues))
         .unwrap_or_default();
     Some(ParsedAgent {

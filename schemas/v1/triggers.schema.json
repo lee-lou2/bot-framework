@@ -26,7 +26,7 @@
           "properties": {
             "cron": {
               "type": "string",
-              "minLength": 1
+              "pattern": "^[ \\t]*(?:@(?:hourly|daily|midnight|weekly|monthly|yearly|annually)|[^@ \\t\\r\\n][^ \\t\\r\\n]*(?:[ \\t]+[^ \\t\\r\\n]+){4})[ \\t]*$"
             }
           },
           "required": [
@@ -207,10 +207,65 @@
           "type": "boolean"
         },
         "preapproved": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "max_per_day": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "targets": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "pattern": "^(?:\\.|\\.?[A-Za-z0-9_:#@+\\-]+(?:\\.[A-Za-z0-9_:#@+\\-]+)*\\.?)$"
+                  },
+                  "target": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "pattern": "^(?:\\.|\\.?[A-Za-z0-9_:#@+\\-]+(?:\\.[A-Za-z0-9_:#@+\\-]+)*\\.?)$"
+                  }
+                },
+                "required": [
+                  "operation",
+                  "target"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "max_per_day",
+            "targets"
+          ],
+          "additionalProperties": false
         },
         "human_approval": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "approvers": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^slack:[a-z][a-z0-9]*(?:-[a-z0-9]+)*/[UW][A-Z0-9]{1,31}$",
+                "maxLength": 102
+              }
+            }
+          },
+          "required": [
+            "approvers"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
