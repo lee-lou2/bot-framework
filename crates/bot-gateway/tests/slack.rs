@@ -342,35 +342,3 @@ async fn a_message_is_admitted_under_the_table_that_proved_its_owner() {
     assert!(rig.slack.until(|s| s.acks().len() == 2).await);
     assert_eq!(rig.store.accepted().len(), 1);
 }
-
-/// 소켓이 아닌 수신 방식은 받아 줄 곳이 없다: 설정 검증이 먼저 거르지만(`bot validate`·시작), 검증을 거치지 않은 설정이 들어와도 Slack 게이트웨이는 그 설치를 **조용히 건너뛰지
-/// 않고** 워크스페이스 이름을 밝혀 시작을 거절한다(건너뛰면 메시지와 승인 버튼이 사라지고 서명·재전송 검사도 동작하지 않는다).
-#[tokio::test]
-async fn a_workspace_that_wants_http_receiving_stops_the_gateway_instead_of_being_skipped() {
-    // 검증을 거치지 않은 설정(`HostConfig`는 `Deserialize`로 그대로 만들 수 있다)
-    let mut config: bot_gateway::host::HostConfig = serde_json::from_value(json!({
-        "slack": {"workspaces": {"home": {"team_id": "T1", "app_id": "A1", "dm": true,
-            "bot_token": "bot-token", "app_token": "app-token", "signing_secret": "signing",
-            "receive": "http", "channels": {"planning": "C1"}}}}
-    }))
-    .unwrap();
-    assert!(config.validate().is_err(), "설정 검증이 먼저 거른다");
-    let mut rig = rig_with(vec![personal()], default_secrets(), config.clone(), |_| {}).await;
-    let serve = std::mem::replace(&mut rig.serve, tokio::spawn(async { Ok(()) }));
-    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), serve)
-        .await
-        .expect("게이트웨이가 멈추지 않았어요")
-        .unwrap();
-    let error = ended.expect_err("시작을 거절해야 해요").to_string();
-    assert!(
-        error.contains("home") && error.contains("receive=http"),
-        "{error}"
-    );
-    assert!(
-        rig.slack.all_calls().is_empty(),
-        "Slack에 아무것도 부르지 않았어요"
-    );
-    // 소켓으로 바꾸면 같은 설정이 받는다
-    config.slack.workspaces.get_mut("home").unwrap().receive = bot_gateway::host::Receive::Socket;
-    assert!(config.validate().is_ok());
-}

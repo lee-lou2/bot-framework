@@ -156,12 +156,6 @@ impl SlackGateway {
             let Some(ws) = host.slack.workspaces.get(&alias) else {
                 return Err(SlackError(format!("{who}: 호스트에 등록되지 않았어요")));
             };
-            // 소켓이 아닌 수신 방식은 이 설치를 받아 줄 곳이 없다: 조용히 건너뛰면 메시지·승인 버튼이 사라지므로 시작을 거절한다(설정 검증이 먼저 거른다)
-            if ws.receive != crate::host::Receive::Socket {
-                return Err(SlackError(format!(
-                    "{who}: receive=http는 아직 지원하지 않아요 — socket(app_token)으로만 받을 수 있어요"
-                )));
-            }
             let Some(app) = self.creds.app_token(&profile, &alias).await else {
                 return Err(SlackError(format!(
                     "{who}: 봇·앱 토큰을 읽지 못했어요(자격 이름만 확인하세요)"

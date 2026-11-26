@@ -12,10 +12,7 @@ use bot_core::{
     port::{Error, SecretStore},
     profile::{Snapshot, TriggerSource},
 };
-use bot_gateway::{
-    host::{HostConfig, Receive},
-    http::token::MIN_KEY_BYTES,
-};
+use bot_gateway::{host::HostConfig, http::token::MIN_KEY_BYTES};
 use std::collections::BTreeSet;
 
 mod trace;
@@ -85,10 +82,7 @@ pub fn entrance_secrets(snapshot: &Snapshot, gateway: &HostConfig) -> BTreeSet<S
             Adapter::SlackChannel { workspace, .. } | Adapter::SlackDm { workspace } => {
                 if let Some(ws) = gateway.slack.workspaces.get(workspace) {
                     names.insert(ws.bot_token.clone());
-                    match ws.receive {
-                        Receive::Socket => names.extend(ws.app_token.clone()),
-                        Receive::Http => names.extend(ws.signing_secret.clone()),
-                    }
+                    names.extend(ws.app_token.clone());
                 }
             }
             Adapter::Http { endpoint } => {

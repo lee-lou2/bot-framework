@@ -30,6 +30,9 @@ fn count(hash: &mut Sha256, n: usize) {
     hash.update((n as u64).to_be_bytes());
 }
 
+/// 워크스페이스마다 지문에 넣는 수신 방식 표지. 소켓 수신(0)만 검증을 통과하므로 상수다. 값을 계속 넣는 것은 이미 활성화된 호스트의 지문 바이트가 바뀌지 않게 하려는 것이다.
+const RECEIVE_SOCKET: u8 = 0;
+
 /// 지금 호스트에서 OS 사용자 이름을 풀어 지문을 만든다.
 pub fn fingerprint(config: &HostConfig) -> Result<[u8; 32], HostError> {
     fingerprint_with(config, &resolve_uid)
@@ -55,10 +58,7 @@ pub fn fingerprint_with(
         field(&mut hash, ws.team_id.as_bytes());
         optional(&mut hash, ws.app_id.as_deref());
         hash.update([u8::from(ws.dm)]);
-        hash.update([match ws.receive {
-            crate::host::Receive::Socket => 0,
-            crate::host::Receive::Http => 1,
-        }]);
+        hash.update([RECEIVE_SOCKET]);
         field(&mut hash, ws.bot_token.as_bytes());
         optional(&mut hash, ws.app_token.as_deref());
         optional(&mut hash, ws.signing_secret.as_deref());
@@ -119,12 +119,6 @@ mod tests {
     /// `guest`는 uid 502로 푼다(실제 OS 조회 없이)
     fn print(value: Value) -> [u8; 32] {
         let config = HostConfig::from_value(value).unwrap();
-        fingerprint_with(&config, &|account| Ok(account.uid.unwrap_or(502))).unwrap()
-    }
-
-    /// 설정 검증을 거치지 않은 값의 지문(검증이 거절하는 모양도 지문 계산은 정의돼 있다)
-    fn unvalidated_print(value: Value) -> [u8; 32] {
-        let config: HostConfig = serde_json::from_value(value).unwrap();
         fingerprint_with(&config, &|account| Ok(account.uid.unwrap_or(502))).unwrap()
     }
 
@@ -289,13 +283,10 @@ mod tests {
                 "DM",
                 changed(|v| v["slack"]["workspaces"]["home"]["dm"] = json!(false)),
             ),
-            ("수신 방식", {
-                let mut value = base();
-                let home = &mut value["slack"]["workspaces"]["home"];
-                home["receive"] = json!("http");
-                home["signing_secret"] = json!("signing");
-                unvalidated_print(value)
-            }),
+            (
+                "서명 비밀 이름",
+                changed(|v| v["slack"]["workspaces"]["home"]["signing_secret"] = json!("signing")),
+            ),
             (
                 "봇 토큰 이름",
                 changed(|v| v["slack"]["workspaces"]["home"]["bot_token"] = json!("other")),

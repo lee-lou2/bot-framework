@@ -17,11 +17,17 @@
 | 키 | 내용 |
 |---|---|
 | `cli.accounts.<별칭>` | `{"os_user": "이름"}` 또는 `{"uid": 501}` 중 정확히 하나. `cli.socket`은 절대 경로(100바이트 이하) |
-| `slack.workspaces.<별칭>` | `team_id`·`app_id`(선택, 소켓 hello 확인)·`channels`(별칭→채널 ID)·`dm`(DM 입구를 열지, 기본 거짓)·`receive`(`socket`만 — `http`는 Events API·버튼을 받는 수신기와 서명·재전송 검사가 생길 때까지 `bot validate`와 `serve`가 워크스페이스 이름(`slack.workspaces.<별칭>.receive`)을 밝혀 거절한다. 서명 비밀을 줘도 같다)와 자격 **이름** `bot_token`·`app_token`(소켓 수신에 필요)·`signing_secret`(지금은 쓰지 않는다) |
+| `slack.workspaces.<별칭>` | `team_id`·`app_id`(선택, 소켓 hello 확인)·`channels`(별칭→채널 ID)·`dm`(DM 입구를 열지, 기본 거짓)·`receive`·자격 **이름** `bot_token`·`app_token`·`signing_secret`. 수신 규칙은 표 아래 목록이다 |
 | `http.listen`·`http.remote`·`http.endpoints.<별칭>` | 기본 `127.0.0.1:8788`(관리 화면의 기본 8787과 겹치지 않는다). 이 입구는 TLS 없는 평문 HTTP라서 **루프백이 아닌 주소는 `http.remote: true`로 명시해야** 열린다(기본 거짓) — 없으면 `bot validate`와 `bot serve`가 `gateway.http.listen`을 밝혀 거절하고 아무것도 열지 않는다. TLS를 맡는 프록시 뒤에서 켠다. 웹훅(`kind:"webhook"`)에는 `issuer`·`audience`·`key`(HS256 키의 자격 이름)·`sync_wait_ms`(기본 10초)·`max_token_age_secs` |
 | `http.endpoints.<별칭>` (OpenAI) | `kind:"openai"`, 키 슬롯 `keys`, 최대 대기 `wait_ms`(기본 120초), 미완료 실행 상한 `max_active_runs`(기본 32). JWT 웹훅과 다른 별칭을 사용한다. |
 | `limits` | `body_bytes`(기본 OpenAI 256 KiB, 그 밖의 입구 64 KiB)·`attachments`(8)·`per_entrance_per_min`(120)·`per_principal_per_min`(30) |
 | `admin_url` | 일반 승인 카드용 관리 화면 주소(선택). Slack 소유자의 예약 승인 DM에는 사용하지 않는다 |
+
+Slack 워크스페이스의 수신 규칙:
+
+- `receive`는 `socket`(기본)만 쓸 수 있다. `http`는 Events API·버튼을 받는 수신기와 서명·재전송 검사가 생길 때까지 `bot validate`와 `bot serve`가 `slack.workspaces.<별칭>.receive`를 밝혀 거절한다. 서명 비밀을 줘도 같다.
+- `app_token`은 소켓 수신에 필요하다.
+- `signing_secret`은 이름 모양만 검사하고 쓰지 않는다. 활성 집합에는 들어가므로 바꾸면 활성화 사건이다.
 
 자격 값은 이 파일에 쓰지 않는다. 이름만 적고 값은 **바인딩을 가진 프로필**의 `bot/<profile>/<name>`에서 읽는다(전역 폴백 없음, 토큰 값이 같아도 권한을 합치지 않는다).
 

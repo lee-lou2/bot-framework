@@ -52,13 +52,15 @@ pub struct SlackHost {
     pub workspaces: BTreeMap<String, SlackWorkspace>,
 }
 
+/// 수신 방식 선언(`receive`, 생략하면 `socket`). 읽기만 하고 이 모듈 안의 `validate`만 본다: `http`는 받아 줄 수신기가 없어 이름을 밝혀 거절하므로
+/// 검증을 통과한 워크스페이스는 모두 소켓으로 받는다. 바깥 코드가 수신 방식을 가를 일이 없도록 이 타입과 필드는 비공개다.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum Receive {
+enum Receive {
     /// 앱 토큰으로 Socket Mode 세션을 연다(공개 주소가 필요 없다).
     #[default]
     Socket,
-    /// Events API·버튼을 이 호스트의 HTTP 주소로 받고 서명과 시각을 확인한다.
+    /// Events API·버튼을 HTTP로 받는 방식. 수신기가 없어 선언만 읽는다.
     Http,
 }
 
@@ -71,6 +73,7 @@ pub struct SlackWorkspace {
     /// 자격 이름. 값은 바인딩 소유 프로필의 `bot/<profile>/<name>`에서 읽는다.
     pub bot_token: String,
     pub app_token: Option<String>,
+    /// 자격 이름. 지금은 이름 모양만 검사하고 쓰지 않는다(HTTP 수신기가 생길 때 쓴다). 활성화 지문에는 들어가며, 이미 이 키를 적은 설정이 거절되지 않게 남긴다.
     pub signing_secret: Option<String>,
     #[serde(default)]
     pub channels: BTreeMap<String, String>,
@@ -78,7 +81,7 @@ pub struct SlackWorkspace {
     #[serde(default)]
     pub dm: bool,
     #[serde(default)]
-    pub receive: Receive,
+    receive: Receive,
 }
 
 /// 읽기(`Deserialize`)는 `host/openai.rs`가 한다: `endpoints`의 각 입구를 `kind`로 갈라 웹훅은 `endpoints`에, OpenAI는 `openai`에 담는다.
