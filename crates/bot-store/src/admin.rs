@@ -127,12 +127,8 @@ impl Store {
         }
         let mut entry = Entry::new(&actor.0, action, run, "operator_requested");
         entry.args = Some(digest);
-        let seq = audit::append(&mut tx, profile, &entry).await?;
-        sqlx::query("update bot_audit set run_command_id = $1 where seq = $2")
-            .bind(&command.id)
-            .bind(seq)
-            .execute(&mut *tx)
-            .await?;
+        entry.run_command_id = Some(&command.id);
+        audit::append(&mut tx, profile, &entry).await?;
         tx.commit().await?;
         Ok(RunCommandOutcome::Applied)
     }

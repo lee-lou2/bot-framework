@@ -10,9 +10,9 @@
     const r = d.run, scope = d.control;
     if (!operator || r.run !== r.root || r.parent !== null || !scope) return null;
     if (scope.held === true) return "held";
-    if (scope.held !== false || !count(r.generation) || !count(scope.claim_epoch) || scope.cancel_requested !== false) return null;
+    if (scope.held !== false || !count(r.generation) || !count(scope.claim_epoch)) return null;
     if (r.state === "dead") return "resume";
-    return CANCEL_STATES.includes(r.state) ? "cancel" : null;
+    return scope.cancel_requested === false && CANCEL_STATES.includes(r.state) ? "cancel" : null;
   }
 
   function payload(d, id) {
@@ -118,7 +118,7 @@
             pending = null;
             note.textContent = A.explain(e, { stale: "실행 상태가 바뀌었습니다. 새 상태를 확인하세요." });
             if (node.isConnected && !node.closest("[hidden]")) {
-              app.toast(note.textContent);
+              app.toast(note.textContent, "bad");
               app.refresh(true);
             }
           }

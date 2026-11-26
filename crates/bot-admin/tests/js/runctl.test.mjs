@@ -15,9 +15,13 @@ test("run controls require an operator and a non-private root observation", () =
   assert.equal(offered({ ...d, control: null }, true), null);
   assert.equal(offered({ ...d, run: { ...d.run, root: "other", parent: "other" } }, true), null);
   assert.equal(offered(d, true), "resume");
-  for (const state of ["ready", "retry", "waiting", "leased"]) assert.equal(offered(detail(state), true), "cancel");
+  for (const state of ["ready", "retry", "waiting", "leased"]) {
+    assert.equal(offered(detail(state), true), "cancel");
+    const cancelling = detail(state);
+    assert.equal(offered({ ...cancelling, control: { ...cancelling.control, cancel_requested: true } }, true), null);
+  }
   for (const state of ["succeeded", "cancelled"]) assert.equal(offered(detail(state), true), null);
-  assert.equal(offered({ ...d, control: { ...d.control, cancel_requested: true } }, true), null);
+  assert.equal(offered({ ...d, control: { ...d.control, cancel_requested: true } }, true), "resume");
   assert.equal(offered({ ...d, control: { ...d.control, held: true } }, true), "held");
 });
 
@@ -30,10 +34,18 @@ function surface(post) {
   globalThis.BotDom = { h: (_, attrs, children) => ({
     ...attrs, children, classList: { toggle() {} }, isConnected: true, closest: () => null,
   }) };
-  globalThis.BotApi = { seg: encodeURIComponent, post };
-  const nav = [], refreshes = [];
-  const controller = create({ toast() {}, refresh: (manual) => refreshes.push(manual), go: (...args) => nav.push(args) });
-  return { controller, nav, refreshes };
+  globalThis.BotApi = {
+    seg: encodeURIComponent,
+    post,
+    explain: (e, over) => (over && over[e.word]) || e.word,
+  };
+  const nav = [], refreshes = [], toasts = [];
+  const controller = create({
+    toast: (text, tone) => toasts.push([text, tone]),
+    refresh: (manual) => refreshes.push(manual),
+    go: (...args) => nav.push(args),
+  });
+  return { controller, nav, refreshes, toasts };
 }
 
 test("run resume pins the first observation and resends the identical command after a lost response", async (t) => {
@@ -85,4 +97,15 @@ test("a blocked run opens the hold view without sending a command", () => {
   const button = controller.mount(d, offered(d, true)).children[0];
   button.onclick();
   assert.deepEqual(nav, [["decide", { profile: "personal" }]]);
+});
+
+test("a rejected run command reports an error toast with bad tone", async (t) => {
+  const now = t.mock.method(Date, "now", () => 1000);
+  const { controller, refreshes, toasts } = surface(async () => { throw { word: "stale" }; });
+  const button = controller.mount(detail(), "resume").children[0];
+  button.onclick();
+  now.mock.mockImplementation(() => 1700);
+  await button.onclick();
+  assert.deepEqual(toasts, [["실행 상태가 바뀌었습니다. 새 상태를 확인하세요.", "bad"]]);
+  assert.deepEqual(refreshes, [true]);
 });

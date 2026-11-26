@@ -18,12 +18,14 @@ use std::sync::{
 use support::{admin::*, *};
 
 const OPERATOR: &str = "test-operator";
+const OPERATOR2: &str = "test-operator-2";
 const MEMBER: &str = "test-member";
 
 struct Http {
     client: Client,
     root: String,
     csrf: String,
+    operator2_csrf: String,
     member_csrf: String,
     checks: Arc<AtomicUsize>,
     stop: tokio::sync::oneshot::Sender<()>,
@@ -55,6 +57,13 @@ impl Http {
                 auth: Arc::new(
                     StaticTokens::new()
                         .with(OPERATOR, operator())
+                        .with(
+                            OPERATOR2,
+                            bot_core::admin::Viewer {
+                                principal: bot_core::id::PrincipalId("local:operator2".into()),
+                                operator: true,
+                            },
+                        )
                         .with(MEMBER, owner()),
                 ),
             },
@@ -71,11 +80,16 @@ impl Http {
                 .unwrap()
                 .to_owned()
         };
-        let (csrf, member_csrf) = (csrf_for(OPERATOR).await, csrf_for(MEMBER).await);
+        let (csrf, operator2_csrf, member_csrf) = (
+            csrf_for(OPERATOR).await,
+            csrf_for(OPERATOR2).await,
+            csrf_for(MEMBER).await,
+        );
         Self {
             client,
             root,
             csrf,
+            operator2_csrf,
             member_csrf,
             checks,
             stop,
@@ -484,5 +498,98 @@ async fn the_command_index_upgrade_preserves_the_existing_audit_chain() {
     assert_eq!(after["ok"], true);
     assert_eq!(after["entries"], before["entries"].as_u64().unwrap() + 1);
     assert_ne!(after["head"], before["head"]);
+    http.close().await;
+}
+
+#[tokio::test]
+async fn dead_cancel_requested_resumes_without_audit_update_and_boundaries_hold() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    // 감사 테이블은 INSERT 전용이다: run_command_id 기록에 UPDATE를 쓰면 즉시 실패한다.
+    db.sql(
+        "create function bot_forbid_audit_update() returns trigger language plpgsql as $$
+         begin raise exception 'bot_audit must be append-only'; end $$",
+    )
+    .await;
+    db.sql(
+        "create trigger bot_audit_no_update before update on bot_audit
+         for each row execute function bot_forbid_audit_update()",
+    )
+    .await;
+    let http = Http::start(&db).await;
+    let dead = leased(&db, "dead-cancel").await;
+    let run = dead.attempt.run.clone();
+    runs(&db)
+        .fail(dead.attempt, Failure::Permanent("fixture"))
+        .await
+        .unwrap();
+    db.sql(&format!(
+        "update bot_runs set cancel_requested = true where id = '{}'",
+        run.0
+    ))
+    .await;
+
+    let detail = http.detail(&run).await;
+    assert_eq!(detail["control"]["cancel_requested"], true);
+    let cmd = command(&detail, "resume-after-cancel");
+    status(
+        http.apply(&run, "resume", &cmd).await,
+        StatusCode::OK,
+        json!({"ok":true}),
+    )
+    .await;
+    assert_eq!(state_of_run(&db, &run).await, "ready");
+    assert!(
+        !db.scalar::<bool>(&format!(
+            "select cancel_requested from bot_runs where id = '{}'",
+            run.0
+        ))
+        .await
+    );
+    let cmd_rows = db
+        .scalar::<i64>(
+            "select count(*) from bot_audit where run_command_id = 'resume-after-cancel'",
+        )
+        .await;
+    assert_eq!(cmd_rows, 1);
+    assert_eq!(http.verify_audit().await["ok"], true);
+
+    // 다른 운영자가 같은 command_id를 다시 보내면 충돌(409)이다.
+    status(
+        http.post(&run, "resume", OPERATOR2, Some(&http.operator2_csrf), &cmd)
+            .await,
+        StatusCode::CONFLICT,
+        json!({"error":"conflict"}),
+    )
+    .await;
+
+    // 다른 프로필 경로와 private 실행은 존재를 드러내지 않고 404다.
+    let other_profile = http
+        .client
+        .post(format!("{}/runs/other/{}/resume", http.root, run.0))
+        .bearer_auth(OPERATOR)
+        .header("X-Bot-Csrf", &http.csrf)
+        .json(&cmd)
+        .send()
+        .await
+        .unwrap();
+    let not_found = json!({"error":"not_found"});
+    status(other_profile, StatusCode::NOT_FOUND, not_found.clone()).await;
+
+    let priv_run = leased(&db, "priv-run").await.attempt.run;
+    db.sql(&format!(
+        "update bot_runs set private = true where id = '{}'",
+        priv_run.0
+    ))
+    .await;
+    let priv_cmd =
+        json!({"command_id":"priv-stop","state":"leased","generation":1,"claim_epoch":1});
+    status(
+        http.apply(&priv_run, "cancel", &priv_cmd).await,
+        StatusCode::NOT_FOUND,
+        not_found,
+    )
+    .await;
     http.close().await;
 }
