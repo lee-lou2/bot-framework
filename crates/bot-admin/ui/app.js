@@ -79,7 +79,7 @@
     if (state.busy && !manual) return Promise.resolve();
     if (state.ctl) state.ctl.abort();
     const seq = ++state.seq, ctl = new AbortController();
-    const ctx = { profile: state.profile, signal: ctl.signal, current: () => seq === state.seq && id === state.tab };
+    const ctx = { profile: state.profile, signal: ctl.signal, manual, current: () => seq === state.seq && id === state.tab };
     state.ctl = ctl; state.busy = true;
     return v.load(ctx)
       .then(() => { if (ctx.current()) { notice(""); if (state.stamped !== seq) stamp(); } })

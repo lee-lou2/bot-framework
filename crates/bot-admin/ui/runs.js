@@ -37,6 +37,7 @@
       }
       return Promise.all(jobs).then((r) => {
         if (!ctx.current() || epoch !== st.epoch) return;
+        if (!ctx.manual && controls.busy()) return;
         st.items = r[0].items; st.next = r[0].next; st.loaded = true;
         app.noteProfiles(st.items.map((x) => x.profile));
         if (r[1] && r[1].want === selKey()) { st.detail = r[1].d || null; st.detailErr = r[1].e || null; }

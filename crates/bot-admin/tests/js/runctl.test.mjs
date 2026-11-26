@@ -31,9 +31,9 @@ function surface(post) {
     ...attrs, children, classList: { toggle() {} }, isConnected: true, closest: () => null,
   }) };
   globalThis.BotApi = { seg: encodeURIComponent, post };
-  const nav = [];
-  const controller = create({ toast() {}, refresh() {}, go: (...args) => nav.push(args) });
-  return { controller, nav };
+  const nav = [], refreshes = [];
+  const controller = create({ toast() {}, refresh: (manual) => refreshes.push(manual), go: (...args) => nav.push(args) });
+  return { controller, nav, refreshes };
 }
 
 test("run resume pins the first observation and resends the identical command after a lost response", async (t) => {
@@ -57,9 +57,25 @@ test("run resume pins the first observation and resends the identical command af
     path: "/v1/admin/runs/personal/r1/resume",
     body: { command_id: sent[0].body.command_id, state: "dead", generation: 3, claim_epoch: 5 },
   });
+  assert.equal(controller.busy(), true);
   await button.onclick();
   assert.deepEqual(sent, [sent[0], sent[0]]);
   assert.equal(button.disabled, true);
+  assert.equal(controller.busy(), false);
+});
+
+test("an operator can release a pending resend and read the latest state", async (t) => {
+  const now = t.mock.method(Date, "now", () => 1000);
+  const { controller, refreshes } = surface(async () => { throw { word: "unavailable" }; });
+  const [button, refresh] = controller.mount(detail(), "resume").children;
+  button.onclick();
+  now.mock.mockImplementation(() => 1700);
+  await button.onclick();
+  assert.equal(refresh.hidden, false);
+  assert.deepEqual(refreshes, []);
+  refresh.onclick();
+  assert.equal(controller.busy(), false);
+  assert.deepEqual(refreshes, [true]);
 });
 
 test("a blocked run opens the hold view without sending a command", () => {

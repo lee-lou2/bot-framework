@@ -31,17 +31,18 @@
       const r = d.run;
       let pending = null, armedAt = null, timer, sending = false, settled = false, blocked = action === "held";
       const note = h("span", { role: "status", text: blocked ? "이 실행 트리에 판정을 기다리는 보류가 있습니다." : "" });
-      const undo = h("button", { type: "button", class: "btn sm", text: "확인 닫기", onclick: disarm });
+      const undo = h("button", { type: "button", class: "btn sm", onclick: dismiss });
       const button = h("button", { type: "button", class: "btn sm", onclick: choose });
       const node = h("div", { class: "rd-wait is-none", onkeydown: (e) => {
         if (e.key === "Escape" && armedAt !== null) { disarm(); button.focus(); }
       } }, [button, undo, note]);
-      active = { node, disarm, busy: () => sending || armedAt !== null };
+      active = { node, disarm, busy: () => sending || (pending !== null && !settled) };
       sync();
       return node;
 
       function sync() {
-        undo.hidden = armedAt === null;
+        undo.hidden = pending === null || sending || settled;
+        undo.textContent = armedAt === null ? "최신 상태 불러오기" : "확인 닫기";
         button.disabled = sending || settled;
         button.classList.toggle("danger", action === "cancel" && !blocked);
         button.textContent = sending ? "전송 중…" : blocked ? LABEL.held
@@ -55,6 +56,14 @@
         pending = null;
         note.textContent = "";
         sync();
+      }
+
+      function dismiss() {
+        if (armedAt !== null) { disarm(); return; }
+        pending = null;
+        note.textContent = "";
+        sync();
+        app.refresh(true);
       }
 
       function choose() {
