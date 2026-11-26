@@ -208,7 +208,7 @@ impl SlackGateway {
             body: json!({"text": stripped}),
             event: Event::Message,
         };
-        // 인증된 이벤트 원천을 붙인다(일반 직접 트리거의 넘김·승인 증거용 — 민감 DM 트리거는 접수 전에 갈라져 원천을 쓰지 않는다)
+        // 인증된 이벤트 원천은 일반 접수의 넘김·승인 증거와 민감 DM의 봉투 지문에 쓰인다.
         let source = SlackSource {
             kind: SourceKind::Message,
             team: message.team.clone(),

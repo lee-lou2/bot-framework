@@ -6,11 +6,11 @@
 
 호스트 파일은 프로필의 별칭을 실제 계정, 서비스, 실행 파일에 연결한다. `BOT_HOST_CONFIG`를 생략하면 예시 프로필용 데모 설정을 쓴다. 임의 프로필을 추가할 때는 호스트 파일에 모델과 입구를 등록한다. [새 프로필 설정 예시](profile-spec.md#새-프로필의-호스트-설정)
 
-최상위 키는 `version`(1), `gateway`, `servers`, `models`, `providers`, `egress`, `sandbox`, `limits`, `admin`이다. `models`는 프로필별 허용 별칭을 정하고, `providers`는 각 별칭에 `demo`, `claude-cli`, API 직접 호출(`anthropic-api`·`openai-api`)을 연결한다. 상류 주소에는 자격·쿼리·조각이 없는 HTTPS URL을 쓴다(API 직접 호출은 loopback IP 리터럴에 한해 `http`도 받고 그때만 `secret`을 생략할 수 있다). `egress`는 프로필별로 허용할 외부 호스트와 포트를 제한한다. [모델·샌드박스 설정](architecture.md#호스트-설정과-역할-조립)
+최상위 키는 `version`(1), `gateway`, `servers`, `models`, `providers`, `egress`, `private_egress`, `sandbox`, `limits`, `admin`이다. `models`는 프로필별 허용 별칭을 정하고, `providers`는 각 별칭에 `demo`, `claude-cli`, API 직접 호출(`anthropic-api`·`openai-api`)을 연결한다. 상류 주소에는 자격·쿼리·조각이 없는 HTTPS URL을 쓴다(API 직접 호출은 loopback IP 리터럴에 한해 `http`도 받고 그때만 `secret`을 생략할 수 있다). `egress`는 프로필별로 허용할 외부 호스트와 포트를 제한한다. [모델·샌드박스 설정](architecture.md#호스트-설정과-역할-조립)
 
 `servers`에는 패키지 루트와 실행 명령을 등록한다. `bot validate`에 표시되는 판본은 서버 파일과 실행 명령에서 계산된다. 도구를 실행하는 역할은 `BOT_INSTALLS` 아래 읽기 전용 설치본을 쓴다. 기본 상태 모드는 `ephemeral`이다. 호출 간 상태가 필요한 `required` 서버는 현재 srt 호스트에서 시작할 수 없다. [도구 서버 설치](plugins.md#도구-서버-설치)
 
-활성 집합에는 프로필 판본과 권한에 영향을 주는 호스트 설정을 함께 묶는다. 예를 들어 CLI 사용자 매핑, Slack 팀·채널, HTTP 인증 설정, 허용 모델·상류 목적지와 자격 이름, 도구 설치 판본, egress 상한, 모델 VM 이미지와 망 이름이 들어간다. 비밀 값은 넣지 않는다. 매핑을 바꾼 뒤에는 `bot serve --activate`로 교체한다.
+활성 집합에는 프로필 판본과 권한에 영향을 주는 호스트 설정을 함께 묶는다. 예를 들어 CLI 사용자 매핑, Slack 팀·채널, HTTP 인증 설정, 허용 모델·상류 목적지와 자격 이름, 도구 설치 판본, egress 상한과 사설 목적지 매핑(`private_egress`), 모델 VM 이미지와 망 이름이 들어간다. 비밀 값은 넣지 않는다. 매핑을 바꾼 뒤에는 `bot serve --activate`로 교체한다.
 
 아래는 `gateway` 하위 설정이다.
 
@@ -30,7 +30,7 @@
 - 주체 문자열: `local:<account>` · `slack:<워크스페이스 별칭>/<Slack 사용자 ID>` · `http:<입구 별칭>/<토큰의 sub>`. 구분자를 넣어 다른 주체인 척할 수 없다.
 - 활성 프로필 전체에서 같은 입구를 두 번 쓸 수 없다(별칭 수준과 실제 ID 수준 모두). CLI는 (OS 사용자, 프로필)로 입구를 고른다.
 - 멤버가 아니면 거절한다(Slack은 조용히 ack, HTTP는 403, CLI는 `forbidden`). 요청자 스코프는 `역할 스코프의 합집합 ∩ 정책 상한`이고, 에이전트 실행(`run`)은 이 스코프가 있어야 시작한다. 승인자는 사람 주체(CLI·Slack)만 기본이 되고 HTTP 서비스 주체는 지정하지 않는다.
-- 트리거는 같은 바인딩·사건(HTTP는 method·path)의 후보를 order 순으로 검사해 첫 일치 하나만 접수한다. 봉투 경로(`body.…`·`conversation.…`)는 점 경로 조회와 리터럴 동등 비교뿐이다. 민감(private) 트리거는 일반 접수·큐에 쓰기 전에 전용 입구(`PrivateIntake`)로만 가고, 실패해도 일반 대화로 넘어가지 않는다. 민감 입력은 영구 거절(형식·권한)만 확정(ack)이고, 진행 중·시작 전 재시도·충돌·장애 신호는 모두 ack하지 않아 재전달된다.
+- 트리거는 같은 바인딩·사건(HTTP는 method·path)의 후보를 order 순으로 검사해 첫 일치 하나만 접수한다. 봉투 경로(`body.…`·`conversation.…`)는 점 경로 조회와 리터럴 동등 비교뿐이다. 민감(private) 트리거는 일반 접수·큐에 쓰기 전에 전용 입구(`PrivateIntake`)로만 가고, 실패해도 일반 대화로 넘어가지 않는다. 선택한 `private_pass: true` 트리거가 유효한 빈 PASS를 반환하면 원문과 첨부 참조를 원래 바인딩의 일반 DM 대화에 접수한다. 민감 입력은 영구 거절(형식·권한)만 확정(ack)이고, 진행 중·시작 전 재시도·충돌·장애 신호는 모두 ack하지 않아 재전달된다.
 
 ## CLI 입구
 

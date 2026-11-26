@@ -370,20 +370,17 @@ impl Store {
                 if row.get::<Option<String>, _>("private_pass").as_deref() != Some("bound_v2") {
                     return Err(Error::Denied.into());
                 }
-                (FINISH_OK, "passed")
+                (FINISH_PASSED, "passed")
             }
             (PrivateOutcome::Held, "leased", true) => (HOLD, "held"),
             (PrivateOutcome::Rejected, "leased", _) => (FINISH_REJECTED, "rejected"),
             _ => return Err(Error::Conflict.into()),
         };
-        let update = sqlx::query(sql).bind(&permit.profile.0).bind(&permit.run.0);
-        let update = match outcome {
-            PrivateOutcome::Passed | PrivateOutcome::Completed => {
-                update.bind(matches!(outcome, PrivateOutcome::Passed))
-            }
-            _ => update,
-        };
-        update.execute(&mut *tx).await?;
+        sqlx::query(sql)
+            .bind(&permit.profile.0)
+            .bind(&permit.run.0)
+            .execute(&mut *tx)
+            .await?;
         let principal: String = row.get("principal");
         let entry = Entry::new(&principal, "private.finish", &permit.run.0, verdict);
         audit::append(&mut tx, &permit.profile.0, &entry).await?;
@@ -397,7 +394,10 @@ const RELEASE: &str = "update bot_runs set state = 'ready', wait_kind = null, le
         private_started_ms = null, updated_ms = bot_now_ms() where profile = $1 and id = $2";
 const HOLD: &str = "update bot_runs set state = 'waiting', wait_kind = 'hold', lease_until_ms = null, lease_owner = null,
         updated_ms = bot_now_ms() where profile = $1 and id = $2";
-const FINISH_OK: &str = "update bot_runs set state = 'succeeded', private_pass = case when $3 then 'passed_v2' else private_pass end,
+const FINISH_OK: &str = "update bot_runs set state = 'succeeded',
+        error = null, wait_kind = null, lease_until_ms = null, lease_owner = null,
+        finished_ms = bot_now_ms(), updated_ms = bot_now_ms() where profile = $1 and id = $2";
+const FINISH_PASSED: &str = "update bot_runs set state = 'succeeded', private_pass = 'passed_v2',
         error = null, wait_kind = null, lease_until_ms = null, lease_owner = null,
         finished_ms = bot_now_ms(), updated_ms = bot_now_ms() where profile = $1 and id = $2";
 const FINISH_REJECTED: &str = "update bot_runs set state = 'dead', error = 'rejected', wait_kind = null, lease_until_ms = null, lease_owner = null,

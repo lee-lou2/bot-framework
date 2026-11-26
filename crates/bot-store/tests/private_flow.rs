@@ -213,6 +213,32 @@ async fn upgrading_a_completed_private_request_preserves_only_its_private_receip
 }
 
 #[tokio::test]
+async fn private_pass_constraint_skips_validation_but_rejects_new_invalid_writes() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let gateway = rig(&db);
+    gateway.runner.script(ok());
+    gateway
+        .gate
+        .receive(delivery("constraint", "질문"))
+        .await
+        .unwrap();
+    let validated = db
+        .scalar::<bool>("select convalidated from pg_constraint where conrelid = 'bot_runs'::regclass and pg_get_constraintdef(oid) like '%private_pass%'")
+        .await;
+    assert!(!validated);
+    let error = sqlx::query("update bot_runs set private_pass = 'unknown'")
+        .execute(db.store.pool())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23514")
+    );
+}
+
+#[tokio::test]
 async fn opt_in_without_a_valid_pass_never_grants_public_intake() {
     let Some(db) = TestDb::new().await else {
         return;

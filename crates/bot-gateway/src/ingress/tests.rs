@@ -412,20 +412,22 @@ async fn private_pass_uses_distinct_request_id_for_normal_dm() {
     assert_eq!(record.target, "agent main 안녕?");
 }
 
+#[derive(Default)]
+struct AlwaysPass(Mutex<Vec<(String, [u8; 32])>>);
+
+impl PrivateIntake for AlwaysPass {
+    fn receive(&self, call: PrivateCall) -> bot_core::port::Reply<'_, PrivateDecision> {
+        assert_eq!(call.args.0, "{}");
+        self.0
+            .lock()
+            .unwrap()
+            .push((call.trigger, call.envelope_sha256));
+        Box::pin(async { Ok(PrivateDecision::Pass) })
+    }
+}
+
 #[tokio::test]
 async fn only_the_selected_private_trigger_may_release_the_event() {
-    #[derive(Default)]
-    struct AlwaysPass(Mutex<Vec<(String, [u8; 32])>>);
-    impl PrivateIntake for AlwaysPass {
-        fn receive(&self, call: PrivateCall) -> bot_core::port::Reply<'_, PrivateDecision> {
-            assert_eq!(call.args.0, "{}");
-            self.0
-                .lock()
-                .unwrap()
-                .push((call.trigger, call.envelope_sha256));
-            Box::pin(async { Ok(PrivateDecision::Pass) })
-        }
-    }
     let mut closed = event_trigger("closed", "direct", tool_target("inbox.receive", "{}"));
     closed.private = true;
     closed.order = 2;
@@ -474,6 +476,57 @@ async fn only_the_selected_private_trigger_may_release_the_event() {
     assert_eq!(calls[1].1, calls[3].1);
     assert_ne!(calls[1].1, calls[4].1);
     assert_ne!(calls[1].1, calls[5].1);
+}
+
+#[tokio::test]
+async fn private_pass_fingerprint_binds_the_authenticated_slack_event() {
+    use bot_core::slack::SourceKind;
+
+    let mut trigger = event_trigger("secure", "direct", tool_target("inbox.receive", "{}"));
+    trigger.private = true;
+    trigger.private_pass = true;
+    let rig = rig_with(base().trigger("main", trigger), |host| {
+        host.limits.per_principal_per_min = Some(30);
+    });
+    let private = Arc::new(AlwaysPass::default());
+    let ingress = Ingress::new(
+        rig.catalog,
+        rig.ingress.host.clone(),
+        rig.store,
+        private.clone(),
+    );
+    let routes = ingress.routes().unwrap();
+    let source = SlackSource {
+        kind: SourceKind::Message,
+        team: "T1".into(),
+        channel: "D1".into(),
+        ts: "100.1".into(),
+        thread_ts: None,
+        event_id: "Ev1".into(),
+        reaction: None,
+    };
+    // 봉투는 고정해 인증된 원천의 차이만 비교한다.
+    for event in [
+        source.clone(),
+        source.clone(),
+        SlackSource {
+            ts: "100.2".into(),
+            ..source.clone()
+        },
+        SlackSource {
+            event_id: "Ev2".into(),
+            ..source
+        },
+    ] {
+        ingress
+            .admit_sourced(&routes, slack_dm("U1", "D1.100.1", "질문"), Some(event))
+            .await;
+    }
+    let calls = private.0.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0].1, calls[1].1);
+    assert_ne!(calls[0].1, calls[2].1);
+    assert_ne!(calls[0].1, calls[3].1);
 }
 
 #[tokio::test]
