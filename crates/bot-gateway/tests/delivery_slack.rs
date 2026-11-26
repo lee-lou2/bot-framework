@@ -512,7 +512,7 @@ async fn the_test_helper_counts_a_post_only_when_the_sender_would_confirm_it() {
     assert!(!slack.calls("chat.postMessage").last().unwrap().succeeded());
 }
 
-/// F2: 확인된 채널 게시(영수증)는 «봇이 이 스레드에 참여했다»는 증거로 남는다 — 스레드 안의 회신은 그 루트, 최상위 글은 글 자신. 확인되지 않은 게시·DM·첨부만 있는
+/// 확인된 채널 게시(영수증)는 «봇이 이 스레드에 참여했다»는 스레드 답글 증거로 남는다 — 스레드 안의 회신은 그 루트, 최상위 글은 글 자신. 확인되지 않은 게시·DM·첨부만 있는
 /// 최상위 글은 남기지 않는다.
 #[tokio::test]
 async fn a_confirmed_channel_post_is_recorded_as_thread_evidence() {

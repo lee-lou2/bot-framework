@@ -386,7 +386,7 @@ impl ActiveRevisions for MemoryActive {
     }
 }
 
-/// 봇 참여 스레드 증거 저장소(F2). 시험이 기록을 읽고 읽기 실패를 만든다.
+/// 봇 참여 스레드 증거 저장소(Slack `thread_reply`용). 시험이 기록을 읽고 읽기 실패를 만든다.
 #[derive(Default)]
 pub struct MemoryThreads {
     inner: Mutex<ThreadsInner>,

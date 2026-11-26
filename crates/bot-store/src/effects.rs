@@ -116,7 +116,7 @@ impl Store {
         let digest = args_digest(&r.args)?;
         let at = &r.attempt;
         let mut tx = self.pool.begin().await?;
-        // 사전 승인(F1) 호출이면 활성 집합을 먼저 공유 잠금한다(잠금 순서: 활성 집합 → run → 호출 → 효과 → 승인 → 정지 → 사용 → 감사).
+        // 사전 승인 호출이면 활성 집합을 먼저 공유 잠금한다(잠금 순서: 활성 집합 → run → 호출 → 효과 → 승인 → 정지 → 사용 → 감사).
         // 승인 ID는 호출을 시작할 때 한 번 기록되고 바뀌지 않는다.
         let granted: Option<(String, i64)> = sqlx::query(
             "select grant_id, grant_epoch from bot_calls where profile = $1 and run = $2 and call = $3",

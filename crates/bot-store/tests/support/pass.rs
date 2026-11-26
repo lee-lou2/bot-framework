@@ -1,4 +1,4 @@
-//! F3 넘김 시험 도구(pass_chain·pass_recovery가 함께 쓴다): 실제 BrokerService·PG 원장·가짜 도구 실행기와 사슬 접수 도우미.
+//! 넘김(`bot/pass`) 시험 도구(pass_chain·pass_recovery가 함께 쓴다): 실제 BrokerService·PG 원장·가짜 도구 실행기와 사슬 접수 도우미.
 #![allow(dead_code)]
 
 use super::*;

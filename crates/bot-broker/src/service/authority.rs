@@ -1,4 +1,4 @@
-//! 직접 호출의 권한(F1 사전 승인·F4 지정한 사람의 증거) 판정. 판정은 브로커가 하고, 저장소가 호출을 시작하는 커밋에서 같은 잠금으로 다시 대조한다.
+//! 직접 호출의 권한(사전 승인·지정한 사람의 승인 증거) 판정. 판정은 브로커가 하고, 저장소가 호출을 시작하는 커밋에서 같은 잠금으로 다시 대조한다.
 //! 권한은 루트 run의 직접 호출(`{run}:tool`)에만 붙는다: 모델·위임한 자식·다른 후보·본문 속 트리거 ID는 어느 쪽도 물려받지 못한다.
 
 use super::{BrokerService, call::Flow};
@@ -60,7 +60,7 @@ impl BrokerService {
         }
     }
 
-    /// F1: 지금 판본이 이 트리거에 `preapproved`를 선언했으면, 지금 선언·설치 판본으로 지문을 다시 계산해 권한으로 낸다.
+    /// 사전 승인: 지금 판본이 이 트리거에 `preapproved`를 선언했으면, 지금 선언·설치 판본으로 지문을 다시 계산해 권한으로 낸다.
     fn grant_authority(&self, flow: &Flow) -> Verdict {
         let ctx = &flow.ctx;
         let Some(origin) = ctx.trigger.as_ref().filter(|o| o.agent == ctx.agent) else {
@@ -95,7 +95,7 @@ impl BrokerService {
         }
     }
 
-    /// F4: 승인이 필요한 호출이고 접수 때 묶은 증거가 지금·고정 판본이 지정한 승인자의 이번 이벤트일 때만 권한으로 낸다.
+    /// 지정한 사람의 승인: 승인이 필요한 호출이고 접수 때 묶은 증거가 지금·고정 판본이 지정한 승인자의 이번 이벤트일 때만 권한으로 낸다.
     /// 어긋나면 증거는 쓰지 않고(감사에 고정 사유만 남긴다) 기존 카드 규칙을 따른다.
     async fn human_authority(&self, flow: &Flow, class: &Class, pointer: bool) -> Verdict {
         if !class.needs_approval() || pointer {

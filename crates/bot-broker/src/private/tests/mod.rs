@@ -240,7 +240,7 @@ async fn the_tool_result_is_discarded_even_when_it_echoes_the_input() {
     assert!(dumps.iter().all(|d| !d.contains(SENTINEL)));
 }
 
-/// F3: 민감 DM 전용 도구가 «처리하지 않음» 표식을 돌려줘도 넘길 곳이 없다 — 실패(보류)로 닫고, 도구는 한 번만 돌고, 원문은 어디에도 남지 않는다.
+/// 민감 DM 전용 도구가 넘김(«처리하지 않음») 표식을 돌려줘도 넘길 곳이 없다 — 실패(보류)로 닫고, 도구는 한 번만 돌고, 원문은 어디에도 남지 않는다.
 #[tokio::test]
 async fn a_pass_marker_on_the_private_path_closes_as_held_and_hands_nothing_on() {
     let marker = r#"{"_meta":{"bot/pass":true},"content":[],"isError":false}"#;

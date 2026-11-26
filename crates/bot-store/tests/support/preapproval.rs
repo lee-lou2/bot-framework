@@ -1,4 +1,4 @@
-//! F1 사전 승인 시험 도구: 실제 PG 저장소와 실제 브로커(가짜 실행기) 위에 `preapproved` cron 트리거를 올린다.
+//! 사전 승인 시험 도구: 실제 PG 저장소와 실제 브로커(가짜 실행기) 위에 `preapproved` cron 트리거를 올린다.
 #![allow(dead_code)]
 
 use super::*;

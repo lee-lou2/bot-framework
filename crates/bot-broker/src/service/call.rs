@@ -388,7 +388,7 @@ impl BrokerService {
             flow.ctx.private_memory_read,
         );
         note.risk = Some(class.risk);
-        // F1·F4: 사전 승인된 정적 직접 호출이나 지정한 사람의 증거로 승인될 수 있는 직접 호출이면 이 권한으로 시작한다
+        // 사전 승인된 정적 직접 호출이나 지정한 사람의 증거로 승인될 수 있는 직접 호출이면 이 권한으로 시작한다
         let mut authority = match self.authority_for(&flow, &class, pointer.is_some()).await {
             Verdict::None => None,
             Verdict::Use(authority) => Some(authority),

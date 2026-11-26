@@ -88,7 +88,7 @@ impl SlackGateway {
         }
     }
 
-    /// 스레드 증거 저장소를 붙인다(F2 `thread_reply`): 회신 발송 영수증과 인증된 자기 봇 글을 기록하고, 답글은 이 증거가 있는 스레드에서만 받는다.
+    /// Slack `thread_reply`용 스레드 증거 저장소를 붙인다: 회신 발송 영수증과 인증된 자기 봇 글을 기록하고, 답글은 이 증거가 있는 스레드에서만 받는다.
     #[must_use]
     pub fn with_threads(mut self, threads: Arc<dyn BotThreads>) -> Self {
         self.threads = Some(threads);

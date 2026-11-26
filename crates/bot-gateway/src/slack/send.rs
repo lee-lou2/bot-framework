@@ -44,7 +44,7 @@ const UNKNOWN_ERRORS: [&str; 5] = [
 pub struct SlackSender {
     api: SlackApi,
     creds: Arc<Credentials>,
-    /// 확인된 게시를 «봇이 이 스레드에 참여했다»는 증거로 남기는 곳(F2 `thread_reply`). 없으면 남기지 않는다.
+    /// 확인된 게시를 «봇이 이 스레드에 참여했다»는 증거로 남기는 곳(Slack `thread_reply`용). 없으면 남기지 않는다.
     threads: Option<Arc<dyn BotThreads>>,
     /// 진행 스트림 카드를 게시 직전에 치우는 제어기(없으면 생략)
     ux: Option<Arc<super::ux::SlackUx>>,

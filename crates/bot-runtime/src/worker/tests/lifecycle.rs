@@ -75,7 +75,7 @@ async fn a_tool_target_runs_one_call_with_a_fixed_id_and_records_the_tool_result
     );
 }
 
-/// F3: 넘김 사슬이 있는 접수는 후보마다 호출 ID가 다르고(첫 후보는 기존 ID), «넘김» 결과는 run을 종결하지 않고 다음 시도로 돌려보낸다.
+/// 넘김 사슬이 있는 접수는 후보마다 호출 ID가 다르고(첫 후보는 기존 ID), «넘김» 결과는 run을 종결하지 않고 다음 시도로 돌려보낸다.
 #[tokio::test]
 async fn a_candidate_in_a_pass_chain_gets_its_own_call_id_and_a_pass_leaves_the_run_unfinished() {
     for (pos, id) in [(0, "r1:tool"), (1, "r1:tool:1"), (2, "r1:tool:2")] {

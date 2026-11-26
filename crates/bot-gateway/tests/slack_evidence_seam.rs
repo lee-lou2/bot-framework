@@ -1,4 +1,4 @@
-//! F3·F4 이음매. 저장소(`bot-store`의 `evidence::bind_in`)는 인증된 원천(`extras.source`)과 후보 사슬(`extras.chain`)이 **둘 다** 있고
+//! 넘김 사슬과 지정한 사람의 승인 증거 이음매. 저장소(`bot-store`의 `evidence::bind_in`)는 인증된 원천(`extras.source`)과 후보 사슬(`extras.chain`)이 **둘 다** 있고
 //! 첫 후보가 접수의 대상과 같은 직접 도구일 때만 지정한 사람의 승인 증거를 묶는다. 하나라도 어긋나면 조용히 만들지 않고 카드 규칙으로 돌아가므로,
 //! 게이트웨이가 직접 도구 Slack 이벤트(반응·멘션)마다 그 조건을 채우는지 실제 수신 경로로 고정한다. 저장소 쪽(접수 커밋 안의 증거 묶기·소비)은
 //! `bot-store/tests/human_approval.rs`가 같은 모양의 `AcceptExtras`로 실제 PG 위에서 확인한다.

@@ -342,7 +342,7 @@ impl Store {
         self.start_inner(s, None).await.map(|_| ())
     }
 
-    /// `call_start`에 사전 승인(F1)·지정한 사람의 증거(F4)를 같은 잠금 안에서 더해 확인한다. 확인에 실패하면 아무것도 쓰지 않고 고정 사유를 돌려준다.
+    /// `call_start`에 사전 승인과 지정한 사람의 승인 증거를 같은 잠금 안에서 더해 확인한다. 확인에 실패하면 아무것도 쓰지 않고 고정 사유를 돌려준다.
     pub(crate) async fn call_start_with(
         &self,
         s: StartCall,

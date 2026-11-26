@@ -23,7 +23,7 @@ pub struct Declared {
     pub human_approval: Option<HumanApproval>,
 }
 
-/// F4 승인자 목록의 최대 길이.
+/// 지정한 사람의 승인(`human_approval`) 승인자 목록의 최대 길이.
 const MAX_APPROVERS: usize = 16;
 
 /// `preapproved`·`human_approval`의 모양을 읽는다. 어긋나면 고정 코드로 보고하고 해당 선언은 없는 것으로 둔다(오류가 이미 났다).

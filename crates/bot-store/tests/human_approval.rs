@@ -1,4 +1,4 @@
-//! F4 지정한 사람의 메시지·반응이 승인 한 단계를 대신한다: 실제 PG 저장소와 실제 브로커(가짜 실행기) 위에서
+//! 지정한 사람의 승인: 지정한 사람의 메시지·반응이 승인 한 단계를 대신한다. 실제 PG 저장소와 실제 브로커(가짜 실행기) 위에서
 //! 인증된 이벤트 증거의 접수·소비·재전달·우회 시도를 확인한다. 독립적인 요건(민감 회상 확인·소유자 전용 등)은 그대로다.
 
 mod support;
@@ -286,7 +286,7 @@ async fn evidence_is_only_made_from_an_authenticated_human_direct_tool_event_wit
         )
         .await;
     assert!(service.1.is_some());
-    // 모델 대상·후보 대상이 다른 접수는 사슬 검증(F3: 첫 후보는 접수의 대상과 같은 직접 도구여야 한다)에서 접수째 거절된다: 증거도 run도 남지 않는다
+    // 모델 대상·후보 대상이 다른 접수는 넘김 사슬 검증(첫 후보는 접수의 대상과 같은 직접 도구여야 한다)에서 접수째 거절된다: 증거도 run도 남지 않는다
     let mut model = event_accept("req-d", APPROVER);
     model.target = Target::Agent {
         agent: AgentId("main".into()),

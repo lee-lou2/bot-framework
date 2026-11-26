@@ -90,7 +90,7 @@ pub fn select<'a>(
     })
 }
 
-/// `select`와 같은 규칙으로 맞는 트리거를 **모두** order 순으로 돌려준다. 첫 번째가 `select`의 답이다(F3 넘김 후보 목록).
+/// `select`와 같은 규칙으로 맞는 트리거를 **모두** order 순으로 돌려준다. 첫 번째가 `select`의 답이다(넘김 후보 목록).
 pub fn select_all<'a>(
     triggers: &'a [BoundTrigger],
     binding: &BindingId,

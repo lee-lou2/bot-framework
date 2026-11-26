@@ -1,4 +1,4 @@
-//! 채널 바인딩의 `events`(F2): 선언 규칙, 기본값, 트리거 사건과의 대조, 판본에 들어가는지.
+//! Slack 채널 바인딩의 `events` 선택: 선언 규칙, 기본값, 트리거 사건과의 대조, 판본에 들어가는지.
 mod support;
 
 use bot_core::{id::BindingId, profile::Adapter, slack::SlackEvent};

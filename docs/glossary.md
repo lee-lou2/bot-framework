@@ -43,9 +43,9 @@
 | `Sandbox` | `bot_core::sandbox::Sandbox<ModelSpec>`은 모델 VM(`ContainerSandbox`), `bot_broker::sandbox::Sandbox`는 도구 서버(srt, `SrtSandbox`)다. 둘을 묶는 공통 포트는 없다. |
 | `Delivery` | 게이트웨이(`bot_gateway::delivery`)에서는 발송 결과, 워커(`bot_runtime::worker`)에서는 예약 회신을 다루는 포트 묶음, `bot-cli`의 관리 화면 기동(`serve::admin`)에서는 운영자 비밀을 내보낼 곳(터미널·파일)이다. |
 
-## 주석의 F1~F4
+## 마이그레이션 주석의 F1~F4
 
-v2.2에 함께 들어온 네 기능의 내부 번호다. 새 코드와 주석에는 번호 대신 이름을 쓴다.
+v2.2에 함께 들어온 네 기능의 내부 번호다. Rust 소스와 시험 주석에서는 번호를 모두 제거했고, 바이트를 바꿀 수 없는 이미 적용된 마이그레이션 SQL(`crates/bot-store/migrations/0020_pass_and_threads.sql`~`0022_slack_events.sql`)의 주석에만 남아 있다.
 
 | 표지 | 뜻 | 대표 위치 |
 |---|---|---|

@@ -258,7 +258,7 @@ impl Ingress {
         self.admit_sourced(routes, inbound, None).await
     }
 
-    /// `admit_with`에 어댑터가 인증한 Slack 이벤트 원천을 덧붙인다(F2·F4). 원천이 있는 접수만 넘김 후보 사슬(F3)을 만든다.
+    /// `admit_with`에 어댑터가 인증한 Slack 이벤트 원천을 덧붙인다(이벤트 중복 제거·지정한 사람의 승인 증거용). 원천이 있는 접수만 넘김 후보 사슬을 만든다.
     pub async fn admit_sourced(
         &self,
         routes: &Routes,

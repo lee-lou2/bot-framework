@@ -1,4 +1,4 @@
-//! F1 사전 승인 관리 API: 목록 모양, 정지·재개의 CAS와 재전달, `main%2Fdeveloper` 한 조각 경로, 권한·CSRF·입력 검증.
+//! 사전 승인 관리 API: 목록 모양, 정지·재개의 CAS와 재전달, `main%2Fdeveloper` 한 조각 경로, 권한·CSRF·입력 검증.
 //! 실제 소켓의 axum 라우터 위에서 가짜 저장소로 확인한다(저장소의 같은 규칙은 bot-store 시험이 실제 PG로 확인한다).
 
 mod support;

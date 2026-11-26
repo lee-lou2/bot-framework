@@ -1,4 +1,4 @@
-//! F4 지정한 사람의 승인 시험 도구: Slack 채널 바인딩 `team`의 반응 트리거 `confirm`이 승인 도구를 고정 인자로 직접 부른다.
+//! 지정한 사람의 승인 시험 도구: Slack 채널 바인딩 `team`의 반응 트리거 `confirm`이 승인 도구를 고정 인자로 직접 부른다.
 #![allow(dead_code)]
 
 use super::*;
