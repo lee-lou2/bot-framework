@@ -117,7 +117,7 @@ pub fn pattern_hint(pattern: &str) -> Option<&'static str> {
             "`slack:<워크스페이스 별칭>/<사용자 ID>` 형식이어야 해요(사용자 ID는 Slack 프로필에서 복사한 `U`나 `W`로 시작하는 대문자·숫자). 예: `slack:home/<사용자 ID>`",
         ),
         (
-            "^[ \\t\\r\\n]*(?:@(?:hourly|daily|midnight|weekly|monthly|yearly|annually)|[^@ \\t\\r\\n][^ \\t\\r\\n]*(?:[ \\t\\r\\n]+[^ \\t\\r\\n]+){4})[ \\t\\r\\n]*$",
+            "^[ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]*(?:@(?:hourly|daily|midnight|weekly|monthly|yearly|annually)|[^@ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}][^ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]*(?:[ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]+[^ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]+){4})[ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]*$",
             "cron은 '분 시 일 월 요일' 다섯 칸(초 칸 없음) 또는 별칭(@hourly·@daily·@midnight·@weekly·@monthly·@yearly·@annually)이어야 해요. 예: `0 9 * * *`",
         ),
         (

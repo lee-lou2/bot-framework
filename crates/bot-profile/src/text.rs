@@ -74,14 +74,9 @@ pub struct FrontMatter<'a> {
 }
 
 /// 첫 줄이 정확히 `---`이면 다음 `---` 줄까지를 front matter로 본다.
+/// (단독 `---` 파일 끝을 미닫힘으로 거절하는 새 규칙은 `Strict` 모드의 `SKILL.md`에서만 적용해
+/// 구판 `AGENT.md`와 V1 번들 호환성을 유지한다.)
 pub fn split_front_matter<'a>(path: &str, text: &'a str) -> Result<FrontMatter<'a>, Issue> {
-    if text == "---" || text == "---\r" {
-        return Err(Issue::error(
-            "front-matter-unclosed",
-            path,
-            "맨 위 `---`로 연 front matter를 닫는 `---` 줄이 없어요",
-        ));
-    }
     let Some(rest) = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))
@@ -145,11 +140,9 @@ mod tests {
             "front-matter-unclosed"
         );
         for bare in ["---", "---\r"] {
-            assert_eq!(
-                split_front_matter("a.md", bare).unwrap_err().code,
-                "front-matter-unclosed",
-                "{bare:?}"
-            );
+            let plain = split_front_matter("a.md", bare).unwrap();
+            assert!(plain.yaml.is_none(), "{bare:?}");
+            assert_eq!(plain.body, bare, "{bare:?}");
         }
     }
 

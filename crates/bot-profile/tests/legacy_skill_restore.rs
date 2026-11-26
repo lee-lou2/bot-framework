@@ -97,6 +97,34 @@ fn legacy_v1_bundles_restore_every_previously_valid_skill_byte_identically() {
         ("big", minimal_profile(&big), big),
         ("agg", agg_profile(), agg_memo),
         ("bare", minimal_profile("---"), "---".to_owned()),
+        (
+            "agent-bare",
+            minimal_profile(BODY)
+                .into_iter()
+                .map(|(p, c)| {
+                    if p == "agents/main/AGENT.md" {
+                        (p, "---".to_owned())
+                    } else {
+                        (p, c)
+                    }
+                })
+                .collect(),
+            BODY.trim_end().to_owned(),
+        ),
+        (
+            "agent-bare-cr",
+            minimal_profile(BODY)
+                .into_iter()
+                .map(|(p, c)| {
+                    if p == "agents/main/AGENT.md" {
+                        (p, "---\r".to_owned())
+                    } else {
+                        (p, c)
+                    }
+                })
+                .collect(),
+            BODY.trim_end().to_owned(),
+        ),
     ];
 
     for (name, files, expected_memo) in cases {

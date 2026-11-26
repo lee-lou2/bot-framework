@@ -129,6 +129,11 @@ fn cron_pattern_accepts_all_valid_expressions_and_rejects_wrong_field_counts_and
         "0 9 * * *\n",
         "  @daily\r\n",
         "0 9\n* * *",
+        "0\u{00a0}9 * * *",
+        "0\u{202f}9 * * *",
+        "0\u{2003}9 * * *",
+        "0\u{3000}9 * * *",
+        "\u{2002}@midnight\u{3000}",
         "0 9 ? * MON",
         "0 9 1 * ?",
         "@hourly",
@@ -507,4 +512,53 @@ triggers:
             .len(),
         2
     );
+}
+
+#[test]
+fn cron_schema_whitespace_matches_rust_char_is_whitespace_for_every_unicode_scalar() {
+    let doc: Value = serde_json::from_str(include_str!("../../../schemas/v1/triggers.schema.json"))
+        .expect("triggers.schema.json");
+    let pattern = doc
+        .pointer("/$defs/source/oneOf/0/properties/cron/pattern")
+        .and_then(Value::as_str)
+        .expect("cron pattern");
+    let re = regex::Regex::new(pattern).expect("regex compile");
+    let schema = triggers_schema();
+    let mut ws_count = 0usize;
+    for ch in '\0'..=char::MAX {
+        let is_ws = ch.is_whitespace();
+        let five = format!("0{ch}9 * * *");
+        let alias = format!("{ch}@midnight{ch}");
+        assert_eq!(
+            re.is_match(&five),
+            is_ws,
+            "cron 구분 공백 불일치: U+{:04X}",
+            ch as u32
+        );
+        assert_eq!(
+            re.is_match(&alias),
+            is_ws,
+            "cron 별칭 앞뒤 공백 불일치: U+{:04X}",
+            ch as u32
+        );
+        if is_ws {
+            ws_count += 1;
+            assert!(Cron::parse(&five).is_ok(), "U+{:04X}", ch as u32);
+            assert!(Cron::parse(&alias).is_ok(), "U+{:04X}", ch as u32);
+            for expr in [&five, &alias] {
+                let d = trigger_doc(json!({
+                    "id": "m",
+                    "on": {"cron": expr},
+                    "principal": "service:morning",
+                    "target": {"tool": "agenda.list", "args": {}}
+                }));
+                assert!(
+                    schema.validate(&d).is_empty(),
+                    "스키마가 Rust 공백 U+{:04X} 거절",
+                    ch as u32
+                );
+            }
+        }
+    }
+    assert_eq!(ws_count, 25, "유니코드 White_Space 문자 25종 전부 대조");
 }

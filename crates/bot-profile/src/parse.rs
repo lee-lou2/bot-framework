@@ -226,6 +226,14 @@ pub(crate) fn check_skill_md(
             return None;
         }
     };
+    if md == "---" || md == "---\r" {
+        issues.error(
+            "front-matter-unclosed",
+            md_path,
+            "맨 위 `---`로 연 front matter를 닫는 `---` 줄이 없어요",
+        );
+        return None;
+    }
     let mut found = Vec::new();
     let parsed = frontmatter::parse(md_path, md, &Kind::Skill, limits, &mut found);
     issues.extend(found);
