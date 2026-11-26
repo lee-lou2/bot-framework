@@ -382,6 +382,83 @@ async fn beat_coalesces_pending_runs_and_keeps_the_last_signal() {
 }
 
 #[tokio::test]
+async fn expired_beat_and_unrelated_work_both_progress() {
+    let Some(db) = TestDb::with(bot_store::Config {
+        max_attempts: 2,
+        ..Default::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let peer = db.peer("other").await;
+    let spec = trigger_spec("health", "* * * * *", true);
+    db.publish_schedule(schedule_set("personal", "r1", vec![spec.clone()]))
+        .await
+        .unwrap();
+    db.backdate_schedule().await;
+    let cursor = db
+        .scalar::<i64>("select cursor_ms from bot_schedule_cursors")
+        .await;
+    let beat = |ms| {
+        db.store.accept_occurrence(
+            occ("health", ms),
+            occurrence_accept(
+                "personal",
+                "health",
+                ms,
+                spec.target.clone(),
+                &["calendar.read"],
+            ),
+        )
+    };
+    let first = beat(cursor + 60_000).await.unwrap();
+    let original = db.store.claim().await.unwrap().unwrap();
+    assert_eq!(original.attempt.run, first);
+    let next = beat(cursor + 120_000).await.unwrap();
+    // 후속 beat는 리스 만료보다 먼저 준비됐다. 시간 순서만 보면 선행 beat를 앞지른다.
+    db.sql("update bot_runs set not_before_ms = 1 where state = 'ready'")
+        .await;
+    db.expire_lease(&first).await;
+    let ordinary = db
+        .store
+        .accept(accept("work", "ordinary", "일반 질문"))
+        .await
+        .unwrap();
+
+    let (a, b) = tokio::join!(db.store.claim(), peer.claim());
+    let (a, b) = (a.unwrap().unwrap(), b.unwrap().unwrap());
+    let (reclaimed, healthy) = if a.attempt.run == first {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    assert_eq!(reclaimed.attempt.run, first);
+    assert_eq!(
+        reclaimed.attempt.generation.0,
+        original.attempt.generation.0 + 1
+    );
+    assert_eq!(healthy.attempt.run, ordinary);
+    db.store
+        .finish(healthy.attempt, done("완료"))
+        .await
+        .unwrap();
+    assert!(peer.claim().await.unwrap().is_none());
+    assert_eq!(
+        db.scalar::<i64>(
+            "select count(*) from bot_runs where serial_key is not null and state = 'leased'"
+        )
+        .await,
+        1
+    );
+
+    // 선행 beat가 마지막 시도를 소진하면 같은 키의 후속 beat를 바로 점유할 수 있다.
+    db.expire_lease(&first).await;
+    assert_eq!(peer.claim().await.unwrap().unwrap().attempt.run, next);
+    assert_eq!(state_of_run(&db, &first).await, "dead");
+}
+
+#[tokio::test]
 async fn ordinary_triggers_never_coalesce() {
     let Some(db) = TestDb::new().await else {
         return;

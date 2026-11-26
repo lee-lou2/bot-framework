@@ -22,7 +22,7 @@ impl Store {
             return Err(Error::Denied.into());
         }
         sqlx::query(
-            "update bot_runs set state = 'ready', lease_until_ms = null, lease_owner = null, not_before_ms = bot_now_ms(),
+            "update bot_runs set state = 'ready', lease_until_ms = null, lease_owner = null,
                     generation = generation + 1, keep_generation = true, updated_ms = bot_now_ms()
              where profile = $1 and id = $2",
         )

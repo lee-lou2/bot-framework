@@ -26,7 +26,7 @@ impl Store {
         let mut tx = self.begin_authorized().await?;
         let moved = sqlx::query(
             "update bot_runs set state = 'ready', attempts = 0, error = null, result = null, finished_ms = null,
-                    not_before_ms = 0, keep_generation = false, cancel_requested = false, updated_ms = bot_now_ms()
+                    keep_generation = false, cancel_requested = false, updated_ms = bot_now_ms()
              where profile = $1 and id = $2 and state = 'dead' and not private",
         )
         .bind(&profile.0)

@@ -176,6 +176,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "private pass",
         include_str!("../migrations/0023_private_pass.sql"),
     ),
+    (
+        24,
+        "queue order",
+        include_str!("../migrations/0024_queue_order.sql"),
+    ),
 ];
 
 fn migrator() -> Migrator {

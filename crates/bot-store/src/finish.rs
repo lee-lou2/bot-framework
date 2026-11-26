@@ -133,7 +133,7 @@ pub(crate) async fn wake(
 ) -> R<bool> {
     let woke = sqlx::query(
         "update bot_runs set state = 'ready', wait_kind = null, wait_child = null, keep_generation = true,
-                not_before_ms = 0, updated_ms = bot_now_ms()
+                updated_ms = bot_now_ms()
          where profile = $1 and id = $2 and state = 'waiting' and wait_kind = $3 and wait_child is not distinct from $4",
     )
     .bind(profile)

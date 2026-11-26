@@ -79,23 +79,18 @@ async fn cancel_ends_queued_runs_and_flags_running_ones() {
     let Some(db) = TestDb::new().await else {
         return;
     };
-    let queued = db
-        .store
-        .accept(accept("personal", "q", "hi"))
-        .await
-        .unwrap();
     let running = db
         .store
         .accept(accept("personal", "r", "hi"))
         .await
         .unwrap();
-    db.sql(&format!(
-        "update bot_runs set created_ms = 1 where id = '{}'",
-        running.0
-    ))
-    .await;
     let got = db.store.claim().await.unwrap().unwrap();
     assert_eq!(got.attempt.run, running);
+    let queued = db
+        .store
+        .accept(accept("personal", "q", "hi"))
+        .await
+        .unwrap();
 
     db.store
         .cancel(profile(), queued.clone(), operator(), "그만".into())

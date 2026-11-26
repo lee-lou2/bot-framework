@@ -84,7 +84,7 @@ fn same_binding(stored: &Approval, expected: &Approval) -> bool {
 /// 기다리던 승인이 하나도 남지 않았으면 승인 대기 중인 run을 깨운다(같은 세대로 재개).
 pub(crate) async fn wake_waiters(tx: &mut Tx<'_>, profile: &str, run: &str) -> R<bool> {
     let woke = sqlx::query(
-        "update bot_runs set state = 'ready', wait_kind = null, keep_generation = true, not_before_ms = 0, updated_ms = bot_now_ms()
+        "update bot_runs set state = 'ready', wait_kind = null, keep_generation = true, updated_ms = bot_now_ms()
          where profile = $1 and id = $2 and state = 'waiting' and wait_kind = 'approval'
            and not exists (select 1 from bot_approvals a where a.profile = $1 and a.run = $2 and a.state = 'pending')",
     )

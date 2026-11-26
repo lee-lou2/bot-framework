@@ -205,7 +205,7 @@ impl Store {
                 // 다음 후보(또는 기본 대화)로: 대상·에이전트·커서를 바꾸고 대기열로 되돌린다. 다음 점유가 세대와 claim 토큰을 올려 이 시도의 쓰기를 막는다.
                 sqlx::query(
                     "update bot_runs set target = $3, agent = $4, pass_pos = $5, state = 'ready', lease_until_ms = null, lease_owner = null,
-                            not_before_ms = 0, updated_ms = bot_now_ms()
+                            updated_ms = bot_now_ms()
                      where profile = $1 and id = $2",
                 )
                 .bind(&run.profile)

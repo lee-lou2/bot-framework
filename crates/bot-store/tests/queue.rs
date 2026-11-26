@@ -76,6 +76,101 @@ async fn claims_oldest_first_and_raises_the_generation() {
 }
 
 #[tokio::test]
+async fn due_retry_precedes_newer_ready_arrivals() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let retry = leased(&db, "retry").await;
+    db.store
+        .fail(retry.attempt.clone(), Failure::Transient("network"))
+        .await
+        .unwrap();
+    let backlog = accepted(&db, "backlog").await;
+    let locked = accepted(&db, "locked").await;
+    // 구판 ready 행은 준비 시각이 0이어서 생성 시각으로 순서를 복원한다.
+    db.sql(&format!(
+        "update bot_runs set not_before_ms = 0, created_ms = 2 where id = '{}'",
+        backlog.0
+    ))
+    .await;
+    db.sql(&format!(
+        "update bot_runs set not_before_ms = 0, created_ms = 1 where id = '{}'",
+        locked.0
+    ))
+    .await;
+    db.sql("update bot_runs set not_before_ms = bot_now_ms() - 1000 where state = 'retry'")
+        .await;
+    let mut tx = db.store.pool().begin().await.unwrap();
+    sqlx::query("select id from bot_runs where id = $1 for update")
+        .bind(&locked.0)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+
+    for (i, expected) in [backlog, retry.attempt.run].iter().enumerate() {
+        accepted(&db, &format!("fresh-{i}")).await;
+        let got = db.store.claim().await.unwrap().unwrap();
+        assert_eq!(&got.attempt.run, expected);
+        db.store.finish(got.attempt, done("완료")).await.unwrap();
+    }
+    tx.rollback().await.unwrap();
+    assert_eq!(db.store.claim().await.unwrap().unwrap().attempt.run, locked);
+}
+
+#[tokio::test]
+async fn resuming_an_old_run_puts_it_behind_an_already_due_retry() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let old = leased(&db, "resume").await;
+    db.store
+        .fail(old.attempt.clone(), Failure::Permanent("invalid"))
+        .await
+        .unwrap();
+    let retry = leased(&db, "retry").await;
+    db.store
+        .fail(retry.attempt.clone(), Failure::Transient("network"))
+        .await
+        .unwrap();
+    db.sql("update bot_runs set created_ms = 1, not_before_ms = 1 where state = 'dead'")
+        .await;
+    db.sql("update bot_runs set not_before_ms = bot_now_ms() - 1000 where state = 'retry'")
+        .await;
+    db.store
+        .resume(
+            old.attempt.profile,
+            old.attempt.run.clone(),
+            PrincipalId("local:owner".into()),
+            "확인".into(),
+        )
+        .await
+        .unwrap();
+    let got = db.store.claim().await.unwrap().unwrap();
+    assert_eq!(got.attempt.run, retry.attempt.run);
+    assert_eq!(
+        db.store.claim().await.unwrap().unwrap().attempt.run,
+        old.attempt.run
+    );
+}
+
+#[tokio::test]
+async fn a_lease_at_the_current_millisecond_still_owns_its_slot() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    db.sql("create or replace function bot_now_ms() returns bigint language sql volatile as 'select 1900000000000::bigint'").await;
+    let run = leased(&db, "exact").await;
+    db.sql("update bot_runs set lease_until_ms = bot_now_ms()")
+        .await;
+    assert!(db.store.claim().await.unwrap().is_none());
+    db.expire_lease(&run.attempt.run).await;
+    assert_eq!(
+        db.store.claim().await.unwrap().unwrap().attempt.run,
+        run.attempt.run
+    );
+}
+
+#[tokio::test]
 async fn rejects_writes_from_expired_owner() {
     let Some(db) = TestDb::new().await else {
         return;
