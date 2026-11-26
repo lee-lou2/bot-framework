@@ -549,9 +549,10 @@ class Entry(unittest.TestCase):
             mock.patch.object(checker, "check_toolchain") as toolchain,
             mock.patch.object(checker, "check_sdk_pins") as sdk_pins,
             mock.patch.object(checker, "check_sdk_job") as sdk_job,
+            mock.patch.object(checker, "check_docs") as docs,
         ):
             checker.main()
-        for called in (files, examples, workflows, toolchain, sdk_pins, sdk_job):
+        for called in (files, examples, workflows, toolchain, sdk_pins, sdk_job, docs):
             called.assert_called_once_with()
 
 

@@ -24,6 +24,7 @@ from pathlib import Path
 ALLOW_FILE = Path(".github/docs-allow.txt")
 PATH_ROOTS = ("crates/", "docs/", "schemas/", "scripts/", "examples/", ".github/", "images/")
 ADMIN_ROUTES_FILE = "crates/bot-admin/src/lib.rs"
+BUILTIN_TOOLS_FILE = "crates/bot-core/src/builtin.rs"
 FENCE = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.S | re.M)
 
 
@@ -218,8 +219,10 @@ def admin_routes(root):
 
 
 def reserved_tools(root):
-    block = re.search(r"const RESERVED_TOOL_IDS: &\[&str\] = &\[(.*?)\];", read(root, "crates/bot-profile/src/tools.rs"), re.S)
-    return re.findall(r'"([^"]+)"', block.group(1)) if block else []
+    text = non_test_text(read(root, BUILTIN_TOOLS_FILE))
+    model_ids = re.findall(r'pub const \w+:\s*ModelTool\s*=\s*ModelTool\s*\{[^}]*\bid:\s*"([^"]+)"', text, re.S)
+    extra_ids = re.findall(r'pub const \w+_TOOL:\s*&str\s*=\s*"([^"]+)"', text)
+    return sorted(set(model_ids + extra_ids))
 
 
 def workspace_crates(root):
@@ -322,7 +325,7 @@ def docs_problems(root):
     problems += missing("cli", flags, text, lambda _: "crates/bot-cli/src/cli.rs")
     admin = read(root, "docs/admin.md")
     problems += missing("route", admin_routes(root), admin, lambda _: ADMIN_ROUTES_FILE)
-    problems += missing("tool", reserved_tools(root), text, lambda _: "crates/bot-profile/src/tools.rs")
+    problems += missing("tool", reserved_tools(root), text, lambda _: BUILTIN_TOOLS_FILE)
     members = workspace_crates(root)
     for name in ("docs/architecture.md", "AGENTS.md"):
         listed = table_crates(read(root, name))

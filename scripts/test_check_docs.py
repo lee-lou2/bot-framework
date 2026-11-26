@@ -21,9 +21,6 @@ def load(name, relative):
 docs = load("docs_contract", ".github/scripts/docs_contract.py")
 contracts = load("check_contracts", ".github/scripts/check_contracts.py")
 
-# The two settings that exist in the code but that no document names yet (the security change documents them).
-KNOWN_PENDING = ("private_pass", "private_egress")
-
 GOOD = {
     "Cargo.toml": '[workspace]\nmembers = ["crates/bot-core", "crates/bot-cli"]\n',
     "README.md": "# demo\n",
@@ -42,7 +39,7 @@ GOOD = {
     "crates/bot-gateway/src/host/openai.rs": "// no keys\n",
     "crates/bot-admin/src/settings.rs": "// no keys\n",
     "crates/bot-admin/src/lib.rs": '.route("/v1/admin/me", get(me))\n.route("/ui", get(index))\n.route("/ui/{*path}", get(asset))\n',
-    "crates/bot-profile/src/tools.rs": 'const RESERVED_TOOL_IDS: &[&str] = &[\n    "memory.share",\n];\n',
+    "crates/bot-core/src/builtin.rs": 'pub const SHARE: ModelTool = ModelTool {\n    id: "memory.share",\n};\n',
     "crates/bot-cli/src/cli.rs": """
 #[derive(Subcommand)]
 pub enum Command {
@@ -168,8 +165,8 @@ class Names(unittest.TestCase):
             self.assertEqual([(k, t) for k, t, _ in repo.problems()], [("route", "/v1/admin/holds")])
 
     def test_a_reserved_tool_id_must_appear_somewhere_in_the_documents(self):
-        tools = 'const RESERVED_TOOL_IDS: &[&str] = &[\n    "memory.share",\n    "schedule.deliver",\n];\n'
-        with Repo({"crates/bot-profile/src/tools.rs": tools}) as repo:
+        tools = 'pub const SHARE: ModelTool = ModelTool {\n    id: "memory.share",\n};\npub const DELIVER_TOOL: &str = "schedule.deliver";\n'
+        with Repo({"crates/bot-core/src/builtin.rs": tools}) as repo:
             self.assertEqual([(k, t) for k, t, _ in repo.problems()], [("tool", "schedule.deliver")])
 
     def test_the_crate_tables_must_list_exactly_the_workspace_members(self):
@@ -232,14 +229,14 @@ class Exceptions(unittest.TestCase):
 
 
 class Repository(unittest.TestCase):
-    """The repository's own documents. Only the two settings in KNOWN_PENDING may be missing; when the security change has documented them,
-    delete KNOWN_PENDING, expect no problem and call `check_docs()` from `main()` in check_contracts.py."""
+    """The repository's own documents must agree with the code with zero unexcused discrepancies."""
 
-    def test_nothing_but_the_known_pending_items_disagrees(self):
+    def test_repository_documents_and_code_agree(self):
+        self.assertIn("memory.share", docs.reserved_tools(ROOT))
+        self.assertIn("schedule.deliver", docs.reserved_tools(ROOT))
         allowed, bad = docs.parse_allow((ROOT / docs.ALLOW_FILE).read_text(encoding="utf-8"))
         self.assertEqual(bad, [])
-        left = docs.filter_allowed(docs.docs_problems(ROOT), allowed)
-        self.assertEqual([m for m in left if not any(f"`{name}`" in m for name in KNOWN_PENDING)], [])
+        self.assertEqual(docs.filter_allowed(docs.docs_problems(ROOT), allowed), [])
 
     def test_every_file_that_rejects_unknown_host_keys_is_a_registered_reader(self):
         """A host section read in a file the check does not know would be a silent blind spot again."""
@@ -258,11 +255,7 @@ class Repository(unittest.TestCase):
 
     def test_the_hook_in_check_contracts_runs_the_same_rules(self):
         with contextlib.chdir(ROOT):
-            try:
-                contracts.check_docs()
-            except ValueError as error:
-                lines = str(error).splitlines()[1:]
-                self.assertTrue(lines and all(any(f"`{name}`" in line for name in KNOWN_PENDING) for line in lines), lines)
+            contracts.check_docs()
 
 
 if __name__ == "__main__":

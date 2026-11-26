@@ -416,6 +416,7 @@ def main():
     check_toolchain()
     check_sdk_pins()
     check_sdk_job()
+    check_docs()
 
 
 if __name__ == "__main__":
