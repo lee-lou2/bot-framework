@@ -66,6 +66,16 @@ const PROXY_VARS: [&str; 6] = [
     "all_proxy",
 ];
 
+/// srt가 서버의 상태 요구(`state`)를 지킬 수 있는가. srt는 호출 간 영속 볼륨을 지원하지 않으므로 `Required`는 지킬 수 없다.
+/// 호출마다 거절하는 `admitted`와, 시작 전에 설정을 미리 거르는 호스트의 점검(`bot-cli`의 `refuse_required_state`)이 이 판정 하나를 같이 쓴다.
+/// 상태 종류가 늘면 여기서 컴파일 오류가 나므로 srt가 지킬 수 있는지 먼저 정하게 된다.
+pub fn supports_state(state: ServerState) -> bool {
+    match state {
+        ServerState::Ephemeral => true,
+        ServerState::Required => false,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerCommand {
     /// 서버를 띄우는 명령(운영자가 설치한 실행 파일 경로와 인자).
@@ -235,7 +245,7 @@ impl SrtSandbox {
             .get(server)
             .filter(|s| s.revision == image)
             .ok_or(Error::Denied)?;
-        if found.state == ServerState::Required {
+        if !supports_state(found.state) {
             return Err(Error::Denied);
         }
         Ok(found)

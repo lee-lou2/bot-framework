@@ -60,6 +60,26 @@ async fn the_default_state_is_ephemeral_and_still_runs_and_unknown_servers_stay_
     process.handle.terminate().await.unwrap();
 }
 
+/// 호출마다의 `admit`과 시작 전 점검이 쓰는 `supports_state`는 같은 답을 낸다(규칙이 한 곳이라 어긋날 수 없다).
+#[tokio::test]
+async fn the_per_call_admission_and_the_pre_start_predicate_give_the_same_answer() {
+    assert!(supports_state(ServerState::Ephemeral));
+    assert!(!supports_state(ServerState::Required));
+    for state in [ServerState::Ephemeral, ServerState::Required] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path(), fake_srt(dir.path(), PINNED_VERSION));
+        cfg.servers.get_mut("demo-agenda").unwrap().state = state;
+        let sandbox = SrtSandbox::open(cfg, Arc::new(CountingEntropy::default()))
+            .await
+            .unwrap();
+        assert_eq!(
+            sandbox.admit("demo-agenda", "img1").is_ok(),
+            supports_state(state),
+            "{state:?}"
+        );
+    }
+}
+
 #[test]
 fn the_default_of_the_core_enum_is_ephemeral() {
     assert_eq!(ServerState::default(), ServerState::Ephemeral);

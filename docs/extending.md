@@ -72,7 +72,7 @@ Rust를 고치지 않는다. 도구는 MCP 서버로 만들고 설정 네 곳을
 ## 샌드박스 백엔드
 
 - **도구 서버용**: `bot_broker::sandbox::Sandbox`(`crates/bot-broker/src/sandbox.rs`)를 `crates/bot-broker/` 아래 새 파일에 구현하고(srt는 `srt.rs`) `crates/bot-broker/src/lib.rs`에서 `pub mod`로 연다.
-  - 조용한 곳(컴파일러가 모른다): 조립 `crates/bot-cli/src/serve/runner.rs`의 `local_sandbox`가 구체 `SrtSandbox`를 만든다. 호스트 설정의 `Sandbox` 구조체와 `parse_sandbox`(`crates/bot-cli/src/execution.rs`)는 `srt`·`apple` 두 필드다. 시작 전 점검 `refuse_required_state`는 srt 전용 판정이다. 그 밖에 `crates/bot-cli/src/doctor/host.rs`, 문서([아키텍처](architecture.md)의 설정 표·[보안](security.md)), CI의 `tool-sandbox` 잡(`.github/workflows/ci.yml`).
+  - 조용한 곳(컴파일러가 모른다): 조립 `crates/bot-cli/src/serve/runner.rs`의 `local_sandbox`가 구체 `SrtSandbox`를 만든다. 호스트 설정의 `Sandbox` 구조체와 `parse_sandbox`(`crates/bot-cli/src/execution.rs`)는 `srt`·`apple` 두 필드다. 시작 전 점검 `refuse_required_state`는 srt의 `supports_state`(호출마다 거절하는 `admit`과 같은 판정)를 부르므로 srt 전용이다. 둘째 백엔드는 자기 판정을 내놓고 이 점검이 고른 백엔드의 것을 부르게 한다. 그 밖에 `crates/bot-cli/src/doctor/host.rs`, 문서([아키텍처](architecture.md)의 설정 표·[보안](security.md)), CI의 `tool-sandbox` 잡(`.github/workflows/ci.yml`).
   - 백엔드를 호스트 설정에서 고르는 표는 아직 없다. 구현이 하나뿐이라 한 줄짜리 표가 되기 때문이다. 두 번째 백엔드가 정해지면 `local_sandbox`가 `Arc<dyn Sandbox>`를 돌려주게 하고 그때 표를 넣는다.
 - **모델 VM용**: 포트 `bot_core::sandbox::Sandbox<ModelSpec>`의 구현은 Apple `container`용 `ContainerSandbox`(`crates/bot-runtime/src/model/container.rs`) 하나다. 조립(`crates/bot-cli/src/serve/claude.rs`)이 그 구체 타입과 릴레이 주소 계약(닻 VM이 확인한 게이트웨이 IPv4, [아키텍처](architecture.md))에 기대고 있어, 다른 VM 백엔드는 그 계약을 포트로 올리는 설계가 먼저다.
 

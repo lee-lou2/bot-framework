@@ -14,12 +14,11 @@ use bot_broker::{
     resolve::HostPort,
     runner::{Deps as RunnerDeps, HostRegistry, McpRunner, RunnerConfig},
     sandbox::{Process, Sandbox, SandboxSpec},
-    srt::{ServerCommand, SrtConfig, SrtSandbox},
+    srt::{ServerCommand, SrtConfig, SrtSandbox, supports_state},
     sys::OsEntropy,
 };
 use bot_core::{
     id::ProfileId,
-    install::ServerState,
     port::{EffectJournal, Error, Reply},
 };
 use bot_gateway::active::ActiveCheck;
@@ -70,15 +69,12 @@ fn denied(settings: &Settings, base: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// 호출 간 상태 볼륨을 요구하는(`state: required`) 서버가 있으면 Err. srt 샌드박스는 영속 볼륨을 지원하지 않으므로, 호출할 때마다 거절되기
-/// 전에 도구를 실행하는 역할의 시작에서 막는다(영속 볼륨은 격리·용량·잠금을 검증한 별도 어댑터가 생긴 뒤에 쓴다).
+/// srt가 상태 요구를 지킬 수 없는(`state: required`) 서버가 있으면 Err. 판정은 srt 어댑터의 `supports_state`(호출마다 거절하는 `admit`과 같은 것)이고,
+/// 호출할 때마다 거절되기 전에 도구를 실행하는 역할의 시작에서 막는다(영속 볼륨은 격리·용량·잠금을 검증한 별도 어댑터가 생긴 뒤에 쓴다).
 pub(crate) fn refuse_required_state(
     servers: &BTreeMap<String, install::ServerSpec>,
 ) -> Result<(), String> {
-    match servers
-        .iter()
-        .find(|(_, spec)| spec.state == ServerState::Required)
-    {
+    match servers.iter().find(|(_, spec)| !supports_state(spec.state)) {
         Some((alias, _)) => Err(format!(
             "servers.{alias}.state=required: srt 샌드박스는 호출 간 상태 볼륨을 지원하지 않아 시작하지 않아요 — 상태를 요구하는 서버는 영속 볼륨을 검증한 어댑터가 생긴 뒤에 쓸 수 있어요"
         )),
