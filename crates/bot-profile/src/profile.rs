@@ -255,14 +255,27 @@ fn parse_bindings(
                 channel: text(obj, "channel").to_owned(),
                 events: channel_events(obj),
             },
-            (_, _, true) => Adapter::OpenAi {
+            // `http`는 웹훅(JWT)이고, `model`이 있으면 OpenAI 호환 모델 바인딩이다.
+            ("http", _, true) => Adapter::OpenAi {
                 endpoint: text(obj, "endpoint").to_owned(),
                 model: text(obj, "model").to_owned(),
                 approvers: parse_approvers(obj.get("approvers")),
             },
-            _ => Adapter::Http {
+            ("http", _, false) => Adapter::Http {
                 endpoint: text(obj, "endpoint").to_owned(),
             },
+            // 스키마가 먼저 거르는 값이다. 스키마에 새 입구를 더하고 여기를 빠뜨려도 조용히 웹훅으로 읽지 않고 이름을 밝혀 거절한다.
+            (other, ..) => {
+                issues.error_at(
+                    "unknown-adapter",
+                    "profile.yaml",
+                    format!("{at}/adapter"),
+                    format!(
+                        "입구 종류 `{other}`를 알 수 없어요(cli · slack · http). 스키마가 먼저 거르는 값이라, 여기까지 왔다면 스키마와 이 해석기가 어긋난 거예요"
+                    ),
+                );
+                continue;
+            }
         };
         let id = BindingId(text(obj, "id").to_owned());
         if let Adapter::Http { endpoint } | Adapter::OpenAi { endpoint, .. } = &kind {
@@ -315,3 +328,7 @@ fn parse_bindings(
     }
     out
 }
+
+#[cfg(test)]
+#[path = "profile_tests.rs"]
+mod tests;
