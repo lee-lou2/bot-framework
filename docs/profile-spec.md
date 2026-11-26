@@ -370,6 +370,18 @@ BOT_HOST_CONFIG는 CLI가 읽는 JSON이다. gateway 키는 게이트웨이가 �
 | `empty-file` | front matter를 뺀 SKILL.md 본문이 비어 있음 |
 | `schema` | 알 수 없는 키, `name` 문자·길이 규칙 위반, `description`(1~1024자)·`compatibility`(1~500자)·`license`·`metadata` 형식 위반 |
 
+### 스키마가 거르는 것 / `bot validate`만 거르는 것
+
+번들 JSON Schema(`schemas/v1/*.schema.json`)는 단일 파일 안의 구조·필수 키·닫힌 객체(`additionalProperties: false`)·값 범위·형식 패턴을 편집기·AI·CI 단계에서 먼저 거른다. 여러 파일·필드 사이 참조, 의미 규칙, 호스트 등록부 대조는 `bot validate`(및 `bot serve`)만 거른다. 특히 `triggers.yaml`의 `preapproved`·`human_approval`·`on.cron`은 스키마 단계에서 닫힌 구조와 칸 수를 거르되, 맥락 설명이 필요한 배치·참조 규칙은 Rust 검증기에 남겨 고정 오류 코드(`invalid_preapproval`·`invalid_human_approval`·`bad-cron`)와 안내 문구를 유지한다.
+
+| 대상 | JSON Schema가 거르는 것 | `bot validate`만 거르는 것 |
+|---|---|---|
+| `triggers.yaml` `preapproved` | 닫힌 객체(`max_per_day`·`targets` 필수, 미지 키 금지), `max_per_day` 1..=65535 정수, `targets` 1..=64개 중복 없는 `{operation, target}`(각 1~128자, 와일드카드·URL·공백·`..` 금지) | 비-beat `cron` + `target.tool` 전용, `input`·`private`·`human_approval` 병용 금지, 대상 도구의 `effects: true` 여부(`preapproval_unenforceable`) |
+| `triggers.yaml` `human_approval` | 닫힌 객체(`approvers` 필수, 미지 키 금지), `approvers` 1..=16개 중복 없는 `slack:<워크스페이스>/<U\|W…>` 형식(최대 102자) | `on.event` + `target.tool` 전용, `match`의 정확한 확인 문구(`body.text`)·이모지(`body.reaction`) 고정, `private` 병용 금지, 바인딩 워크스페이스 일치·`profile.yaml` 멤버 여부·워크스페이스 63자 상한 |
+| `triggers.yaml` `on.cron` | 5칸 공백 구분 문자열 또는 지원 별칭 7종(`@hourly`·`@daily`·`@midnight`·`@weekly`·`@monthly`·`@yearly`·`@annually`) | 분(0~59)·시(0~23)·일(1~31)·월(1~12)·요일(0~7) 범위, 증분(`/n`), 시작≤끝, 일·요일 외 `?` 금지, 256바이트 상한 |
+| `triggers.yaml` 기타 | 트리거 필수 필드, `on`·`target` 분기, cron 전용 키(`principal`·`approver`·`beat`)·`response`·`private` 기본 배치 | `private_pass`의 `private: true` 전제, `http.path` 정규화(`..`·`//`·공백·256바이트), 지원 이벤트(`message`·`thread-reply`·`reaction`), 봉투 경로 루트, `sync`+도구 조합, ID·`order` 중복, 바인딩·도구·주체·고정 `args`·`input` 대조 |
+| `profile.yaml` · `tools.yaml` · `env.yaml` · `AGENT.md` · `SKILL.md` | 닫힌 객체, 버전, 이름·식별자·스코프·입력 스키마 어휘 형식, `SKILL.md` front matter 키·길이·문자 규칙 | `id`/스킬 `name`=폴더명, IANA 시간대, 역할·스코프·비밀·바인딩·에이전트·도구 참조, 예약 도구 ID·예약 환경 변수, `SKILL.md` `allowed-tools` 전용 코드·본문 32 KiB 합계, `tools.lock.yaml` 해시, 호스트 등록부 대조 |
+
 **참조와 충돌.** 활성화 전에 다음을 거절한다: id≠폴더명, 대소문자까지 정확하지 않은 IANA 시간대, 알 수 없는 역할·스코프(특히 `policy.approve` 오타), 같은 신원·바인딩 id·입구(활성 프로필 전체), 없는 에이전트·바인딩·도구, 호스트 내장 도구 ID `memory.share`·`schedule.create`·`schedule.list`·`schedule.cancel`·`schedule.deliver` 선언(정확히 이 ID들만 예약하며 `memory`·`schedule` 스킬의 다른 도구나 다른 스킬의 `share`·`create`는 허용, 새·복원 프로필 공통), 도구 `env` 이름이 그 도구를 부르는 에이전트의 상속 env.yaml에 없음(`env-missing`, 부모·자식 모두 호출할 수 있으면 둘 다 본다)·로더·셸·프록시·호스트 예약 이름(`env-reserved`)·비밀 환경 이름과 충돌(`env-secret-conflict`)·중복이나 잘못된 이름(스키마), 보이지 않는 스킬 이름 충돌, profile.yaml에 없는 비밀 이름, 기억 시드 owner가 멤버가 아님, cron 주체가 서비스가 아니거나 도구 스코프가 없음, 승인 대상 도구의 cron에 approver가 없음(승인자는 `local:*`·`slack:*` 사람 신원만, `service:*`·`http:*`는 불가), 같은 후보군의 같은 order, private 트리거가 DM 바인딩이 아니거나 일반 트리거보다 뒤이거나 승인 대상 도구 또는 다단계(`effects: true`) 도구를 부름(승인 카드·단계 영수증에 민감한 본문이 남음), `input`과 고정 args의 키 충돌·스키마에 없는 인자·빠진 필수 인자·args 단독 호출의 스키마 위반, `sync` 응답인데 도구 대상이 아님. 호스트 등록부 대조(미등록 서버·모델·입구 별칭, egress 상한, 도구 호출 시간 한도의 천장 `tool-timeout-over-cap`)는 활성화 때만 한다. 같은 바이트의 판본은 호스트가 바뀌어도 같고, 옛 판본 복원은 구조·참조만 다시 확인한다.
 
 **권한 계산.** 멤버의 스코프는 역할 스코프의 합집합 ∩ `policy.scopes`, 실행의 스코프는 그 값 ∩ 에이전트의 `scopes`(부모 상한 ∩ `policy.agents`)다. 도구는 필요한 스코프 전체가 들어 있어야 한다. 승인이 필요한 도구는 irreversible, 스코프가 `policy.approve`에 있는 write다. 수신자를 인자로 정하는 `destination`은 스냅샷의 `Tool.class`가 이미 irreversible로 올라간 값이며(선언 등급은 도구 판본 해시에 남는다), reply 목적지는 선언 그대로다. 기억 시드의 등록 해시(sha256)는 CLI가 owner·visibility·본문을 길이 구분한 UTF-8로 계산해야 소유자 변경이 반영된다.
