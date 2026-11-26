@@ -81,20 +81,29 @@ impl Store {
             target.get::<Option<String>, _>("parent").as_deref(),
         )
         .await?;
-        let nodes = sqlx::query(
-            "with recursive tree as (
-                 select profile, id, depth from bot_runs where profile = $1 and id = $2
-                 union all
-                 select c.profile, c.id, c.depth from bot_runs c join tree t on c.profile = t.profile and c.parent = t.id
-             )
-             select r.profile, r.id, r.parent, r.parent_step, r.attempts, r.cancel_requested, r.private, r.state
-             from bot_runs r join tree t on t.profile = r.profile and t.id = r.id
-             order by r.depth, r.id for update of r",
-        )
-        .bind(&profile.0)
-        .bind(&run.0)
-        .fetch_all(&mut *tx)
-        .await?;
+        // 위임이 쥔 부모 잠금을 기다리는 동안 그 위임의 자식이 커밋될 수 있다.
+        // 이미 잠근 부모에게는 새 위임이 생기지 않는다. 새 문장의 스냅숏에서 노드 수가 같아질 때까지 잠근다.
+        let mut locked = 0;
+        let nodes = loop {
+            let nodes = sqlx::query(
+                "with recursive tree as (
+                     select profile, id, depth from bot_runs where profile = $1 and id = $2
+                     union all
+                     select c.profile, c.id, c.depth from bot_runs c join tree t on c.profile = t.profile and c.parent = t.id
+                 )
+                 select r.profile, r.id, r.parent, r.parent_step, r.attempts, r.cancel_requested, r.private, r.state
+                 from bot_runs r join tree t on t.profile = r.profile and t.id = r.id
+                 order by r.depth, r.id for update of r",
+            )
+            .bind(&profile.0)
+            .bind(&run.0)
+            .fetch_all(&mut *tx)
+            .await?;
+            if nodes.len() == locked {
+                break nodes;
+            }
+            locked = nodes.len();
+        };
         let mut touched = 0;
         for node in &nodes {
             let state: String = node.get("state");

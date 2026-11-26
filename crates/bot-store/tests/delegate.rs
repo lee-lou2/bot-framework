@@ -400,3 +400,135 @@ async fn child_answers_are_not_delivered() {
         .unwrap();
     assert_eq!(db.scalar::<i64>("select count(*) from bot_outbox").await, 1);
 }
+
+#[tokio::test]
+async fn cancel_covers_child_committed_while_waiting_for_parent() {
+    for grandchild in [false, true] {
+        let Some(db) = TestDb::new().await else {
+            return;
+        };
+        let root = leased(&db, "tree").await;
+        let parent = if grandchild {
+            db.store
+                .delegate(delegate(&root.attempt, "first", "main/a", "조사", &["run"]))
+                .await
+                .unwrap();
+            db.store.claim().await.unwrap().unwrap()
+        } else {
+            root.clone()
+        };
+        let mut lock = db.store.pool().begin().await.unwrap();
+        let pid: i32 = sqlx::query_scalar(
+            "select pg_backend_pid() from bot_audit_head where singleton for update",
+        )
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+        let peer = db.peer("delegate").await;
+        let cmd = delegate(
+            &parent.attempt,
+            "next",
+            &format!("{}/b", parent.agent.0),
+            "조사",
+            &["run"],
+        );
+        let creating = tokio::spawn(async move { peer.delegate(cmd).await });
+        let creating_pid = db.waiter_blocked_by(pid).await;
+        let admin = db.peer("admin").await;
+        let target = root.attempt.run.clone();
+        let cancelling = tokio::spawn(async move {
+            admin
+                .cancel(
+                    profile(),
+                    target,
+                    PrincipalId("operator".into()),
+                    "중지".into(),
+                )
+                .await
+        });
+        db.waiter_blocked_by(creating_pid).await;
+        lock.commit().await.unwrap();
+        let child = creating.await.unwrap().unwrap();
+        cancelling.await.unwrap().unwrap();
+        for id in [&root.attempt.run, &parent.attempt.run, &child] {
+            assert_eq!(state_of(&db, id).await, "cancelled");
+        }
+        assert!(db.store.claim().await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn delegation_waiting_for_a_committing_cancel_cannot_create_a_child() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let root = leased(&db, "first-cancel").await;
+    let mut lock = db.store.pool().begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar(
+        "select pg_backend_pid() from bot_audit_head where singleton for update",
+    )
+    .fetch_one(&mut *lock)
+    .await
+    .unwrap();
+    let admin = db.peer("admin").await;
+    let target = root.attempt.run.clone();
+    let cancelling = tokio::spawn(async move {
+        admin
+            .cancel(
+                profile(),
+                target,
+                PrincipalId("operator".into()),
+                "중지".into(),
+            )
+            .await
+    });
+    let cancelling_pid = db.waiter_blocked_by(pid).await;
+    let peer = db.peer("delegate").await;
+    let cmd = delegate(&root.attempt, "next", "main/a", "조사", &["run"]);
+    let creating = tokio::spawn(async move { peer.delegate(cmd).await });
+    db.waiter_blocked_by(cancelling_pid).await;
+    lock.commit().await.unwrap();
+    cancelling.await.unwrap().unwrap();
+    assert!(matches!(creating.await.unwrap(), Err(Error::Denied)));
+    assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 1);
+}
+
+#[tokio::test]
+async fn cancelling_a_subtree_leaves_its_sibling_alone() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let (root, first) = delegated(&db).await;
+    let child = db.store.claim().await.unwrap().unwrap();
+    db.store
+        .fail(child.attempt, Failure::Permanent("failed"))
+        .await
+        .unwrap();
+    let parent = db.store.claim().await.unwrap().unwrap();
+    let second = db
+        .store
+        .delegate(delegate(&parent.attempt, "2", "main/b", "조사", &["run"]))
+        .await
+        .unwrap();
+    db.store
+        .resume(
+            profile(),
+            first.clone(),
+            PrincipalId("operator".into()),
+            "재개".into(),
+        )
+        .await
+        .unwrap();
+    db.store
+        .cancel(
+            profile(),
+            first.clone(),
+            PrincipalId("operator".into()),
+            "중지".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state_of(&db, &root.attempt.run).await, "waiting");
+    assert_eq!(state_of(&db, &first).await, "cancelled");
+    assert_eq!(db.store.claim().await.unwrap().unwrap().attempt.run, second);
+}

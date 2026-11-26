@@ -128,6 +128,26 @@ impl TestDb {
             .unwrap()
     }
 
+    /// 다른 연결이 지정한 PID의 실제 잠금 해제를 기다릴 때까지 관측한다.
+    pub async fn waiter_blocked_by(&self, blocker: i32) -> i32 {
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                if let Some(pid) = sqlx::query_scalar(
+                    "select pid from pg_stat_activity where application_name = $1 and $2 = any(pg_blocking_pids(pid))",
+                )
+                .bind(&self.schema)
+                .bind(blocker)
+                .fetch_optional(self.store.pool())
+                .await
+                .unwrap()
+                {
+                    return pid;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("잠금을 기다리는 연결이 있어야 한다")
+    }
+
     /// 리스를 이미 끝난 것으로 만든다(잠을 자지 않고 만료를 흉내 낸다).
     pub async fn expire_lease(&self, run: &RunId) {
         self.sql(&format!(
