@@ -55,20 +55,8 @@ pub fn model_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> {
         .get(&snapshot.id.0)
         .into_iter()
         .flatten()
-        .filter_map(|alias| match host.providers.get(alias) {
-            Some(Provider::ClaudeCli { secret, .. }) => Some(secret.clone()),
-            Some(
-                Provider::AnthropicApi {
-                    secret: Some(secret),
-                    ..
-                }
-                | Provider::OpenAiApi {
-                    secret: Some(secret),
-                    ..
-                },
-            ) => Some(secret.clone()),
-            _ => None,
-        })
+        .filter_map(|alias| host.providers.get(alias).and_then(Provider::secret))
+        .map(str::to_owned)
         .collect()
 }
 
@@ -123,7 +111,11 @@ pub fn missing_model_sandbox(snapshot: &Snapshot, host: &HostFile) -> Option<Str
         .get(&snapshot.id.0)
         .into_iter()
         .flatten()
-        .any(|alias| matches!(host.providers.get(alias), Some(Provider::ClaudeCli { .. })));
+        .any(|alias| {
+            host.providers
+                .get(alias)
+                .is_some_and(Provider::needs_model_vm)
+        });
     (uses_claude_cli && host.sandbox.apple.is_none()).then(|| {
         format!(
             "{}: claude-cli 별칭을 허용했지만 호스트 설정에 sandbox.apple(다이제스트로 고정한 이미지와 호스트 전용 망)이 없어요 — docs/model-image.md",

@@ -115,11 +115,11 @@ pub async fn missing_keys(
 
 /// 호스트가 모델 CLI를 쓰는 별칭이 있는가: 프로필이 허용한 별칭 중 `claude-cli`로 실행하는 것
 pub fn needed(host: &HostFile) -> bool {
-    host.catalog
-        .models
-        .values()
-        .flatten()
-        .any(|alias| matches!(host.providers.get(alias), Some(Provider::ClaudeCli { .. })))
+    host.catalog.models.values().flatten().any(|alias| {
+        host.providers
+            .get(alias)
+            .is_some_and(Provider::needs_model_vm)
+    })
 }
 
 /// 상류 주소(`https://호스트[:포트][/경로]`)를 제공자의 목적지와 요청 경로로 나눈다. 포트를 생략하면 443, 경로를 생략하면 기본 경로다.

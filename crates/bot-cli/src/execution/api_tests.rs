@@ -1,7 +1,7 @@
 //! API 직접 호출 제공자(`anthropic-api`·`openai-api`): 모양 검사(주소 규칙·키 생략은 loopback만·출력 한도)와 활성화 지문(종류·모델·기준 주소 전체·자격 이름).
 
 use super::*;
-use bot_runtime::model::LimitField;
+use bot_runtime::model::{ApiKind, LimitField};
 use serde_json::json;
 
 fn parsed(entry: Value) -> Result<Provider, String> {
@@ -20,22 +20,25 @@ fn anthropic(patch: Value) -> Value {
 fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_limit() {
     assert_eq!(
         parsed(anthropic(json!({}))).unwrap(),
-        Provider::AnthropicApi {
+        Provider::Api(ApiProvider {
+            kind: ApiKind::Anthropic,
             model: "claude-x".into(),
             endpoint: "https://api.anthropic.com".into(),
             secret: Some("anthropic-key".into()),
             max_tokens: None,
-        }
+            limit_field: LimitField::MaxTokens,
+        })
     );
     assert_eq!(
         parsed(json!({"kind": "openai-api", "model": "gpt-x", "endpoint": "https://api.example.com/v1", "secret": "openai-key", "max_tokens": 2048})).unwrap(),
-        Provider::OpenAiApi {
+        Provider::Api(ApiProvider {
+            kind: ApiKind::OpenAi,
             model: "gpt-x".into(),
             endpoint: "https://api.example.com/v1".into(),
             secret: Some("openai-key".into()),
             max_tokens: Some(2048),
             limit_field: LimitField::MaxTokens,
-        }
+        })
     );
     // 로컬 서버(loopback IP 리터럴)는 `http`로도 쓰고 키(`secret`)를 생략할 수 있다
     for endpoint in [
@@ -47,13 +50,14 @@ fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_
             parsed(json!({"kind": "openai-api", "model": "llama", "endpoint": endpoint})).unwrap();
         assert_eq!(
             local,
-            Provider::OpenAiApi {
+            Provider::Api(ApiProvider {
+                kind: ApiKind::OpenAi,
                 model: "llama".into(),
                 endpoint: endpoint.into(),
                 secret: None,
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
-            }
+            })
         );
     }
     // 함께 있는 별칭들을 한꺼번에 읽는다
@@ -186,21 +190,18 @@ fn api(
         endpoint.to_owned(),
         secret.map(str::to_owned),
     );
-    match kind {
-        0 => Provider::AnthropicApi {
-            model,
-            endpoint,
-            secret,
-            max_tokens,
+    Provider::Api(ApiProvider {
+        kind: if kind == 0 {
+            ApiKind::Anthropic
+        } else {
+            ApiKind::OpenAi
         },
-        _ => Provider::OpenAiApi {
-            model,
-            endpoint,
-            secret,
-            max_tokens,
-            limit_field: LimitField::MaxTokens,
-        },
-    }
+        model,
+        endpoint,
+        secret,
+        max_tokens,
+        limit_field: LimitField::MaxTokens,
+    })
 }
 
 #[test]
@@ -269,12 +270,15 @@ fn openai_api_takes_max_completion_tokens_or_max_tokens_but_never_both() {
         base
     };
     // 새 OpenAI 모델은 `max_completion_tokens`만, 호환 서버(Ollama·vLLM 등)는 대개 `max_tokens`를 받는다
-    let want = |max_tokens, limit_field| Provider::OpenAiApi {
-        model: "o3".into(),
-        endpoint: "https://api.openai.com/v1".into(),
-        secret: Some("openai-key".into()),
-        max_tokens,
-        limit_field,
+    let want = |max_tokens, limit_field| {
+        Provider::Api(ApiProvider {
+            kind: ApiKind::OpenAi,
+            model: "o3".into(),
+            endpoint: "https://api.openai.com/v1".into(),
+            secret: Some("openai-key".into()),
+            max_tokens,
+            limit_field,
+        })
     };
     assert_eq!(
         parsed(openai(json!({"max_completion_tokens": 2048}))).unwrap(),

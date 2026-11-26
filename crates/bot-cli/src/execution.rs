@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
 mod provider;
-pub use provider::{Provider, parse_providers};
+pub use provider::{ApiProvider, Provider, parse_providers};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Srt {
@@ -226,20 +226,6 @@ fn count(hash: &mut Sha256, n: usize) {
     hash.update((n as u64).to_be_bytes());
 }
 
-/// API 직접 호출 항목의 권한 필드: 종류(`tag`)·상류 모델·상류 기준 주소 전체·키 자격 이름(없으면 표지만). 출력 한도는 권한이 아니다.
-fn api_authority(hash: &mut Sha256, tag: u8, model: &str, endpoint: &str, secret: Option<&str>) {
-    hash.update([tag]);
-    field(hash, model.as_bytes());
-    field(hash, endpoint.as_bytes());
-    match secret {
-        Some(name) => {
-            hash.update([1]);
-            field(hash, name.as_bytes());
-        }
-        None => hash.update([0]),
-    }
-}
-
 /// 권한이 달라지는 호스트 설정의 지문(자격 값·호스트별 경로·주소 제외). `gateway`는 게이트웨이의 신원·입구 매핑 지문이다.
 /// 프로필별 모델 허용·모델 실행 방법(상류 목적지와 자격 이름)·egress 상한·서버 별칭과 설치 판본·VM 이미지와 망 이름이 들어간다.
 pub fn authority_fingerprint(
@@ -267,31 +253,7 @@ pub fn authority_fingerprint(
     count(&mut hash, providers.len());
     for (alias, provider) in providers {
         field(&mut hash, alias.as_bytes());
-        match provider {
-            Provider::Demo => hash.update([0]),
-            Provider::ClaudeCli {
-                model,
-                endpoint,
-                secret,
-            } => {
-                hash.update([1]);
-                for part in [model, endpoint, secret] {
-                    field(&mut hash, part.as_bytes());
-                }
-            }
-            Provider::AnthropicApi {
-                model,
-                endpoint,
-                secret,
-                ..
-            } => api_authority(&mut hash, 2, model, endpoint, secret.as_deref()),
-            Provider::OpenAiApi {
-                model,
-                endpoint,
-                secret,
-                ..
-            } => api_authority(&mut hash, 3, model, endpoint, secret.as_deref()),
-        }
+        provider.authority(&mut hash);
     }
     hash.update(b"servers");
     count(&mut hash, catalog.servers.len());
@@ -322,5 +284,7 @@ pub fn authority_fingerprint(
 mod api_tests;
 #[cfg(test)]
 mod fingerprint_tests;
+#[cfg(test)]
+mod provider_tests;
 #[cfg(test)]
 mod tests;

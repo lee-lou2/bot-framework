@@ -6,7 +6,10 @@
 //! `anthropic-api`·`openai-api`는 VM·CLI 없이 워커가 상류 API를 직접 부르는 Step 실행기다(`bot_runtime::model::ApiRunner`). 서비스 키를 읽는 보관소(가림 장치를 거친다)와
 //! 요청 직전의 활성화 판본 확인(`ActiveGate`)이 조립돼 있어야 시작한다.
 use super::watched::Watched;
-use crate::{execution::Provider, host::HostFile};
+use crate::{
+    execution::{ApiProvider, Provider},
+    host::HostFile,
+};
 use bot_core::{
     id::{ProfileId, SecretName},
     port::Reply,
@@ -14,9 +17,7 @@ use bot_core::{
 use bot_gateway::active::ActiveCheck;
 use bot_runtime::{
     Models,
-    model::{
-        ApiEndpoint, ApiKind, ApiRunner, ApiSettings, DemoModel, LimitField, ModelRunner, SendGate,
-    },
+    model::{ApiEndpoint, ApiRunner, ApiSettings, DemoModel, ModelRunner, SendGate},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -57,48 +58,31 @@ impl Models for ProviderModels {
     }
 }
 
-/// API 직접 호출 별칭 하나의 설정 필드(호스트 설정의 `providers.<별칭>`)
-struct ApiFields<'a> {
-    model: &'a str,
-    endpoint: &'a str,
-    secret: Option<&'a str>,
-    max_tokens: Option<u32>,
-    limit_field: LimitField,
-}
-
 /// API 직접 호출 별칭 하나의 실행기. 조각이 없거나 주소·키 설정이 규칙에 어긋나면 Err(기동 실패).
 fn api_runner(
     alias: &str,
-    kind: ApiKind,
-    fields: ApiFields<'_>,
-    api: Option<&ApiParts>,
+    config: &ApiProvider,
+    parts: Option<&ApiParts>,
 ) -> Result<Arc<dyn ModelRunner>, String> {
-    let ApiFields {
-        model,
-        endpoint,
-        secret,
-        max_tokens,
-        limit_field,
-    } = fields;
-    let parts = api.ok_or_else(|| {
+    let parts = parts.ok_or_else(|| {
         format!("모델 별칭 {alias}: API 직접 호출 실행기가 조립되지 않아 시작하지 않아요")
     })?;
-    let endpoint = ApiEndpoint::parse(endpoint)
+    let endpoint = ApiEndpoint::parse(&config.endpoint)
         .map_err(|reason| format!("providers.{alias}.endpoint: {reason}"))?;
     let secret =
-        match secret {
+        match config.secret.as_deref() {
             Some(name) => Some(SecretName::parse(name).ok_or_else(|| {
                 format!("providers.{alias}.secret이 자격 이름 규칙에 맞지 않아요")
             })?),
             None => None,
         };
     let settings = ApiSettings {
-        kind,
+        kind: config.kind,
         endpoint,
-        model: model.to_owned(),
+        model: config.model.clone(),
         secret,
-        max_tokens,
-        limit_field,
+        max_tokens: config.max_tokens,
+        limit_field: config.limit_field,
     };
     let runner = ApiRunner::new(settings, parts.secrets.clone(), parts.gate.clone())
         .map_err(|reason| format!("모델 별칭 {alias}: {reason}"))?;
@@ -130,41 +114,7 @@ pub fn build(
                         "모델 별칭 {alias}: claude-cli 실행기가 조립되지 않아 시작하지 않아요(호스트 설정의 sandbox.apple이 필요해요)"
                     )
                 })?,
-                Provider::AnthropicApi {
-                    model,
-                    endpoint,
-                    secret,
-                    max_tokens,
-                } => api_runner(
-                    alias,
-                    ApiKind::Anthropic,
-                    ApiFields {
-                        model,
-                        endpoint,
-                        secret: secret.as_deref(),
-                        max_tokens: *max_tokens,
-                        limit_field: LimitField::MaxTokens,
-                    },
-                    api,
-                )?,
-                Provider::OpenAiApi {
-                    model,
-                    endpoint,
-                    secret,
-                    max_tokens,
-                    limit_field,
-                } => api_runner(
-                    alias,
-                    ApiKind::OpenAi,
-                    ApiFields {
-                        model,
-                        endpoint,
-                        secret: secret.as_deref(),
-                        max_tokens: *max_tokens,
-                        limit_field: *limit_field,
-                    },
-                    api,
-                )?,
+                Provider::Api(config) => api_runner(alias, config, api)?,
             };
             runners.insert(alias.clone(), runner);
         }
@@ -180,6 +130,7 @@ mod tests {
     use super::*;
     use crate::{host, load};
     use bot_core::port::SecretStore;
+    use bot_runtime::model::{ApiKind, LimitField};
 
     fn parsed(extra: &str) -> HostFile {
         host::parse(&format!(
@@ -272,13 +223,14 @@ mod tests {
         let mut forced = host;
         forced.providers.insert(
             "assistant".into(),
-            Provider::OpenAiApi {
+            Provider::Api(ApiProvider {
+                kind: ApiKind::OpenAi,
                 model: "m".into(),
                 endpoint: "https://api.example/v1".into(),
                 secret: None,
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
-            },
+            }),
         );
         let error = build(&forced, None, Some(&parts())).err().unwrap();
         assert!(
@@ -287,13 +239,14 @@ mod tests {
         );
         forced.providers.insert(
             "assistant".into(),
-            Provider::OpenAiApi {
+            Provider::Api(ApiProvider {
+                kind: ApiKind::OpenAi,
                 model: "m".into(),
                 endpoint: "http://api.example/v1".into(),
                 secret: Some("key".into()),
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
-            },
+            }),
         );
         let error = build(&forced, None, Some(&parts())).err().unwrap();
         assert!(error.contains("providers.assistant.endpoint"), "{error}");

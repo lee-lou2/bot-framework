@@ -3,7 +3,6 @@
 //! `serve::refuse_required_state`.
 use super::{Item, State, capped};
 use crate::{
-    execution::Provider,
     host::HostFile,
     install,
     load::load_host,
@@ -12,7 +11,6 @@ use crate::{
 };
 use bot_core::id::Revision;
 use bot_gateway::cli::socket::current_uid;
-use bot_runtime::model::LimitField;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 해석한 호스트와 도구 서버의 설치 판본(계산하지 못했으면 None)
@@ -83,78 +81,12 @@ fn summary(host: &HostFile, settings: &Settings) -> Item {
     }
 }
 
-/// 상류 주소에서 호스트(권한부)만 보여 준다. 경로·쿼리는 출력하지 않는다.
-fn authority(endpoint: &str) -> &str {
-    let rest = endpoint
-        .split_once("://")
-        .map_or(endpoint, |(_, rest)| rest);
-    rest.split(['/', '?', '#']).next().unwrap_or_default()
-}
-
-/// API 직접 호출 별칭의 한 줄: 키 이름(값 아님)과 상류 호스트만 보인다. 키는 loopback 주소에서만 생략할 수 있다(규칙은 `check_model_aliases`가 판정한다).
-/// 출력 한도는 적었을 때만 보이고, 기본 필드(`max_tokens`)가 아니면 상류에 보내는 이름도 함께 보인다.
-fn api_line(
-    alias: &str,
-    kind: &str,
-    (model, endpoint): (&str, &str),
-    secret: Option<&str>,
-    (max_tokens, field): (Option<u32>, LimitField),
-) -> String {
-    let key = secret.map_or_else(
-        || "서비스 키 없음(loopback 전용)".to_owned(),
-        |name| format!("자격 이름 {name}"),
-    );
-    let limit = max_tokens.map_or_else(String::new, |tokens| match field {
-        LimitField::MaxTokens => format!(" · 최대 토큰 {tokens}"),
-        other => format!(" · 최대 토큰 {tokens}({})", other.name()),
-    });
-    format!(
-        "{alias}: {kind} · 모델 {model} · 상류 {} · {key}{limit}",
-        authority(endpoint)
-    )
-}
-
 fn providers(host: &HostFile) -> Item {
-    let mut lines = Vec::new();
-    for (alias, provider) in &host.providers {
-        // 새 제공자 종류는 여기에 줄을 더한다(빠뜨리면 컴파일이 막는다)
-        lines.push(match provider {
-            Provider::Demo => format!("{alias}: demo(외부 호출 없는 데모 모델)"),
-            Provider::ClaudeCli {
-                model,
-                endpoint,
-                secret,
-            } => format!(
-                "{alias}: claude-cli · 모델 {model} · 상류 {} · 자격 이름 {secret}",
-                authority(endpoint)
-            ),
-            Provider::AnthropicApi {
-                model,
-                endpoint,
-                secret,
-                max_tokens,
-            } => api_line(
-                alias,
-                "anthropic-api",
-                (model, endpoint),
-                secret.as_deref(),
-                (*max_tokens, LimitField::MaxTokens),
-            ),
-            Provider::OpenAiApi {
-                model,
-                endpoint,
-                secret,
-                max_tokens,
-                limit_field,
-            } => api_line(
-                alias,
-                "openai-api",
-                (model, endpoint),
-                secret.as_deref(),
-                (*max_tokens, *limit_field),
-            ),
-        });
-    }
+    let lines: Vec<String> = host
+        .providers
+        .iter()
+        .map(|(alias, provider)| provider.describe(alias))
+        .collect();
     // 프로필이 허용한 별칭에 실행 방법이 없으면 worker가 시작하지 않는다(그 판정을 그대로 쓴다)
     let problems = serve::check_model_aliases(host).err();
     let state = if problems.is_none() {
