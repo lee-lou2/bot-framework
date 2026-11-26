@@ -146,6 +146,7 @@ pub fn model_host(host: &HostFile) -> Result<ModelHost, String> {
             model,
             endpoint,
             secret,
+            effort: _,
         } = provider
         else {
             continue;
@@ -365,12 +366,14 @@ pub async fn start(parts: ClaudeParts, input: Input<'_>) -> Result<Claude, Strin
         config = config.with_confined_reads();
     }
     for (alias, provider) in &input.host.providers {
-        if let Provider::ClaudeCli { model, .. } = provider {
+        if let Provider::ClaudeCli { model, effort, .. } = provider {
             config = config.with_model(
                 alias,
                 CliModel {
                     id: model.clone(),
-                    effort: EFFORT.into(),
+                    effort: effort
+                        .map_or(EFFORT, bot_runtime::model::Effort::as_str)
+                        .into(),
                     max_output_tokens: MAX_OUTPUT_TOKENS,
                     retries: RETRIES,
                     context_window: CONTEXT_WINDOW,

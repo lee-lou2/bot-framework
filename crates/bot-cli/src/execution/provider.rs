@@ -11,7 +11,7 @@
 //! 지문은 그 메서드를 부르므로, 새 종류를 더하면 컴파일러가 이 블록의 `match`를 모두 가리킨다(실행기를 만드는 `serve::models::build`는 실행 방식 세 가지로만 가른다).
 use super::{field, object, only, text};
 use bot_core::id::SecretName;
-use bot_runtime::model::{ApiEndpoint, ApiKind, LimitField};
+use bot_runtime::model::{ApiEndpoint, ApiKind, Effort, LimitField};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -26,6 +26,8 @@ pub enum Provider {
         model: String,
         endpoint: String,
         secret: String,
+        /// 사고(추론) 수준(`--effort`). 생략하면 기본 `medium`이다.
+        effort: Option<Effort>,
     },
     /// 워커가 상류 API를 직접 부른다(`RunnerKind::Step`, VM 없음). 모델은 호스트 파일·셸에 닿지 못하고 도구는 워커→브로커 경로만 쓴다.
     Api(ApiProvider),
@@ -45,6 +47,8 @@ pub struct ApiProvider {
     pub max_tokens: Option<u32>,
     /// `max_tokens` 값을 실어 보낼 필드 이름(적힌 이름 그대로). OpenAI 호환만 `max_completion_tokens`를 고를 수 있다.
     pub limit_field: LimitField,
+    /// 사고(추론) 수준. 생략하면 상류 요청에 넣지 않는다.
+    pub effort: Option<Effort>,
 }
 
 impl Provider {
@@ -74,10 +78,14 @@ impl Provider {
                 model,
                 endpoint,
                 secret,
-            } => format!(
-                "{alias}: claude-cli · 모델 {model} · 상류 {} · 자격 이름 {secret}",
-                upstream_host(endpoint)
-            ),
+                effort,
+            } => {
+                let effort_note = effort.map_or_else(String::new, |e| format!(" · 사고 수준 {e}"));
+                format!(
+                    "{alias}: claude-cli · 모델 {model} · 상류 {} · 자격 이름 {secret}{effort_note}",
+                    upstream_host(endpoint)
+                )
+            }
             Provider::Api(api) => {
                 let kind = match api.kind {
                     ApiKind::Anthropic => "anthropic-api",
@@ -93,8 +101,11 @@ impl Provider {
                             LimitField::MaxTokens => format!(" · 최대 토큰 {tokens}"),
                             other => format!(" · 최대 토큰 {tokens}({})", other.name()),
                         });
+                let effort_note = api
+                    .effort
+                    .map_or_else(String::new, |e| format!(" · 사고 수준 {e}"));
                 format!(
-                    "{alias}: {kind} · 모델 {} · 상류 {} · {key}{limit}",
+                    "{alias}: {kind} · 모델 {} · 상류 {} · {key}{limit}{effort_note}",
                     api.model,
                     upstream_host(&api.endpoint)
                 )
@@ -111,13 +122,14 @@ impl Provider {
                 model,
                 endpoint,
                 secret,
+                effort: _,
             } => {
                 hash.update([1]);
                 for part in [model, endpoint, secret] {
                     field(hash, part.as_bytes());
                 }
             }
-            // 출력 한도(`max_tokens`·`limit_field`)는 권한이 아니라 운영 값이다. 필드를 모두 이름으로 적어 둬서 새 필드가 지문에서 조용히 빠지지 않는다(더하면 컴파일 오류).
+            // 출력 한도(`max_tokens`·`limit_field`)와 사고 수준(`effort`)은 권한이 아니라 운영 값이다. 필드를 모두 이름으로 적어 둬서 새 필드가 지문에서 조용히 빠지지 않는다(더하면 컴파일 오류).
             Provider::Api(ApiProvider {
                 kind,
                 model,
@@ -125,6 +137,7 @@ impl Provider {
                 secret,
                 max_tokens: _,
                 limit_field: _,
+                effort: _,
             }) => {
                 hash.update([match kind {
                     ApiKind::Anthropic => 2,
@@ -171,6 +184,18 @@ fn endpoint_ok(endpoint: &str) -> bool {
     bot_broker::resolve::HostPort::parse(&target).is_some()
 }
 
+fn parse_effort(fields: &Map<String, Value>, path: &str) -> Result<Option<Effort>, String> {
+    let Some(value) = fields.get("effort") else {
+        return Ok(None);
+    };
+    let raw = value.as_str().ok_or_else(|| {
+        format!("{path}.effort: low · medium · high · xhigh · max 중 하나여야 해요")
+    })?;
+    Effort::parse(raw)
+        .map(Some)
+        .ok_or_else(|| format!("{path}.effort: low · medium · high · xhigh · max 중 하나여야 해요"))
+}
+
 /// API 직접 호출 항목(`anthropic-api`·`openai-api`)의 공통 필드. 주소는 `ApiEndpoint` 규칙(https만, http는 loopback IP 리터럴만, 자격·쿼리·조각 금지)을 지키고 키(`secret`)는 loopback
 /// 주소에서만 생략할 수 있다. 출력 한도는 `max_tokens`이고, OpenAI 호환은 `max_completion_tokens`도 받되 둘 중 하나만 쓸 수 있다(종류마다 받는 키는 아래 `match`가 정한다).
 fn parse_api(
@@ -179,7 +204,14 @@ fn parse_api(
     kind: ApiKind,
 ) -> Result<ApiProvider, String> {
     let allowed: &[&str] = match kind {
-        ApiKind::Anthropic => &["kind", "model", "endpoint", "secret", "max_tokens"],
+        ApiKind::Anthropic => &[
+            "kind",
+            "model",
+            "endpoint",
+            "secret",
+            "max_tokens",
+            "effort",
+        ],
         ApiKind::OpenAi => &[
             "kind",
             "model",
@@ -187,6 +219,7 @@ fn parse_api(
             "secret",
             "max_tokens",
             "max_completion_tokens",
+            "effort",
         ],
     };
     only(fields, allowed, path)?;
@@ -229,6 +262,7 @@ fn parse_api(
                 .ok_or_else(|| format!("{path}.{name}: 1~1000000의 정수여야 해요"))?,
         ),
     };
+    let effort = parse_effort(fields, path)?;
     Ok(ApiProvider {
         kind,
         model: model.to_owned(),
@@ -236,6 +270,7 @@ fn parse_api(
         secret,
         max_tokens,
         limit_field,
+        effort,
     })
 }
 
@@ -256,7 +291,11 @@ pub fn parse_providers(value: &Value) -> Result<BTreeMap<String, Provider>, Stri
                 Provider::Demo
             }
             "claude-cli" => {
-                only(fields, &["kind", "model", "endpoint", "secret"], &path)?;
+                only(
+                    fields,
+                    &["kind", "model", "endpoint", "secret", "effort"],
+                    &path,
+                )?;
                 let endpoint = text(fields, "endpoint", &path)?;
                 if !endpoint_ok(endpoint) {
                     return Err(format!(
@@ -267,10 +306,12 @@ pub fn parse_providers(value: &Value) -> Result<BTreeMap<String, Provider>, Stri
                 if SecretName::parse(secret).is_none() {
                     return Err(format!("{path}.secret: 자격 이름 규칙에 맞지 않아요"));
                 }
+                let effort = parse_effort(fields, &path)?;
                 Provider::ClaudeCli {
                     model: text(fields, "model", &path)?.to_owned(),
                     endpoint: endpoint.to_owned(),
                     secret: secret.to_owned(),
+                    effort,
                 }
             }
             "anthropic-api" => Provider::Api(parse_api(fields, &path, ApiKind::Anthropic)?),

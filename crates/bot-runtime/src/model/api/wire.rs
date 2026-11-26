@@ -82,7 +82,7 @@ impl ApiKind {
             });
         }
         match self {
-            ApiKind::Anthropic => anthropic::parse(&value, request, names),
+            ApiKind::Anthropic => anthropic::parse(settings, &value, request, names),
             ApiKind::OpenAi => openai::parse(settings, &value, request, names),
         }
     }

@@ -188,6 +188,7 @@ pub fn settings(kind: ApiKind, api: &FakeApi, secret: Option<&str>) -> ApiSettin
         secret: secret.and_then(SecretName::parse),
         max_tokens: None,
         limit_field: Default::default(),
+        effort: None,
     }
 }
 
