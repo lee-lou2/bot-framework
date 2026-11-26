@@ -28,32 +28,11 @@ use bot_core::{
     state::{ConversationKind, Risk, RunContext, Visibility},
 };
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
 
-/// 내장 도구 ID. 에이전트가 이 스코프를 가져야 쓸 수 있다.
-pub const SHARE_TOOL: &str = "memory.share";
-pub const SHARE_SCOPE: &str = "memory.share";
-pub const SHARE_REVISION: &str = "builtin-1";
-const SCHEMA: &str = r#"{"additionalProperties":false,"properties":{"id":{"maxLength":128,"minLength":1,"type":"string"}},"required":["id"],"type":"object"}"#;
+pub use bot_core::builtin::{REVISION as SHARE_REVISION, SHARE_TOOL};
 
-/// 내장 도구 선언(도구 서버 없음).
 pub fn share_tool() -> Tool {
-    Tool {
-        server: "builtin".into(),
-        revision: Revision(SHARE_REVISION.into()),
-        class: Risk::Irreversible,
-        scopes: BTreeSet::from([SHARE_SCOPE.to_owned()]),
-        input: JsonPayload(SCHEMA.into()),
-        env: BTreeSet::new(),
-        secrets: BTreeMap::new(),
-        egress: BTreeSet::new(),
-        effects: false,
-        external: false,
-        destination: None,
-        definition: None,
-        mcp_name: None,
-        timeout_secs: None,
-    }
+    bot_core::builtin::SHARE.declaration()
 }
 
 /// 승인 분류: 가시성을 넓히는 일은 되돌릴 수 없는 변경으로 본다.

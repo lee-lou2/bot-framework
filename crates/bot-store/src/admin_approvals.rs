@@ -1,6 +1,7 @@
 //! 관리 조회의 승인 부분: 목록(필터·정렬·커서)과 상세, 카드 줄 렌더. 기억 공유 카드(`본문`)와 예약 회신 카드(`전송 초안`)는 소유자에게만 원문을 준다.
 
 use crate::db::{R, Store, ms_to_time};
+use bot_core::builtin::{CardBody as Body, card_body};
 use bot_core::{admin::*, id::*, port::Error};
 use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
@@ -20,17 +21,6 @@ fn processed_cursor(after: &Option<String>) -> Option<(i64, i32, i64, String)> {
     let pending = parts.next()?.parse().ok()?;
     let expires = parts.next()?.parse().ok()?;
     Some((decided, pending, expires, parts.next()?.to_owned()))
-}
-
-/// 카드가 줄 상한 안에서 이어 쓰는 긴 원문.
-#[derive(Clone, Copy, PartialEq)]
-enum Body {
-    /// 이어 쓰는 원문이 없는 카드
-    None,
-    /// 기억 공유: 본문을 JSON 문자열로 이스케이프해 이어 쓴다
-    Share,
-    /// 예약 회신: 승인 문서(JSON) 전체를 그대로 이어 쓴다
-    Draft,
 }
 
 /// 브로커가 렌더링한 카드의 줄(`라벨: 값`)을 (라벨, 값) 쌍으로 바꾼다. 제목이 맨 앞이다.
@@ -103,11 +93,7 @@ fn render_for(
     card: &str,
 ) -> Vec<(String, String)> {
     let owner = approval.requester == viewer.principal && approval.approver == viewer.principal;
-    let body = match approval.tool.0.as_str() {
-        crate::share::SHARE_TOOL => Body::Share,
-        bot_core::schedule::DELIVER_TOOL => Body::Draft,
-        _ => Body::None,
-    };
+    let body = card_body(&approval.tool.0);
     if body != Body::None && !owner {
         return vec![];
     }

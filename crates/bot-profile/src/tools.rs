@@ -31,17 +31,6 @@ fn strings(value: Option<&Value>) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// 호스트가 내장 도구로 쓰는 전체 도구 ID(기억 공유, 대화 중 예약·후속 확인, 호스트 자동 회신 승인 전용 `schedule.deliver`). 정확히 이 ID만 예약하고,
-/// 같은 이름의 스킬(`memory`, `schedule`)이나 같은 도구 이름(`mail.share`, `calendar.create`)은 막지 않는다.
-/// 점 없는 내장 이름(`delegate`)은 `skill.tool`과 겹칠 수 없다.
-const RESERVED_TOOL_IDS: &[&str] = &[
-    "memory.share",
-    "schedule.create",
-    "schedule.list",
-    "schedule.cancel",
-    "schedule.deliver",
-];
-
 /// `lock`은 같은 스킬 폴더의 `tools.lock.yaml`(검증을 마친 것). 도구가 `input`을 생략하면 입력 스키마와 정의 해시를 여기서 가져온다.
 pub fn parse(
     value: &Value,
@@ -133,7 +122,7 @@ fn parse_tool(
     issues: &mut Issues,
 ) -> Option<Tool> {
     let name = obj.get("id").and_then(Value::as_str)?.to_owned();
-    if RESERVED_TOOL_IDS.contains(&format!("{skill}.{name}").as_str()) {
+    if bot_core::builtin::reserved(&format!("{skill}.{name}")) {
         issues.error_at(
             "reserved-tool",
             path,

@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 /// 기억 공유 도구의 ID.
-pub(crate) const SHARE_TOOL: &str = "memory.share";
+pub(crate) use bot_core::builtin::SHARE_TOOL;
 
 impl Store {
     pub(crate) async fn memory_share(&self, s: StartCall, id: MemoryId) -> R<MemoryId> {

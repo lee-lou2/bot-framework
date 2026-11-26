@@ -23,8 +23,7 @@ use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
 /// 대화에서 예약을 만드는 내장 도구의 ID(브로커의 `schedule.create`·`schedule.cancel`과 같다).
-pub(crate) const CREATE_TOOL: &str = "schedule.create";
-pub(crate) const CANCEL_TOOL: &str = "schedule.cancel";
+pub(crate) use bot_core::builtin::{CANCEL_TOOL, CREATE_TOOL};
 
 /// 예약 시각이 지금보다 이만큼(약 5년)보다 멀면 받지 않는다.
 const MAX_AHEAD_MS: i64 = 5 * 366 * 24 * 3600 * 1000;

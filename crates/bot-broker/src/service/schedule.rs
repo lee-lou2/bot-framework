@@ -27,21 +27,11 @@ use bot_core::{
     schedule::{DeliveryTarget, ScheduleSpec},
     state::{ConversationKind, Risk, RunContext},
 };
-use std::collections::BTreeSet;
 
 mod args;
 use args::{Create, Reject, legacy_create_sha256, parse_cancel, parse_list, render_list};
 
-pub const CREATE_TOOL: &str = "schedule.create";
-pub const LIST_TOOL: &str = "schedule.list";
-pub const CANCEL_TOOL: &str = "schedule.cancel";
-/// 다른 수신자에게 나가는 최종 내용의 승인을 여는 호스트 전용 ID(core가 정한다). 모델에게 보이지 않고 부를 수 없다.
-pub use bot_core::schedule::DELIVER_TOOL;
-pub const REVISION: &str = "builtin-1";
-
-const CREATE_SCHEMA: &str = r#"{"additionalProperties":false,"properties":{"at":{"type":"string"},"cron":{"type":"string"},"destination":{"additionalProperties":false,"properties":{"binding":{"type":"string"},"conversation":{"additionalProperties":false,"properties":{"id":{"type":"string"},"kind":{"enum":["direct","channel"],"type":"string"},"thread":{"type":["string","null"]}},"required":["kind","id"],"type":"object"}},"required":["binding","conversation"],"type":"object"},"instruction":{"maxLength":8192,"minLength":1,"type":"string"},"quiet":{"type":"boolean"},"timezone":{"type":"string"}},"required":["instruction"],"type":"object"}"#;
-const LIST_SCHEMA: &str = r#"{"additionalProperties":false,"properties":{},"type":"object"}"#;
-const CANCEL_SCHEMA: &str = r#"{"additionalProperties":false,"properties":{"id":{"maxLength":128,"minLength":1,"type":"string"}},"required":["id"],"type":"object"}"#;
+pub use bot_core::builtin::{CANCEL_TOOL, CREATE_TOOL, DELIVER_TOOL, LIST_TOOL, REVISION};
 
 /// 이 내장 예약 도구의 인자가 **실행 전에 확정적으로 틀렸는가**(`Invalid`): 호출 순서와 같은 구조·문법 검사(와 `create`의 `at`이 지금보다 앞인 시각)다.
 /// 틀린 인자는 호출 기록·승인 카드 전에 거절되므로 CLI 재개의 확정 거절 표식(`CliRefusal`)을 남길 근거가 된다. 시각은 거절한 뒤에 다시 물어도 같은 답이다(시간은 앞으로만 간다).
@@ -68,31 +58,12 @@ pub fn is_builtin(tool: &str) -> bool {
     matches!(tool, CREATE_TOOL | LIST_TOOL | CANCEL_TOOL | DELIVER_TOOL)
 }
 
-fn builtin(id: &str, class: Risk, schema: &str) -> Tool {
-    Tool {
-        server: "builtin".into(),
-        revision: Revision(REVISION.into()),
-        class,
-        scopes: BTreeSet::from([id.to_owned()]),
-        input: JsonPayload(schema.into()),
-        env: BTreeSet::new(),
-        secrets: Default::default(),
-        egress: BTreeSet::new(),
-        effects: false,
-        external: false,
-        destination: None,
-        definition: None,
-        mcp_name: None,
-        timeout_secs: None,
-    }
-}
-
 pub fn create_tool() -> Tool {
-    builtin(CREATE_TOOL, Risk::Write, CREATE_SCHEMA)
+    bot_core::builtin::CREATE.declaration()
 }
 
 pub fn list_tool() -> Tool {
-    builtin(LIST_TOOL, Risk::Read, LIST_SCHEMA)
+    bot_core::builtin::LIST.declaration()
 }
 
 /// 다른 수신자를 지정한 생성: 사람이 수신자와 지시문을 확인해야 하는 **되돌릴 수 없는** 호출이다(정책과 무관하게 항상 승인). 다른 수신자에게 나가므로
@@ -106,7 +77,7 @@ pub fn create_tool_to() -> Tool {
 }
 
 pub fn cancel_tool() -> Tool {
-    builtin(CANCEL_TOOL, Risk::Write, CANCEL_SCHEMA)
+    bot_core::builtin::CANCEL.declaration()
 }
 
 /// 승인·분류에 쓰는 선언(생성·취소). 목록과 호스트 전용은 승인이 없다.
@@ -116,27 +87,6 @@ pub fn mutating_tool(id: &str) -> Option<Tool> {
         CANCEL_TOOL => Some(cancel_tool()),
         _ => None,
     }
-}
-
-/// 모델에게 보이는 예약 도구: (도구 ID, 선언, 설명). 에이전트 스코프에 같은 이름이 있을 때만 목록에 올린다.
-pub fn model_tools() -> [(ToolId, Tool, &'static str); 3] {
-    [
-        (
-            ToolId(CREATE_TOOL.into()),
-            create_tool(),
-            "Schedule a follow-up in this conversation: once at a UTC RFC 3339 time (at, like 2030-01-01T12:00:00Z) or repeatedly (cron with 5 fields, optional IANA timezone). instruction is what to do then; quiet suppresses the reply when nothing needs reporting. Optionally send the result to another registered recipient with destination (binding and conversation kind/id); the owner approves the exact recipient and instruction, and again before each send.",
-        ),
-        (
-            ToolId(LIST_TOOL.into()),
-            list_tool(),
-            "List your active scheduled follow-ups (id, time, quiet).",
-        ),
-        (
-            ToolId(CANCEL_TOOL.into()),
-            cancel_tool(),
-            "Cancel one of your scheduled follow-ups by id.",
-        ),
-    ]
 }
 
 /// 호출 전에 확인할 공통 사실: 현재·고정 판본과 사람 요청자, 같은 이름의 스코프.

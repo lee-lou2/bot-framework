@@ -223,7 +223,7 @@ mod tests {
         // 어느 서버에도 선언돼 있지 않은 내장 판정(기억 공유 등)은 설치와 무관하게 맡긴다
         assert!(!holds(
             &declaring(&["agenda"]),
-            &ToolId("memory.share".into()),
+            &ToolId(bot_core::builtin::SHARE_TOOL.into()),
             &installed(&[])
         ));
         assert!(!holds(&declaring(&[]), &delete, &installed(&[])));

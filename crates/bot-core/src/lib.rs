@@ -15,6 +15,7 @@
 pub mod admin;
 pub mod api;
 pub mod attachments;
+pub mod builtin;
 pub mod canon;
 pub mod cards;
 pub mod cli;

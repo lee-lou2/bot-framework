@@ -16,11 +16,7 @@ use super::{
 use crate::{
     canon::canonicalize,
     json::parse,
-    service::{
-        preflight::noting_limit,
-        schedule,
-        share::{SHARE_SCOPE, SHARE_TOOL, share_tool},
-    },
+    service::{preflight::noting_limit, schedule},
     text::json_quote,
 };
 use bot_core::{
@@ -130,41 +126,17 @@ async fn tools_list(shared: &Shared, session: &Session, id: &Value) -> Vec<u8> {
     if let Some(snapshot) = shared.parts.catalog.current(&session.attempt.profile)
         && let Some(agent) = snapshot.agents.get(&session.agent)
     {
-        // 내장 기억 공유 도구: 에이전트의 스코프 상한에 `memory.share`가 있을 때만 보인다(호출 때 인가는 브로커가 다시 한다).
-        if agent.scopes.contains(SHARE_SCOPE) {
-            let tool = ToolId(SHARE_TOOL.to_owned());
-            if let Some(schema) = parse(&share_tool().input.0).and_then(|v| canonicalize(&v)) {
-                let name = tool.mcp_name();
-                tools.push((
-                    name.clone(),
-                    format!(
-                        "{{\"description\":{},\"inputSchema\":{schema},\"name\":{}}}",
-                        json_quote(
-                            "Share one of your private memories with the profile after you approve its exact text."
-                        ),
-                        json_quote(&name)
-                    ),
-                ));
-            }
-        }
-        // 내장 예약 도구: 에이전트의 스코프 상한에 같은 이름의 스코프가 있을 때만 보인다(호출 때 인가는 브로커가 다시 한다).
-        // 호스트 전용 `schedule.deliver`는 목록에 없다.
-        for (id, spec, description) in schedule::model_tools() {
-            let scope_ok = spec.scopes.iter().all(|scope| agent.scopes.contains(scope));
-            if let (true, Some(schema)) = (
-                scope_ok,
-                parse(&spec.input.0).and_then(|v| canonicalize(&v)),
-            ) {
-                let name = id.mcp_name();
-                tools.push((
-                    name.clone(),
-                    format!(
-                        "{{\"description\":{},\"inputSchema\":{schema},\"name\":{}}}",
-                        json_quote(description),
-                        json_quote(&name)
-                    ),
-                ));
-            }
+        for spec in bot_core::builtin::model_tools(&agent.scopes) {
+            let name = ToolId(spec.id.into()).mcp_name();
+            tools.push((
+                name.clone(),
+                format!(
+                    "{{\"description\":{},\"inputSchema\":{},\"name\":{}}}",
+                    json_quote(spec.description),
+                    spec.schema,
+                    json_quote(&name)
+                ),
+            ));
         }
         // 내장 위임 도구: 직계 자식이 있을 때만 보인다(스키마가 자식 ID를 열거한다).
         if let Some(entry) = delegate::listing(&snapshot, &session.agent) {
@@ -173,7 +145,7 @@ async fn tools_list(shared: &Shared, session: &Session, id: &Value) -> Vec<u8> {
         for skill in agent.skills.values() {
             for (tool_id, tool) in &skill.tools {
                 // 내장 도구 이름은 예약돼 있다: 같은 이름의 선언이 있어도 목록에는 내장 하나만 나온다.
-                if tool_id.0 == SHARE_TOOL || schedule::is_builtin(&tool_id.0) {
+                if bot_core::builtin::reserved(&tool_id.0) {
                     continue;
                 }
                 let Some(schema) = parse(&tool.input.0).and_then(|v| canonicalize(&v)) else {

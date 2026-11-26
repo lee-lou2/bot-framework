@@ -40,7 +40,7 @@ pub(crate) async fn noting_limit<T>(call: impl Future<Output = T>) -> (T, bool) 
 }
 
 /// 모델이 부르는 내장 위임 도구의 이름(MCP에서 보이는 그대로). 카탈로그에 없고 프런트가 입력·인가를 직접 판정한다.
-pub const DELEGATE_TOOL: &str = "delegate";
+pub use bot_core::builtin::DELEGATE_TOOL;
 
 pub(crate) fn expected(error: &Error, limited: bool) -> Option<CliRefusal> {
     Some(match error {

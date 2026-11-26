@@ -13,7 +13,7 @@ use bot_core::{
     port::Error,
     profile::Snapshot,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 /// MCP에서 보이는 이름.
 pub(super) const NAME: &str = crate::service::preflight::DELEGATE_TOOL;
@@ -30,23 +30,14 @@ pub(super) fn children(snapshot: &Snapshot, agent: &AgentId) -> Vec<AgentId> {
 
 /// `tools/list`의 도구 한 건. 직계 자식이 없으면 `None`.
 pub(super) fn listing(snapshot: &Snapshot, agent: &AgentId) -> Option<(String, String)> {
-    let ids: Vec<String> = children(snapshot, agent).into_iter().map(|a| a.0).collect();
+    let ids = children(snapshot, agent);
     if ids.is_empty() {
         return None;
     }
-    let schema = json!({
-        "additionalProperties": false,
-        "properties": {
-            "agent": {"enum": ids, "type": "string"},
-            "instruction": {"minLength": 1, "type": "string"},
-        },
-        "required": ["agent", "instruction"],
-        "type": "object",
-    });
-    let schema = canonicalize(&schema)?;
+    let schema = canonicalize(&bot_core::builtin::delegate_schema(&ids))?;
     let body = format!(
         "{{\"description\":{},\"inputSchema\":{schema},\"name\":\"{NAME}\"}}",
-        crate::text::json_quote("Hand a task to one of your direct sub-agents and get its result."),
+        crate::text::json_quote(bot_core::builtin::DELEGATE_DESCRIPTION),
     );
     Some((NAME.to_owned(), body))
 }

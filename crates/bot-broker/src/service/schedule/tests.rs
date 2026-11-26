@@ -388,17 +388,35 @@ fn the_list_never_carries_instructions_or_recipients() {
 fn the_host_only_id_is_reserved_but_not_a_model_tool() {
     assert!(is_builtin(DELIVER_TOOL) && is_builtin(CREATE_TOOL));
     assert!(!is_builtin("schedule.other") && !is_builtin("memory.share"));
-    let ids: Vec<String> = model_tools()
-        .iter()
-        .map(|(id, _, _)| id.0.clone())
+    let scopes = Scopes::from([
+        CREATE_TOOL.into(),
+        LIST_TOOL.into(),
+        CANCEL_TOOL.into(),
+        DELIVER_TOOL.into(),
+    ]);
+    let ids: Vec<_> = bot_core::builtin::model_tools(&scopes)
+        .map(|spec| spec.id)
         .collect();
     assert_eq!(ids, [CREATE_TOOL, LIST_TOOL, CANCEL_TOOL]);
     assert!(mutating_tool(LIST_TOOL).is_none() && mutating_tool(DELIVER_TOOL).is_none());
-    for (_, tool, _) in model_tools() {
-        assert_eq!(
-            tool.scopes.len(),
-            1,
-            "각 도구는 같은 이름의 스코프 하나가 필요하다"
-        );
+}
+
+#[test]
+fn issued_builtin_ids_and_revisions_are_stable() {
+    use crate::service::{
+        deliver::deliver_tool,
+        preflight::DELEGATE_TOOL,
+        share::{SHARE_TOOL, share_tool},
+    };
+    for (id, declaration, issued) in [
+        (SHARE_TOOL, share_tool(), "memory.share"),
+        (CREATE_TOOL, create_tool(), "schedule.create"),
+        (LIST_TOOL, list_tool(), "schedule.list"),
+        (CANCEL_TOOL, cancel_tool(), "schedule.cancel"),
+        (DELIVER_TOOL, deliver_tool(), "schedule.deliver"),
+    ] {
+        assert_eq!(id.as_bytes(), issued.as_bytes());
+        assert_eq!(declaration.revision.0.as_bytes(), b"builtin-1");
     }
+    assert_eq!(DELEGATE_TOOL.as_bytes(), b"delegate");
 }

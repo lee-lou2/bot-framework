@@ -7,8 +7,7 @@ use serde_json::{Value, json};
 
 /// 한 예약 실행에서 최종 회신 묶음은 하나다. 이 호출 ID는 호스트가 소유한다.
 pub const DELIVER_CALL: &str = "schedule-deliver";
-pub const DELIVER_TOOL: &str = "schedule.deliver";
-pub const DELIVER_REVISION: &str = "builtin-1";
+pub use crate::builtin::{DELIVER_TOOL, REVISION as DELIVER_REVISION};
 pub const DELIVERY_CARD_LABEL: &str = "전송 초안";
 
 // 게이트웨이 카드 전체가 20줄, 줄마다 500바이트다. 실제 렌더러는 머리줄도 함께 센다.

@@ -22,7 +22,7 @@ use bot_core::{
 };
 use chrono::{DateTime, Datelike, Utc};
 use chrono_tz::Tz;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::BTreeSet,
     time::{SystemTime, UNIX_EPOCH},
@@ -42,7 +42,7 @@ pub const MAX_MEMORY_BYTES: usize = 8 * 1024;
 /// 이전 대화 합계 상한(오래된 차례부터 버린다)
 pub const MAX_HISTORY_BYTES: usize = 64 * 1024;
 /// 위임 도구의 ID. 워커가 이 ID를 가로채 `DelegationStore::delegate`로 보낸다.
-pub const DELEGATE_TOOL: &str = "delegate";
+pub use bot_core::builtin::DELEGATE_TOOL;
 
 const WEEKDAYS: [&str; 7] = ["월", "화", "수", "목", "금", "토", "일"];
 
@@ -304,23 +304,13 @@ fn visible_tools(agent: &Agent, effective: &BTreeSet<String>) -> Vec<(String, To
 }
 
 fn delegate_tool(children: &[(AgentId, String)]) -> ToolSpec {
-    let ids: Vec<&str> = children.iter().map(|(id, _)| id.0.as_str()).collect();
     ToolSpec {
         id: ToolId(DELEGATE_TOOL.into()),
         kind: ToolKind::Delegate,
         class: Risk::Read,
-        description: "직계 하위 에이전트에게 일을 맡기고 그 결과를 받아요.".into(),
+        description: bot_core::builtin::DELEGATE_DESCRIPTION.into(),
         input: JsonPayload(
-            json!({
-                "type": "object",
-                "required": ["agent", "instruction"],
-                "properties": {
-                    "agent": {"type": "string", "enum": ids},
-                    "instruction": {"type": "string", "minLength": 1},
-                },
-                "additionalProperties": false,
-            })
-            .to_string(),
+            bot_core::builtin::delegate_schema(children.iter().map(|(id, _)| id)).to_string(),
         ),
     }
 }

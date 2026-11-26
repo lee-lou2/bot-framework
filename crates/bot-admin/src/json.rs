@@ -3,9 +3,10 @@
 
 use crate::port::*;
 use bot_core::{
+    builtin::{CardBody, card_body},
     command::memory_share_hash,
     id::MemoryId,
-    schedule::{DELIVER_TOOL, DELIVERY_CARD_LABEL},
+    schedule::DELIVERY_CARD_LABEL,
     state::{ConversationKind, EffectState, Risk, RunState},
 };
 use serde_json::{Value, json};
@@ -205,13 +206,10 @@ pub fn hold(h: &HoldView) -> Value {
     })
 }
 
-/// 카드 본문에 요청자 본인만 볼 수 있는 글이 담기는 승인의 도구: 기억 공유(비공개 기억 본문)와 예약 전송(다른 수신자에게 나갈 최종 회신 초안).
-pub const OWNER_ONLY_BODY_TOOLS: [&str; 2] = ["memory.share", DELIVER_TOOL];
-
 /// 카드 본문(`render`)을 이 조회자에게 보여도 되는가. 소유자만 보는 카드는 요청자이자 승인자인 본인(기억의 소유자, 예약을 만든 사람)이
 /// 인증된 경우에만 본문을 낸다. 운영자도 예외가 아니다(메타데이터·감사는 그대로 본다). 요청자와 승인자가 다르면 아무도 못 본다.
 pub fn body_visible(a: &ApprovalView, viewer: &Viewer) -> bool {
-    !OWNER_ONLY_BODY_TOOLS.contains(&a.tool.0.as_str())
+    card_body(&a.tool.0) == CardBody::None
         || (viewer.principal == a.requester && viewer.principal == a.approver)
 }
 
@@ -253,13 +251,12 @@ fn delivery_card_matches(a: &ApprovalView) -> bool {
 /// (기억 공유는 기억 ID·본문, 예약 전송은 전송 초안)를 실제로 볼 수 있어야 한다: 소유자가 아니거나, 카드에 제목·공유 범위만 있거나,
 /// 본문 일부가 빠졌거나, 지문과 다르면 승인할 수 없다(볼 수 없는 내용을 승인하게 되므로). 거절은 늘 허용한다. 화면과 판정 API가 같은 조건을 쓴다.
 pub fn approve_blocked(a: &ApprovalView, viewer: &Viewer) -> Option<&'static str> {
-    let owner_only = OWNER_ONLY_BODY_TOOLS.contains(&a.tool.0.as_str());
-    let complete = match a.tool.0.as_str() {
-        "memory.share" => share_card_matches(a),
-        DELIVER_TOOL => delivery_card_matches(a),
-        _ => !a.render.is_empty(),
+    let complete = match card_body(&a.tool.0) {
+        CardBody::None => return None,
+        CardBody::Share => share_card_matches(a),
+        CardBody::Draft => delivery_card_matches(a),
     };
-    (owner_only && (!body_visible(a, viewer) || !complete)).then_some("no_body")
+    (!body_visible(a, viewer) || !complete).then_some("no_body")
 }
 
 pub fn approval(a: &ApprovalView, viewer: &Viewer) -> Value {

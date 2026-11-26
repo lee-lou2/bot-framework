@@ -7,6 +7,7 @@ use bot_core::{
     profile::{Policy, Skill, Tool},
     state::{Conversation, ConversationKind, Visibility},
 };
+use serde_json::json;
 use std::collections::BTreeMap;
 
 fn scopes(items: &[&str]) -> BTreeSet<String> {
