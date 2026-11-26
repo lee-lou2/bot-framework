@@ -12,18 +12,20 @@ use super::{
     result_text, role_name, schema_of, token_usage,
 };
 use crate::model::{
-    ModelError, ModelRequest, ModelStep, PendingCall,
+    ModelError, ModelRequest, ModelStep, PendingCall, ToolSpec,
     api::{names::NameTable, runner::ApiSettings, transport::Header},
     call_id,
 };
 use bot_core::command::{JsonPayload, RunOutcome, TokenUsage};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 
 pub(super) const PATH: &str = "/v1/messages";
 const VERSION: &str = "2023-06-01";
 /// 설정에 `max_tokens`가 없을 때(Anthropic은 필수 필드다)
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+/// 최상위 조합자(`allOf`·`anyOf`·`oneOf`)를 펼칠 때의 중첩 깊이 상한
+const MAX_SCHEMA_FLATTEN_DEPTH: usize = 8;
 
 pub(super) fn headers(key: Option<&str>) -> Vec<Header> {
     let mut headers: Vec<Header> = vec![
@@ -97,7 +99,7 @@ pub(super) fn build(settings: &ApiSettings, request: &ModelRequest) -> Result<Bu
                 Ok(json!({
                     "name": name,
                     "description": tool.description,
-                    "input_schema": schema_of(tool),
+                    "input_schema": input_schema(tool),
                 }))
             })
             .collect::<Result<Vec<Value>, ModelError>>()?;
@@ -105,6 +107,185 @@ pub(super) fn build(settings: &ApiSettings, request: &ModelRequest) -> Result<Bu
     }
     let body = serde_json::to_vec(&body).map_err(|_| fail("invalid_request", false))?;
     Ok(Built { body, names })
+}
+
+/// Anthropic Messages API용 도구 `input_schema`.
+/// 상류는 최상위의 `oneOf`·`allOf`·`anyOf`를 거절하므로 최상위 조합자만 풀어 분기의 `properties`와 공통 필수 키(`allOf` 전체·`anyOf`/`oneOf` 교집합)를 끌어올린다.
+/// 속성 내부의 중첩 조합자는 그대로 두고, 실제 호출 인자는 브로커가 프로필 원본 스키마 전체로 다시 검증한다.
+fn input_schema(tool: &ToolSpec) -> Value {
+    let Value::Object(mut root) = schema_of(tool) else {
+        return json!({"type": "object"});
+    };
+    if root.get("type").and_then(Value::as_str) != Some("object") {
+        root.insert("type".to_owned(), Value::String("object".to_owned()));
+    }
+    if !has_top_combinator(&root) {
+        return Value::Object(root);
+    }
+    let root_props: HashSet<String> = root
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|props| props.keys().cloned().collect())
+        .unwrap_or_default();
+    let mut properties = root
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut required = required_of(&root);
+    let mut extra_props = Map::new();
+    let mut extra_req = Vec::new();
+    flatten_combinators(&mut root, &mut extra_props, &mut extra_req, 0);
+    for (name, schema) in extra_props {
+        if !root_props.contains(&name) {
+            merge_property(&mut properties, name, schema);
+        }
+    }
+    push_unique(&mut required, extra_req);
+    if !properties.is_empty() {
+        root.insert("properties".to_owned(), Value::Object(properties));
+    }
+    if !required.is_empty() {
+        root.insert(
+            "required".to_owned(),
+            Value::Array(required.into_iter().map(Value::String).collect()),
+        );
+    }
+    Value::Object(root)
+}
+
+fn has_top_combinator(map: &Map<String, Value>) -> bool {
+    map.contains_key("allOf") || map.contains_key("anyOf") || map.contains_key("oneOf")
+}
+
+fn required_of(map: &Map<String, Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(items) = map.get("required").and_then(Value::as_array) {
+        for item in items {
+            if let Some(name) = item.as_str()
+                && !out.iter().any(|existing| existing == name)
+            {
+                out.push(name.to_owned());
+            }
+        }
+    }
+    out
+}
+
+fn push_unique(target: &mut Vec<String>, items: Vec<String>) {
+    for item in items {
+        if !target.contains(&item) {
+            target.push(item);
+        }
+    }
+}
+
+fn flatten_combinators(
+    obj: &mut Map<String, Value>,
+    props: &mut Map<String, Value>,
+    req: &mut Vec<String>,
+    depth: usize,
+) {
+    let all_of = obj.remove("allOf");
+    let any_of = obj.remove("anyOf");
+    let one_of = obj.remove("oneOf");
+    if depth >= MAX_SCHEMA_FLATTEN_DEPTH {
+        return;
+    }
+    if let Some(Value::Array(branches)) = all_of {
+        for branch in branches {
+            if let Some((b_props, b_req)) = extract_branch(branch, depth) {
+                for (name, schema) in b_props {
+                    merge_property(props, name, schema);
+                }
+                push_unique(req, b_req);
+            }
+        }
+    }
+    for group in [any_of, one_of].into_iter().flatten() {
+        let Value::Array(branches) = group else {
+            continue;
+        };
+        let mut common: Option<Vec<String>> = None;
+        let mut all_objects = !branches.is_empty();
+        for branch in branches {
+            if let Some((b_props, b_req)) = extract_branch(branch, depth) {
+                for (name, schema) in b_props {
+                    merge_property(props, name, schema);
+                }
+                match &mut common {
+                    None => common = Some(b_req),
+                    Some(prev) => prev.retain(|name| b_req.contains(name)),
+                }
+            } else {
+                all_objects = false;
+            }
+        }
+        if all_objects && let Some(common_req) = common {
+            push_unique(req, common_req);
+        }
+    }
+}
+
+fn extract_branch(branch: Value, depth: usize) -> Option<(Map<String, Value>, Vec<String>)> {
+    if depth >= MAX_SCHEMA_FLATTEN_DEPTH {
+        return None;
+    }
+    let Value::Object(mut obj) = branch else {
+        return None;
+    };
+    let mut props = match obj.remove("properties") {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    let mut req = required_of(&obj);
+    flatten_combinators(&mut obj, &mut props, &mut req, depth + 1);
+    Some((props, req))
+}
+
+fn is_pure_any_of(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|map| map.len() == 1 && map.get("anyOf").is_some_and(Value::is_array))
+}
+
+fn merge_property(props: &mut Map<String, Value>, name: String, incoming: Value) {
+    let Some(existing) = props.get_mut(&name) else {
+        props.insert(name, incoming);
+        return;
+    };
+    if *existing == incoming {
+        return;
+    }
+    let mut variants = if is_pure_any_of(existing) {
+        existing
+            .as_object_mut()
+            .and_then(|map| map.remove("anyOf"))
+            .and_then(|value| match value {
+                Value::Array(items) => Some(items),
+                _ => None,
+            })
+            .unwrap_or_default()
+    } else {
+        vec![existing.take()]
+    };
+    let add = if is_pure_any_of(&incoming) {
+        match incoming {
+            Value::Object(mut map) => match map.remove("anyOf") {
+                Some(Value::Array(items)) => items,
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    } else {
+        vec![incoming]
+    };
+    for candidate in add {
+        if !variants.contains(&candidate) {
+            variants.push(candidate);
+        }
+    }
+    *existing = json!({"anyOf": variants});
 }
 
 /// 응답의 `usage`에서 (관측용, 실측). 입력은 `input_tokens`에 캐시 읽기·쓰기를 더한 값이다(CLI 실행기와 같은 규칙).

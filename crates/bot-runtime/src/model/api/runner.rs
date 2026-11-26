@@ -196,6 +196,15 @@ impl ApiRunner {
             },
         };
         if let Some(error) = status_error(sent.status, &sent.body) {
+            if let ModelError::Failed { code, transient } = &error {
+                tracing::warn!(
+                    code,
+                    transient,
+                    status = sent.status,
+                    error_type = known_error_type(&sent.body),
+                    "모델 상류가 오류 상태를 돌려줬어요"
+                );
+            }
             return Err(error);
         }
         let text = std::str::from_utf8(&sent.body).map_err(|_| wire::invalid())?;
@@ -276,4 +285,62 @@ fn quota_exhausted(body: &[u8]) -> bool {
             .and_then(Value::as_str)
             == Some("insufficient_quota")
     })
+}
+
+/// 상류 오류 본문에서 허용 목록의 고정 분류 낱말만 고른다(원문·메시지는 로그에 싣지 않는다).
+fn known_error_type(body: &[u8]) -> &'static str {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return "unknown";
+    };
+    for pointer in ["/error/type", "/error/code"] {
+        if let Some(raw) = value.pointer(pointer).and_then(Value::as_str)
+            && let Some(known) = classify_error_type(raw)
+        {
+            return known;
+        }
+    }
+    "unknown"
+}
+
+fn classify_error_type(raw: &str) -> Option<&'static str> {
+    match raw {
+        "invalid_request_error" => Some("invalid_request_error"),
+        "authentication_error" => Some("authentication_error"),
+        "permission_error" => Some("permission_error"),
+        "not_found_error" => Some("not_found_error"),
+        "request_too_large" => Some("request_too_large"),
+        "rate_limit_error" => Some("rate_limit_error"),
+        "api_error" => Some("api_error"),
+        "overloaded_error" => Some("overloaded_error"),
+        "insufficient_quota" => Some("insufficient_quota"),
+        "billing_error" => Some("billing_error"),
+        "server_error" => Some("server_error"),
+        "model_not_found" => Some("model_not_found"),
+        "context_length_exceeded" => Some("context_length_exceeded"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::known_error_type;
+
+    #[test]
+    fn known_error_type_only_returns_allowlisted_classifications() {
+        assert_eq!(
+            known_error_type(
+                br#"{"type":"error","error":{"type":"invalid_request_error","message":"secret-body"}}"#
+            ),
+            "invalid_request_error"
+        );
+        assert_eq!(
+            known_error_type(br#"{"error":{"code":"insufficient_quota"}}"#),
+            "insufficient_quota"
+        );
+        assert_eq!(
+            known_error_type(br#"{"error":{"type":"sk-leaked-secret","code":"arbitrary_text"}}"#),
+            "unknown"
+        );
+        assert_eq!(known_error_type(b"not json"), "unknown");
+    }
 }

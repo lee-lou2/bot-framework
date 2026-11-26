@@ -489,3 +489,88 @@ fn one_bad_call_means_no_call_at_all() {
         Err(failed("too_many_calls", false))
     );
 }
+
+#[test]
+fn top_level_schema_combinators_are_flattened_while_nested_ones_stay_intact() {
+    let any_of_required = json!({
+        "type": "object",
+        "description": "링크 또는 채널+시각",
+        "properties": {
+            "url": {"type": "string"},
+            "channel": {"type": "string"},
+            "ts": {"type": "string"},
+            "note": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+        },
+        "anyOf": [{"required": ["url"]}, {"required": ["channel", "ts"]}],
+        "additionalProperties": false
+    });
+    let all_of_merged = json!({
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+        "allOf": [
+            {"properties": {"name": {"type": "string"}}, "required": ["name"]},
+            {"properties": {"count": {"type": "integer"}}, "required": ["id", "count"]}
+        ]
+    });
+    let one_of_branches = json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "a"},
+                    "target": {"type": "string"},
+                    "only_a": {"type": "boolean"}
+                },
+                "required": ["kind", "target"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "b"},
+                    "target": {"type": "integer"},
+                    "only_b": {"type": "string"}
+                },
+                "required": ["kind", "target"]
+            }
+        ]
+    });
+    let req = request(
+        vec![user("도구 확인")],
+        vec![
+            tool("chat.thread", "스레드 조회", &any_of_required.to_string()),
+            tool("item.update", "항목 갱신", &all_of_merged.to_string()),
+            tool("item.pick", "분기 선택", &one_of_branches.to_string()),
+        ],
+        vec![],
+    );
+    let body = body_of(KIND, &req);
+    let tools = body["tools"].as_array().unwrap();
+    // 1) 최상위 anyOf 제거, 중첩 anyOf·properties·additionalProperties 보존, 필수 키 과잉 승격 없음
+    let s0 = &tools[0]["input_schema"];
+    assert_eq!(s0["type"], "object");
+    assert!(s0.get("anyOf").is_none() && s0.get("oneOf").is_none() && s0.get("allOf").is_none());
+    assert!(s0.get("required").is_none());
+    assert_eq!(s0["additionalProperties"], false);
+    assert_eq!(
+        s0["properties"]["note"],
+        json!({"anyOf": [{"type": "string"}, {"type": "null"}]})
+    );
+    // 2) allOf의 properties·required 병합(중복 제거)
+    let s1 = &tools[1]["input_schema"];
+    assert!(s1.get("allOf").is_none());
+    assert_eq!(s1["required"], json!(["id", "name", "count"]));
+    assert_eq!(s1["properties"]["name"]["type"], "string");
+    assert_eq!(s1["properties"]["count"]["type"], "integer");
+    // 3) oneOf의 분기 properties 병합(충돌 속성은 내부 anyOf), 공통 필수 키만 승격
+    let s2 = &tools[2]["input_schema"];
+    assert_eq!(s2["type"], "object");
+    assert!(s2.get("oneOf").is_none());
+    assert_eq!(s2["required"], json!(["kind", "target"]));
+    assert_eq!(
+        s2["properties"]["target"],
+        json!({"anyOf": [{"type": "string"}, {"type": "integer"}]})
+    );
+    assert_eq!(s2["properties"]["only_a"]["type"], "boolean");
+    assert_eq!(s2["properties"]["only_b"]["type"], "string");
+}
