@@ -1,3 +1,8 @@
+//! 호출 시작 커밋 뒤 도구 실행·결과 정산과 옛 세대 호출의 복구 판정(`execute`·`recover`).
+//!
+//! 시작이 원장에 커밋된 뒤에만 실행기를 부르고, 결과를 돌려주기 직전 `still_current`로 활성 판본을 다시 확인한다.
+//! 인가·속도 제한·승인 카드 개시는 앞 단계(`call`·`gate`) 몫이며, 복구 규칙 자체는 `recovery`가 정한다.
+
 use super::{BrokerService, call::Flow};
 use crate::{
     classify::{Class, classify},

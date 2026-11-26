@@ -1,3 +1,8 @@
+//! 도구 호출 한 건의 진입·선언 결합·인가·거절 기록과 호출 스팬(`Broker::call` 본흐름).
+//!
+//! 전체 호출 순서와 불변식은 `service.rs` 머리말을 따르며, 승인 카드 개시·대조는 `gate`,
+//! 실제 실행·복구는 `exec`, 기억 공유·예약 내장 도구는 `share`·`schedule`에 넘긴다.
+
 use super::{
     BrokerService,
     authority::{Verdict, waivable},

@@ -1,3 +1,6 @@
+//! 예약 저장소가 연결되지 않은 브로커용 기본 `UserSchedules` 구현(`NoSchedules`).
+//! 모든 대화 예약 연산을 상태 변경 없이 `Error::Unavailable`로 닫는다.
+
 use bot_core::{
     command::JsonPayload,
     id::{Attempt, CallId, Revision, ScheduleId},

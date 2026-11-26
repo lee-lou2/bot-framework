@@ -1,3 +1,7 @@
+//! 게이트웨이·관리 핸들이 인증에 쓴 활성 집합 판본을 고정하고 요청 트랜잭션에서 대조한다.
+//! `begin_authorized`는 `bot_active` 행의 `FOR SHARE` 잠금으로 판본 교체와 외부 요청을 직렬화한다.
+//! 활성 집합의 게시·교체 자체는 `active.rs`가 맡는다.
+
 use crate::db::{R, Store, Tx};
 use bot_core::{id::Revision, port::Error};
 

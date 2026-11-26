@@ -1,3 +1,8 @@
+//! 호출의 승인 관문(`gate`)과 승인 결합값(`Binding`) 계산.
+//!
+//! 기존 승인의 결합값·만료·설치를 대조해 통과(`Go`)·대기(`Awaiting`)·거절을 가르고, 필요하면 새 승인 카드를 연다.
+//! 승인 클릭 처리와 실제 도구 시작·실행은 맡지 않는다(`decide`·`exec` 몫).
+
 use super::{BrokerService, call::Flow, route::Route};
 use crate::{
     approval::{new_nonce, render_card, render_delivery_card, render_memory_card, same_binding},
