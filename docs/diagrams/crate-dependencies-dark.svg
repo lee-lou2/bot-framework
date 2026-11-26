@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 688" width="1120" height="688" role="img" aria-labelledby="t-cr-d d-cr-d">
+  <title id="t-cr-d">Bot Framework Rust 크레이트 의존 구조</title>
+  <desc id="d-cr-d">최상위 바이너리 bot-cli가 가운데 6개의 독립 도메인 크레이트를 조합하고, 6개 크레이트는 서로 의존하지 않고 bot-core의 포트 트레이트에만 의존하는 3계층 구조.</desc>
+  <style>
+    .bg { fill: #1c212c; }
+    .frame { fill: #1c212c; stroke: #343d50; stroke-width: 1; }
+    .hdr-bg { fill: #1c212c; }
+    .ftr-bg { fill: #1c212c; }
+    .hdr-rule { stroke: rgba(245,245,245,0.13); stroke-width: 1; }
+    .dot { fill: rgba(245,245,245,0.10); }
+    .zone { fill: rgba(245,245,245,0.025); stroke: rgba(245,245,245,0.17); stroke-width: 0.9; }
+    .zone-dash { fill: rgba(245,245,245,0.025); stroke: #c4c8d4; stroke-width: 0.9; stroke-dasharray: 5,3; }
+    .node { fill: #1c212c; stroke: #f2f3f5; stroke-width: 1.1; }
+    .node-soft { fill: #1c212c; stroke: #c4c8d4; stroke-width: 1; }
+    .node-dash { fill: #1c212c; stroke: #f2f3f5; stroke-width: 1.1; stroke-dasharray: 5,3; }
+    .node-focal { fill: rgba(240,138,89,0.11); stroke: #f08a59; stroke-width: 1.5; }
+    .node-link { fill: rgba(124,166,232,0.10); stroke: #7ca6e8; stroke-width: 1.1; }
+    .div { stroke: rgba(245,245,245,0.13); stroke-width: 0.9; }
+    .div-acc { stroke: rgba(240,138,89,0.32); stroke-width: 0.9; }
+    .lbl-bg { fill: #1c212c; }
+    .h-eye { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 9.5px; font-weight: 600; letter-spacing: 0.14em; fill: #f08a59; }
+    .h-title { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 18px; font-weight: 700; fill: #f2f3f5; }
+    .h-sub { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 11.5px; fill: #c4c8d4; }
+    .eye { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.10em; fill: #9aa4ba; }
+    .eye-acc { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.10em; fill: #f08a59; }
+    .eye-lnk { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.10em; fill: #7ca6e8; }
+    .ttl { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 13.5px; font-weight: 700; fill: #f2f3f5; }
+    .ttl-sm { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 12.5px; font-weight: 700; fill: #f2f3f5; }
+    .ttl-acc { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 14px; font-weight: 700; fill: #f08a59; }
+    .sub { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 10px; fill: #c4c8d4; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8.8px; fill: #c4c8d4; }
+    .mono-ink { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 9.2px; font-weight: 500; fill: #f2f3f5; }
+    .zlbl { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.12em; fill: #9aa4ba; }
+    .zlbl-acc { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.12em; fill: #f08a59; }
+    .edge { fill: none; stroke: #c4c8d4; stroke-width: 1.2; }
+    .edge-dash { fill: none; stroke: #c4c8d4; stroke-width: 1; stroke-dasharray: 4,3; }
+    .edge-acc { fill: none; stroke: #f08a59; stroke-width: 1.5; }
+    .edge-lnk { fill: none; stroke: #7ca6e8; stroke-width: 1.3; }
+    .elbl { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 500; fill: #c4c8d4; }
+    .elbl-acc { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; fill: #f08a59; }
+    .elbl-lnk { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; fill: #7ca6e8; }
+    .ar-m { fill: #c4c8d4; }
+    .ar-a { fill: #f08a59; }
+    .ar-l { fill: #7ca6e8; }
+    .bar { stroke: rgba(191,192,192,0.30); stroke-width: 2; }
+    .bar-acc { stroke: #f08a59; stroke-width: 2; }
+    .fk { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8.5px; font-weight: 600; letter-spacing: 0.08em; fill: #9aa4ba; }
+    .fk-acc { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8.5px; font-weight: 600; letter-spacing: 0.08em; fill: #f08a59; }
+    .fv { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 10px; fill: #f2f3f5; }
+  </style>
+  <defs>
+    <clipPath id="clip-cr-d"><rect x="0.5" y="0.5" width="1119" height="687" rx="10"/></clipPath>
+    <pattern id="dots-cr-d" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.85" class="dot"/>
+    </pattern>
+    <marker id="ar-m-cr-d" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
+      <polygon points="0 0, 7 3, 0 6" class="ar-m"/>
+    </marker>
+    <marker id="ar-mr-cr-d" markerWidth="7" markerHeight="6" refX="0.5" refY="3" orient="auto">
+      <polygon points="7 0, 0 3, 7 6" class="ar-m"/>
+    </marker>
+    <marker id="ar-a-cr-d" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
+      <polygon points="0 0, 7 3, 0 6" class="ar-a"/>
+    </marker>
+    <marker id="ar-ar-cr-d" markerWidth="7" markerHeight="6" refX="0.5" refY="3" orient="auto">
+      <polygon points="7 0, 0 3, 7 6" class="ar-a"/>
+    </marker>
+    <marker id="ar-l-cr-d" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
+      <polygon points="0 0, 7 3, 0 6" class="ar-l"/>
+    </marker>
+    <marker id="ar-lr-cr-d" markerWidth="7" markerHeight="6" refX="0.5" refY="3" orient="auto">
+      <polygon points="7 0, 0 3, 7 6" class="ar-l"/>
+    </marker>
+  </defs>
+  <g clip-path="url(#clip-cr-d)">
+    <rect width="1120" height="688" class="bg"/>
+    <rect x="0" y="76" width="1120" height="532" fill="url(#dots-cr-d)" opacity="0.6"/>
+    <!-- Header -->
+    <text x="24" y="28" class="h-eye">WORKSPACE · RUST CRATES · HEXAGONAL PORTS &amp; ADAPTERS</text>
+    <text x="24" y="51" class="h-title">Rust 워크스페이스 크레이트 의존 구조 (8 Crates)</text>
+    <text x="24" y="67" class="h-sub">bot-core ◄ {bot-profile, bot-gateway, bot-store, bot-runtime, bot-broker, bot-admin} ◄ bot-cli (가운데 6개 상호 의존 금지)</text>
+    <line x1="0" y1="76" x2="1120" y2="76" class="hdr-rule"/>
+
+    <g transform="translate(0,68)">
+      <!-- ZONES -->
+      <rect x="196" y="28" width="728" height="116" rx="8" class="zone"/>
+      <rect x="464" y="22" width="192" height="14" rx="2" class="lbl-bg"/>
+      <text x="560" y="32" text-anchor="middle" class="zlbl">COMPOSITION ROOT · BINARY</text>
+
+      <rect x="28" y="196" width="1064" height="172" rx="8" class="zone"/>
+      <rect x="484" y="190" width="152" height="14" rx="2" class="lbl-bg"/>
+      <text x="560" y="200" text-anchor="middle" class="zlbl">6 DOMAIN CRATES</text>
+
+      <rect x="156" y="416" width="808" height="104" rx="8" class="zone"/>
+      <rect x="176" y="410" width="212" height="14" rx="2" class="lbl-bg"/>
+      <text x="184" y="420" class="zlbl">SHARED KERNEL · PORT TRAITS</text>
+
+      <!-- BUS ARROWS -->
+      <line x1="560" y1="128" x2="560" y2="168" class="edge-acc"/>
+      <path d="M 560,168 H 128 Q 120,168 120,176 V 228" class="edge-acc" marker-end="url(#ar-a-cr-d)"/>
+      <path d="M 560,168 H 304 Q 296,168 296,176 V 228" class="edge-acc" marker-end="url(#ar-a-cr-d)"/>
+      <path d="M 560,168 H 480 Q 472,168 472,176 V 228" class="edge-acc" marker-end="url(#ar-a-cr-d)"/>
+      <path d="M 560,168 H 640 Q 648,168 648,176 V 228" class="edge-acc" marker-end="url(#ar-a-cr-d)"/>
+      <path d="M 560,168 H 816 Q 824,168 824,176 V 228" class="edge-acc" marker-end="url(#ar-a-cr-d)"/>
+      <path d="M 560,168 H 992 Q 1000,168 1000,176 V 228" class="edge-acc" marker-end="url(#ar-a-cr-d)"/>
+
+      <path d="M 120,348 V 380 Q 120,388 128,388 H 552 Q 560,388 560,396 V 440" class="edge" marker-end="url(#ar-m-cr-d)"/>
+      <path d="M 296,348 V 380 Q 296,388 304,388 H 552" class="edge"/>
+      <path d="M 472,348 V 380 Q 472,388 480,388 H 552" class="edge"/>
+      <path d="M 648,348 V 380 Q 648,388 640,388 H 568" class="edge"/>
+      <path d="M 824,348 V 380 Q 824,388 816,388 H 568" class="edge"/>
+      <path d="M 1000,348 V 380 Q 1000,388 992,388 H 568 Q 560,388 560,396 V 440" class="edge" marker-end="url(#ar-m-cr-d)"/>
+
+      <rect x="488" y="150" width="144" height="14" rx="2" class="lbl-bg"/>
+      <text x="560" y="160" text-anchor="middle" class="elbl-acc">어댑터 주입 · 역할 조립</text>
+      <rect x="444" y="381" width="232" height="14" rx="2" class="lbl-bg"/>
+      <text x="560" y="391" text-anchor="middle" class="elbl">오직 bot-core 포트 트레이트만 의존</text>
+
+      <!-- NODES -->
+      <g id="cr-cli">
+        <rect x="240" y="52" width="640" height="76" rx="6" class="node-focal"/>
+        <text x="260" y="74" class="eye-acc">CRATE 08 · DEPENDS ON ALL 7 CRATES</text>
+        <text x="260" y="96" class="ttl-acc">bot-cli</text>
+        <text x="326" y="96" class="mono-ink">(bin: bot)</text>
+        <text x="260" y="114" class="sub">호스트 설정(host.json) · 활성화 지문 · SecretStore 구현 · 스캐폴드(init/add) · 역할별 기동(serve)</text>
+      </g>
+      <g id="cr-profile">
+        <rect x="40" y="228" width="160" height="120" rx="6" class="node"/>
+        <text x="52" y="248" class="eye">CRATE 02</text>
+        <text x="52" y="270" class="ttl-sm">bot-profile</text>
+        <line x1="52" y1="280" x2="188" y2="280" class="div"/>
+        <text x="52" y="298" class="sub">프로필 탐색 · 검증</text>
+        <text x="52" y="314" class="sub">스킬 묶음 · 판본</text>
+        <text x="52" y="334" class="mono">BOTPROFILE1/2</text>
+      </g>
+      <g id="cr-gateway">
+        <rect x="216" y="228" width="160" height="120" rx="6" class="node"/>
+        <text x="228" y="248" class="eye">CRATE 03</text>
+        <text x="228" y="270" class="ttl-sm">bot-gateway</text>
+        <line x1="228" y1="280" x2="364" y2="280" class="div"/>
+        <text x="228" y="298" class="sub">CLI · Slack · HTTP</text>
+        <text x="228" y="314" class="sub">접수 · Outbox 발송</text>
+        <text x="228" y="334" class="mono">OpenAI 호환 입구</text>
+      </g>
+      <g id="cr-store">
+        <rect x="392" y="228" width="160" height="120" rx="6" class="node"/>
+        <text x="404" y="248" class="eye">CRATE 04</text>
+        <text x="404" y="270" class="ttl-sm">bot-store</text>
+        <line x1="404" y1="280" x2="540" y2="280" class="div"/>
+        <text x="404" y="298" class="sub">PostgreSQL 구현</text>
+        <text x="404" y="314" class="sub">큐 · 원장 · 승인 · 감사</text>
+        <text x="404" y="334" class="mono">공개 표면 Store 1개</text>
+      </g>
+      <g id="cr-runtime">
+        <rect x="568" y="228" width="160" height="120" rx="6" class="node"/>
+        <text x="580" y="248" class="eye">CRATE 05</text>
+        <text x="580" y="270" class="ttl-sm">bot-runtime</text>
+        <line x1="580" y1="280" x2="716" y2="280" class="div"/>
+        <text x="580" y="298" class="sub">워커 · 예약 · 위임</text>
+        <text x="580" y="314" class="sub">모델 실행기(API/VM)</text>
+        <text x="580" y="334" class="mono">ContainerSandbox</text>
+      </g>
+      <g id="cr-broker">
+        <rect x="744" y="228" width="160" height="120" rx="6" class="node"/>
+        <text x="756" y="248" class="eye">CRATE 06</text>
+        <text x="756" y="270" class="ttl-sm">bot-broker</text>
+        <line x1="756" y1="280" x2="892" y2="280" class="div"/>
+        <text x="756" y="298" class="sub">도구 인가 · 승인 · 감사</text>
+        <text x="756" y="314" class="sub">모델 프록시 · 릴레이</text>
+        <text x="756" y="334" class="mono">MCP + SrtSandbox</text>
+      </g>
+      <g id="cr-admin">
+        <rect x="920" y="228" width="160" height="120" rx="6" class="node"/>
+        <text x="932" y="248" class="eye">CRATE 07</text>
+        <text x="932" y="270" class="ttl-sm">bot-admin</text>
+        <line x1="932" y1="280" x2="1068" y2="280" class="div"/>
+        <text x="932" y="298" class="sub">관리 API · 내장 UI</text>
+        <text x="932" y="314" class="sub">OTLP 추적 · 로그</text>
+        <text x="932" y="334" class="mono">모든 역할이 관측 사용</text>
+      </g>
+      <g id="cr-core">
+        <rect x="180" y="440" width="760" height="64" rx="6" class="node-focal"/>
+        <text x="200" y="462" class="eye-acc">CRATE 01 · ZERO INTERNAL DEPENDENCIES</text>
+        <text x="200" y="484" class="ttl-acc">bot-core</text>
+        <text x="288" y="484" class="sub">공통 ID·상태 · 포트 트레이트(RunStore, SecretStore, Sandbox) · 내장 도구 단일 표 · 결정적 알고리즘(cron·정규 JSON·해시)</text>
+      </g>
+    </g>
+
+    <!-- Footer Ledger -->
+  <line x1="1" y1="608" x2="1119" y2="608" class="hdr-rule"/>
+  <line x1="24" y1="624" x2="24" y2="672" class="bar-acc"/>
+  <text x="34" y="634" class="fk-acc">단방향 의존 규율</text>
+  <text x="34" y="653" class="fv">가운데 6개 크레이트 간 직접 의존 금지</text>
+  <text x="34" y="669" class="fv">오직 bot-core 포트 트레이트로만 통신</text>
+  <line x1="296" y1="624" x2="296" y2="672" class="bar"/>
+  <text x="306" y="634" class="fk">이중 샌드박스 포트</text>
+  <text x="306" y="653" class="fv">모델 VM(bot_core::sandbox)과 도구 srt</text>
+  <text x="306" y="669" class="fv">(bot_broker::sandbox)는 별개 포트</text>
+  <line x1="568" y1="624" x2="568" y2="672" class="bar"/>
+  <text x="578" y="634" class="fk">결정적 해시 · 지문</text>
+  <text x="578" y="653" class="fv">활성화 지문·정규 JSON·IEEE-754 반올림이</text>
+  <text x="578" y="669" class="fv">전 역할에서 바이트 단위로 동일</text>
+  <line x1="840" y1="624" x2="840" y2="672" class="bar"/>
+  <text x="850" y="634" class="fk">공개 저장소 규약</text>
+  <text x="850" y="653" class="fv">Rust 2024 · 의존성 = 고정(deny.toml)</text>
+  <text x="850" y="669" class="fv">모든 소스 파일 600줄 상한 자동 검증</text>
+  </g>
+  <rect x="0.5" y="0.5" width="1119" height="687" rx="10" fill="none" stroke="#343d50" stroke-width="1"/>
+</svg>
