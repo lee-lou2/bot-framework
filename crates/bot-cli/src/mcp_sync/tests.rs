@@ -242,3 +242,106 @@ fn a_diagnostic_never_repeats_what_the_server_chose_and_the_credential_check_com
         assert!(!why.contains("bearer-value-123456"), "{why}");
     }
 }
+
+#[tokio::test]
+async fn invalid_skill_md_fails_before_reading_secrets_or_connecting_to_remote() {
+    use crate::settings::SecretsKind;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connected = Arc::new(AtomicBool::new(false));
+    let seen = connected.clone();
+    let accept = tokio::spawn(async move {
+        if listener.accept().await.is_ok() {
+            seen.store(true, Ordering::SeqCst);
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("profiles");
+    let skill_dir = root.join("demo/skills/docs");
+    std::fs::create_dir_all(root.join("demo/agents/main")).unwrap();
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        root.join("demo/profile.yaml"),
+        "version: 1\nid: demo\nmodel: assistant\nroles: {owner: [run, docs.read]}\nmembers: [{identity: \"local:owner\", roles: [owner]}]\nbindings: [{id: desk, adapter: cli, account: owner, agent: main}]\nsecrets: [docs-token]\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("demo/agents/main/AGENT.md"), "문서를 읽는다.\n").unwrap();
+    std::fs::write(
+        skill_dir.join("tools.yaml"),
+        format!(
+            "version: 1\nserver: docs\ntools:\n  - id: read\n    class: read\n    scopes: [docs.read]\n    egress: [\"{addr}\"]\n"
+        ),
+    )
+    .unwrap();
+    let host_path = tmp.path().join("host.json");
+    let uid = current_uid().unwrap();
+    std::fs::write(
+        &host_path,
+        json!({
+            "version": 1,
+            "gateway": {"cli": {"accounts": {"owner": {"uid": uid}}}},
+            "models": {"demo": ["assistant"]},
+            "providers": {"assistant": {"kind": "demo"}},
+            "servers": {
+                "docs": {
+                    "transport": "http",
+                    "url": format!("http://{addr}/mcp"),
+                    "auth": {"kind": "bearer", "secret": "docs-token"}
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let settings = Settings {
+        profiles: Some(root),
+        host_config: Some(host_path),
+        database_url: None,
+        socket: None,
+        secrets: SecretsKind::Env,
+        secrets_reread: None,
+        installs: None,
+        admin_token_file: None,
+    };
+
+    let over = "x".repeat(bot_profile::SKILL_MAX_BYTES + 1);
+    for (label, content, want) in [
+        ("단일 32 KiB 초과", over.as_str(), "[skill-too-large]"),
+        (
+            "allowed-tools 금지",
+            "---\nname: docs\nallowed-tools: Bash\n---\n본문\n",
+            "[skill-allowed-tools]",
+        ),
+        ("단독 --- 파일 끝", "---", "[front-matter-unclosed]"),
+        (
+            "폴더명 불일치",
+            "---\nname: other\n---\n본문\n",
+            "[skill-name-mismatch]",
+        ),
+    ] {
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+        let secret_called = Arc::new(AtomicBool::new(false));
+        let flag = secret_called.clone();
+        let err = run_with(&settings, &skill_dir, move || {
+            flag.store(true, Ordering::SeqCst);
+            Err("자격 보관소에 닿으면 안 돼요".to_owned())
+        })
+        .await
+        .expect_err(label);
+        assert!(err.contains(want), "{label}: {err}");
+        assert!(
+            !secret_called.load(Ordering::SeqCst),
+            "{label}: SKILL.md 오류에서 자격을 읽었어요"
+        );
+        assert!(
+            !connected.load(Ordering::SeqCst),
+            "{label}: SKILL.md 오류에서 원격 서버에 접속했어요"
+        );
+        assert!(!skill_dir.join(lock::FILE).exists(), "{label}");
+    }
+    accept.abort();
+}

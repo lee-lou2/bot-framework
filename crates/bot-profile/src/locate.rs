@@ -1,6 +1,7 @@
 //! `bot mcp sync`가 대상 프로필과 스킬을 정하는 길. `validate`와 같은 로더 규칙을 그대로 쓴다: 루트 목록(루트 자체는 링크여도 되지만 그 아래 링크·낱개 파일·이름 규칙 위반은
-//! 거절), 프로필 트리(링크·특수 파일·하드링크·과대 입력 거절, 파일은 한 번만 읽어 메모리에 고정), 폴더 구조, `profile.yaml`의 스키마와 `id`=폴더 이름.
-//! 프로필 전체의 의미 검사(참조·권한)는 하지 않는다 — 아직 잠금이 없는 스킬이 프로필 검증을 막아 첫 동기화를 못 하게 하지 않는다. 프로필을 이렇게 확정하지 못하면
+//! 거절), 프로필 트리(링크·특수 파일·하드링크·과대 입력 거절, 파일은 한 번만 읽어 메모리에 고정), 폴더 구조, `profile.yaml`의 스키마와 `id`=폴더 이름,
+//! 그리고 대상 스킬의 `SKILL.md`(텍스트·front matter·폴더명 일치·빈 본문·단일 32 KiB 상한).
+//! 프로필 전체의 의미 검사(상속 스킬 합계·참조·권한)는 하지 않는다 — 아직 잠금이 없는 스킬이 프로필 검증을 막아 첫 동기화를 못 하게 하지 않는다. 프로필과 대상 스킬을 확정하지 못하면
 //! 호출하는 쪽은 서버에 접속하지도 자격을 읽지도 않는다.
 use crate::{
     issue::{Issue, Issues},
@@ -104,13 +105,26 @@ pub fn locate_skill(root: &Path, dir: &Path, limits: &Limits) -> Result<Located,
         .find(|skill| skill.dir == inside)
         .ok_or_else(not_a_skill)?;
     let bytes = |path: &Option<String>| path.as_deref().and_then(|p| tree.file(p));
-    let (Some(skill_md), Some(tools_yaml)) = (bytes(&skill.skill_md), bytes(&skill.tools)) else {
+    let (Some(skill_md_path), Some(skill_md), Some(tools_yaml)) = (
+        skill.skill_md.as_deref(),
+        bytes(&skill.skill_md),
+        bytes(&skill.tools),
+    ) else {
         return Err(refuse(
             "missing-file",
             dir,
             "스킬 폴더에 SKILL.md와 tools.yaml이 있어야 해요",
         ));
     };
+    // 대상 스킬의 SKILL.md를 접속·자격 조회 전에 `validate`와 같은 규칙으로 검증한다
+    let _ = parse::check_skill_md(&skill.name, skill_md_path, skill_md, limits, &mut issues);
+    if issues.has_errors() {
+        return Err(issues
+            .into_vec()
+            .into_iter()
+            .filter(Issue::is_error)
+            .collect());
+    }
     Ok(Located {
         profile: ProfileId(parts.id),
         profile_dir,

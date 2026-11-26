@@ -96,6 +96,53 @@ fn nothing_is_located_when_the_profile_would_not_load_like_validate() {
 }
 
 #[test]
+fn invalid_target_skill_md_is_refused_before_location_succeeds() {
+    let over = "a".repeat(bot_profile::SKILL_MAX_BYTES + 1);
+    let cases = [
+        ("단일 32 KiB 초과", over.as_str(), "skill-too-large"),
+        (
+            "allowed-tools 금지",
+            "---\nname: agenda\nallowed-tools: Bash\n---\n일정\n",
+            "skill-allowed-tools",
+        ),
+        (
+            "미닫힘 front matter",
+            "---\nname: agenda\n일정\n",
+            "front-matter-unclosed",
+        ),
+        ("단독 --- 파일 끝", "---", "front-matter-unclosed"),
+        (
+            "폴더명과 다른 name",
+            "---\nname: other\n---\n일정\n",
+            "skill-name-mismatch",
+        ),
+        (
+            "미지 키",
+            "---\nname: agenda\nextra: 1\n---\n일정\n",
+            "schema",
+        ),
+        (
+            "front matter 뒤 빈 본문",
+            "---\nname: agenda\n---\n",
+            "empty-file",
+        ),
+    ];
+    for (label, content, want) in cases {
+        let files = edit(base(), &format!("{SKILL}/SKILL.md"), support::DELETE, "");
+        let files = edit(files, &format!("{SKILL}/SKILL.md"), "", content);
+        let root = setup(&files);
+        let codes = locate(&root, &skill_dir(&root)).expect_err(label);
+        assert!(codes.iter().any(|c| c == want), "{label}: {codes:?}");
+    }
+    // 정상 front matter를 가진 SKILL.md는 문제없이 확정한다
+    let valid = "---\nname: agenda\ndescription: 일정 조회\n---\n일정을 조회한다.\n";
+    let files = edit(base(), &format!("{SKILL}/SKILL.md"), support::DELETE, "");
+    let files = edit(files, &format!("{SKILL}/SKILL.md"), "", valid);
+    let root = setup(&files);
+    assert!(locate(&root, &skill_dir(&root)).is_ok());
+}
+
+#[test]
 fn links_special_files_and_paths_outside_the_tree_are_never_followed() {
     let root = setup(&base());
     let dir = skill_dir(&root);
