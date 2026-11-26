@@ -64,6 +64,16 @@ pub struct AddArgs {
     pub what: AddKind,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ToolClass {
+    /// 읽기 전용 도구
+    Read,
+    /// 상태 변경 도구(`policy.approve`에 스코프를 넣으면 사람 승인을 거친다)
+    Write,
+    /// 되돌릴 수 없는 도구(항상 사람 승인을 거친다)
+    Irreversible,
+}
+
 #[derive(Subcommand)]
 pub enum AddKind {
     /// 에이전트 뼈대(AGENT.md)를 더한다. 경로는 계보로 쓴다(예: main/cs)
@@ -79,6 +89,23 @@ pub enum AddKind {
         /// 스킬 이름(소문자·숫자·하이픈)
         name: String,
         /// 이 에이전트의 스킬로 둔다(생략하면 프로필 전체가 보는 스킬)
+        #[arg(long)]
+        agent: Option<String>,
+        /// 프로필 폴더(profile.yaml이 있는 곳, 기본은 현재 폴더)
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// 스킬 폴더의 tools.yaml에 도구 항목을 더한다(권한 상한은 바꾸지 않는다)
+    Tool {
+        /// 도구 ID(`<스킬>.<도구>`, 둘 다 소문자·숫자·하이픈, 예: agenda.search)
+        id: String,
+        /// 위험 등급
+        #[arg(long, value_enum, default_value = "read")]
+        class: ToolClass,
+        /// 도구 서버 별칭(생략하면 기존 tools.yaml의 server 또는 스킬 이름)
+        #[arg(long)]
+        server: Option<String>,
+        /// 스킬이 속한 에이전트 경로(생략하면 프로필에서 해당 스킬을 찾는다)
         #[arg(long)]
         agent: Option<String>,
         /// 프로필 폴더(profile.yaml이 있는 곳, 기본은 현재 폴더)
@@ -294,6 +321,43 @@ mod tests {
             ),
             _ => panic!(),
         }
+        match Cli::try_parse_from([
+            "bot",
+            "add",
+            "tool",
+            "weather.forecast",
+            "--class",
+            "write",
+            "--server",
+            "weather-mcp",
+            "--agent",
+            "main",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Add(AddArgs {
+                what:
+                    AddKind::Tool {
+                        id,
+                        class,
+                        server,
+                        agent,
+                        ..
+                    },
+            }) => assert_eq!(
+                (id.as_str(), class, server.as_deref(), agent.as_deref()),
+                (
+                    "weather.forecast",
+                    ToolClass::Write,
+                    Some("weather-mcp"),
+                    Some("main")
+                )
+            ),
+            _ => panic!(),
+        }
+        assert!(Cli::try_parse_from(["bot", "add", "tool"]).is_err());
+        assert!(Cli::try_parse_from(["bot", "add", "tool", "a.b", "--class", "bad"]).is_err());
         assert!(Cli::try_parse_from(["bot", "add", "agent"]).is_err());
         match Cli::try_parse_from(["bot", "doctor", "--check-db", "--host", "h.json"])
             .unwrap()

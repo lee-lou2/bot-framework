@@ -65,6 +65,13 @@ fn add(args: &AddArgs) -> Result<(), String> {
     let text = match &args.what {
         AddKind::Agent { path, dir } => scaffold::agent(dir, path)?,
         AddKind::Skill { name, agent, dir } => scaffold::skill(dir, name, agent.as_deref())?,
+        AddKind::Tool {
+            id,
+            class,
+            server,
+            agent,
+            dir,
+        } => scaffold::tool(dir, id, *class, server.as_deref(), agent.as_deref())?,
     };
     println!("{text}");
     Ok(())

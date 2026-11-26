@@ -3,8 +3,10 @@
 mod add;
 mod files;
 mod templates;
+mod tool;
 
 pub use add::{agent, skill};
+pub use tool::tool;
 
 use crate::cli::Template;
 use bot_core::id::is_name;

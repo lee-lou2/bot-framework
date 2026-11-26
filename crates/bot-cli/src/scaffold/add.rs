@@ -5,10 +5,10 @@ use bot_core::id::is_name;
 use bot_profile::Limits;
 use std::path::Path;
 
-const NAME_RULE: &str = "소문자로 시작하는 소문자·숫자·하이픈, 63자 이하";
+pub(super) const NAME_RULE: &str = "소문자로 시작하는 소문자·숫자·하이픈, 63자 이하";
 
 /// 에이전트 경로(`main/cs`)를 이름 조각으로 나눈다. 모든 조각이 이름 규칙을 지켜야 한다.
-fn lineage(path: &str) -> Result<Vec<&str>, String> {
+pub(super) fn lineage(path: &str) -> Result<Vec<&str>, String> {
     let parts: Vec<&str> = path.split('/').collect();
     match parts.iter().find(|part| !is_name(part)) {
         Some(bad) => Err(format!(
@@ -19,11 +19,11 @@ fn lineage(path: &str) -> Result<Vec<&str>, String> {
 }
 
 /// 계보 → 프로필 폴더 안의 경로 조각: `main/cs` → `agents/main/agents/cs`
-fn agent_dir<'a>(lineage: &[&'a str]) -> Vec<&'a str> {
+pub(super) fn agent_dir<'a>(lineage: &[&'a str]) -> Vec<&'a str> {
     lineage.iter().flat_map(|part| ["agents", *part]).collect()
 }
 
-fn open(dir: &Path) -> Result<Writer, String> {
+pub(super) fn open(dir: &Path) -> Result<Writer, String> {
     let writer = Writer::new(dir)?;
     if !writer.file_exists(&["profile.yaml"])? {
         return Err(format!(
@@ -35,14 +35,14 @@ fn open(dir: &Path) -> Result<Writer, String> {
 }
 
 /// 에이전트 폴더(AGENT.md가 있는 폴더)가 이미 있는가
-fn has_agent(writer: &Writer, lineage: &[&str]) -> Result<bool, String> {
+pub(super) fn has_agent(writer: &Writer, lineage: &[&str]) -> Result<bool, String> {
     let mut parts = agent_dir(lineage);
     parts.push("AGENT.md");
     writer.file_exists(&parts)
 }
 
 /// 파일 하나를 만든다. 실패하면 우리가 만든 빈 폴더만 지우고(파일은 이름으로 안전하게 지울 수 없어 남긴다) 남은 파일의 경로를 알린다.
-fn finish(mut writer: Writer, rel: &str, text: &str) -> Result<(), String> {
+pub(super) fn finish(mut writer: Writer, rel: &str, text: &str) -> Result<(), String> {
     writer.write(rel, text).map_err(|error| {
         let left = writer.undo();
         if left.is_empty() {
@@ -168,6 +168,6 @@ pub fn skill(dir: &Path, name: &str, agent: Option<&str>) -> Result<String, Stri
     let rel = format!("{}/SKILL.md", target.join("/"));
     finish(writer, &rel, &templates::skill_md(name))?;
     Ok(format!(
-        "만들었어요: {rel}\n다음:\n  - SKILL.md의 description과 순서를 채워 주세요(맨 위 `---` front matter는 메타데이터로 검증하고 모델 프롬프트에는 본문만 전달돼요).\n  - 도구(tools.yaml)와 권한은 만들지 않았어요. 도구가 필요하면 tools.yaml을 직접 만들고, 필요한 스코프는 profile.yaml의 roles·policy에 직접 허용해 주세요 — 권한 상한은 자동으로 바꾸지 않아요.\n  - `bot validate`로 확인해 주세요."
+        "만들었어요: {rel}\n다음:\n  - SKILL.md의 description과 순서를 채워 주세요(맨 위 `---` front matter는 메타데이터로 검증하고 모델 프롬프트에는 본문만 전달돼요).\n  - 도구(tools.yaml)와 권한은 만들지 않았어요. 도구가 필요하면 `bot add tool {name}.<도구>`로 tools.yaml에 항목을 더하고, 필요한 스코프는 profile.yaml의 roles·policy에 직접 허용해 주세요 — 권한 상한은 자동으로 바꾸지 않아요.\n  - `bot validate`로 확인해 주세요."
     ))
 }

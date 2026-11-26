@@ -15,14 +15,14 @@
 use rustix::{
     fs::{
         AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, Stat, fstat, mkdirat, open, openat,
-        renameat_with, statat, unlinkat,
+        renameat, renameat_with, statat, unlinkat,
     },
     io::Errno,
     process::{geteuid, umask},
 };
 use std::{
     fs::File,
-    io::Write,
+    io::{Read, Write},
     os::fd::OwnedFd,
     path::Path,
     sync::Mutex,
@@ -178,6 +178,99 @@ impl Writer {
         }
         names.sort();
         Ok(names)
+    }
+
+    /// `parts`가 이미 있는 일반 파일이면 링크를 따라가지 않고 `max_bytes` 이하로 읽는다. 링크·특수 파일·크기 초과는 거절한다.
+    pub fn read_regular(&self, parts: &[&str], max_bytes: u64) -> Result<Vec<u8>, String> {
+        let Some((last, parents)) = parts.split_last() else {
+            return Err("빈 경로예요".into());
+        };
+        if !plain(last) {
+            return Err(format!("경로 조각이 올바르지 않아요: {last:?}"));
+        }
+        let shown = parts.join("/");
+        let (depth, dir) = self.present(parents)?;
+        if depth < parents.len() {
+            return Err(format!("{shown}이(가) 없어요"));
+        }
+        let fd = openat(
+            &dir,
+            *last,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|errno| match errno {
+            Errno::NOENT => format!("{shown}이(가) 없어요"),
+            Errno::LOOP => format!("{shown}은(는) 링크라 따라가지 않아요"),
+            error => format!("{shown}을(를) 열지 못했어요: {error}"),
+        })?;
+        let stat = fstat(&fd).map_err(|_| format!("{shown}을(를) 확인하지 못했어요"))?;
+        if kind(&stat) != FileType::RegularFile {
+            return Err(format!("{shown}은(는) 일반 파일이 아니에요"));
+        }
+        if stat.st_size < 0 || stat.st_size as u64 > max_bytes {
+            return Err(format!(
+                "{shown}이(가) 크기 한도({max_bytes} 바이트)를 넘어요"
+            ));
+        }
+        let mut buf = Vec::new();
+        File::from(fd)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut buf)
+            .map_err(|error| format!("{shown}을(를) 읽지 못했어요: {error}"))?;
+        if buf.len() as u64 > max_bytes {
+            return Err(format!(
+                "{shown}이(가) 크기 한도({max_bytes} 바이트)를 넘어요"
+            ));
+        }
+        Ok(buf)
+    }
+
+    /// 이미 있는 일반 파일 `rel`을 같은 폴더 안의 임시 파일로 쓴 뒤 원자적으로 바꾼다(링크는 따라가지 않고 거절한다).
+    pub fn replace_regular(&self, rel: &str, content: &str) -> Result<(), String> {
+        let parts: Vec<&str> = rel.split('/').collect();
+        let Some((name, dirs)) = parts.split_last() else {
+            return Err("빈 경로예요".into());
+        };
+        if !parts.iter().all(|part| plain(part)) {
+            return Err(format!("경로가 올바르지 않아요: {rel:?}"));
+        }
+        let (depth, dir) = self.present(dirs)?;
+        if depth < dirs.len() {
+            return Err(format!("{rel}의 상위 폴더가 없어요"));
+        }
+        let stat = statat(&dir, *name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| format!("{rel}을(를) 확인하지 못했어요"))?;
+        match kind(&stat) {
+            FileType::RegularFile => {}
+            FileType::Symlink => return Err(format!("{rel}은(는) 링크라 덮어쓰지 않아요")),
+            _ => return Err(format!("{rel}은(는) 일반 파일이 아니에요")),
+        }
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        for attempt in 0..32u32 {
+            let tmp = format!(".bot-add-tool-{}-{seed:x}-{attempt}", std::process::id());
+            let fd = match openat(
+                &dir,
+                tmp.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o666),
+            ) {
+                Ok(fd) => fd,
+                Err(Errno::EXIST) => continue,
+                Err(error) => return Err(format!("{rel} 임시 파일을 만들지 못했어요: {error}")),
+            };
+            if let Err(error) = File::from(fd).write_all(content.as_bytes()) {
+                let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty());
+                return Err(format!("{rel}을(를) 쓰지 못했어요: {error}"));
+            }
+            return renameat(&dir, tmp.as_str(), &dir, *name).map_err(|error| {
+                let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty());
+                format!("{rel}을(를) 바꾸지 못했어요: {error}")
+            });
+        }
+        Err(format!("{rel} 임시 파일 이름을 정하지 못했어요"))
     }
 
     /// 새 파일을 만든다(필요한 폴더도 새로 만든다). `rel`은 `/`로 구분한 기준 폴더 아래 상대 경로다.

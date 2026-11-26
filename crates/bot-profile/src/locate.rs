@@ -6,11 +6,13 @@ use crate::{
     issue::{Issue, Issues},
     layout::{self, SkillFiles},
     limits::Limits,
-    parse, profile,
+    lock, parse, profile,
     scan::{self, Tree},
     schemas::bundled,
+    text, tools, yaml,
 };
 use bot_core::id::ProfileId;
+use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
 /// 확정한 프로필과 스킬. 바이트는 트리를 읽을 때 고정한 것이다(디스크를 다시 읽지 않는다).
@@ -190,4 +192,93 @@ pub fn check_skill(
         });
     }
     Ok(())
+}
+
+/// `tools.yaml` 한 파일을 프로필 로더와 같은 규칙으로 해석한 결과(`bot add tool` 검증·병합용).
+#[derive(Debug)]
+pub struct ToolsDoc {
+    pub server: String,
+    pub tool_ids: Vec<String>,
+    pub value: Value,
+}
+
+/// `tools.yaml` 바이트를 텍스트·YAML·번들 `tools.schema.json`으로 읽고 검증한다.
+/// `check_rules`가 참이면 `tools::parse`(예약 ID·중복·`input`/잠금·egress·destination)까지 검사한다.
+pub fn parse_tools_yaml(
+    skill: &str,
+    path: &str,
+    bytes: &[u8],
+    lock_bytes: Option<&[u8]>,
+    check_rules: bool,
+    limits: &Limits,
+) -> Result<ToolsDoc, Vec<Issue>> {
+    let mut issues = Issues::new(limits.max_issues);
+    let raw = match text::check_text(path, bytes) {
+        Ok(text) => text,
+        Err(issue) => return Err(vec![issue]),
+    };
+    let value = match yaml::parse(path, raw, limits) {
+        Ok(value) => value,
+        Err(issue) => return Err(vec![issue]),
+    };
+    for v in bundled().tools.validate(&value) {
+        issues.error_at("schema", path, v.pointer, v.message);
+    }
+    if issues.has_errors() {
+        return Err(issues.into_vec());
+    }
+    if check_rules {
+        let parsed_lock = match lock_bytes {
+            Some(raw_lock) => {
+                let lock_path = format!("{skill}/{}", crate::lock::FILE);
+                let lock_text = match text::check_text(&lock_path, raw_lock) {
+                    Ok(t) => t,
+                    Err(issue) => return Err(vec![issue]),
+                };
+                let lock_val = match yaml::parse(&lock_path, lock_text, limits) {
+                    Ok(v) => v,
+                    Err(issue) => return Err(vec![issue]),
+                };
+                match lock::parse(&lock_val, &lock_path, limits, &mut issues) {
+                    Some(parsed) => Some(parsed),
+                    None => return Err(issues.into_vec()),
+                }
+            }
+            None => None,
+        };
+        let _ = tools::parse(
+            &value,
+            skill,
+            path,
+            limits,
+            parsed_lock.as_ref(),
+            &mut issues,
+        );
+        if issues.has_errors() {
+            return Err(issues
+                .into_vec()
+                .into_iter()
+                .filter(Issue::is_error)
+                .collect());
+        }
+    }
+    let server = value
+        .get("server")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let tool_ids = value
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ToolsDoc {
+        server,
+        tool_ids,
+        value,
+    })
 }
