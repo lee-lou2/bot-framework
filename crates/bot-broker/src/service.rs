@@ -134,10 +134,7 @@ impl Broker for BrokerService {
             };
             match preflight::confirm(self.parts.ledger.as_ref(), Some(self), call, reason).await {
                 Ok(true) => Ok(ModelCall::Refused(reason)),
-                // 입력·도구 없음이 고정 선언과 일치하지 않으면 저장소에서 비롯된 오류일 수 있다.
-                Ok(false) if matches!(error, Error::Invalid | Error::Missing) => {
-                    Err(Error::Unavailable)
-                }
+                // 원래 오류는 호출자에게 넘기고, 사전 판정이 확인한 거절만 표식으로 만든다.
                 Ok(false) => Err(error),
                 Err(Error::Stale) => Err(Error::Stale),
                 Err(_) => Err(Error::Unavailable),

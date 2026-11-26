@@ -231,6 +231,98 @@ async fn both_dialects_record_and_return_a_schedule_beyond_the_time_limit_as_inv
     }
 }
 
+async fn schedule_error_reaches_model(
+    kind: ApiKind,
+    request: Call,
+    expected: &str,
+    db_ahead: bool,
+) {
+    let Some(w) = builtin_world().await else {
+        return;
+    };
+    if db_ahead {
+        w.pg.sql("create or replace function bot_now_ms() returns bigint language sql volatile as 'select floor(extract(epoch from clock_timestamp()) * 1000)::bigint + 3600000'").await;
+    }
+    let api = FakeApi::start().await;
+    api.script(calls(kind, "", vec![request], None));
+    api.script(text(kind, "요청을 다시 확인해 주세요", None));
+    let run = accept(&w, "schedule-input-error", ConversationKind::Direct).await;
+    let worker = w.worker(&w.pg.store, models(kind, &api), config());
+    assert_eq!(
+        worker.run_once().await,
+        Some(Outcome::Succeeded),
+        "{kind:?}"
+    );
+    let seen = api.seen();
+    assert_eq!(seen.len(), 2);
+    let body = seen[1].json();
+    let content = &body["messages"].as_array().unwrap().last().unwrap()["content"];
+    assert_eq!(
+        content.as_str().or_else(|| content[0]["content"].as_str()),
+        Some(expected)
+    );
+    assert!(view::marks(&w, &run).await.is_empty());
+    assert_eq!(
+        w.pg.scalar::<i64>("select count(*) from bot_user_schedules")
+            .await,
+        0
+    );
+}
+
+async fn a_missing_schedule(kind: ApiKind) {
+    schedule_error_reaches_model(
+        kind,
+        call("schedule.cancel", json!({"id":"sched-missing"})),
+        "unknown_tool",
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn anthropic_continues_after_cancelling_a_missing_schedule() {
+    a_missing_schedule(ApiKind::Anthropic).await;
+}
+
+#[tokio::test]
+async fn openai_continues_after_cancelling_a_missing_schedule() {
+    a_missing_schedule(ApiKind::OpenAi).await;
+}
+
+#[tokio::test]
+async fn a_timezone_rejected_by_the_store_is_returned_to_both_models() {
+    for kind in KINDS {
+        schedule_error_reaches_model(
+            kind,
+            call(
+                "schedule.create",
+                json!({"cron":"* * * * *", "timezone":"Factory", "instruction":"알려 주세요"}),
+            ),
+            "실패: invalid_args",
+            false,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn both_models_get_a_schedule_timing_error_when_the_db_clock_is_ahead() {
+    for kind in KINDS {
+        let at = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        let at = bot_core::schedule::utc::format_utc(at);
+        schedule_error_reaches_model(
+            kind,
+            call(
+                "schedule.create",
+                json!({"at":at, "instruction":"알려 주세요"}),
+            ),
+            "실패: invalid_args",
+            true,
+        )
+        .await;
+    }
+}
+
 #[tokio::test]
 async fn both_dialects_approve_the_destination_then_each_draft_and_can_list_and_cancel() {
     for kind in KINDS {

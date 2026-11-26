@@ -144,7 +144,7 @@ pub enum ModelCall {
 
 pub trait Broker: Send + Sync {
     fn call(&self, call: ToolCall) -> Reply<'_, CallResult>;
-    /// 검증된 모델 계획의 호출. 미확정 오류는 바깥 `Err`로 남겨 재판정한다.
+    /// 검증된 모델 계획의 호출. 표식으로 남길 근거가 없는 오류는 바깥 `Err`로 돌려준다.
     /// 결정 전용 포트 등 호출 원인을 확인할 수 없는 구현은 실행을 시작하지 않는다.
     fn call_for_model(&self, _: ToolCall) -> Reply<'_, ModelCall> {
         Box::pin(async { Err(Error::Unavailable) })

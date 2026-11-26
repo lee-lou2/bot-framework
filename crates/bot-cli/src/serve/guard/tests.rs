@@ -300,3 +300,38 @@ async fn a_stale_worker_starts_no_tool_but_still_passes_decisions_through() {
         .unwrap();
     assert_eq!(inner.decisions().len(), 1);
 }
+
+#[tokio::test]
+async fn only_a_current_worker_can_forward_a_model_call_to_the_broker() {
+    use bot_core::cli::CliRefusal;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct ModelBroker(AtomicUsize);
+    impl Broker for ModelBroker {
+        fn call(&self, _: ToolCall) -> Reply<'_, CallResult> {
+            panic!("모델 호출 전용 포트를 써야 한다");
+        }
+        fn call_for_model(&self, _: ToolCall) -> Reply<'_, ModelCall> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(ModelCall::Refused(CliRefusal::Denied)) })
+        }
+        fn decide(&self, _: ApprovalId, _: PrincipalId, _: bool) -> Reply<'_, ()> {
+            unavailable()
+        }
+    }
+
+    let active = MemoryActive::new(Some("set-1"));
+    let inner = Arc::new(ModelBroker::default());
+    let outer = GuardedBroker::new(inner.clone(), active.check("set-1"));
+    assert!(matches!(
+        outer.call_for_model(call()).await,
+        Ok(ModelCall::Refused(CliRefusal::Denied))
+    ));
+    active.set(Some("set-2"));
+    assert!(matches!(
+        outer.call_for_model(call()).await,
+        Err(Error::Stale)
+    ));
+    assert_eq!(inner.0.load(Ordering::SeqCst), 1);
+}
