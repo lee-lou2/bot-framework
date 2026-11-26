@@ -9,7 +9,7 @@
 | 실행(run) | `RunId`, 표 `bot_runs`, `RunState` | 접수 하나가 만드는 일의 단위. 루트 run은 `root = id`이고 위임한 자식 run은 `parent`·`parent_step`을 가진다. 상태는 `Ready`·`Leased`·`Waiting`·`Retry`·`Succeeded`·`Dead`·`Cancelled`다. |
 | 점유(claim) | `RunStore::claim`, `RunContext` | 워커가 준비된 run 하나를 가져가는 일과 그 결과. 점유할 때마다 `claim_epoch`이 오른다. |
 | 리스(lease) | `lease_until_ms`, `RunStore::renew` | 점유한 워커의 소유 기한. 하트비트가 `renew`로 늘리고, 만료되면 다른 워커가 인계한다. 문서의 "리스(claim)"는 점유와 그 기한을 함께 가리킨다. |
-| 세대(generation) | `Generation`, `bot_runs.generation` | 소유권 인계 때 오르는 펜싱 값. 인계는 옛 승인을 무효로 만들고, 승인·자식 결과를 기다리다 자발적으로 재개할 때는 유지한다(`keep_generation`). |
+| 세대(generation) | `Generation`, `bot_runs.generation` | 옛 세대가 연 승인을 무효로 만드는 펜싱 값. 점유할 때마다 오르고, `keep_generation`이 켜진 점유만 그대로 둔다. 그대로 두는 점유: 승인·자식 결과·보류 판정을 기다리다 깨어난 점유, 종료 반납 직후의 첫 점유(반납 때 이미 한 번 올렸다). 그 밖에는 오른다: 첫 점유(0→1)·일시 실패 재시도·리스 만료 인계·`bot/pass`로 다음 후보에 넘긴 뒤의 점유. |
 | claim_epoch | `ClaimEpoch`, `bot_runs.claim_epoch` | **모든** 점유(정상 재개 포함)마다 오르는 run별 단조 증가 값. 같은 세대 안에서도 낡은 점유자의 쓰기를 막는다. |
 | 시도(attempt) | `Attempt` | 한 점유의 신원(프로필·run·세대·claim_epoch). 소유자 검사의 열쇠다. `claim`이 `None`이면 신원만 담은 값(승인·UI·추적)이라 워커 작업을 인가하지 못한다. **오독 주의**: `bot_runs.attempts` 열은 이 값이 아니라 실패·리스 만료로 소모한 재시도 횟수다. |
 
@@ -41,7 +41,7 @@
 |---|---|
 | `cli` | `bot_core::cli`는 CLI 입구가 아니라 **Claude CLI가 낸 도구 호출의 위치**(체크포인트 키)와 실행 전 확정 거절(`CliRefusal`) 계약이다. `bot_gateway::cli`는 CLI 입구(유닉스 소켓), `bot-cli`는 `bot` 바이너리 크레이트다. |
 | `Sandbox` | `bot_core::sandbox::Sandbox<ModelSpec>`은 모델 VM(`ContainerSandbox`), `bot_broker::sandbox::Sandbox`는 도구 서버(srt, `SrtSandbox`)다. 둘을 묶는 공통 포트는 없다. |
-| `Delivery` | 게이트웨이(`bot_gateway::delivery`)에서는 발송 결과, 워커(`bot_runtime::worker`)에서는 예약 회신을 다루는 포트 묶음이다. |
+| `Delivery` | 게이트웨이(`bot_gateway::delivery`)에서는 발송 결과, 워커(`bot_runtime::worker`)에서는 예약 회신을 다루는 포트 묶음, `bot-cli`의 관리 화면 기동(`serve::admin`)에서는 운영자 비밀을 내보낼 곳(터미널·파일)이다. |
 
 ## 주석의 F1~F4
 
@@ -59,4 +59,4 @@ v2.2에 함께 들어온 네 기능의 내부 번호다. 새 코드와 주석에
 | 문서의 말 | 코드 | 뜻 |
 |---|---|---|
 | 효과(effect) | `EffectId`, `EffectState` | 도구가 외부에 쓰는 일의 한 단계. 결과를 알 수 없는 효과는 `Held`로 멈추고 운영자가 판정한다(보류, `HoldId`). |
-| 활성 집합 | `ActiveRevisions` | 프로필 판본과 권한에 영향을 주는 호스트 설정을 함께 묶은 값. 바꾸면 `bot serve --activate`로 새 집합을 올려야 하고, 옛 설정으로 남은 프로세스는 구판이다([게이트웨이 운영](gateway.md)). |
+| 활성 집합 | `ActiveRevisions`(포트), `Revision` | 지금 게시된 프로필 집합과 그 판본. `ActiveRevisions`는 게시된 전체 집합의 판본(`Revision`)을 읽고 한 번에 교체(CAS)하는 포트(트레이트)이고, 판본 값은 프로필 판본과 권한에 영향을 주는 호스트 설정을 함께 묶는다. 바꾸면 `bot serve --activate`로 새 집합을 올려야 하고, 옛 설정으로 남은 프로세스는 구판이다([게이트웨이 운영](gateway.md)). |
