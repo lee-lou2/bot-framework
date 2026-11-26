@@ -1,5 +1,6 @@
 """Validate schemas, example manifests, the public file list (length limit, no editor leftovers), the CI workflow hardening, the Rust toolchain pin and the pinned SDK test environment."""
 import hashlib
+import importlib.util
 import json
 import re
 import shlex
@@ -391,6 +392,14 @@ def npm_problems(tokens):
         elif not arg.startswith("-") and not NPM_PACKAGE_EXACT.fullmatch(arg):
             problems.append(f"`npm {command} {arg}` must name an exact version (`name@x.y.z`)")
     return problems
+
+
+def check_docs():
+    """Documents must name what the code defines and cite only paths that exist (the rules live in docs_contract.py next to this file; `-I` drops this folder from `sys.path`, so load it by path)."""
+    spec = importlib.util.spec_from_file_location("docs_contract", Path(__file__).with_name("docs_contract.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.check()
 
 
 def main():
