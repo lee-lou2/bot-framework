@@ -10,6 +10,7 @@ test("the known call recovery reasons have operator-facing labels", () => {
   assert.equal(holdReason("response_unknown"), "최종 응답을 알 수 없음");
   assert.equal(holdReason("effects_unresolved"), "미확정 단계 있음");
   assert.equal(holdReason("previous_process_unconfirmed"), "이전 실행기 종료 미확인");
+  assert.equal(holdReason("missing_transport"), "발송 어댑터 미지정");
   assert.equal(holdReason("other"), "기타");
 });
 

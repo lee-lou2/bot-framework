@@ -265,3 +265,201 @@ async fn a_non_slack_origin_cannot_open_the_slack_only_owner_dm_path() {
         );
     }
 }
+
+#[tokio::test]
+async fn missing_transport_reply_is_held_with_open_hold_and_does_not_block_later_replies() {
+    use bot_core::admin::{AdminRead, HoldKind};
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let req = accept_as(
+        "personal",
+        "legacy-null",
+        "slack:home/U1",
+        ConversationKind::Direct,
+        "D1",
+        "hi",
+    );
+    let run = runs(&db).accept(req).await.unwrap();
+    let ctx = runs(&db).claim().await.unwrap().unwrap();
+    assert_eq!(ctx.attempt.run, run);
+    // 구판 미매핑 푸시 실행(reply_transport IS NULL)을 재현한다.
+    sqlx::query(
+        "update bot_runs set reply_transport = null where profile = 'personal' and id = $1",
+    )
+    .bind(&run.0)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+
+    // 실행 완료가 실패해 큐가 멈추지 않고, 회신은 pending 대신 즉시 held로 열린다.
+    assert_eq!(
+        runs(&db).finish(ctx.attempt, done("답")).await.unwrap(),
+        Completion::Succeeded
+    );
+    assert_eq!(state_of_run(&db, &run).await, "succeeded");
+    let row: (String, Option<String>, String) = sqlx::query_as(
+        "select state, reason, transport from bot_outbox where profile = 'personal' and run = $1 and seq = 0",
+    )
+    .bind(&run.0)
+    .fetch_one(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            "held".to_owned(),
+            Some("missing_transport".to_owned()),
+            String::new()
+        )
+    );
+    assert!(ob(&db).claim(&SLACK, 10).await.unwrap().is_empty());
+
+    // 운영자 보류 목록에 열린 hold_id와 함께 보이고 감사 로그도 남는다.
+    let holds = AdminRead::holds(
+        &db.store,
+        &support::admin::operator(),
+        Some(ProfileId("personal".into())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0].kind, HoldKind::Reply);
+    assert_eq!(holds[0].run, run);
+    assert_eq!(holds[0].reason, "missing_transport");
+    assert!(holds[0].hold_id.is_some());
+    assert_eq!(
+        db.scalar::<i64>(
+            "select count(*) from bot_audit where action = 'outbox.held' and verdict = 'missing_transport'",
+        )
+        .await,
+        1
+    );
+
+    // 같은 run의 뒤 순번 정상 회신(seq = 1)을 앞선 held 행이 HOL-블록하지 않는다.
+    sqlx::query(
+        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, body, transport)
+         values ('personal', $1, 1, 'reply:' || $1 || ':1', 'desk', 'slack:home/U1', 'direct', 'D1', '{\"text\":\"뒤\"}', 'slack')",
+    )
+    .bind(&run.0)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    let claimed = ob(&db).claim(&SLACK, 10).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].key.seq, 1);
+    assert_eq!(db.store.verify().await.unwrap().first_bad, None);
+}
+
+#[tokio::test]
+async fn resolve_reply_refuses_not_executed_for_empty_transport_but_allows_confirmed() {
+    use bot_core::admin::{AdminAct, AdminRead, HoldDecision, HoldRef, HoldVerdict};
+
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let req = accept_as(
+        "personal",
+        "empty-hold",
+        "slack:home/U1",
+        ConversationKind::Direct,
+        "D1",
+        "hi",
+    );
+    let run = runs(&db).accept(req).await.unwrap();
+    let ctx = runs(&db).claim().await.unwrap().unwrap();
+    sqlx::query(
+        "update bot_runs set reply_transport = null where profile = 'personal' and id = $1",
+    )
+    .bind(&run.0)
+    .execute(db.store.pool())
+    .await
+    .unwrap();
+    runs(&db).finish(ctx.attempt, done("답")).await.unwrap();
+
+    let view = AdminRead::holds(
+        &db.store,
+        &support::admin::operator(),
+        Some(ProfileId("personal".into())),
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    let hold = HoldRef {
+        profile: view.profile,
+        run: view.run.clone(),
+        call: view.call,
+        effect: None,
+        hold_id: view.hold_id.expect("열린 보류 ID"),
+    };
+    let actor = PrincipalId("local:operator".into());
+    // transport = ''인 회신을 NotExecuted로 pending 되돌리려는 시도는 거절하고 보류를 유지한다.
+    assert!(matches!(
+        AdminAct::resolve_hold(
+            &db.store,
+            actor.clone(),
+            hold.clone(),
+            HoldVerdict::NotExecuted {
+                evidence: "미발송 확인".into(),
+            },
+        )
+        .await,
+        Err(Error::Conflict)
+    ));
+    assert_eq!(state_of(&db, 0).await, "held");
+    assert_eq!(
+        db.scalar::<i64>("select count(*) from bot_holds where closed_ms is null")
+            .await,
+        1
+    );
+    assert_eq!(
+        db.scalar::<i64>("select count(*) from bot_audit where action = 'hold.resolve'")
+            .await,
+        0
+    );
+    // 수동 확인(Confirmed)은 정상적으로 닫는다.
+    assert_eq!(
+        AdminAct::resolve_hold(
+            &db.store,
+            actor,
+            hold,
+            HoldVerdict::Confirmed {
+                receipt: "manual-receipt-1".into(),
+            },
+        )
+        .await
+        .unwrap(),
+        HoldDecision::Applied
+    );
+    assert_eq!(state_of(&db, 0).await, "confirmed");
+    assert_eq!(db.store.verify().await.unwrap().first_bad, None);
+}
+
+#[tokio::test]
+async fn bot_runs_check_rejects_empty_reply_transport() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let req = accept_as(
+        "personal",
+        "empty-check",
+        "slack:home/U1",
+        ConversationKind::Direct,
+        "D1",
+        "hi",
+    );
+    let run = runs(&db).accept(req).await.unwrap();
+    let err = sqlx::query(
+        "update bot_runs set reply_transport = '' where profile = 'personal' and id = $1",
+    )
+    .bind(&run.0)
+    .execute(db.store.pool())
+    .await
+    .unwrap_err();
+    let code = err
+        .as_database_error()
+        .and_then(|db_err| db_err.code())
+        .map(|c| c.into_owned());
+    assert_eq!(code.as_deref(), Some("23514"));
+}

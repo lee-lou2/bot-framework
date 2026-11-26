@@ -100,7 +100,9 @@ fn scheduler(w: &World, routes: Option<Arc<Routes>>) -> Scheduler {
 
 /// 한 번 하는 예약 하나를 DB에 둔다: 두 분 전이 예정이라 지금 발화해야 한다. `destination`은 봉인한 수신자(없으면 원래 대화).
 async fn plant(w: &World, id: &str, destination: Option<&str>) {
-    let origin = w.accept(&format!("origin-{id}"), "예약을 만든 대화").await;
+    let origin = w
+        .accept_slack_dm(&format!("origin-{id}"), "예약을 만든 대화")
+        .await;
     let (binding, kind, dest) = match destination {
         Some(dest) => ("'slack'", "'channel'", format!("'{dest}'")),
         None => ("null", "null", "null".to_owned()),

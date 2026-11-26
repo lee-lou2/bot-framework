@@ -1,6 +1,6 @@
 -- 회신의 발송 책임. 원래 대화의 키를 run에 두고 실제 목적지의 키를 회신 행에 둔다.
 alter table bot_runs add column reply_transport text check (
-    reply_transport is null or (not private and conv_kind in ('direct', 'channel'))
+    reply_transport is null or (reply_transport <> '' and not private and conv_kind in ('direct', 'channel'))
 );
 -- 빈 값은 구판 자료 중 책임을 판정할 수 없는 회신이다. 제품의 발송 키는 비어 있지 않다.
 alter table bot_outbox add column transport text not null default '';

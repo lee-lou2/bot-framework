@@ -19,7 +19,7 @@ use bot_broker::{
 use bot_core::{
     command::*,
     id::*,
-    intake::RequestKey,
+    intake::{PushTransportId, RequestKey},
     port::RunStore,
     profile::{ActiveRevisions, Snapshot},
     state::{Conversation, ConversationKind, Risk},
@@ -328,6 +328,14 @@ impl World {
             .accept(command(request, text))
             .await
             .expect("접수")
+    }
+
+    /// Slack DM(push) 대화로 접수한다(바인딩 `desk`·발송자 키 `slack`).
+    pub async fn accept_slack_dm(&self, request: &str, text: &str) -> RunId {
+        let mut cmd = command(request, text);
+        cmd.reply_transport = Some(PushTransportId::SLACK);
+        cmd.event.conversation.kind = ConversationKind::Direct;
+        self.pg.store.accept(cmd).await.expect("접수")
     }
 
     pub async fn status(&self, request: &str) -> bot_core::intake::RequestState {

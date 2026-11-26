@@ -41,11 +41,15 @@ pub(crate) async fn push(tx: &mut Tx<'_>, schedule: &PgRow, text: &str) -> R<()>
         serde_json::json!({ "text": text }).to_string(),
     ))?;
     let (profile, run): (String, String) = (schedule.get("profile"), schedule.get("origin_run"));
-    sqlx::query(
-        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body, transport)
-         select $1, $2, n.seq, 'reply:' || $2 || ':' || n.seq::text, $3, $4, $5, $6, $7, $8, coalesce(r.reply_transport, '')
+    let inserted: Option<(String, String)> = sqlx::query_as(
+        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body, state, reason, transport)
+         select $1, $2, n.seq, 'reply:' || $2 || ':' || n.seq::text, $3, $4, $5, $6, $7, $8,
+                case when coalesce(r.reply_transport, '') = '' then 'held' else 'pending' end,
+                case when coalesce(r.reply_transport, '') = '' then 'missing_transport' else null end,
+                coalesce(r.reply_transport, '')
          from bot_runs r, lateral (select coalesce(max(o.seq) + 1, 0) as seq from bot_outbox o where o.profile = $1 and o.run = $2) n
-         where r.profile = $1 and r.id = $2",
+         where r.profile = $1 and r.id = $2
+         returning call, state",
     )
     .bind(&profile)
     .bind(&run)
@@ -55,7 +59,12 @@ pub(crate) async fn push(tx: &mut Tx<'_>, schedule: &PgRow, text: &str) -> R<()>
     .bind(schedule.get::<String, _>("origin_id"))
     .bind(schedule.get::<Option<String>, _>("origin_thread"))
     .bind(body)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
+    if let Some((call, state)) = inserted
+        && state == "held"
+    {
+        crate::finish::hold_missing_transport(tx, &profile, &run, &call).await?;
+    }
     Ok(())
 }

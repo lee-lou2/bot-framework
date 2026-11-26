@@ -245,8 +245,8 @@ impl Store {
         if hold.effect.is_some() {
             return invalid();
         }
-        let state: String = sqlx::query_scalar(
-            "select state from bot_outbox where profile = $1 and run = $2 and seq = $3 for update",
+        let (state, transport): (String, String) = sqlx::query_as(
+            "select state, transport from bot_outbox where profile = $1 and run = $2 and seq = $3 for update",
         )
         .bind(&hold.profile.0)
         .bind(run)
@@ -255,6 +255,11 @@ impl Store {
         .await?
         .ok_or(Error::Missing)?;
         if state != "held" {
+            return Err(Error::Conflict.into());
+        }
+        // 발송 어댑터가 비어 있는 회신은 pending으로 돌려도 어떤 어댑터도 점유할 수 없다.
+        // 수동 발송 확인(`Confirmed`)만 허용하고 `NotExecuted` 재전송은 거절한다.
+        if transport.is_empty() && matches!(verdict, HoldVerdict::NotExecuted { .. }) {
             return Err(Error::Conflict.into());
         }
         let sql = match verdict {

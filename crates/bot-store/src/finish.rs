@@ -252,22 +252,55 @@ pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: 
     Ok(())
 }
 
+/// 발송 어댑터가 없는 구판/미매핑 푸시 실행의 회신은 `pending`으로 쌓지 않고 즉시 보류로 연다.
+/// `bot_outbox_hold` 트리거는 `UPDATE`에서만 돌므로 `INSERT` 직후 보류 발생과 감사를 같은 커밋에 남긴다.
+pub(crate) async fn hold_missing_transport(
+    tx: &mut Tx<'_>,
+    profile: &str,
+    run: &str,
+    call: &str,
+) -> R<()> {
+    sqlx::query("select bot_hold_open($1, $2, $3, null, 'reply')")
+        .bind(profile)
+        .bind(run)
+        .bind(call)
+        .execute(&mut **tx)
+        .await?;
+    audit::append(
+        tx,
+        profile,
+        &Entry::new("system", "outbox.held", call, "missing_transport"),
+    )
+    .await?;
+    Ok(())
+}
+
 /// 푸시 어댑터(Slack 등)의 대화에만 회신 행을 쌓는다. CLI·HTTP 결과는 인증된 상태 조회로 가져가고 예약에는 대화가 없다.
 /// 순번은 이 run의 기존 행(승인 카드 포함) 다음부터 잇는다. 호출자가 run을 잠갔다.
+/// 발송 어댑터가 비어 있는 구판/미매핑 푸시 실행은 실행 완료를 실패시키지 않고 회신만 즉시 보류(`held`)로 열어 운영자가 보게 한다.
 pub(crate) async fn push_reply(tx: &mut Tx<'_>, profile: &str, run: &str, body: &str) -> R<()> {
-    sqlx::query(
-        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body, transport)
+    let inserted: Option<(String, String)> = sqlx::query_as(
+        "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body, state, reason, transport)
          select r.profile, r.id, n.seq, 'reply:' || r.id || ':' || n.seq::text, r.binding, r.principal,
-                r.conv_kind, r.conv_id, r.thread, $3, coalesce(r.reply_transport, '')
+                r.conv_kind, r.conv_id, r.thread, $3,
+                case when coalesce(r.reply_transport, '') = '' then 'held' else 'pending' end,
+                case when coalesce(r.reply_transport, '') = '' then 'missing_transport' else null end,
+                coalesce(r.reply_transport, '')
          from bot_runs r,
               lateral (select coalesce(max(o.seq) + 1, 0) as seq from bot_outbox o where o.profile = r.profile and o.run = r.id) n
-         where r.profile = $1 and r.id = $2 and not r.private and r.conv_kind in ('direct', 'channel')",
+         where r.profile = $1 and r.id = $2 and not r.private and r.conv_kind in ('direct', 'channel')
+         returning call, state",
     )
     .bind(profile)
     .bind(run)
     .bind(body)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
+    if let Some((call, state)) = inserted
+        && state == "held"
+    {
+        hold_missing_transport(tx, profile, run, &call).await?;
+    }
     Ok(())
 }
 

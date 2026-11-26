@@ -40,7 +40,9 @@ fn scheduler(w: &World) -> Scheduler {
 
 /// 기한이 지난 반복 예약 한 행: 저장된 `cron` · `timezone`을 그대로 넣는다(검사를 거치지 않는다).
 async fn plant_cron(w: &World, id: &str, cron: &str, zone: &str, ago: i64) {
-    let origin = w.accept(&format!("origin-{id}"), "예약을 만든 대화").await;
+    let origin = w
+        .accept_slack_dm(&format!("origin-{id}"), "예약을 만든 대화")
+        .await;
     w.pg.sql(&format!(
         "insert into bot_user_schedules
            (profile, id, owner, agent, origin_run, origin_call, origin_binding, origin_kind, origin_id,
@@ -54,7 +56,9 @@ async fn plant_cron(w: &World, id: &str, cron: &str, zone: &str, ago: i64) {
 
 /// 기한이 지난 한 번짜리 한 행(정상).
 async fn plant_once(w: &World, id: &str, ago: i64) {
-    let origin = w.accept(&format!("origin-{id}"), "예약을 만든 대화").await;
+    let origin = w
+        .accept_slack_dm(&format!("origin-{id}"), "예약을 만든 대화")
+        .await;
     w.pg.sql(&format!(
         "insert into bot_user_schedules
            (profile, id, owner, agent, origin_run, origin_call, origin_binding, origin_kind, origin_id,

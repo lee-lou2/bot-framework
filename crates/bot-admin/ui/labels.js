@@ -16,7 +16,7 @@
   // 보류 사유 코드: 정해진 말로만 보이고 모르는 값은 «기타»다.
   // 도구 호출이 끝나지 못한 이유(서버가 확인한 분류만 온다). 모르는 값은 «기타».
   const CALL_ERROR = { denied: "거절됨", timeout: "시간 초과", invalid_result: "결과 형식 오류", outcome_unknown: "결과를 알 수 없음", execution_failed: "실행 실패" };
-  const HOLD_REASON = { outcome_unknown: "결과를 알 수 없음", unknown_outcome: "결과를 알 수 없음", owner_lost: "이전 실행 결과 미확인", no_evidence: "실행 여부를 가릴 증거 없음", response_unknown: "최종 응답을 알 수 없음", effects_unresolved: "미확정 단계 있음", previous_process_unconfirmed: "이전 실행기 종료 미확인" };
+  const HOLD_REASON = { outcome_unknown: "결과를 알 수 없음", unknown_outcome: "결과를 알 수 없음", owner_lost: "이전 실행 결과 미확인", no_evidence: "실행 여부를 가릴 증거 없음", response_unknown: "최종 응답을 알 수 없음", effects_unresolved: "미확정 단계 있음", previous_process_unconfirmed: "이전 실행기 종료 미확인", missing_transport: "발송 어댑터 미지정" };
   const CONVERSATION = { direct: "직접 대화", channel: "채널", cli: "CLI", http: "HTTP", scheduled: "예약" };
   const AUDIT_ACTION = { "approval.decide": "승인 판정", "hold.resolve": "보류 판정", "profile.activate": "프로필 활성화", "tool.call": "도구 호출", "preapproval.pause": "사전 승인 정지", "preapproval.resume": "사전 승인 재개" };
   const AUDIT_VERDICT = { allow: ["허용", "ok", "on"], deny: ["거절", "off", "off"], ok: ["정상", "ok", "on"], confirmed: ["처리됨 확인", "ok", "on"], not_executed: ["미실행 확인", "warn", "held"] };

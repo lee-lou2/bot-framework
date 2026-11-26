@@ -99,7 +99,7 @@ fn scheduler(w: &World, routes: &Arc<Routes>, batch: usize) -> Scheduler {
 /// 보류될 예약 100개(소유자 넷 × 25)와, 그보다 늦게 도래했지만 등록부가 필요 없는(원래 대화로 답하는) 다른 소유자의 예약 하나.
 /// 보류될 예약은 명시 목적지가 있고 모두 더 오래전에 도래해서 점검 쪽의 앞을 채운다.
 async fn plant_blockers_and_one_free(w: &World) {
-    let origin = w.accept("origin", "예약을 만든 대화").await;
+    let origin = w.accept_slack_dm("origin", "예약을 만든 대화").await;
     for (k, owner) in STUCK_OWNERS.iter().enumerate() {
         w.pg.sql(&format!(
             "with t as (select bot_now_ms() as now)
@@ -271,7 +271,7 @@ async fn a_recovered_held_schedule_fires_within_a_bounded_number_of_checks_even_
     let Some(w) = world().await else {
         return;
     };
-    let origin = w.accept("origin", "예약을 만든 대화").await.0;
+    let origin = w.accept_slack_dm("origin", "예약을 만든 대화").await.0;
     // 보류될 예약 셋(목적지가 있다)과 막히지 않는 예약 하나. 바퀴를 시작할 때 이 넷이 «이번 바퀴가 읽을 것»이다.
     for (i, id) in ["h-1", "h-2", "h-3"].into_iter().enumerate() {
         plant_row(&w, &origin, id, STUCK_OWNERS[0], true, 120_000 - i as i64).await;
@@ -366,7 +366,7 @@ async fn an_overdue_recurring_schedule_gets_one_turn_per_pass_and_the_others_fir
     let Some(w) = world().await else {
         return;
     };
-    let origin = w.accept("origin", "예약을 만든 대화").await.0;
+    let origin = w.accept_slack_dm("origin", "예약을 만든 대화").await.0;
     // 키가 가장 오래된 30분 밀린 매분 반복 예약, 등록부가 필요한 보류 예약, 다른 소유자의 한 번짜리. 배치 1.
     // 반복 예약은 발화할 때마다 다음 확인 시각이 앞으로 가지만 아직 다른 둘보다 오래됐다 — 같은 바퀴의 뒤쪽 쪽에 다시 나타난다.
     plant_recurring(&w, &origin, "r-minutely", STUCK_OWNERS[0]).await;
@@ -448,7 +448,7 @@ async fn a_held_row_behind_an_overdue_recurring_schedule_does_not_cut_the_catch_
     let Some(w) = world().await else {
         return;
     };
-    let origin = w.accept("origin", "예약을 만든 대화").await.0;
+    let origin = w.accept_slack_dm("origin", "예약을 만든 대화").await.0;
     // 30분 밀린 매분 반복 예약 + 마지막에 등록부 보류 예약(끝까지 풀리지 않는다), 배치 1: 바퀴마다 반복 예약은 한 번씩만 발화하지만 «남음»이 쪽을 넘어도 사라지지 않아 쉬지 않고 이어 간다
     plant_recurring(&w, &origin, "r-minutely", STUCK_OWNERS[0]).await;
     plant_row(&w, &origin, "z-held", STUCK_OWNERS[0], true, 60_000).await;

@@ -336,6 +336,7 @@ impl Store {
                 }
                 let revision = cmd.checked_revision.clone().ok_or(Error::Invalid)?;
                 // 원래 대화의 발송 책임은 예약을 만든 실행에 고정돼 있다.
+                // 푸시 대화인데 발송 키가 비어 있는 구판 실행에서는 새 무책임 푸시 실행을 만들지 않는다.
                 let origin_transport: Option<String> = sqlx::query_scalar(
                     "select reply_transport from bot_runs where profile = $1 and id = $2",
                 )
@@ -343,6 +344,12 @@ impl Store {
                 .bind(row.get::<String, _>("origin_run"))
                 .fetch_one(&mut *tx)
                 .await?;
+                let origin_kind: String = row.get("origin_kind");
+                if matches!(origin_kind.as_str(), "direct" | "channel")
+                    && origin_transport.is_none()
+                {
+                    return invalid();
+                }
                 let reply_transport = origin_transport.map(PushTransportId::new).transpose()?;
                 let accept = accept_of(&row, &revision, at_ms, &scopes, reply_transport)?;
                 let checked = check(&accept)?;
