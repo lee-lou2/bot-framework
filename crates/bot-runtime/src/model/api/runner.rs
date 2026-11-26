@@ -16,7 +16,8 @@ use super::{
     wire::{self, ApiKind, Built, fail},
 };
 use crate::model::{
-    ModelError, ModelRequest, ModelRunner, ModelStep, RunnerKind, StepFuture, driver::cancelled,
+    ModelError, ModelMeta, ModelRequest, ModelRunner, ModelStep, RunnerKind, StepFuture,
+    driver::cancelled,
 };
 use bot_core::{
     id::{ProfileId, SecretName},
@@ -237,6 +238,17 @@ impl ModelRunner for ApiRunner {
 
     fn step(&self, request: ModelRequest) -> StepFuture<'_> {
         Box::pin(self.run(request))
+    }
+
+    fn meta(&self, _alias: &str) -> Option<ModelMeta> {
+        let provider = match self.settings.kind {
+            ApiKind::Anthropic => "anthropic",
+            ApiKind::OpenAi => "openai",
+        };
+        Some(ModelMeta {
+            provider,
+            model: self.settings.model.clone(),
+        })
     }
 }
 

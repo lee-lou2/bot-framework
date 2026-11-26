@@ -1,41 +1,118 @@
-//! 관측: 호스트 `admin.trace`에 설정한 수집기로 보내는 `Exporter` 하나를 이 프로세스의 모든 역할(gateway·admin·broker…)이
-//! 함께 쓴다. 단독 gateway도 설정된 수집기를 쓴다. 알려진 자격 값은 내보내는 글과 관리 응답에서 가린다 — 시작 때 읽은 값뿐 아니라 이 프로세스가 비밀 보관소에서
-//! 읽어 쓰는 모든 값이 쓰이기 전에 가림 장치에 들어가므로(`Watched`) 키를 교체해도 새 값이 바로 가려진다. 스스로 읽지 않는 값은 주기적으로 다시 읽어
-//! 따라잡는다(`watched::reread`).
+//! 관측: 호스트 `admin.trace`·`admin.logs`·`admin.issues` 수집기를 한 번 띄워 이 프로세스의 모든 역할이 함께 쓴다.
+//! 알려진 자격 값은 내보내는 글·로그·이슈·관리 응답에서 가린다 — 시작 때 읽은 값뿐 아니라 이 프로세스가 비밀 보관소에서
+//! 읽어 쓰는 모든 값이 쓰이기 전에 가림 장치에 들어가므로(`Watched`) 키를 교체해도 새 값이 바로 가려진다.
 use super::watched::{Pace, Watched, declared, read_round};
-use crate::{host::HostFile, secrets::env::EnvStore};
+use crate::{host::HostFile, logging, secrets::env::EnvStore};
 use bot_admin::{
-    Exporter,
+    Exporter, Fence, IssueExporter, LogExporter,
+    issues::IssueOptions,
     trace::{Options, Redactor},
 };
-use bot_core::{port::SecretStore, trace::Tracer};
+use bot_core::{
+    issue::{IssueEvent, IssueLevel, IssueReporter},
+    port::SecretStore,
+    trace::{SpanRecord, Tracer, Val, key},
+};
 use bot_profile::Registry;
 use std::{sync::Arc, time::Duration};
+
+/// 정상 흐름·사용자 거절이라 이슈 트래커에 올리지 않을 오류 분류.
+const BENIGN_SPAN_ERRORS: [&str; 10] = [
+    "cancelled",
+    "denied",
+    "forbidden",
+    "invalid",
+    "lost",
+    "no_route",
+    "parked",
+    "rate_limited",
+    "too_large",
+    "unregistered",
+];
+
+/// 스팬을 추적 수집기에 넘기면서, 비정상 실패 스팬은 이슈 트래커에도 자동 보고하는 래퍼.
+struct ReportingTracer {
+    inner: Arc<Exporter>,
+    issues: Arc<IssueExporter>,
+}
+
+impl Tracer for ReportingTracer {
+    fn record(&self, span: SpanRecord) {
+        if let Some(error_class) = span.error
+            && !BENIGN_SPAN_ERRORS.contains(&error_class)
+        {
+            let private = span
+                .attrs
+                .iter()
+                .any(|(k, v)| *k == key::BOT_PRIVATE && *v == Val::Bool(true));
+            let mut ev = IssueEvent::new(
+                IssueLevel::Error,
+                error_class,
+                format!("{} failed ({error_class})", span.name),
+                span.name.clone(),
+            )
+            .profile(span.profile.clone())
+            .trace_id(span.ids.trace)
+            .span_id(span.ids.span);
+            ev.timestamp_nano = span.end_nano;
+            if !private {
+                for tag_key in [key::BOT_RUN_ID, key::BOT_AGENT, key::GEN_AI_TOOL_NAME] {
+                    if let Some(val) = span.str(tag_key) {
+                        ev = ev.tag(tag_key, val);
+                    }
+                }
+            }
+            self.issues.report(ev);
+        }
+        self.inner.record(span);
+    }
+}
 
 /// 이 프로세스의 관측 입력
 pub struct Observe {
     pub exporter: Arc<Exporter>,
-    /// 알려진 비밀 값을 담은 **살아 있는** 가림 장치(관리 응답 검사·내보내는 글이 같은 목록을 쓴다)
+    pub logs: Arc<LogExporter>,
+    pub issues: Arc<IssueExporter>,
+    /// 알려진 비밀 값을 담은 **살아 있는** 가림 장치(관리 응답 검사·추적·로그·이슈가 같은 목록을 쓴다)
     pub redactor: Redactor,
-    /// 모든 역할이 써야 하는 비밀 보관소: 읽는 값을 `redactor`에 더하고 그대로 넘겨 준다. 역할의 입력은 이 타입(`Arc<Watched>`)만 받는다 —
-    /// 날 보관소(`Arc<dyn SecretStore>`)를 넘기면 컴파일이 되지 않는다.
+    /// 모든 역할이 써야 하는 비밀 보관소: 읽는 값을 `redactor`에 더하고 그대로 넘겨 준다.
     pub secrets: Arc<Watched>,
+    /// 전역 로그·이슈 싱크 수명 가드(프로세스·시험 종료 시 자동 해제)
+    _sinks: Option<logging::SinkGuard>,
 }
 
 impl Observe {
-    /// 모든 역할에 같은 수집기를 넘기는 추적 입력
+    /// 모든 역할에 같은 수집기를 넘기는 추적 입력(이슈 트래커가 켜져 있으면 실패 스팬을 자동 보고한다)
     pub fn tracer(&self) -> Arc<dyn Tracer> {
-        self.exporter.clone()
+        if self.issues.enabled() {
+            Arc::new(ReportingTracer {
+                inner: self.exporter.clone(),
+                issues: self.issues.clone(),
+            })
+        } else {
+            self.exporter.clone()
+        }
     }
 
-    /// 종료할 때 남은 큐를 비운다.
+    /// 활성화 판본 확인 문을 추적·로그·이슈 내보내기 모두에 단다.
+    pub fn set_gate(&self, check: Fence, timeout: Duration) {
+        self.exporter.set_gate(check.clone(), timeout);
+        self.logs.set_gate(check.clone(), timeout);
+        self.issues.set_gate(check, timeout);
+    }
+
+    /// 종료할 때 추적·로그·이슈의 남은 큐를 모두 비운다.
     pub async fn flush(&self) {
-        self.exporter.flush(Duration::from_secs(5)).await;
+        let timeout = Duration::from_secs(5);
+        tokio::join!(
+            self.exporter.flush(timeout),
+            self.logs.flush(timeout),
+            self.issues.flush(timeout),
+        );
     }
 }
 
-/// `bot doctor`가 모델 별칭 판정(`models::build`)에 넘기는 **자리만 채우는** 보관소: 비어 있는 개발용 보관소를 가림 장치로 감싼 것이라 아무 값도
-/// 읽지 않고 어떤 역할에도 넘기지 않는다. 보관소를 감싸는 곳을 이 파일 하나로 두는 규칙(`watched` 구조 시험)을 지키려고 여기에 둔다.
+/// `bot doctor`가 모델 별칭 판정(`models::build`)에 넘기는 **자리만 채우는** 보관소.
 pub(super) fn inert_secrets() -> Arc<Watched> {
     Arc::new(Watched::new(
         Arc::new(EnvStore::default()),
@@ -43,8 +120,7 @@ pub(super) fn inert_secrets() -> Arc<Watched> {
     ))
 }
 
-/// 수집기 설정(`admin.trace`)으로 내보내기 작업을 띄운다. 설정이 없으면 아무것도 내보내지 않는다. 잘못된 설정이면 Err(시작 전).
-/// 이 프로세스가 아는 프로필의 자격 중 읽을 수 있는 것은 미리 읽어 가림 목록에 넣어 둔다 — 없는 자격은 건너뛴다(관측은 모든 자격이 있어야 시작하는 역할이 아니다).
+/// 수집기 설정(`admin.trace`·`admin.logs`·`admin.issues`)으로 내보내기 작업을 띄운다.
 pub async fn start(
     host: &HostFile,
     registry: &Registry,
@@ -58,16 +134,34 @@ pub async fn start(
         Pace::new(Duration::ZERO),
     )
     .await;
+    let store = Some(secrets.clone() as Arc<dyn SecretStore>);
     let exporter = Exporter::start(
         host.admin.trace.clone(),
-        Some(secrets.clone() as Arc<dyn SecretStore>),
+        store.clone(),
         redactor.clone(),
         Options::default(),
     )?;
+    let logs = LogExporter::start(
+        host.admin.logs.clone(),
+        store.clone(),
+        redactor.clone(),
+        Options::default(),
+    )?;
+    let issues = IssueExporter::start(
+        host.admin.issues.clone(),
+        store,
+        redactor.clone(),
+        IssueOptions::default(),
+    )?;
+    let sinks = (logs.enabled() || issues.enabled())
+        .then(|| logging::attach_sinks(Some(logs.clone()), Some(issues.clone())));
     Ok(Observe {
         exporter,
+        logs,
+        issues,
         redactor,
         secrets,
+        _sinks: sinks,
     })
 }
 

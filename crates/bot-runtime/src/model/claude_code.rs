@@ -16,8 +16,8 @@
 //! 성공·실패는 마지막 `result` 이벤트의 `is_error`로 알고(API 오류면 종료 코드도 1), 진행은 `stream_event`·`api_retry`로 안다.
 
 use super::{
-    CliConfig, CliModel, ModelError, ModelRequest, ModelRunner, RelayChannel, RunnerKind,
-    StepFuture, TOKEN_ENV, ToolOutput, Usage,
+    CliConfig, CliModel, ModelError, ModelMeta, ModelRequest, ModelRunner, RelayChannel,
+    RunnerKind, StepFuture, TOKEN_ENV, ToolOutput, Usage,
     cli::{self, BOT_MOUNT, CallDir, WORK_MOUNT},
     driver::{self, Event, Output, Parser, classify},
     prompt,
@@ -220,6 +220,13 @@ impl ModelRunner for ClaudeCodeRunner {
             };
             drop(call);
             output.map(cli::final_step)
+        })
+    }
+
+    fn meta(&self, alias: &str) -> Option<ModelMeta> {
+        self.config.models.get(alias).map(|m| ModelMeta {
+            provider: "anthropic",
+            model: m.id.clone(),
         })
     }
 }

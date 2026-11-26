@@ -7,8 +7,8 @@
 //! - 그 밖의 말: 쓰는 법을 안내한다.
 
 use super::{
-    CallEnd, DoneCall, ModelError, ModelRequest, ModelRunner, ModelStep, PendingCall, Role,
-    RunnerKind, StepFuture, Usage, call_id,
+    CallEnd, DoneCall, ModelError, ModelMeta, ModelRequest, ModelRunner, ModelStep, PendingCall,
+    Role, RunnerKind, StepFuture, Usage, call_id,
 };
 use bot_core::{command::JsonPayload, id::ToolId};
 use serde_json::{Value, json};
@@ -32,6 +32,13 @@ impl ModelRunner for DemoModel {
                 return Err(ModelError::Cancelled);
             }
             Ok(decide(&request))
+        })
+    }
+
+    fn meta(&self, _alias: &str) -> Option<ModelMeta> {
+        Some(ModelMeta {
+            provider: "demo",
+            model: "demo".to_owned(),
         })
     }
 }

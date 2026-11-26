@@ -152,13 +152,30 @@ API에서는 `POST /v1/admin/approvals/{nonce}/decide`에 `{"allow":true,"seen":
 워커·브로커·게이트웨이는 끝난 스팬을 `bot_core::trace::Tracer`에 넘긴다. 호출은 동기·무대기·무실패다.
 
 - **ID**: 추적 ID는 시도(프로필, run, 세대)에서 결정적으로 계산한다. 분리 배치의 다른 프로세스도 같은 값을 계산하므로 IPC에 문맥을 싣지 않아도 한 시도의 스팬이 한 추적에 모인다. 세대가 바뀌면 새 추적이다. 같은 run·세대라도 프로필이 다르면 추적이 다르다.
-- **키**: `gen_ai.*`와 `bot.*` 고정 어휘만 나간다. 승인 nonce·인자·영수증·민감 DM 원문 키는 어휘에 없다. 요청이 보낸 HTTP method·경로는 싣지 않는다 — 접수 스팬의 `http.request.method`·`http.route`는 요청과 맞은 **등록된 트리거 정의**의 값이고, 맞지 않은 요청은 고정 값(`_OTHER`·`unmatched`)이다(호출자가 경로에 실은 식별자·비밀이 `content`·`ids` 설정과 무관하게 나가지 않도록).
-- **정책**(내보내기 경계에서 한 번 더 건다): 어휘 밖의 키는 버린다. 프롬프트·인자·결과 같은 내용 키는 프로필별 opt-in이며 기본 꺼짐이다. 켜면 그 프로필이 지정한 수집기로만 가고, 알려진 비밀 값과 토큰 모양을 가리고 8 KiB로 자른다. **알려진 비밀 값은 시작 때 읽은 목록에 묶이지 않는다:** 이 프로세스가 비밀 보관소에서 읽어 쓰는 모든 값(모델 서비스 키·도구 자격·수집기 헤더 자격)은 쓰이기 **전에** 같은 가림 목록에 들어가므로, 키를 교체해도 새 값이 내보내는 글과 관리 응답 검사에서 바로 가려진다. 교체 전 값도 이 프로세스가 사는 동안 계속 가려진다. 본문은 **헤더 자격을 읽은 뒤** 그 시점의 목록으로 만든다 — 그 읽기가 새로 알게 된 값(교체된 수집기 자격)도 같은 배치의 본문에서 가려진다. **스스로 읽지 않는 값도 따라잡는다:** 역할을 나눠 띄우면 관리 프로세스는 모델 키·도구 자격을 읽는 쪽이 아니라서 다른 프로세스가 읽는 새 값을 모른다. 그래서 이 프로세스는 선언된 비밀 이름 전체를 시작 때 읽고 이후 주기적으로(`BOT_SECRETS_REREAD_SECS`, 기본 60초, 0이면 끈다) 다시 읽어 같은 목록에 더한다 — 값은 가림에만 쓰고 쥐지도 기록하지도 않는다. 읽기마다 5초만 기다리고 이름 사이에 쉼을 두며, 응답 없는 보관소(잠긴 키체인)가 있던 바퀴 뒤에는 주기를 두 배씩(최대 10배) 늘린다. 다른 역할에서만 쓰는 새 값은 관리 프로세스가 그 값을 성공적으로 읽은 뒤 가려진다. 보관소 지연·재시도와 SOPS의 30초 캐시가 반영 시점을 늦출 수 있다. 민감 DM 경로의 스팬에 `bot.private=true`를 붙이면 내용을 켠 프로필에서도 내용이 나가지 않는다(표지는 내보내지 않는다). 사람·대화 식별자는 프로필별 가명으로 바꾼다(`Ids::Plain`으로 끌 수 있다).
-- **철회**: 수집 설정(목적지·헤더 이름과 자격 이름·내용 허용·식별자 표기·표본 비율)은 **활성화 지문에 들어간다.** 수집을 거두거나 바꾸면 명시 활성화(`--activate`)가 필요한 활성화 사건이고, 옛 설정으로 남은 프로세스는 구판이 된다. 구판의 내보내기 문은 닫혀 있어, 큐에 남은 스팬까지 옛 허락(목적지·내용·식별자 표기)으로 더 보내지 않고 버린다(`dropped`, 마지막 오류 분류 `stale`). 저장소를 확인하지 못하는 동안(장애·3초 시간 초과)도 닫힌 것으로 본다 — 거둔 것을 확인할 수 없는 동안 옛 허락으로 내보내지 않는다. **문은 배치마다 두 번 본다:** 배치를 집을 때(구판은 수집 자격조차 읽지 않는다)와 **전송 직전**(헤더 자격을 읽고 본문을 만든 뒤)이다. 보관소가 느려 자격을 읽는 동안 수집이 거두어져도 옛 목적지로 가지 않는다. **이미 보내기 시작한 요청은 거둘 수 없다:** 그 배치는 `dropped`가 아니라 `sent`(네트워크 실패면 `failed`)로 세고, 그다음 배치부터 문이 막는다. 수집을 쓰지 않는 호스트의 활성 판본은 달라지지 않는다. 백엔드 이름과 화면 링크 틀은 내보내는 것을 바꾸지 않아 지문에 넣지 않는다. 이미 수집기에 도착한 스팬은 거둘 수 없다.
+- **키**: `gen_ai.*`·`bot.*`·`user.id`·`session.id` 고정 어휘만 나간다. 승인 nonce·인자·영수증·민감 DM 원문 키는 어휘에 없다. 모델 스팬(`worker.model`, `Client`)은 `gen_ai.provider.name`·`gen_ai.request.model`·`gen_ai.response.model`과 보고된 토큰 사용량을 싣고, 루트 실행 스팬(`worker.run`)은 `user.id`·`session.id`·`gen_ai.conversation.id`(기본 가명 처리)를 싣는다. 요청이 보낸 HTTP method·경로는 싣지 않는다 — 접수 스팬의 `http.request.method`·`http.route`는 요청과 맞은 **등록된 트리거 정의**의 값이고, 맞지 않은 요청은 고정 값(`_OTHER`·`unmatched`)이다(호출자가 경로에 실은 식별자·비밀이 `content`·`ids` 설정과 무관하게 나가지 않도록).
+- **정책**(내보내기 경계에서 한 번 더 건다): 어휘 밖의 키는 버린다. 프롬프트·인자·결과 같은 내용 키는 프로필별 opt-in이며 기본 꺼짐이다. 켜면 그 프로필이 지정한 수집기로만 가고, 알려진 비밀 값과 토큰 모양을 가리고 8 KiB로 자른다. **알려진 비밀 값은 시작 때 읽은 목록에 묶이지 않는다:** 이 프로세스가 비밀 보관소에서 읽어 쓰는 모든 값(모델 서비스 키·도구 자격·수집기 헤더·이슈 트래커 키)은 쓰이기 **전에** 같은 가림 목록에 들어가므로, 키를 교체해도 새 값이 내보내는 글·로그·이슈와 관리 응답 검사에서 바로 가려진다. 교체 전 값도 이 프로세스가 사는 동안 계속 가려진다. 본문은 **헤더·인증 자격을 읽은 뒤** 그 시점의 목록으로 만든다 — 그 읽기가 새로 알게 된 값(교체된 수집기 자격)도 같은 배치의 본문에서 가려진다. **스스로 읽지 않는 값도 따라잡는다:** 역할을 나눠 띄우면 관리 프로세스는 모델 키·도구 자격을 읽는 쪽이 아니라서 다른 프로세스가 읽는 새 값을 모른다. 그래서 이 프로세스는 선언된 비밀 이름 전체(호스트 관측 자격 포함)를 시작 때 읽고 이후 주기적으로(`BOT_SECRETS_REREAD_SECS`, 기본 60초, 0이면 끈다) 다시 읽어 같은 목록에 더한다 — 값은 가림에만 쓰고 쥐지도 기록하지도 않는다. 읽기마다 5초만 기다리고 이름 사이에 쉼을 두며, 응답 없는 보관소(잠긴 키체인)가 있던 바퀴 뒤에는 주기를 두 배씩(최대 10배) 늘린다. 다른 역할에서만 쓰는 새 값은 관리 프로세스가 그 값을 성공적으로 읽은 뒤 가려진다. 보관소 지연·재시도와 SOPS의 30초 캐시가 반영 시점을 늦출 수 있다. 민감 DM 경로의 스팬에 `bot.private=true`를 붙이면 내용을 켠 프로필에서도 내용이 나가지 않는다(표지는 내보내지 않는다). 사람·대화 식별자는 프로필별 가명으로 바꾼다(`Ids::Plain`으로 끌 수 있다).
+- **철회**: 추적(`admin.trace`)·로그(`admin.logs`)·이슈(`admin.issues`) 설정은 모두 **활성화 지문에 들어간다.** 수집을 거두거나 바꾸면 명시 활성화(`--activate`)가 필요한 활성화 사건이고, 옛 설정으로 남은 프로세스는 구판이 된다. 구판의 내보내기 문은 닫혀 있어, 큐에 남은 스팬·로그·이슈까지 옛 허락(목적지·내용·식별자 표기)으로 더 보내지 않고 버린다(`dropped`, 마지막 오류 분류 `stale`). 저장소를 확인하지 못하는 동안(장애·3초 시간 초과)도 닫힌 것으로 본다 — 거둔 것을 확인할 수 없는 동안 옛 허락으로 내보내지 않는다. **문은 배치마다 두 번 본다:** 배치를 집을 때(구판은 수집 자격조차 읽지 않는다)와 **전송 직전**(자격을 읽고 본문을 만든 뒤)이다. 보관소가 느려 자격을 읽는 동안 수집이 거두어져도 옛 목적지로 가지 않는다. **이미 보내기 시작한 요청은 거둘 수 없다:** 그 배치는 `dropped`가 아니라 `sent`(네트워크 실패면 `failed`)로 세고, 그다음 배치부터 문이 막는다. 관측을 쓰지 않는 호스트의 활성 판본은 달라지지 않는다. 백엔드 이름과 화면 링크 틀은 내보내는 것을 바꾸지 않아 지문에 넣지 않는다. 이미 수집기에 도착한 항목은 거둘 수 없다.
 - **격리**: 프로필마다 한정 큐·작업·차단기·목적지를 둔다. 한 프로필의 스팬은 그 프로필의 목적지로만 가고, 미등록·목적지 없는 프로필은 어디로도 가지 않는다. 헤더 비밀은 프로필마다 자기 SecretStore 이름으로 보낼 때마다 받는다. 받지 못하면 인증 없이 보내지 않는다.
 - **장애**: 스팬 하나가 256 KiB를 넘으면 큐에 넣지 않고 버린다. 큐가 차면 버리고, 수집기가 응답하지 않거나 거절하면 차단기가 열려 배치를 버린다(1초부터 60초까지 지수 백오프). 모든 스팬은 보냄·실패·버림 중 하나로 센다. 실행과 원장은 영향이 없다. `Exporter`를 모두 놓으면 작업은 남은 큐를 보낸 뒤 끝나고 SecretStore 참조를 놓는다.
 - **샘플링**: 추적 ID 값으로 정하므로 모든 프로세스가 같은 결론이다.
-- **전송**: OTLP/HTTP protobuf를 평문 `http://`로 보낸다 — 헤더 비밀과 내용이 그대로 나가므로 **수집기 주소는 루프백·사설 주소만 명시 없이 받는다.** 루프백(`127.0.0.0/8`·`::1`), 사설(`10/8`·`172.16/12`·`192.168/16`·`fc00::/7`), 링크 로컬(`169.254/16`·`fe80::/10`) IP 리터럴과 `localhost`·`*.localhost`다. 그 밖의 주소는 **이름(DNS)도 포함해** 어디로 풀릴지 알 수 없어 `bot validate`와 `bot serve`가 프로필 이름과 호스트를 밝혀 시작 전에 거절한다(예: `127.0.0.1.example.com`·`2130706433`처럼 사설처럼 보이는 것도). `localhost`·`*.localhost`는 시스템 이름 해석기(hosts 파일·DNS)를 거치지 않고 `127.0.0.1`·`::1`로 직접 접속한다(`Host` 헤더에는 원래 이름이 실린다) — 해석기가 다른 주소를 돌려주어도 평문이 사설망 밖으로 가지 않는다. 공개망 쪽 수집기라면 TLS를 맡는 수집기(sidecar)를 루프백·사설 주소에 두고 거기로 보낸다. 정말 평문으로 사설망 밖에 보내려면 그 프로필에 `remote: true`를 명시한다(관리 화면의 `remote`와 같은 방식, 프로필마다 따로다).
+- **전송**: OTLP/HTTP protobuf(`application/x-protobuf`)를 `https://`와 `http://`로 모두 보낸다.
+  - **`https://`(Langfuse·LangSmith·원격 OTLP 수집기)**: OS 루트 인증서 기반 TLS로 직접 전송하며 `remote: true`가 필요 없다. 리다이렉트·재시도·연결 재사용을 끄고, 모든 커스텀 헤더는 `sensitive`로 다루며, `localhost`·`*.localhost`는 이름 해석기를 거치지 않고 루프백(`127.0.0.1`·`::1`)으로 고정한다.
+  - **평문 `http://`**: 헤더 비밀과 내용이 그대로 나가므로 루프백(`127.0.0.0/8`·`::1`), 사설(`10/8`·`172.16/12`·`192.168/16`·`fc00::/7`), 링크 로컬(`169.254/16`·`fe80::/10`) IP 리터럴과 `localhost`·`*.localhost`만 명시 없이 받는다. 그 밖의 평문 주소(DNS 이름 포함)는 시작 전에 거절하며, 정말 평문으로 사설망 밖에 보내려면 각 절에 `remote: true`를 명시한다. `localhost`·`*.localhost`는 시스템 이름 해석기를 거치지 않고 루프백으로 직접 접속한다(`Host` 헤더에는 원래 이름이 실린다).
+
+## 로그(OTLP)와 이슈 트래커(Sentry 호환)
+
+추적과 같은 전송·회로 차단기·활성화 문·가림 장치(`Redactor`) 위에 호스트 단위 OTLP 로그 내보내기(`admin.logs`)와 이슈 트래커(`admin.issues`)를 둘 수 있다.
+
+- **구조화 로그(stderr)와 OTLP 로그(`admin.logs`)**:
+  - `BOT_LOG_FORMAT=json`으로 stderr에 줄 단위 JSON(`ts_ms`·`level`·`target`·`message`·`fields`)을 낼 수 있다(기본 `text`). `BOT_LOG` 필터(자체 크레이트만 수준 적용, 외부 라이브러리 최대 `warn`, `sqlx` 끔)는 두 형식에 똑같이 적용된다.
+  - `admin.logs`를 켜면 OTLP/HTTP(S) protobuf(`ExportLogsServiceRequest`, 기본 경로 `/v1/logs`)로 같은 로그 이벤트를 수집기에 배치 전송한다. `level`(`debug`·`info`·`warn`·`error`, 기본 `warn`)은 `BOT_LOG` 상한 안에서 내보낼 최소 수준을 고른다.
+  - 모든 본문과 필드는 내보내기 직전 `Redactor`로 가리고 길이·개수 상한(본문 2 KiB, 필드 값 256자, 최대 32개)을 둔다.
+- **이슈 트래커(`admin.issues`, `kind: "sentry"`)**:
+  - `bot_core::issue::IssueReporter` 포트의 Sentry Envelope v7 구현(`POST <endpoint>`, `Content-Type: application/x-sentry-envelope`, `X-Sentry-Auth`)으로 Sentry·GlitchTip·Bugsink 등 Sentry 호환 백엔드와 바로 연동한다.
+  - 자동 보고 대상: ① `tracing::error!` 이벤트, ② 예상치 못한 패닉(`fatal`), ③ 비정상 실패 스팬(`cancelled`·`denied`·`invalid`·`rate_limited`·`forbidden`·`unregistered`·`no_route`·`too_large`·`parked`·`lost` 등 정상 거절·취소 제외). 실패 스팬은 `contexts.trace.trace_id`로 추적과 이어지고, `bot.private` 스팬의 부가 태그는 싣지 않는다.
+  - 재귀·폭주 방지: 내보내기 실패는 카운터·`last_error`만 갱신하고 `tracing` 로그를 남기지 않으며, 관측·HTTP 전송 타깃 로그는 싱크에서 건너뛰고, 같은 `(kind, target)` 조합은 기본 5초 쿨다운으로 중복 폭주를 막는다.
+- **호스트 단위 자격 참조**: `admin.logs.headers`의 객체 값과 `admin.issues.key`는 `{"secret": "<이름>"}`(기본 `bot/host/<이름>` 이름 공간) 또는 `{"profile": "<프로필>", "secret": "<이름>"}`로 SecretStore를 가리킨다. `bot validate`·`bot doctor`가 시작 전에 존재 여부를 확인하고 `bot serve`가 가림 목록에 미리 올린다. `admin.issues.key`는 루프백 평문 `http://` 목 서버에서만 생략할 수 있다.
+- **상태 조회**: `GET /v1/admin/status`의 `process.logs`·`process.issues`에 같은 통계 형식(`enabled`·`queued`·`sent`·`dropped`·`failed`·`circuit`·`last_error`·`backends`)이 실린다(경로·헤더·키는 싣지 않고 `origin`만 보인다).
 
 ## 조립(bot-cli)
 
@@ -193,11 +210,58 @@ API에서는 `POST /v1/admin/approvals/{nonce}/decide`에 `{"allow":true,"seen":
 | `hosts` | `[]` | 프록시 뒤에서 쓰는 추가 `Host`(`이름:포트`). |
 | `max_failures` | `5` | 접속 출처별 실패 한도(60초 창, 초과 시 60초 차단). |
 | `trace.<프로필>` | 없음(내보내지 않음) | 그 프로필의 수집기. `null`이면 꺼짐. |
-| `endpoint` | 필수 | 평문 `http://호스트:포트/경로`. 루프백·사설 주소·`localhost`만 명시 없이 받는다(아래 `remote`). 공개망은 TLS를 맡는 수집기를 거친다. |
-| `remote` | `false` | 사설망 밖일 수 있는 수집기로 **평문** 전송을 해도 된다는 운영자의 명시. 없으면 위 주소가 아닌 수집기는 시작 전에 거절된다. |
+| `endpoint` | 필수 | `https://` 또는 `http://` 끝점. `https://`는 명시 없이 받고, 평문 `http://`는 루프백·사설 주소·`localhost`만 명시 없이 받는다(아래 `remote`). |
+| `remote` | `false` | 사설망 밖일 수 있는 수집기로 **평문 `http://`** 전송을 해도 된다는 운영자의 명시(`https://`에는 필요 없다). |
 | `name`·`link` | `default`·없음 | 표시 이름, 화면 링크 틀(`{trace_id}` 포함, http(s)). |
 | `headers` | 없음 | 글은 평문 값, `{"secret": 이름}`은 그 프로필의 SecretStore 이름(보낼 때마다 받는다). 이름은 프로필이 선언한 자격과 같이 `bot validate`·`bot doctor`가 보관소에 있는지 보고 `bot serve`가 시작 때 읽어 가림 목록에 넣는다. |
 | `content`·`ids`·`sample` | `false`·`hash`·`1.0` | 내용 기록 opt-in, 식별자 표기(`hash`·`plain`), 표본 비율. |
+| `logs` | 없음(꺼짐) | 호스트 단위 OTLP 로그 내보내기(`endpoint`·`name`·`headers`·`level`·`remote`). `headers`의 비밀 객체는 `{"secret": 이름}`(기본 `host` 이름 공간) 또는 `{"profile": 프로필, "secret": 이름}`이다. |
+| `issues` | 없음(꺼짐) | 호스트 단위 이슈 트래커(`kind` 기본 `sentry`, `name`·`endpoint`·`key`·`environment`·`release`·`sample`·`remote`). `key`는 `{"secret": 이름}`(또는 `profile` 포함)이며 루프백 `http://`에서만 생략할 수 있다. |
+
+Langfuse·LangSmith(공통 OTLP/HTTP protobuf + `gen_ai.*` 규격), OTLP 로그 수집기, Sentry 호환 이슈 트래커를 함께 연동하는 예시는 다음과 같다.
+
+```json
+{
+  "bind": "127.0.0.1:8787",
+  "trace": {
+    "personal": {
+      "name": "langfuse",
+      "endpoint": "https://cloud.langfuse.com/api/public/otel/v1/traces",
+      "headers": {
+        "Authorization": {"secret": "langfuse-auth"},
+        "x-langfuse-ingestion-version": "4"
+      },
+      "link": "https://cloud.langfuse.com/trace/{trace_id}",
+      "ids": "hash",
+      "content": false,
+      "sample": 1.0
+    },
+    "work": {
+      "name": "langsmith",
+      "endpoint": "https://api.smith.langchain.com/otel/v1/traces",
+      "headers": {
+        "x-api-key": {"secret": "langsmith-key"},
+        "Langsmith-Project": "bot-work"
+      }
+    }
+  },
+  "logs": {
+    "name": "otel-logs",
+    "endpoint": "https://otlp.example.com/v1/logs",
+    "headers": {"Authorization": {"secret": "otel-logs-token"}},
+    "level": "warn"
+  },
+  "issues": {
+    "kind": "sentry",
+    "name": "sentry",
+    "endpoint": "https://o0.ingest.sentry.io/api/1/envelope/",
+    "key": {"secret": "sentry-key"},
+    "environment": "production",
+    "release": "bot@0.1.0",
+    "sample": 1.0
+  }
+}
+```
 
 ### 시작 순서
 

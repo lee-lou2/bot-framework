@@ -8,7 +8,7 @@
 //!
 //! 이 래퍼를 만드는 곳은 `trace::start` 하나다. 모든 역할의 입력은 그것이 만든 `Arc<Watched>`만 받으므로(`Arc<dyn SecretStore>`를 받는 입력은 없다) 가림 장치를
 //! 거치지 않는 보관소가 역할에 닿을 길이 없다.
-use crate::{host::HostFile, validate::needed_secrets};
+use crate::{host::HostFile, validate::all_needed_secrets};
 use bot_admin::trace::Redactor;
 use bot_core::{
     id::{ProfileId, SecretName},
@@ -82,17 +82,16 @@ fn add_forms(redactor: &Redactor, text: &str) {
 /// 프로필별로 읽을 비밀 이름
 pub(super) type Plan = Vec<(ProfileId, Vec<SecretName>)>;
 
-/// 이 프로세스가 아는 프로필(활성 집합)이 선언한 비밀 이름 전체: 입구(Slack·HTTP)·모델 서비스·도구 자격. 이름이 하나도 없는 프로필은 뺀다.
+/// 이 프로세스가 아는 프로필(활성 집합)과 호스트 관측 설정(`admin.logs`·`admin.issues`)이 선언한 비밀 이름 전체.
 pub(super) fn declared(host: &HostFile, registry: &Registry) -> Plan {
-    registry
-        .active()
-        .iter()
-        .map(|(profile, snapshot)| {
-            let names = needed_secrets(snapshot, host)
+    all_needed_secrets(registry.active().values().map(AsRef::as_ref), host)
+        .into_iter()
+        .map(|(profile, names)| {
+            let parsed = names
                 .iter()
                 .filter_map(|name| SecretName::parse(name))
                 .collect::<Vec<_>>();
-            (profile.clone(), names)
+            (profile, parsed)
         })
         .filter(|(_, names)| !names.is_empty())
         .collect()

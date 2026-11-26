@@ -10,8 +10,11 @@ pub mod api;
 pub mod assets;
 pub mod auth;
 pub mod fence;
+pub mod issues;
 pub mod json;
+pub mod logs;
 pub mod map;
+pub mod obs;
 pub mod port;
 pub mod preapproval;
 pub mod resp;
@@ -31,6 +34,7 @@ use axum::{
 use bot_core::{id::ProfileId, port::Broker, profile::ProfileCatalog};
 use port::{AdminAct, AdminRead};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     future::Future,
     net::SocketAddr,
@@ -40,9 +44,46 @@ use std::{
 
 pub use auth::{Authenticator, StaticTokens, hosts_for};
 pub use fence::{Fence, FenceFuture};
+pub use issues::IssueExporter;
+pub use logs::LogExporter;
 pub use resp::LeakCheck;
 pub use settings::AdminSettings;
 pub use trace::Exporter;
+
+/// 호스트 활성화 지문(`base`)에 관측 설정(`admin.trace`·`admin.logs`·`admin.issues`)을 차례로 묶는다.
+/// 각 절이 꺼져 있으면 해당 해시 단계를 건너뛰므로 기존 배포의 활성화 지문 바이트가 그대로 유지된다.
+pub fn obs_fingerprint(base: [u8; 32], settings: &AdminSettings) -> [u8; 32] {
+    let base = match trace::fingerprint(&settings.trace) {
+        None => base,
+        Some(fp) => {
+            let mut hash = Sha256::new();
+            hash.update(b"bot-authority-trace-v1\0");
+            hash.update(base);
+            hash.update(fp);
+            hash.finalize().into()
+        }
+    };
+    let base = match logs::fingerprint(&settings.logs) {
+        None => base,
+        Some(fp) => {
+            let mut hash = Sha256::new();
+            hash.update(b"bot-authority-logs-v1\0");
+            hash.update(base);
+            hash.update(fp);
+            hash.finalize().into()
+        }
+    };
+    match issues::fingerprint(&settings.issues) {
+        None => base,
+        Some(fp) => {
+            let mut hash = Sha256::new();
+            hash.update(b"bot-authority-issues-v1\0");
+            hash.update(base);
+            hash.update(fp);
+            hash.finalize().into()
+        }
+    }
+}
 
 /// 디코딩한 JSON의 키·문자열에 알려진 비밀 값이 들어 있는가.
 fn holds_secret(red: &trace::Redactor, v: &Value) -> bool {
@@ -67,6 +108,10 @@ pub struct AdminConfig {
     pub leak_check: Option<LeakCheck>,
     /// 추적 내보내기(상태·추적 링크·관리 판정 스팬에 쓴다). 없으면 꺼진 것으로 나간다.
     pub traces: Option<Arc<Exporter>>,
+    /// OTLP 로그 내보내기(상태 표시에 쓴다). 없으면 꺼진 것으로 나간다.
+    pub logs: Option<Arc<LogExporter>>,
+    /// 이슈 트래커 내보내기(상태 표시에 쓴다). 없으면 꺼진 것으로 나간다.
+    pub issues: Option<Arc<IssueExporter>>,
     /// «같은 집합 확인» 훅과 기다리는 시간(`fence`). 없으면 확인하지 않는다.
     pub fence: Option<Fence>,
     pub fence_timeout: Duration,
@@ -82,6 +127,8 @@ impl AdminConfig {
             block: Duration::from_secs(60),
             leak_check: None,
             traces: None,
+            logs: None,
+            issues: None,
             fence: None,
             fence_timeout: fence::DEFAULT_TIMEOUT,
         }
@@ -118,6 +165,16 @@ impl AdminConfig {
         self
     }
 
+    pub fn logs(mut self, exporter: Arc<LogExporter>) -> Self {
+        self.logs = Some(exporter);
+        self
+    }
+
+    pub fn issues(mut self, exporter: Arc<IssueExporter>) -> Self {
+        self.issues = Some(exporter);
+        self
+    }
+
     /// 프록시 뒤에서 쓰는 외부 호스트 이름(포트 포함)을 더한다.
     pub fn host(mut self, host: &str) -> Self {
         self.hosts.push(host.trim().to_ascii_lowercase());
@@ -135,10 +192,12 @@ pub struct AdminDeps {
     pub profiles: Arc<dyn ProfileCatalog>,
 }
 
-/// 선택 입력(추적 내보내기). 없으면 해당 응답이 꺼진 것으로 나간다.
+/// 선택 입력(추적·로그·이슈 내보내기). 없으면 해당 응답이 꺼진 것으로 나간다.
 #[derive(Default)]
 pub struct Extra {
     pub(crate) exporter: Option<Arc<Exporter>>,
+    pub(crate) logs: Option<Arc<LogExporter>>,
+    pub(crate) issues: Option<Arc<IssueExporter>>,
 }
 
 impl Extra {
@@ -146,6 +205,20 @@ impl Extra {
         match self.exporter.as_ref().and_then(|e| e.stats(profile)) {
             Some(stats) => stats.json(),
             None => serde_json::json!({"enabled": false}),
+        }
+    }
+
+    pub(crate) fn logs_obs(&self) -> Value {
+        match &self.logs {
+            Some(exporter) if exporter.enabled() => exporter.stats().json(),
+            _ => serde_json::json!({"enabled": false}),
+        }
+    }
+
+    pub(crate) fn issues_obs(&self) -> Value {
+        match &self.issues {
+            Some(exporter) if exporter.enabled() => exporter.stats().json(),
+            _ => serde_json::json!({"enabled": false}),
         }
     }
 
@@ -225,6 +298,8 @@ pub fn router(cfg: AdminConfig, deps: AdminDeps) -> Option<Router> {
         started: Instant::now(),
         extra: Extra {
             exporter: cfg.traces,
+            logs: cfg.logs,
+            issues: cfg.issues,
         },
     });
     let gate = cfg.fence.map(|check| {

@@ -1,10 +1,13 @@
 //! 호스트 설정(JSON)의 `admin` 절. 조립하는 쪽(bot-cli)이 `serde_json::Value`를 넘기면 엄격하게 읽어 타입으로 돌려준다.
-//! 모르는 키·잘못된 타입·잘못된 값은 시작 전에 거절한다. 비밀 값은 담지 않는다(헤더 비밀은 SecretStore 이름만).
+//! 모르는 키·잘못된 타입·잘못된 값은 시작 전에 거절한다. 비밀 값은 담지 않는다(헤더·이슈 트래커 키는 SecretStore 이름만).
 
 use crate::{
     AdminConfig,
     auth::hosts_for,
     check_bind,
+    issues::{IssueConfig, IssueKind},
+    logs::{LogConfig, LogLevel},
+    obs::{HostHeaderValue, SecretRef},
     trace::{Backend, HeaderValue, Ids, ProfileTrace},
 };
 use bot_core::id::{ProfileId, SecretName, is_name};
@@ -23,8 +26,12 @@ pub struct AdminSettings {
     pub hosts: Vec<String>,
     /// 접속 출처별 실패 한도(기본 5회/60초).
     pub max_failures: usize,
-    /// 프로필별 추적 설정. 없는 프로필은 내보내지 않는다.
+    /// 프로필별 추적 설정(OTLP). 없는 프로필은 내보내지 않는다.
     pub trace: BTreeMap<ProfileId, ProfileTrace>,
+    /// 호스트 단위 OTLP 로그 내보내기 설정(생략하면 끔).
+    pub logs: Option<LogConfig>,
+    /// 호스트 단위 이슈 트래커 설정(Sentry 등, 생략하면 끔).
+    pub issues: Option<IssueConfig>,
 }
 
 fn object<'a>(v: &'a Value, at: &str) -> Result<&'a Map<String, Value>, String> {
@@ -90,6 +97,31 @@ fn header(name: &str, v: &Value, at: &str) -> Result<HeaderValue, String> {
     }
 }
 
+fn secret_ref(v: &Value, at: &str) -> Result<SecretRef, String> {
+    let o = object(v, at)?;
+    only(o, &["secret", "profile"], at)?;
+    let secret = text(o, "secret", at)?.ok_or_else(|| format!("{at}: secret 이름이 필요하다"))?;
+    let name = SecretName::parse(secret).ok_or_else(|| format!("{at}: 잘못된 비밀 이름"))?;
+    match text(o, "profile", at)? {
+        None => Ok(SecretRef::host(name)),
+        Some(p) if is_name(p) => Ok(SecretRef::in_profile(ProfileId(p.to_owned()), name)),
+        Some(p) => Err(format!(
+            "{at}.profile: 프로필 이름 `{p}`이(가) 올바르지 않다"
+        )),
+    }
+}
+
+fn host_header(name: &str, v: &Value, at: &str) -> Result<HostHeaderValue, String> {
+    let where_at = format!("{at}.headers.{name}");
+    match v {
+        Value::String(s) => Ok(HostHeaderValue::Plain(s.clone())),
+        Value::Object(_) => secret_ref(v, &where_at).map(HostHeaderValue::Secret),
+        _ => Err(format!(
+            "{where_at}: 글 또는 {{\"secret\": 이름}}이어야 한다"
+        )),
+    }
+}
+
 fn one_trace(profile: &ProfileId, v: &Value) -> Result<ProfileTrace, String> {
     let at = format!("admin.trace.{}", profile.0);
     let o = object(v, &at)?;
@@ -134,13 +166,94 @@ fn one_trace(profile: &ProfileId, v: &Value) -> Result<ProfileTrace, String> {
     Ok(trace)
 }
 
+fn parse_logs(v: &Value) -> Result<LogConfig, String> {
+    let at = "admin.logs";
+    let o = object(v, at)?;
+    only(o, &["name", "endpoint", "headers", "level", "remote"], at)?;
+    let endpoint = text(o, "endpoint", at)?.ok_or_else(|| format!("{at}.endpoint: 필요하다"))?;
+    let mut headers = Vec::new();
+    if let Some(h) = o.get("headers") {
+        for (name, value) in object(h, &format!("{at}.headers"))? {
+            headers.push((name.clone(), host_header(name, value, at)?));
+        }
+    }
+    let level = match text(o, "level", at)? {
+        None => LogLevel::Warn,
+        Some(raw) => LogLevel::parse(raw)
+            .ok_or_else(|| format!("{at}.level: debug · info · warn · error 중 하나여야 한다"))?,
+    };
+    let cfg = LogConfig {
+        name: text(o, "name", at)?.unwrap_or("otlp-logs").to_owned(),
+        endpoint: endpoint.to_owned(),
+        headers,
+        level,
+        remote: flag(o, "remote", false, at)?,
+    };
+    cfg.check()?;
+    Ok(cfg)
+}
+
+fn parse_issues(v: &Value) -> Result<IssueConfig, String> {
+    let at = "admin.issues";
+    let o = object(v, at)?;
+    only(
+        o,
+        &[
+            "kind",
+            "name",
+            "endpoint",
+            "key",
+            "environment",
+            "release",
+            "sample",
+            "remote",
+        ],
+        at,
+    )?;
+    let kind = match text(o, "kind", at)? {
+        None | Some("sentry") => IssueKind::Sentry,
+        Some(_) => return Err(format!("{at}.kind: sentry만 지원한다")),
+    };
+    let endpoint = text(o, "endpoint", at)?.ok_or_else(|| format!("{at}.endpoint: 필요하다"))?;
+    let key = match o.get("key").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(secret_ref(v, &format!("{at}.key"))?),
+    };
+    let sample = match o.get("sample") {
+        None => 1.0,
+        Some(n) => n
+            .as_f64()
+            .ok_or_else(|| format!("{at}.sample: 0.0~1.0 숫자여야 한다"))?,
+    };
+    let cfg = IssueConfig {
+        kind,
+        name: text(o, "name", at)?.unwrap_or(kind.as_str()).to_owned(),
+        endpoint: endpoint.to_owned(),
+        key,
+        environment: text(o, "environment", at)?.map(str::to_owned),
+        release: text(o, "release", at)?.map(str::to_owned),
+        sample,
+        remote: flag(o, "remote", false, at)?,
+    };
+    cfg.check()?;
+    Ok(cfg)
+}
+
 impl AdminSettings {
     /// `admin` 객체를 읽는다. 키를 모두 생략해도(`{}`) 로컬 기본값으로 동작한다.
     pub fn from_json(v: &Value) -> Result<Self, String> {
         let o = object(v, "admin")?;
         only(
             o,
-            &["bind", "remote", "hosts", "max_failures", "trace"],
+            &[
+                "bind",
+                "remote",
+                "hosts",
+                "max_failures",
+                "trace",
+                "logs",
+                "issues",
+            ],
             "admin",
         )?;
         let bind: SocketAddr = text(o, "bind", "admin")?
@@ -183,12 +296,22 @@ impl AdminSettings {
                 }
             }
         }
+        let logs = match o.get("logs").filter(|v| !v.is_null()) {
+            None => None,
+            Some(v) => Some(parse_logs(v)?),
+        };
+        let issues = match o.get("issues").filter(|v| !v.is_null()) {
+            None => None,
+            Some(v) => Some(parse_issues(v)?),
+        };
         Ok(Self {
             bind,
             remote,
             hosts,
             max_failures,
             trace,
+            logs,
+            issues,
         })
     }
 

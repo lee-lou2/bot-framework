@@ -193,3 +193,75 @@ async fn a_host_without_collection_still_watches_the_secrets_it_reads() {
         "수집이 꺼져 있어도 관리 응답 검사는 값을 안다"
     );
 }
+
+#[tokio::test]
+async fn reporting_tracer_forwards_non_benign_span_failures_to_sentry_and_skips_benign_and_private_tags()
+ {
+    let (sentry_url, bodies) = collector().await;
+    let host = crate::host::parse(&format!(
+        r#"{{"version": 1, "admin": {{"issues": {{"kind": "sentry", "endpoint": "{sentry_url}"}}}}}}"#
+    ))
+    .unwrap();
+    let observe = start(
+        &host,
+        &Registry::new(),
+        Arc::new(Rotating(Arc::new(Mutex::new(OLD.to_owned())))),
+    )
+    .await
+    .unwrap();
+    let tracer = observe.tracer();
+
+    // 정상 거절·취소(benign)는 이슈 트래커에 올리지 않는다
+    tracer.record(span("r-cancel", "ok").fail("cancelled"));
+    tracer.record(span("r-deny", "ok").fail("denied"));
+
+    // 비정상 실패 스팬은 Sentry로 보낸다(trace_id + 태그 포함)
+    tracer.record(
+        span("r-fail", "ok")
+            .attr(key::BOT_RUN_ID, "r-fail")
+            .attr(key::GEN_AI_TOOL_NAME, "agenda.delete")
+            .fail("execution_failed"),
+    );
+
+    // 민감 DM(bot.private=true) 실패 스팬은 부가 태그(run/agent/tool)를 싣지 않는다
+    let attempt = Attempt {
+        profile: ProfileId("personal".into()),
+        run: RunId("r-priv".into()),
+        claim: None,
+        generation: Generation(1),
+    };
+    tracer.record(
+        SpanRecord::start(&attempt.profile, "private.tool", SpanIds::attempt(&attempt))
+            .attr(key::BOT_PRIVATE, true)
+            .attr(key::BOT_RUN_ID, "r-priv-hidden")
+            .attr(key::GEN_AI_TOOL_NAME, "inbox.secret")
+            .fail("outcome_unknown"),
+    );
+
+    observe.flush().await;
+    let payloads: Vec<String> = bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| String::from_utf8(b.clone()).unwrap())
+        .collect();
+    assert_eq!(
+        payloads.len(),
+        2,
+        "benign 2건 제외, 비정상 실패 2건만 보고: {payloads:?}"
+    );
+    let normal = payloads
+        .iter()
+        .find(|p| p.contains("execution_failed"))
+        .expect("일반 실패");
+    assert!(normal.contains("agenda.delete") && normal.contains("r-fail"));
+    assert!(normal.contains("\"trace_id\"") && normal.contains("\"span_id\""));
+    let priv_ev = payloads
+        .iter()
+        .find(|p| p.contains("outcome_unknown"))
+        .expect("민감 실패");
+    assert!(
+        !priv_ev.contains("r-priv-hidden") && !priv_ev.contains("inbox.secret"),
+        "민감 DM 스팬은 부가 태그를 싣지 않는다: {priv_ev}"
+    );
+}

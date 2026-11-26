@@ -43,7 +43,7 @@
 | `bot-runtime` | 워커·스케줄러·위임·모델 실행기 | `crates/bot-runtime/src/{worker/mod,model/mod,context}.rs` |
 | `bot-broker` | 도구 호출 관문·모델 프록시·MCP 실행(srt) | `crates/bot-broker/src/{lib,service,runner,srt}.rs`(`lib.rs`에 외부 계약) |
 | `bot-gateway` | CLI·HTTP·Slack 접수와 회신 | `crates/bot-gateway/src/{ingress,delivery,slack/mod,http/mod}.rs` |
-| `bot-admin` | 관리 API·UI(`ui/`)와 OTLP 추적 내보내기(`trace/`, 모든 역할이 쓴다) | `crates/bot-admin/src/{lib,api,trace/mod}.rs` |
+| `bot-admin` | 관리 API·UI(`ui/`)와 OTLP 추적·로그·이슈 트래커 내보내기(`obs/`·`trace/`·`logs/`·`issues/`, 모든 역할이 쓴다) | `crates/bot-admin/src/{lib,api,trace/mod,logs/mod,issues/mod}.rs` |
 | `bot-cli` | `bot` 바이너리·호스트 설정·SecretStore 구현·역할 조립 | `crates/bot-cli/src/{main,host,serve/mod}.rs` |
 
 ## X는 어디에 있나
@@ -72,7 +72,7 @@
 | 민감 DM | `crates/bot-gateway/src/ingress.rs`(분기), `crates/bot-broker/src/private.rs`, `crates/bot-store/src/private.rs` |
 | 사전 승인 | `crates/bot-core/src/grant.rs`, `crates/bot-store/src/grants.rs`, `crates/bot-broker/src/preapproval.rs`, `crates/bot-admin/src/preapproval.rs` |
 | 비밀 | 포트 `crates/bot-core/src/port.rs`의 `SecretStore`, 구현 `crates/bot-cli/src/secrets/`, 가림 `crates/bot-cli/src/serve/watched.rs` |
-| 관측·감사 | `crates/bot-core/src/trace.rs`, `crates/bot-admin/src/trace/`, `crates/bot-store/src/audit.rs` |
+| 관측·로그·이슈·감사 | `crates/bot-core/src/{trace,issue}.rs`, `crates/bot-admin/src/{obs,trace,logs,issues}/`, `crates/bot-cli/src/logging.rs`, `crates/bot-store/src/audit.rs` |
 | 관리 API·UI | `crates/bot-admin/src/{lib,api}.rs`(라우트·권한), `crates/bot-admin/ui/`(화면), 설명 `docs/admin.md` |
 | 확장(도구·모델 제공자·채널·보관소·샌드박스·트리거·내장 도구) | `docs/extending.md`, 빠진 곳 점검 `scripts/parity_audit.py` |
 

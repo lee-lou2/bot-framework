@@ -198,6 +198,7 @@ dependencies = [
  "axum",
  "bot-admin",
  "bot-core",
+ "reqwest",
  "serde_json",
  "sha2",
  "tokio",

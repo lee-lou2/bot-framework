@@ -185,18 +185,9 @@ impl HostFile {
             }
             hash.finalize().into()
         };
-        // 수집(OTLP) 설정도 권한이다: 어디로 무엇을(내용·식별자 표기·표본) 내보내는지가 바뀌거나 거두어지면 활성화 사건이라, 옛 설정으로 남은 프로세스가
-        // 구판이 되어 그 프로세스의 내보내기 문이 닫힌다(`serve`가 `Exporter::set_gate`로 잇는다). 수집을 쓰지 않는 호스트는 지문이 그대로다.
-        Ok(match bot_admin::trace::fingerprint(&self.admin.trace) {
-            None => base,
-            Some(trace) => {
-                let mut hash = Sha256::new();
-                hash.update(b"bot-authority-trace-v1\0");
-                hash.update(base);
-                hash.update(trace);
-                hash.finalize().into()
-            }
-        })
+        // 관측(OTLP 추적·로그·이슈 트래커) 설정도 권한이다: 어디로 무엇을 내보내는지가 바뀌거나 거두어지면 활성화 사건이라, 옛 설정으로 남은
+        // 프로세스가 구판이 되어 내보내기 문이 닫힌다. 관측을 쓰지 않는 호스트는 지문이 그대로다.
+        Ok(bot_admin::obs_fingerprint(base, &self.admin))
     }
 
     /// 내장 데모 호스트에 합성 일정 서버(`examples/servers/demo-agenda`)를 연결한다. 프로필 루트(`BOT_PROFILES`) 옆의

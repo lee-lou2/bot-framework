@@ -93,6 +93,8 @@ pub mod key {
     pub const HTTP_REQUEST_METHOD: Key = "http.request.method";
     pub const HTTP_ROUTE: Key = "http.route";
     pub const HTTP_RESPONSE_STATUS_CODE: Key = "http.response.status_code";
+    pub const USER_ID: Key = "user.id";
+    pub const SESSION_ID: Key = "session.id";
     // 내보내기가 남기는 표지.
     pub const BOT_DROPPED: Key = "bot.dropped";
     /// 내부 Bool 표지. true이면 이 스팬의 내용 기록을 차단하며 표지 자체는 내보내지 않는다.
@@ -116,10 +118,16 @@ pub mod key {
     ];
 
     /// 사람·대화를 가리켜 가명 처리 대상인 키.
-    pub const IDENTITY: [Key; 3] = [BOT_PRINCIPAL, GEN_AI_CONVERSATION_ID, BOT_REQUEST_ID];
+    pub const IDENTITY: [Key; 5] = [
+        BOT_PRINCIPAL,
+        GEN_AI_CONVERSATION_ID,
+        BOT_REQUEST_ID,
+        USER_ID,
+        SESSION_ID,
+    ];
 
     /// 허용 어휘 전체. 내보내기는 이 밖의 키를 버린다.
-    pub const ALLOWED: [Key; 40] = [
+    pub const ALLOWED: [Key; 42] = [
         BOT_PROFILE,
         BOT_AGENT,
         BOT_REQUEST_ID,
@@ -160,6 +168,8 @@ pub mod key {
         HTTP_REQUEST_METHOD,
         HTTP_ROUTE,
         HTTP_RESPONSE_STATUS_CODE,
+        USER_ID,
+        SESSION_ID,
     ];
 }
 

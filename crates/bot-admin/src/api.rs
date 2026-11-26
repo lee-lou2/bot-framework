@@ -438,6 +438,8 @@ pub(crate) async fn status(State(st): S, Extension(v): V) -> R {
         "process": {
             "uptime_secs": st.started.elapsed().as_secs(),
             "profiles": rows.iter().map(|s| &s.profile.0).collect::<Vec<_>>(),
+            "logs": st.extra.logs_obs(),
+            "issues": st.extra.issues_obs(),
         },
         "profiles": profiles,
     });

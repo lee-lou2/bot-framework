@@ -42,6 +42,10 @@ impl Collector {
         format!("http://{}/v1/traces", self.addr)
     }
 
+    pub fn url_at(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
+    }
+
     pub fn set(&self, m: Mode) {
         *self.mode.lock().expect("락") = m;
     }
@@ -54,6 +58,13 @@ impl Collector {
         self.requests()
             .iter()
             .flat_map(|r| decode(&r.body))
+            .collect()
+    }
+
+    pub fn logs(&self) -> Vec<LogRec> {
+        self.requests()
+            .iter()
+            .flat_map(|r| decode_logs(&r.body))
             .collect()
     }
 }
@@ -319,6 +330,56 @@ pub fn decode(body: &[u8]) -> Vec<Span> {
                         })
                         .collect(),
                     status: (num(&status, 3), string(&status, 2)),
+                });
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone, Debug)]
+pub struct LogRec {
+    pub resource: BTreeMap<String, Attr>,
+    pub scope: (String, String),
+    pub time_nano: u64,
+    pub severity_number: u64,
+    pub severity_text: String,
+    pub body: String,
+    pub attrs: BTreeMap<String, Attr>,
+    pub dropped: u64,
+    pub trace: Vec<u8>,
+    pub span: Vec<u8>,
+}
+
+pub fn decode_logs(body: &[u8]) -> Vec<LogRec> {
+    let mut out = Vec::new();
+    for rl in lens(&parse(body), 1) {
+        let rl = parse(rl);
+        let resource = lens(&rl, 1)
+            .first()
+            .map(|r| key_values(&parse(r), 1))
+            .unwrap_or_default();
+        for sl in lens(&rl, 2) {
+            let sl = parse(sl);
+            let sc = lens(&sl, 1).first().map(|s| parse(s)).unwrap_or_default();
+            let scope = (string(&sc, 1), string(&sc, 2));
+            for lr in lens(&sl, 2) {
+                let f = parse(lr);
+                let body_val = lens(&f, 5)
+                    .first()
+                    .map(|b| string(&parse(b), 1))
+                    .unwrap_or_default();
+                out.push(LogRec {
+                    resource: resource.clone(),
+                    scope: scope.clone(),
+                    time_nano: num(&f, 1),
+                    severity_number: num(&f, 2),
+                    severity_text: string(&f, 3),
+                    body: body_val,
+                    attrs: key_values(&f, 6),
+                    dropped: num(&f, 7),
+                    trace: lens(&f, 9).first().map(|b| b.to_vec()).unwrap_or_default(),
+                    span: lens(&f, 10).first().map(|b| b.to_vec()).unwrap_or_default(),
                 });
             }
         }

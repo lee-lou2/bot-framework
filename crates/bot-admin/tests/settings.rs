@@ -93,7 +93,7 @@ fn bad_settings_are_refused_with_the_path_of_the_problem() {
         (json!({"trace": {"p": []}}), "admin.trace.p"),
         (json!({"trace": {"p": {}}}), "endpoint"),
         (
-            json!({"trace": {"p": {"endpoint": "https://collector:4318"}}}),
+            json!({"trace": {"p": {"endpoint": "ftp://collector:4318"}}}),
             "p:",
         ),
         (
@@ -220,4 +220,85 @@ async fn parsed_trace_settings_start_an_exporter_and_unknown_profiles_stay_silen
     let e = Exporter::start(s.trace, None, Redactor::default(), Options::default()).expect("시작");
     assert!(e.stats(&ProfileId("p".into())).is_some_and(|x| x.enabled));
     assert!(e.stats(&ProfileId("other".into())).is_none());
+}
+
+#[test]
+fn langfuse_langsmith_otlp_logs_and_sentry_examples_parse_and_validate() {
+    let doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/admin.md"));
+    let first = doc.find("```json\n").expect("첫 예시") + "```json\n".len();
+    let second_start =
+        first + doc[first..].find("```json\n").expect("둘째 예시") + "```json\n".len();
+    let second_end = second_start + doc[second_start..].find("```").expect("예시 끝");
+    let parsed: Value = serde_json::from_str(&doc[second_start..second_end]).expect("JSON");
+    let s = AdminSettings::from_json(&parsed).expect("Langfuse/LangSmith/logs/issues 예시");
+    assert_eq!(
+        s.trace[&ProfileId("personal".into())]
+            .backend
+            .as_ref()
+            .unwrap()
+            .name,
+        "langfuse"
+    );
+    assert_eq!(
+        s.trace[&ProfileId("work".into())]
+            .backend
+            .as_ref()
+            .unwrap()
+            .name,
+        "langsmith"
+    );
+    let logs = s.logs.expect("logs");
+    assert_eq!(
+        (logs.name.as_str(), logs.level),
+        ("otel-logs", bot_admin::logs::LogLevel::Warn)
+    );
+    let issues = s.issues.expect("issues");
+    assert_eq!(
+        (
+            issues.kind,
+            issues.environment.as_deref(),
+            issues.release.as_deref()
+        ),
+        (
+            bot_admin::issues::IssueKind::Sentry,
+            Some("production"),
+            Some("bot@0.1.0")
+        )
+    );
+    assert_eq!(
+        issues
+            .key
+            .as_ref()
+            .map(|k| (k.profile.0.as_str(), k.name.as_str())),
+        Some(("host", "sentry-key"))
+    );
+
+    // 잘못된 logs/issues 설정은 경로를 밝혀 거절한다
+    for (v, needle) in [
+        (json!({"logs": {}}), "admin.logs.endpoint"),
+        (
+            json!({"logs": {"endpoint": "http://otlp.example.com/v1/logs"}}),
+            "admin.logs.remote",
+        ),
+        (
+            json!({"logs": {"endpoint": "https://otlp.example.com/v1/logs", "level": "trace"}}),
+            "admin.logs.level",
+        ),
+        (json!({"issues": {}}), "admin.issues.endpoint"),
+        (
+            json!({"issues": {"endpoint": "https://o0.ingest.sentry.io/api/1/envelope/"}}),
+            "admin.issues.key",
+        ),
+        (
+            json!({"issues": {"kind": "jira", "endpoint": "http://127.0.0.1:9000/api/1/envelope/"}}),
+            "admin.issues.kind",
+        ),
+        (
+            json!({"issues": {"endpoint": "http://sentry.example.com/api/1/envelope/", "key": {"secret": "k"}}}),
+            "admin.issues.remote",
+        ),
+    ] {
+        let e = err(v.clone());
+        assert!(e.contains(needle), "{v} → {e}");
+    }
 }
