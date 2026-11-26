@@ -2,13 +2,18 @@
 
 Checked from the repository root (`python3 -I .github/scripts/docs_contract.py`, or `check_docs()` in check_contracts.py):
   schema   every property of schemas/v1/*.json appears in the documents
-  host     every top-level and nested host-settings key the Rust code accepts appears in the documents
+  host     every host-settings key the Rust code accepts is written as code (in backticks or a code block) in the documents, so a common word in prose
+           (`state`, `name`) does not count. The keys are read from the files of HOST_READERS, each by the way it rejects the rest: `top.remove("key")`,
+           `only(map, &["key"], path)`, `matches!(key.as_str(), "key")`, `match key.as_str() { "key" => … }` and the fields of `#[derive(Deserialize)]`
+           structs. A reader in another file is not seen until it is added there (the selftest fails when a file that rejects unknown keys is not listed)
   cli      every `bot` subcommand and `--flag` defined in crates/bot-cli/src/cli.rs appears in the documents
   route    every admin API route (`/v1/admin/…`) registered in crates/bot-admin/src/lib.rs appears in docs/admin.md
   tool     every reserved built-in tool id appears in the documents
   crate    the crate tables of docs/architecture.md and AGENTS.md list exactly the workspace members
-  path     every repository path in backticks, every relative link and every `#anchor` in the documents exists
-What it cannot see: whether a sentence is still true. A reviewer checks the sentences.
+  path     every repository path in backticks (`file.rs`, `file.rs:12`, `file.rs:12-20`), every relative link and every `#anchor` in the documents exists;
+           code blocks are not read
+What it cannot see: whether a sentence is still true, and (for schema, cli and tool names) whether a common name is documented for the right thing,
+because those names are looked up anywhere in the documents. A reviewer checks the sentences.
 
 An exception goes into .github/docs-allow.txt as `kind | token | reason`; an exception nothing needs any more is reported, so the list cannot rot."""
 import json
@@ -19,7 +24,7 @@ from pathlib import Path
 ALLOW_FILE = Path(".github/docs-allow.txt")
 PATH_ROOTS = ("crates/", "docs/", "schemas/", "scripts/", "examples/", ".github/", "images/")
 ADMIN_ROUTES_FILE = "crates/bot-admin/src/lib.rs"
-HOST_SOURCES = ("crates/bot-cli/src", "crates/bot-admin/src/settings.rs")
+FENCE = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.S | re.M)
 
 
 def read(root, relative):
@@ -40,9 +45,14 @@ def mentioned(name, text):
     return re.search(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", text) is not None
 
 
-def missing(kind, names, text, where):
-    """One problem per name the text does not mention; `where` says what defines it."""
-    return [(kind, name, f"`{name}` ({where(name)}) is not mentioned in the documents") for name in sorted(names) if not mentioned(name, text)]
+def code_text(text):
+    """The code in the documents: fenced blocks and inline code spans."""
+    return "\n".join(FENCE.findall(text) + re.findall(r"`[^`\n]+`", FENCE.sub("", text)))
+
+
+def missing(kind, names, text, where, how="mentioned"):
+    """One problem per name the text does not mention (`how` says in what form); `where` says what defines it."""
+    return [(kind, name, f"`{name}` ({where(name)}) is not {how} in the documents") for name in sorted(names) if not mentioned(name, text)]
 
 
 # ---- what the code defines ---------------------------------------------------------------------------------------------------------------------------------
@@ -67,29 +77,105 @@ def schema_properties(root):
 
 
 def non_test_text(text):
-    """The part of a Rust source before its `#[cfg(test)]` module."""
-    return text.split("#[cfg(test)]", 1)[0]
+    """The part of a Rust source before its test module (`#[cfg(test)]` followed by `mod`). A test-only `use` or `fn` ahead of it does not end the code."""
+    return re.split(r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\b", text, maxsplit=1)[0]
+
+
+def code_chars(text, start=0):
+    """(index, character) of the characters outside string literals."""
+    i = start
+    while i < len(text):
+        if text[i] == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        else:
+            yield i, text[i]
+        i += 1
+
+
+def closing(text, start):
+    """Index of the bracket that closes the one at `start` (the end of the text when it never closes)."""
+    depth = 0
+    for i, char in code_chars(text, start):
+        depth += char in "([{"
+        depth -= char in ")]}"
+        if depth == 0:
+            return i
+    return len(text)
+
+
+def statement_end(text, start):
+    """Index of the `;` that ends the statement the text continues at `start`."""
+    depth = 0
+    for i, char in code_chars(text, start):
+        depth += char in "([{"
+        depth -= char in ")]}"
+        if char == ";" and depth == 0:
+            return i
+    return len(text)
+
+
+def literals(text):
+    return re.findall(r'"([^"\n]*)"', text)
+
+
+def removed_keys(text):
+    """Top-level keys: `top.remove("key")`."""
+    return re.findall(r'top\.remove\("([^"]+)"\)', text)
+
+
+def only_lists(text):
+    """Keys handed to `only(map, &["a", "b"], path)`, and the list bound first by `let allowed … = …;`. Other string arrays are not keys."""
+    spans = [text[call.end():closing(text, call.end() - 1)] for call in re.finditer(r"\bonly\(", text)]
+    spans += [text[bound.end():statement_end(text, bound.end())] for bound in re.finditer(r"\blet allowed\b[^=;]*=", text)]
+    return [key for span in spans for array in re.findall(r"&\[([^\]]*)\]", span) for key in literals(array)]
+
+
+def matched_keys(text):
+    """Keys tested with `matches!(key.as_str(), "a" | "b")`."""
+    return [key for found in re.finditer(r'matches!\(\s*\w+\.as_str\(\),\s*((?:"[^"\n]*"\s*\|?\s*)+)\)', text) for key in literals(found.group(1))]
+
+
+def match_arms(text):
+    """Keys sorted by `match key.as_str() { "a" => …, other => error }`: the string arms."""
+    return re.findall(r'^\s*"([^"\n]+)"\s*=>', text, re.M)
+
+
+def serde_fields(text):
+    """Fields of the `#[derive(Deserialize)]` structs (`deny_unknown_fields` rejects the rest); `#[serde(rename = "x")]` names a field `x`."""
+    keys = []
+    structs = r"#\[derive\([^)]*\bDeserialize\b[^)]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?struct\s+\w+\s*\{(.*?)\n\s*\}"
+    for body in re.findall(structs, text, re.S):
+        renamed = None
+        for line in body.splitlines():
+            attribute = re.match(r'#\[serde\([^\]]*\brename\s*=\s*"([^"]+)"', line.strip())
+            field = re.match(r"(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:", line.strip())
+            if attribute:
+                renamed = attribute.group(1)
+            elif field:
+                keys.append(renamed or field.group(1))
+                renamed = None
+    return keys
+
+
+# The readers of the host settings: how a file lists the keys it accepts, and the files. A new reader is added here (its file by its idiom).
+HOST_READERS = (
+    (removed_keys, ("crates/bot-cli/src/host.rs",)),
+    (only_lists, ("crates/bot-cli/src/execution.rs", "crates/bot-cli/src/execution/provider.rs", "crates/bot-admin/src/settings.rs")),
+    (matched_keys, ("crates/bot-cli/src/install.rs",)),
+    (match_arms, ("crates/bot-cli/src/tool_limits.rs",)),
+    (serde_fields, ("crates/bot-gateway/src/host.rs", "crates/bot-gateway/src/host/openai.rs")),
+)
 
 
 def host_keys(root):
-    """key -> where the Rust code accepts it: `top.remove("key")` (top level) and the string arrays handed to `only(…)` (nested)."""
+    """key -> the first reader file that accepts it."""
     found = {}
-    top = read(root, "crates/bot-cli/src/host.rs")
-    for key in re.findall(r'top\.remove\("([^"]+)"\)', non_test_text(top)):
-        found.setdefault(key, "crates/bot-cli/src/host.rs")
-    files = []
-    for source in HOST_SOURCES:
-        base = root / source
-        files += sorted(base.rglob("*.rs")) if base.is_dir() else [base]
-    for path in files:
-        if path.name == "tests.rs" or path.name.endswith("_tests.rs") or "tests" in path.parts:
-            continue
-        text = non_test_text(path.read_text(encoding="utf-8"))
-        if "only(" not in text:
-            continue
-        for array in re.findall(r"&\[\s*((?:\"[^\"\n]*\"\s*,?\s*)+)\]", text):
-            for key in re.findall(r'"([^"\n]*)"', array):
-                found.setdefault(key, str(path.relative_to(root)))
+    for extract, files in HOST_READERS:
+        for relative in files:
+            for key in extract(non_test_text(read(root, relative))):
+                found.setdefault(key, relative)
     return found
 
 
@@ -143,7 +229,7 @@ def workspace_crates(root):
 
 def table_crates(text):
     """Crate names in the first column of a markdown table (`| bot-x |` or `` | `bot-x` | ``)."""
-    return set(re.findall(r"^\|\s*`?(bot-[a-z]+)`?\s*\|", text, re.M))
+    return set(re.findall(r"^\|\s*`?(bot-[a-z0-9-]+)`?\s*\|", text, re.M))
 
 
 # ---- paths, links and anchors ------------------------------------------------------------------------------------------------------------------------------
@@ -177,14 +263,14 @@ def expand_braces(token):
 
 def path_problems(root, doc):
     """Repository paths in backticks, relative links and `#anchor`s of one document that point at nothing."""
-    text = doc.read_text(encoding="utf-8")
+    text = FENCE.sub("", doc.read_text(encoding="utf-8"))
     name = str(doc.relative_to(root))
     problems = []
     for token in sorted(set(re.findall(r"`([^`\n]+)`", text))):
         if not token.startswith(PATH_ROOTS) or re.search(r"[\s<>*…$|]", token):
             continue
         for candidate in expand_braces(token):
-            path = re.sub(r"(?::\d+)?(?:#.*)?$", "", candidate).rstrip("/")
+            path = re.sub(r"(?::\d+(?:-\d+)?)?(?:#.*)?$", "", candidate).rstrip("/")
             if path and not (root / path).exists():
                 problems.append(("path", path, f"{name}: `{path}` does not exist"))
     for target in sorted(set(re.findall(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)", text))):
@@ -230,7 +316,7 @@ def docs_problems(root):
     props = schema_properties(root)
     problems += missing("schema", props, text, lambda name: "schemas/v1/" + ", ".join(sorted(props[name])))
     keys = host_keys(root)
-    problems += missing("host", keys, text, lambda name: keys[name])
+    problems += missing("host", keys, code_text(text), lambda name: keys[name], "written as code")
     commands, flags = cli_commands(root)
     problems += missing("cli", {f"bot {c}" if " " not in c else c for c in commands}, text, lambda _: "crates/bot-cli/src/cli.rs")
     problems += missing("cli", flags, text, lambda _: "crates/bot-cli/src/cli.rs")

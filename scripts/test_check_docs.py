@@ -30,11 +30,16 @@ GOOD = {
     "AGENTS.md": "# agents\n\n| 크레이트 | 책임 |\n|---|---|\n| `bot-core` | 어휘 |\n| `bot-cli` | 바이너리 |\n\n읽기: `crates/bot-core/src/lib.rs`\n",
     "docs/architecture.md": "# 구조\n\n## 크레이트\n\n| 크레이트 | 책임 |\n|---|---|\n| bot-core | 어휘 |\n| bot-cli | 바이너리 |\n",
     "docs/admin.md": "# 관리\n\n`GET /v1/admin/me`\n",
-    "docs/guide.md": "# 안내\n\n설정 `agent_name`·`nested_key`·`version`·`kind`·`model`·`gateway`, 명령 `bot validate`·`bot add skill`, 플래그 `--check-db`, 도구 `memory.share`.\n",
+    "docs/guide.md": "# 안내\n\n설정 `agent_name`·`nested_key`·`version`·`kind`·`model`·`gateway`·`root`·`tool_call_max_secs`·`team_id`·`renamed_key`, 명령 `bot validate`·`bot add skill`, 플래그 `--check-db`, 도구 `memory.share`.\n",
     "schemas/v1/profile.schema.json": '{"properties": {"agent_name": {"properties": {"nested_key": {}}}}}',
     "crates/bot-core/src/lib.rs": "//! core\n",
     "crates/bot-cli/src/host.rs": 'let version = top.remove("version");\nlet gateway = top.remove("gateway");\n#[cfg(test)]\nmod tests { let x = top.remove("only_in_tests"); }\n',
     "crates/bot-cli/src/execution.rs": 'only(fields, &["kind", "model"], path)?;\n',
+    "crates/bot-cli/src/execution/provider.rs": "// no keys\n",
+    "crates/bot-cli/src/install.rs": '#[cfg(test)]\nuse place::remove_tree;\nfn parse() { fields.keys().find(|k| !matches!(k.as_str(), "root")); matches!(part, "" | ".."); }\n#[cfg(test)]\nmod tests;\n',
+    "crates/bot-cli/src/tool_limits.rs": 'match key.as_str() {\n    "tool_call_max_secs" => {}\n    other => {}\n}\n',
+    "crates/bot-gateway/src/host.rs": "#[derive(Clone, Debug, Deserialize)]\n#[serde(deny_unknown_fields)]\npub struct SlackWorkspace {\n    /// the team\n    pub team_id: String,\n    #[serde(default, rename = \"renamed_key\")]\n    hidden_name: u8,\n}\n\n#[derive(Debug)]\nstruct NotConfig {\n    not_a_key: u8,\n}\n",
+    "crates/bot-gateway/src/host/openai.rs": "// no keys\n",
     "crates/bot-admin/src/settings.rs": "// no keys\n",
     "crates/bot-admin/src/lib.rs": '.route("/v1/admin/me", get(me))\n.route("/ui", get(index))\n.route("/ui/{*path}", get(asset))\n',
     "crates/bot-profile/src/tools.rs": 'const RESERVED_TOOL_IDS: &[&str] = &[\n    "memory.share",\n];\n',
@@ -109,13 +114,41 @@ class Names(unittest.TestCase):
             self.assertEqual([(k, t) for k, t, _ in repo.problems()], [("schema", "nested_key")])
             self.assertIn("profile.schema.json", repo.messages()[0])
 
-    def test_host_keys_come_from_remove_calls_and_only_arrays_but_not_from_tests(self):
+    def test_host_keys_are_read_by_the_way_each_reader_rejects_the_rest_but_not_from_tests(self):
         with Repo() as repo:
-            self.assertEqual(sorted(docs.host_keys(repo.root)), ["gateway", "kind", "model", "version"])
+            self.assertEqual(sorted(docs.host_keys(repo.root)), ["gateway", "kind", "model", "renamed_key", "root", "team_id", "tool_call_max_secs", "version"])
+
+    def test_only_the_arrays_an_only_call_or_an_allowed_list_holds_are_keys(self):
+        reader = (
+            'const KINDS: &[&str] = &["not_a_key"];\n'
+            'only(\n    fields,\n    &[\n        "multi",\n        "line",\n    ],\n    &format!("({})", path),\n)?;\n'
+            'let allowed: &[&str] = match kind {\n    A => &["bound_a"],\n    B => &["bound_b", "bound_a"],\n};\nonly(fields, allowed, path)?;\n'
+            'let other = &["not_a_key_either"];\n'
+        )
+        self.assertEqual(docs.only_lists(reader), ["multi", "line", "bound_a", "bound_b", "bound_a"])
+
+    def test_the_source_is_cut_at_the_test_module_not_at_a_test_only_item(self):
+        text = '#[cfg(test)]\nuse helper;\nlet kept = top.remove("kept");\n#[cfg(test)]\nmod tests;\nlet gone = top.remove("gone");\n'
+        self.assertEqual(docs.removed_keys(docs.non_test_text(text)), ["kept"])
+        self.assertEqual(docs.removed_keys(docs.non_test_text('x\n#[cfg(test)]\npub(crate) mod t { top.remove("gone"); }')), [])
+
+    def test_a_registered_reader_that_has_moved_stops_the_check(self):
+        with Repo({"crates/bot-cli/src/install.rs": None}) as repo, self.assertRaises(FileNotFoundError):
+            docs.host_keys(repo.root)
 
     def test_an_undocumented_host_key_is_reported(self):
         with Repo({"crates/bot-cli/src/execution.rs": 'only(fields, &["kind", "secret_name"], path)?;\n'}) as repo:
             self.assertEqual([(k, t) for k, t, _ in repo.problems()], [("host", "secret_name")])
+
+    def test_a_host_key_must_be_written_as_code_not_only_as_a_word_in_prose(self):
+        prose = GOOD["docs/guide.md"].replace("`gateway`", "gateway") + "\n(gateway는 문장 속에서만 나온다)\n"
+        with Repo({"docs/guide.md": prose}) as repo:
+            self.assertEqual([(k, t) for k, t, _ in repo.problems()], [("host", "gateway")])
+            self.assertIn("written as code", repo.messages()[0])
+        for fixed in ("`gateway`", "\n```json\n{\"gateway\": {}}\n```\n"):
+            with Repo({"docs/guide.md": prose + fixed}) as repo:
+                self.assertEqual(repo.problems(), [])
+        self.assertEqual(docs.code_text("a `b` c\n```\nd\n```\n`e`"), "```\nd\n```\n`b`\n`e`")
 
     def test_commands_and_flags_are_read_from_the_clap_definitions(self):
         with Repo() as repo:
@@ -144,6 +177,9 @@ class Names(unittest.TestCase):
             self.assertEqual(sorted(t for k, t, _ in repo.problems() if k == "crate"), ["bot-cli", "bot-ghost"])
         with Repo({"AGENTS.md": GOOD["AGENTS.md"].replace("| `bot-core` | 어휘 |\n", "")}) as repo:
             self.assertEqual([t for k, t, _ in repo.problems() if k == "crate"], ["bot-core"])
+        # a name with several hyphens or digits is read whole
+        with Repo({"AGENTS.md": GOOD["AGENTS.md"] + "| `bot-two-words2` | x |\n"}) as repo:
+            self.assertEqual([t for k, t, _ in repo.problems() if k == "crate"], ["bot-two-words2"])
 
 
 class Paths(unittest.TestCase):
@@ -163,6 +199,15 @@ class Paths(unittest.TestCase):
                 found,
                 ["`crates/bot-core/src/gone.rs` does not exist", "`crates/nope.rs` does not exist", "link `admin.md#nowhere` points at a missing heading", "link `missing.md` points at a missing file"],
             )
+
+
+    def test_line_ranges_are_stripped_and_code_blocks_are_not_read(self):
+        text = (
+            "`crates/bot-core/src/lib.rs:1` `crates/bot-core/src/lib.rs:1-2` `crates/gone.rs:10-20`\n"
+            "```text\n`crates/in-a-block.rs` [x](nowhere.md)\n```\n"
+        )
+        with Repo({"docs/guide.md": GOOD["docs/guide.md"] + text}) as repo:
+            self.assertEqual([m.split(": ", 1)[1] for _, _, m in repo.problems()], ["`crates/gone.rs` does not exist"])
 
 
 class Exceptions(unittest.TestCase):
@@ -195,6 +240,21 @@ class Repository(unittest.TestCase):
         self.assertEqual(bad, [])
         left = docs.filter_allowed(docs.docs_problems(ROOT), allowed)
         self.assertEqual([m for m in left if not any(f"`{name}`" in m for name in KNOWN_PENDING)], [])
+
+    def test_every_file_that_rejects_unknown_host_keys_is_a_registered_reader(self):
+        """A host section read in a file the check does not know would be a silent blind spot again."""
+        registered = {relative for _, files in docs.HOST_READERS for relative in files}
+        candidates = [*(ROOT / "crates/bot-cli/src").rglob("*.rs"), *(ROOT / "crates/bot-gateway/src/host").rglob("*.rs"), ROOT / "crates/bot-gateway/src/host.rs", ROOT / "crates/bot-admin/src/settings.rs"]
+        rejecting = set()
+        for path in candidates:
+            if path.name == "tests.rs" or path.name.endswith("_tests.rs") or "tests" in path.parts:
+                continue
+            text = docs.non_test_text(path.read_text(encoding="utf-8"))
+            if "알 수 없는 키" in text or "deny_unknown_fields" in text:
+                rejecting.add(str(path.relative_to(ROOT)))
+        self.assertEqual(sorted(rejecting - registered), [])
+        for relative in registered:
+            self.assertTrue((ROOT / relative).is_file(), relative)
 
     def test_the_hook_in_check_contracts_runs_the_same_rules(self):
         with contextlib.chdir(ROOT):
