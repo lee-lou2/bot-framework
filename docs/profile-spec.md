@@ -121,6 +121,22 @@ policy:
 
 ## 일정 스킬과 예약
 
+### SKILL.md front matter와 크기 상한
+
+`SKILL.md` 맨 위에는 선택적으로 Agent Skills 형식의 YAML front matter(`---`로 열고 `---`로 닫는다)를 둘 수 있다([skill.schema.json](../schemas/v1/skill.schema.json)). front matter가 없는 기존 `SKILL.md`는 파일 전체를 본문으로 읽는다. 맨 위 `---`를 닫지 않으면 오타나 잘못된 메타데이터가 프롬프트로 흘러가지 않도록 `front-matter-unclosed` 오류로 거절한다.
+
+| front matter 키 | 규칙 |
+|---|---|
+| `name` | 선택. 1~64자 소문자·숫자·하이픈(`-`, 앞뒤 하이픈·`--` 금지). 적으면 스킬 폴더 이름과 같아야 한다(`skill-name-mismatch`). |
+| `description` | 선택. 1~1024자(공백만 불가). 구조체 메타데이터에 보존한다. |
+| `license` | 선택. 1자 이상 문자열(공백만 불가). |
+| `compatibility` | 선택. 1~500자 문자열(공백만 불가). |
+| `metadata` | 선택. 문자열→문자열 매핑(키는 1자 이상 문자열, 값은 문자열만). |
+
+- **거절하는 키**: `allowed-tools`는 전용 오류 `skill-allowed-tools`로 거절하고, 위 다섯 키 밖의 미지 키는 `schema`로 거절한다. 스킬 문서는 권한을 부여할 수 없으며([보안](security.md#보장-범위)), 모든 도구 선언과 권한 상한은 `tools.yaml`과 `profile.yaml`의 `roles`·`policy`에서만 정한다.
+- **프롬프트와 빈 본문**: 모델 프롬프트에는 front matter를 제거한 본문만 전달한다. front matter 뒤 본문이 비어 있으면 `empty-file`로 거절한다.
+- **크기 상한**: 에이전트 하나에게 보이는 스킬 본문(front matter 제외) 합계는 최대 **32 KiB(32,768바이트)**다(한 요청의 지식 문서 상한 32 KiB와 같은 수준). 단일 `SKILL.md` 본문이나 상속을 합친 에이전트별 합계가 이를 넘으면 실행 중 조용히 자르지 않고 검증·활성화 단계에서 `skill-too-large`로 거절한다. 긴 참고 자료는 `knowledge/`로 옮기거나 필요한 하위 에이전트 아래로 스킬을 나눈다.
+
 tools.yaml의 server는 운영자가 설치한 실행 파일 또는 이미지의 고정된 별칭이다. tools의 각 항목이 호출별 환경과 네트워크 상한을 정한다. 데모 서버는 합성 일정만 사용한다. 제3자에게 입력을 보내는 도구(검색 포함)는 external: true로 선언한다. 아래 로컬 도구의 기본값은 false다.
 
 ```yaml
@@ -292,7 +308,7 @@ HTTP response 기본값 accepted는 커밋 후 202와 request_id를 준다. `{mo
 
 ## 검증과 변경
 
-스키마 위치는 `schemas/v1/{profile,agent,tools,triggers,env}.schema.json`이다. `bot validate`와 `bot serve`가 같은 검증기를 쓴다. 미지원 버전·미등록 서버·알 수 없는 필드·중복 키·잘못된 참조·폴더 밖 경로·링크·특수 파일·과대 입력을 거부한다. 프로필 트리는 운영자가 배포하는 읽기 전용 입력이다.
+스키마 위치는 `schemas/v1/{profile,agent,skill,tools,triggers,env}.schema.json`이다. `bot validate`와 `bot serve`가 같은 검증기를 쓴다. 미지원 버전·미등록 서버·알 수 없는 필드·중복 키·잘못된 참조·폴더 밖 경로·링크·특수 파일·과대 입력을 거부한다. 프로필 트리는 운영자가 배포하는 읽기 전용 입력이다.
 
 검증한 바이트로 새 판본을 만들고 모든 바인딩을 한 번에 교체한다. 실패하면 이전 판본을 사용한다. 실행은 접수 시점의 지침·도구 판본에 묶이며, 이후 호출·승인·게시 직전에는 현재 권한과의 교집합을 적용한다. 재기동 시 옛 판본을 읽는 데에는 아래 제약이 있다. 철회된 서버나 바인딩으로 재개할 수 없다.
 
@@ -341,9 +357,18 @@ BOT_HOST_CONFIG는 CLI가 읽는 JSON이다. gateway 키는 게이트웨이가 �
 
 ## bot-profile 검증 규칙
 
-**폴더.** BOT_PROFILES 바로 아래에는 프로필 폴더만 둔다(루트 자체는 링크여도 된다). 트리 안의 링크·소켓·FIFO·장치·하드링크 파일, UTF-8이 아니거나 제어·방향 전환 문자가 든 이름과 내용, 대소문자만 다른 이름을 거절한다. 알려진 이름만 받는다. 프로필은 profile.yaml·rules.md·agents·knowledge·skills, 에이전트는 AGENT.md·env.yaml·triggers.yaml·memory·knowledge·skills·agents, 스킬은 SKILL.md·tools.yaml·tools.lock.yaml(원격 서버의 도구 정의 잠금)이다. knowledge는 `.md`·`.txt`, memory는 `.md`만 둔다. `.git`·`.DS_Store`·`.gitkeep`은 읽지도 해시하지도 않는다. 기본 한도는 프로필 64개, 프로필당 파일 2,000개·16 MiB, 파일 1 MiB(YAML 256 KiB), 경로 깊이 24, 에이전트 128개·8단계다. 한도를 넘으면 일부만 받지 않고 전체를 거절한다.
+**폴더.** BOT_PROFILES 바로 아래에는 프로필 폴더만 둔다(루트 자체는 링크여도 된다). 트리 안의 링크·소켓·FIFO·장치·하드링크 파일, UTF-8이 아니거나 제어·방향 전환 문자가 든 이름과 내용, 대소문자만 다른 이름을 거절한다. 알려진 이름만 받는다. 프로필은 profile.yaml·rules.md·agents·knowledge·skills, 에이전트는 AGENT.md·env.yaml·triggers.yaml·memory·knowledge·skills·agents, 스킬은 SKILL.md·tools.yaml·tools.lock.yaml(원격 서버의 도구 정의 잠금)이다. knowledge는 `.md`·`.txt`, memory는 `.md`만 둔다. `.git`·`.DS_Store`·`.gitkeep`은 읽지도 해시하지도 않는다. 기본 한도는 프로필 64개, 프로필당 파일 2,000개·16 MiB, 파일 1 MiB(YAML 256 KiB), 경로 깊이 24, 에이전트 128개·8단계, 에이전트별 보이는 스킬 본문 합계 32 KiB(front matter 제외)다. 한도를 넘으면 일부만 받지 않고 전체를 거절한다.
 
-**YAML과 스키마.** 앵커·별칭·태그·다중 문서·중복 키·복합 키·무한대·NaN, 깊이 32·항목 2만 개 초과를 거절한다. 평문은 YAML 1.2 코어 스키마로 읽어 `yes/no/on/off`는 문자열이고 키는 글자 그대로 문자열이다. 번들 스키마로 검증한다. cron은 5칸 표현과 `@hourly`·`@daily`·`@midnight`·`@weekly`·`@monthly`·`@yearly`·`@annually`, 일·요일 칸의 `?`를 받으며 `bot_core::cron::Cron`(검증과 스케줄러 공용)이 정규 5칸으로 바꾼다. AGENT.md의 front matter는 [agent.schema.json](../schemas/v1/agent.schema.json)의 `model`, `description`(한 줄 200자 이하, 상속하지 않으며 생략하면 경로의 마지막 이름), `builtin`(모델 실행기의 읽기 전용 내장 도구 `read`·`grep`·`glob`, 기본은 빈 목록, 상속하지 않으며 중복·미등록은 거절)만 받는다. 도구 input은 [plugins.md](plugins.md)의 어휘만 받으며, pattern은 `\d \w \s \b`·인라인 플래그·lookaround 없이 엔진마다 같게 읽히는 문법만 쓴다. 쓸 수 없는 키워드·패턴은 활성화를 거절한다.
+**YAML과 스키마.** 앵커·별칭·태그·다중 문서·중복 키·복합 키·무한대·NaN, 깊이 32·항목 2만 개 초과를 거절한다. 평문은 YAML 1.2 코어 스키마로 읽어 `yes/no/on/off`는 문자열이고 키는 글자 그대로 문자열이다. 번들 스키마로 검증한다. cron은 5칸 표현과 `@hourly`·`@daily`·`@midnight`·`@weekly`·`@monthly`·`@yearly`·`@annually`, 일·요일 칸의 `?`를 받으며 `bot_core::cron::Cron`(검증과 스케줄러 공용)이 정규 5칸으로 바꾼다. AGENT.md의 front matter는 [agent.schema.json](../schemas/v1/agent.schema.json)의 `model`, `description`(한 줄 200자 이하, 상속하지 않으며 생략하면 경로의 마지막 이름), `builtin`(모델 실행기의 읽기 전용 내장 도구 `read`·`grep`·`glob`, 기본은 빈 목록, 상속하지 않으며 중복·미등록은 거절)만 받는다. SKILL.md의 선택적 front matter는 [skill.schema.json](../schemas/v1/skill.schema.json)의 `name`·`description`·`license`·`compatibility`·`metadata`만 받으며, `allowed-tools`·미지 키·미닫힘 `---`·폴더명과 다른 `name`·빈 본문·에이전트별 본문 32 KiB 초과를 거절한다. 도구 input은 [plugins.md](plugins.md)의 어휘만 받으며, pattern은 `\d \w \s \b`·인라인 플래그·lookaround 없이 엔진마다 같게 읽히는 문법만 쓴다. 쓸 수 없는 키워드·패턴은 활성화를 거절한다.
+
+| SKILL.md 검증 오류 코드 | 원인 |
+|---|---|
+| `front-matter-unclosed` | 맨 위 `---`로 연 front matter에 닫는 `---` 줄이 없음 |
+| `skill-allowed-tools` | front matter에 `allowed-tools`를 적음(권한은 `tools.yaml`과 `profile.yaml` 정책에서만 선언) |
+| `skill-name-mismatch` | front matter의 `name`이 스킬 폴더 이름과 다름 |
+| `skill-too-large` | 단일 SKILL.md 본문 또는 에이전트별 보이는 스킬 본문 합계(front matter 제외)가 32 KiB 초과 |
+| `empty-file` | front matter를 뺀 SKILL.md 본문이 비어 있음 |
+| `schema` | 알 수 없는 키, `name` 문자·길이 규칙 위반, `description`(1~1024자)·`compatibility`(1~500자)·`license`·`metadata` 형식 위반 |
 
 **참조와 충돌.** 활성화 전에 다음을 거절한다: id≠폴더명, 대소문자까지 정확하지 않은 IANA 시간대, 알 수 없는 역할·스코프(특히 `policy.approve` 오타), 같은 신원·바인딩 id·입구(활성 프로필 전체), 없는 에이전트·바인딩·도구, 호스트 내장 도구 ID `memory.share`·`schedule.create`·`schedule.list`·`schedule.cancel`·`schedule.deliver` 선언(정확히 이 ID들만 예약하며 `memory`·`schedule` 스킬의 다른 도구나 다른 스킬의 `share`·`create`는 허용, 새·복원 프로필 공통), 도구 `env` 이름이 그 도구를 부르는 에이전트의 상속 env.yaml에 없음(`env-missing`, 부모·자식 모두 호출할 수 있으면 둘 다 본다)·로더·셸·프록시·호스트 예약 이름(`env-reserved`)·비밀 환경 이름과 충돌(`env-secret-conflict`)·중복이나 잘못된 이름(스키마), 보이지 않는 스킬 이름 충돌, profile.yaml에 없는 비밀 이름, 기억 시드 owner가 멤버가 아님, cron 주체가 서비스가 아니거나 도구 스코프가 없음, 승인 대상 도구의 cron에 approver가 없음(승인자는 `local:*`·`slack:*` 사람 신원만, `service:*`·`http:*`는 불가), 같은 후보군의 같은 order, private 트리거가 DM 바인딩이 아니거나 일반 트리거보다 뒤이거나 승인 대상 도구 또는 다단계(`effects: true`) 도구를 부름(승인 카드·단계 영수증에 민감한 본문이 남음), `input`과 고정 args의 키 충돌·스키마에 없는 인자·빠진 필수 인자·args 단독 호출의 스키마 위반, `sync` 응답인데 도구 대상이 아님. 호스트 등록부 대조(미등록 서버·모델·입구 별칭, egress 상한, 도구 호출 시간 한도의 천장 `tool-timeout-over-cap`)는 활성화 때만 한다. 같은 바이트의 판본은 호스트가 바뀌어도 같고, 옛 판본 복원은 구조·참조만 다시 확인한다.
 
