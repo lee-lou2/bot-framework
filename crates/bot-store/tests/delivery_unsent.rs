@@ -540,3 +540,36 @@ async fn a_card_that_is_not_the_owners_live_pending_card_is_never_closed() {
         );
     }
 }
+
+#[tokio::test]
+async fn cancellation_before_unsent_completion_creates_no_notice() {
+    use bot_core::port::RunAdmin;
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let at = destination_run(&db, ConversationKind::Direct).await.attempt;
+    let draft = replies(&db)
+        .draft(at.clone(), Some(answers(&["답"])))
+        .await
+        .unwrap()
+        .unwrap();
+    db.store
+        .cancel(
+            at.profile.clone(),
+            at.run.clone(),
+            PrincipalId("operator".into()),
+            "중지".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        finish(&db, claim(&at), draft.target, UnsentReason::Unrouted).await,
+        Err(Error::Stale)
+    ));
+    assert!(bodies_to_original(&db).await.is_empty());
+    assert_eq!(delivery_row(&db).await.0, "drafted");
+    assert_eq!(
+        runs(&db).finish(at, done("늦은 답")).await.unwrap(),
+        bot_core::command::Completion::Cancelled
+    );
+}

@@ -44,7 +44,10 @@ async fn a_resumed_run_rejects_the_previous_claim_even_with_the_same_generation(
         runs(&db).history(old.attempt.clone(), 5).await.map(|_| ())
     ));
     assert!(stale(
-        runs(&db).finish(old.attempt.clone(), done("late")).await
+        runs(&db)
+            .finish(old.attempt.clone(), done("late"))
+            .await
+            .map(|_| ())
     ));
     assert!(stale(
         runs(&db)

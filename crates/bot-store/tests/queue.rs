@@ -1,4 +1,6 @@
 mod support;
+#[path = "queue/terminal.rs"]
+mod terminal;
 
 use bot_core::{command::*, id::*, port::*, state::*};
 use bot_store::Config;

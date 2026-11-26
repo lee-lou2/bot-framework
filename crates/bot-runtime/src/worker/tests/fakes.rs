@@ -259,15 +259,18 @@ impl RunStore for FakeRuns {
         state.steps = pending;
         Box::pin(async { Ok(()) })
     }
-    fn finish(&self, _: Attempt, done: Finish) -> Reply<'_, ()> {
+    fn finish(&self, _: Attempt, done: Finish) -> Reply<'_, Completion> {
         let mut state = lock(&self.state);
+        if state.cancel {
+            return Box::pin(async { Ok(Completion::Cancelled) });
+        }
         let error = state.finish_error.take();
         if error.is_none() {
             state.finished.push(done);
         }
-        Box::pin(async move { error.map_or(Ok(()), Err) })
+        Box::pin(async move { error.map_or(Ok(Completion::Succeeded), Err) })
     }
-    fn finish_with(&self, at: Attempt, done: Finish, outcome: RunOutcome) -> Reply<'_, ()> {
+    fn finish_with(&self, at: Attempt, done: Finish, outcome: RunOutcome) -> Reply<'_, Completion> {
         lock(&self.state).outcomes.push(outcome);
         self.finish(at, done)
     }

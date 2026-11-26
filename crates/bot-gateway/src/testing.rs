@@ -10,8 +10,8 @@ pub use catalog::TestCatalog;
 
 use bot_core::{
     command::{
-        Accept, AcceptExtras, Beat, Failure, Finish, HttpRoute, JsonPayload, Retry, Step, Target,
-        Turn,
+        Accept, AcceptExtras, Beat, Completion, Failure, Finish, HttpRoute, JsonPayload, Retry,
+        Step, Target, Turn,
     },
     id::*,
     intake::{PrivateCall, PrivateDecision, PrivateIntake, RequestKey, RequestState},
@@ -406,7 +406,7 @@ impl RunStore for MemoryStore {
         unavailable()
     }
 
-    fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, ()> {
+    fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, Completion> {
         unavailable()
     }
 

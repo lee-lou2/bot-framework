@@ -41,12 +41,12 @@ impl RunStore for Spy {
     fn checkpoint_batch(&self, _: Attempt, _: Vec<Step>) -> Reply<'_, ()> {
         unavailable()
     }
-    fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, ()> {
+    fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, Completion> {
         unavailable()
     }
-    fn finish_with(&self, _: Attempt, _: Finish, outcome: RunOutcome) -> Reply<'_, ()> {
+    fn finish_with(&self, _: Attempt, _: Finish, outcome: RunOutcome) -> Reply<'_, Completion> {
         self.3.lock().unwrap().push(outcome);
-        Box::pin(std::future::ready(Ok(())))
+        Box::pin(std::future::ready(Ok(Completion::Succeeded)))
     }
     fn fail(&self, _: Attempt, failure: Failure) -> Reply<'_, Retry> {
         *self.1.lock().unwrap() = Some(failure);

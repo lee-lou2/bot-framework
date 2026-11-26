@@ -176,6 +176,13 @@ pub struct Finish {
     pub answers: Vec<JsonPayload>,
 }
 
+/// 현재 소유자가 완료를 보고한 트랜잭션이 실제로 커밋한 종결 상태.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Completion {
+    Succeeded,
+    Cancelled,
+}
+
 /// 공급자가 보고한 토큰 수. 입력(`prompt`)은 공급자가 정의한 캐시 입력 토큰을 한 번 포함한다.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TokenUsage {

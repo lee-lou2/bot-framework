@@ -79,11 +79,16 @@ impl RunStore for Store {
         reply!(async move { self.checkpoint_batch_run(&attempt, steps).await })
     }
 
-    fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, ()> {
+    fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, Completion> {
         reply!(async move { self.finish_run(&attempt, done).await })
     }
 
-    fn finish_with(&self, attempt: Attempt, done: Finish, outcome: RunOutcome) -> Reply<'_, ()> {
+    fn finish_with(
+        &self,
+        attempt: Attempt,
+        done: Finish,
+        outcome: RunOutcome,
+    ) -> Reply<'_, Completion> {
         reply!(async move { self.finish_run_with(&attempt, done, Some(outcome)).await })
     }
 

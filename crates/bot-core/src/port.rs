@@ -56,10 +56,15 @@ pub trait RunStore: Send + Sync {
     /// 현재 claim으로 차례의 레코드·도구·그룹을 한 커밋에 저장한다.
     /// 기존 key의 내용이 하나라도 다르면 전체를 롤백한다. 같은 내용의 재전송은 멱등이다.
     fn checkpoint_batch(&self, attempt: Attempt, steps: Vec<Step>) -> Reply<'_, ()>;
-    /// 결과·답(outbox)·부모 깨우기를 한 커밋으로 기록한다.
-    fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, ()>;
+    /// 결과·답(outbox)·부모 깨우기를 한 커밋으로 기록한다. 취소가 먼저면 답을 버리고 취소로 종결해 실제 상태를 돌려준다.
+    fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, Completion>;
     /// `finish`와 같되 실행 계량(잘림·사용량)도 같은 커밋에 기록한다. 계량을 저장하지 않는 구현은 계량을 버리고 `finish`로 끝낸다(기본 구현).
-    fn finish_with(&self, attempt: Attempt, done: Finish, _outcome: RunOutcome) -> Reply<'_, ()> {
+    fn finish_with(
+        &self,
+        attempt: Attempt,
+        done: Finish,
+        _outcome: RunOutcome,
+    ) -> Reply<'_, Completion> {
         self.finish(attempt, done)
     }
     /// 일시 오류는 백오프 재시도, 영구 오류·시도 한도 초과는 dead letter.

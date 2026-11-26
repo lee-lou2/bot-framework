@@ -470,3 +470,16 @@ async fn a_loop_run_opens_a_front_channel_for_its_own_attempt_and_revokes_only_t
     r.worker.execute(agent_run("r3")).await;
     assert_eq!(*lock(&seen), [None]);
 }
+
+#[tokio::test]
+async fn a_cancel_at_finish_is_reported_without_nudging_the_gateway() {
+    let r = rig(ScriptedModel::new(vec![]));
+    lock(&r.runs.state).cancel = true;
+    let run = in_kind(
+        direct_run("root-dm", "agenda.list"),
+        ConversationKind::Direct,
+    );
+    assert_eq!(r.worker.execute(run).await, Outcome::Cancelled);
+    assert!(lock(&r.gateway.delivered).is_empty());
+    assert!(lock(&r.runs.state).failed.is_empty());
+}

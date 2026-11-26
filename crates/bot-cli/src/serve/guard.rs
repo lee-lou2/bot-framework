@@ -5,8 +5,8 @@
 //! 열린 스트림도 주기적으로 다시 확인해 끊는다(`GuardedUpstream`).
 use bot_core::{
     command::{
-        Accept, AcceptExtras, Beat, CallResult, Failure, Finish, Retry, RunOutcome, Step, ToolCall,
-        Turn,
+        Accept, AcceptExtras, Beat, CallResult, Completion, Failure, Finish, Retry, RunOutcome,
+        Step, ToolCall, Turn,
     },
     id::{ApprovalId, Attempt, PrincipalId, RunId},
     intake::{RequestKey, RequestState},
@@ -127,12 +127,17 @@ impl RunStore for GuardedRuns {
         self.inner.checkpoint_batch(attempt, steps)
     }
 
-    fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, ()> {
+    fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, Completion> {
         self.inner.finish(attempt, done)
     }
 
     /// 완료와 같은 커밋에 실행 계량(잘림·실측 사용량)을 싣는 완료도 그대로 넘긴다. 기본 구현은 계량을 버리고 `finish`로 끝내므로 빠지면 저장소가 계량을 영영 받지 못한다.
-    fn finish_with(&self, attempt: Attempt, done: Finish, outcome: RunOutcome) -> Reply<'_, ()> {
+    fn finish_with(
+        &self,
+        attempt: Attempt,
+        done: Finish,
+        outcome: RunOutcome,
+    ) -> Reply<'_, Completion> {
         self.inner.finish_with(attempt, done, outcome)
     }
 

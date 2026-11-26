@@ -3,7 +3,7 @@
 
 use super::{Flow, Outcome, Worker, calls::Called, control::Control, interrupted, span::RunSpan};
 use bot_core::{
-    command::{Beat, Failure, Finish, Retry, RunOutcome, Target},
+    command::{Beat, Completion, Failure, Finish, Retry, RunOutcome, Target},
     pass::direct_call_id,
     port::Error,
     state::{ConversationKind, RunContext},
@@ -122,7 +122,8 @@ impl Worker {
                 .finish_with(ctx.attempt.clone(), finish, outcome)
                 .await
             {
-                Ok(()) => {
+                Ok(Completion::Cancelled) => (Outcome::Cancelled, Some("cancelled")),
+                Ok(Completion::Succeeded) => {
                     self.nudge(ctx, false).await;
                     (Outcome::Succeeded, None)
                 }

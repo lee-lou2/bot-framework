@@ -204,7 +204,7 @@ impl RunStore for FakeRuns {
         }
         Box::pin(async move { if clash { Err(Error::Conflict) } else { Ok(()) } })
     }
-    fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, ()> {
+    fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, Completion> {
         Box::pin(async { Err(Error::Unavailable) })
     }
     fn fail(&self, _: Attempt, _: Failure) -> Reply<'_, Retry> {
@@ -424,7 +424,7 @@ impl RunStore for PlanningRuns {
         }
         Box::pin(async move { result })
     }
-    fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, ()> {
+    fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, Completion> {
         Box::pin(async { Err(Error::Unavailable) })
     }
     fn fail(&self, _: Attempt, _: Failure) -> Reply<'_, Retry> {

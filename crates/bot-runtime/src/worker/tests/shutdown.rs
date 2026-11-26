@@ -51,7 +51,7 @@ impl RunStore for Runs {
     fn checkpoint_batch(&self, attempt: Attempt, steps: Vec<Step>) -> Reply<'_, ()> {
         self.inner.checkpoint_batch(attempt, steps)
     }
-    fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, ()> {
+    fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, Completion> {
         self.inner.finish(attempt, done)
     }
     fn fail(&self, attempt: Attempt, failure: Failure) -> Reply<'_, Retry> {

@@ -7,7 +7,7 @@ use crate::{
     replies,
 };
 use bot_core::{
-    command::{Finish, RunOutcome},
+    command::{Completion, Finish, RunOutcome},
     id::{Attempt, ClaimEpoch},
     port::Error,
     schedule::quiet_completion,
@@ -170,6 +170,10 @@ pub(crate) async fn park(tx: &mut Tx<'_>, run: &RunRow, wait: &Wait) -> R<()> {
 /// run을 끝내고(성공·dead·취소) 부모가 이 자식을 기다리는 중이면 결과를 체크포인트로 넣어 **한 번만** 깨운다.
 /// 호출자가 부모와 이 run을 이미 잠갔다. 마지막에 감사 한 줄(+깨움 한 줄)을 잇는다.
 pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: &str) -> R<()> {
+    // 예약 미발송 안내 등 성공에 딸린 쓰기도 같은 트랜잭션이므로 취소가 먼저면 함께 롤백한다.
+    if run.cancel_requested && matches!(end, End::Succeeded(_)) {
+        return Err(Error::Stale.into());
+    }
     let (state, result, error, action) = match &end {
         End::Succeeded(result) => ("succeeded", Some(*result), None, "run.succeeded"),
         End::Dead(code) => ("dead", None, Some(*code), "run.dead"),
@@ -248,7 +252,7 @@ pub(crate) async fn push_reply(tx: &mut Tx<'_>, profile: &str, run: &str, body: 
 impl Store {
     /// 성공 완료. 결과·회신(outbox)·부모 깨우기가 한 커밋이다. 옛 세대·리스 만료 뒤는 `Stale`.
     /// 위임한 자식의 답은 저장하지 않는다(부모만 답한다). 자식 결과는 부모 체크포인트로 간다.
-    pub(crate) async fn finish_run(&self, at: &Attempt, done: Finish) -> R<()> {
+    pub(crate) async fn finish_run(&self, at: &Attempt, done: Finish) -> R<Completion> {
         self.finish_run_with(at, done, None).await
     }
 
@@ -258,7 +262,19 @@ impl Store {
         at: &Attempt,
         done: Finish,
         outcome: Option<RunOutcome>,
-    ) -> R<()> {
+    ) -> R<Completion> {
+        let mut tx = self.pool.begin().await?;
+        let parent = parent_of(&mut tx, at).await?;
+        lock_parent(&mut tx, &at.profile.0, parent.as_deref()).await?;
+        let run = lock_leased(&mut tx, at).await?;
+        if run.private {
+            return Err(Error::Denied.into());
+        }
+        if run.cancel_requested {
+            end_run(&mut tx, &run, End::Cancelled("cancelled"), "system").await?;
+            tx.commit().await?;
+            return Ok(Completion::Cancelled);
+        }
         let (_, result) = canonical(&done.result)?;
         let answers = done
             .answers
@@ -267,13 +283,6 @@ impl Store {
             .collect::<R<Vec<_>>>()?;
         if answers.len() > 16 {
             return invalid();
-        }
-        let mut tx = self.pool.begin().await?;
-        let parent = parent_of(&mut tx, at).await?;
-        lock_parent(&mut tx, &at.profile.0, parent.as_deref()).await?;
-        let run = lock_leased(&mut tx, at).await?;
-        if run.private {
-            return Err(Error::Denied.into());
         }
         // 다른 수신자로 가는 예약 발화는 동결한 초안을 소유자가 승인해야 끝난다(`ScheduledReplies`). 일반 완료로 답을 원래 대화로 돌리거나 승인을 건너뛰지 못한다
         // (보낼 것이 없는 조용한 성공만 `dropped`로 일반 완료를 받는다)
@@ -315,7 +324,7 @@ impl Store {
             }
         }
         tx.commit().await?;
-        Ok(())
+        Ok(Completion::Succeeded)
     }
 }
 
