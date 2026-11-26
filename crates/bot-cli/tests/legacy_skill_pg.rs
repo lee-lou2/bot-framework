@@ -3,7 +3,7 @@
 mod process_support;
 
 use bot_core::id::{AgentId, Revision};
-use bot_profile::{Limits, Registry, read_legacy_bundle};
+use bot_profile::{Limits, Registry, read_bundle, read_legacy_bundle};
 use bot_store::{Config, Store};
 use process_support::*;
 use std::{collections::BTreeSet, fs, path::Path};
@@ -325,4 +325,193 @@ fn pg_profile_bundle_put_backfills_missing_legacy_v1_bundle_and_refuses_unpinned
         "{}",
         text(&refused)
     );
+}
+
+#[test]
+fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
+    let Some(schema) = Schema::create() else {
+        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        return;
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("dp")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let host = host_file(dir.path());
+
+    // 같은 front matter 원본 폴더는 구판 V1과 신판 V2라는 서로 다른 두 판본을 만든다
+    let valid_profiles = dir.path().join("valid_profiles");
+    copy_dir(&examples(), &valid_profiles);
+    let valid_dir = valid_profiles.join("personal");
+    write_v2_front_matter(&valid_dir);
+    let (_, v1_rev, v1_bytes) = read_legacy_bundle(&valid_dir, &Limits::default()).unwrap();
+    let (_, v2_rev, _) = read_bundle(&valid_dir, &Limits::default()).unwrap();
+    assert_ne!(v1_rev, v2_rev);
+
+    // 1) 구판 V1 실행 1건 + V1 번들을 시드한다
+    seed_legacy_state(&schema, dir.path(), &host, &v1_rev.0, Some(&v1_bytes));
+
+    // 2) 같은 폴더로 신판 V2를 활성화하고 V2 실행 1건도 고정한다(이제 DB에 V1·V2가 둘 다 고정)
+    let sock = dir.path().join("run/dual.sock");
+    let env_valid = env_for(
+        &valid_profiles,
+        &schema.url(),
+        &sock,
+        &[("BOT_HOST_CONFIG", host.to_str().unwrap())],
+    );
+    let gw = start_gateway(&refs(&env_valid), &["--activate"], &sock);
+    wait_for("V2 활성 판본 게시", || {
+        schema.query("select revision from {s}.bot_active_profiles where profile = 'personal'")
+            == v2_rev.0
+    });
+    let chat2 = bot(
+        &refs(&env_valid),
+        &[
+            "chat",
+            "--profile",
+            "personal",
+            "--no-wait",
+            "--request-id",
+            "v2-req",
+            "일정 알려줘",
+        ],
+    );
+    assert!(chat2.status.success(), "{}", text(&chat2));
+    drop(gw);
+    let _ = fs::remove_file(&sock);
+
+    // 3) V1 번들만 남기고 V2 번들이 유실된 상태를 만든다
+    schema.query("truncate {s}.bot_profile_bundles");
+    let hex_v1 = hex_of(&v1_bytes);
+    let inserted = schema.exec(&format!(
+        "insert into {{s}}.bot_profile_bundles (profile, revision, bundle) values ('personal', '{}', decode('{hex_v1}', 'hex'))",
+        v1_rev.0
+    ));
+    assert!(inserted.starts_with("INSERT 0 1"), "{inserted}");
+
+    // clean 폴더(새 판본)로 기동하면 누락된 V2 판본 때문에 반드시 막혀야 한다
+    let clean_profiles = dir.path().join("clean_profiles");
+    copy_dir(&examples(), &clean_profiles);
+    let env_clean = env_for(
+        &clean_profiles,
+        &schema.url(),
+        &sock,
+        &[("BOT_HOST_CONFIG", host.to_str().unwrap())],
+    );
+    let blocked = bot(
+        &refs(&env_clean),
+        &["serve", "--role", "gateway", "--activate"],
+    );
+    assert_eq!(blocked.status.code(), Some(1), "{}", text(&blocked));
+    assert!(
+        text(&blocked).contains(&format!(
+            "프로필 personal 판본 {}: 보관한 묶음이 없어요",
+            v2_rev.0
+        )),
+        "{}",
+        text(&blocked)
+    );
+
+    // 4) `bot profile-bundle put <valid_dir>`를 두 번 실행해 V1·V2 모두 보충(멱등)됨을 확인한다
+    let before_put: i64 = schema
+        .query("select count(*) from {s}.bot_profile_bundles")
+        .parse()
+        .unwrap();
+    let args = ["profile-bundle", "put", valid_dir.to_str().unwrap()];
+    for run in 0..2 {
+        let filled = bot(&refs(&env_clean), &args);
+        assert!(filled.status.success(), "run {run}: {}", text(&filled));
+        let out = text(&filled);
+        assert!(
+            out.contains(&v1_rev.0) && out.contains(&v2_rev.0),
+            "run {run}: V1·V2 판본 모두 출력돼야 함: {out}"
+        );
+    }
+    let after_put: i64 = schema
+        .query("select count(*) from {s}.bot_profile_bundles")
+        .parse()
+        .unwrap();
+    assert_eq!(
+        after_put,
+        before_put + 1,
+        "두 번 실행해도 누락됐던 V2 번들 1건만 더해진다"
+    );
+    for rev in [&v1_rev.0, &v2_rev.0] {
+        assert_eq!(
+            schema.query(&format!(
+                "select count(*) from {{s}}.bot_profile_bundles where profile = 'personal' and revision = '{rev}'"
+            )),
+            "1"
+        );
+    }
+
+    // 5) 보충 뒤 clean 폴더 활성화가 V1·V2 둘 다 복원하고 성공한다
+    let gw = start_gateway(&refs(&env_clean), &["--activate"], &sock);
+    wait_for("보충 뒤 clean 활성 판본 게시", || {
+        let cur =
+            schema.query("select revision from {s}.bot_active_profiles where profile = 'personal'");
+        cur != v1_rev.0 && cur != v2_rev.0
+    });
+    drop(gw);
+}
+
+#[test]
+fn pg_upgrade_restores_legacy_agent_bare_and_unicode_cron_bundles() {
+    let Some(schema) = Schema::create() else {
+        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        return;
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("ac")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let host = host_file(dir.path());
+
+    // 구판 AGENT.md 단독 `---` + triggers.yaml 유니코드 NBSP cron이 함께 든 V1 폴더
+    let legacy_profiles = dir.path().join("legacy_profiles");
+    copy_dir(&examples(), &legacy_profiles);
+    let legacy_dir = legacy_profiles.join("personal");
+    fs::write(legacy_dir.join("agents/main/AGENT.md"), b"---").unwrap();
+    fs::write(
+        legacy_dir.join("agents/main/triggers.yaml"),
+        "version: 1\ntriggers:\n  - id: morning\n    \"on\": {cron: \"0\\u00a09 * * *\"}\n    principal: \"service:morning\"\n    target: {tool: agenda.list, args: {}}\n",
+    )
+    .unwrap();
+    let (_, legacy_rev, legacy_bytes) =
+        read_legacy_bundle(&legacy_dir, &Limits::default()).unwrap();
+
+    // 1) 번들 누락 시드 → `profile-bundle put` 보충 → 신판 기동·복원까지 실 DB에서 확인
+    seed_legacy_state(&schema, dir.path(), &host, &legacy_rev.0, None);
+    let next_profiles = dir.path().join("next_profiles");
+    copy_dir(&examples(), &next_profiles);
+    write_v2_front_matter(&next_profiles.join("personal"));
+    let sock = dir.path().join("run/ac.sock");
+    let env_next = env_for(
+        &next_profiles,
+        &schema.url(),
+        &sock,
+        &[("BOT_HOST_CONFIG", host.to_str().unwrap())],
+    );
+    let put = bot(
+        &refs(&env_next),
+        &["profile-bundle", "put", legacy_dir.to_str().unwrap()],
+    );
+    assert!(put.status.success(), "{}", text(&put));
+    assert!(text(&put).contains(&legacy_rev.0), "{}", text(&put));
+    assert_eq!(
+        schema.query(&format!(
+            "select encode(bundle, 'hex') from {{s}}.bot_profile_bundles where revision = '{}'",
+            legacy_rev.0
+        )),
+        hex_of(&legacy_bytes)
+    );
+    let gw = start_gateway(&refs(&env_next), &["--activate"], &sock);
+    wait_for(
+        "AGENT.md 단독 --- + 유니코드 cron 복원 뒤 활성화",
+        || {
+            schema.query("select revision from {s}.bot_active_profiles where profile = 'personal'")
+                != legacy_rev.0
+        },
+    );
+    drop(gw);
 }

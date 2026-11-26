@@ -29,34 +29,46 @@ pub async fn put(settings: &Settings, dir: &Path) -> Result<(), String> {
         .migrate()
         .await
         .map_err(|_| "저장소 마이그레이션에 실패했어요")?;
-    // 구판(`BOTPROFILE1`) 판본이 저장소에 고정돼 있으면 같은 원본 폴더로 그 옛 SHA-256을 재생성해 보충한다
+    // 저장소에 고정된 구판(V1)·신판(V2) 판본 중 이 폴더가 생성하는 것을 모두 보충한다.
+    // 어느 것도 고정되지 않았으면 현행(V2/V1) 검증 결과만 보관하고, 현행 규칙에 맞지 않는 미고정 폴더는 거절한다.
     let target = BTreeMap::from([(profile_id, Revision(String::new()))]);
     let pinned = store
         .pinned_revisions(&target)
         .await
         .map_err(|_| "저장소에서 고정 판본을 읽지 못했어요")?;
-    let (profile, revision, bundle) = match (legacy, current) {
-        (Ok((id, rev, bytes)), _) if pinned.contains(&(id.clone(), rev.clone())) => {
-            (id, rev, bytes)
+    let mut targets = Vec::new();
+    if let Ok((id, rev, bytes)) = legacy
+        && pinned.contains(&(id.clone(), rev.clone()))
+    {
+        targets.push((id, rev, bytes));
+    }
+    match current {
+        Ok((id, rev, bytes)) => {
+            let duplicate = targets.iter().any(|(_, existing, _)| existing == &rev);
+            if !duplicate && (targets.is_empty() || pinned.contains(&(id.clone(), rev.clone()))) {
+                targets.push((id, rev, bytes));
+            }
         }
-        (_, Ok(built)) => built,
-        (_, Err(report)) => {
+        Err(report) if targets.is_empty() => {
             return Err(format!("프로필 폴더를 검증하지 못했어요:\n{report}"));
         }
-    };
-    store
-        .put_bundle(profile.clone(), revision.clone(), bundle)
-        .await
-        .map_err(|error| match error {
-            Error::Conflict => {
-                "저장소에 같은 판본 번호로 다른 묶음이 이미 있어요 — 저장소가 손상됐을 수 있어요"
-            }
-            Error::Unavailable => "저장소에 닿지 못했어요",
-            _ => "저장소가 묶음을 받지 않았어요",
-        })?;
-    println!(
-        "프로필 {} 판본 {}의 묶음을 보관했어요(이미 있었다면 그대로예요)",
-        profile.0, revision.0
-    );
+        Err(_) => {}
+    }
+    for (profile, revision, bundle) in targets {
+        store
+            .put_bundle(profile.clone(), revision.clone(), bundle)
+            .await
+            .map_err(|error| match error {
+                Error::Conflict => {
+                    "저장소에 같은 판본 번호로 다른 묶음이 이미 있어요 — 저장소가 손상됐을 수 있어요"
+                }
+                Error::Unavailable => "저장소에 닿지 못했어요",
+                _ => "저장소가 묶음을 받지 않았어요",
+            })?;
+        println!(
+            "프로필 {} 판본 {}의 묶음을 보관했어요(이미 있었다면 그대로예요)",
+            profile.0, revision.0
+        );
+    }
     Ok(())
 }
