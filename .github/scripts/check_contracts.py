@@ -35,6 +35,27 @@ MAX_JOB_MINUTES = 120
 LEFTOVER = re.compile(r"(?:\.(?:bak|orig|rej|swp)|~)$")
 
 
+def is_test_src(path):
+    """Test-only Rust sources under `crates/*/src/` exempt from the `//!` module header rule."""
+    parts = path.parts
+    return (
+        path.name == "tests.rs"
+        or path.name.endswith("_tests.rs")
+        or bool({"tests", "testing"} & set(parts[3:-1]))
+    )
+
+
+def needs_module_header(path):
+    parts = path.parts
+    return (
+        len(parts) >= 4
+        and parts[0] == "crates"
+        and parts[2] == "src"
+        and path.suffix == ".rs"
+        and not is_test_src(path)
+    )
+
+
 def check_files():
     listing = subprocess.check_output(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
@@ -48,8 +69,11 @@ def check_files():
         if path == Path("Cargo.lock"):
             continue  # Cargo regenerates this file as one workspace-wide dependency graph.
         with path.open("rb") as source:
-            if sum(1 for _ in source) > 600:
-                raise ValueError(f"{path}: exceeds 600 lines")
+            lines = source.readlines()
+        if len(lines) > 600:
+            raise ValueError(f"{path}: exceeds 600 lines")
+        if needs_module_header(path) and (not lines or not lines[0].startswith(b"//!")):
+            raise ValueError(f"{path}: missing `//!` module responsibility header on line 1")
 
 
 def check_examples():

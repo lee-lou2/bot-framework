@@ -269,6 +269,34 @@ class Leftovers(unittest.TestCase):
         self.check(["fine.rs", "old.rs.bak"], ignore="*.bak\n")
 
 
+class ModuleHeaders(unittest.TestCase):
+    def check(self, files):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        subprocess.run(["git", "init", "-q"], cwd=folder.name, check=True)
+        for name, text in files.items():
+            target = Path(folder.name, name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        with contextlib.chdir(folder.name):
+            checker.check_files()
+
+    def test_non_test_crate_sources_require_a_module_header_on_line_one(self):
+        self.check({
+            "crates/bot-demo/src/lib.rs": "//! 책임\npub fn x() {}\n",
+            "crates/bot-demo/src/tests.rs": "fn helper() {}\n",
+            "crates/bot-demo/src/foo_tests.rs": "fn helper() {}\n",
+            "crates/bot-demo/src/tests/sub.rs": "fn helper() {}\n",
+            "crates/bot-demo/src/testing/world.rs": "fn helper() {}\n",
+            "crates/bot-demo/tests/e2e.rs": "fn helper() {}\n",
+        })
+        for body in ("fn x() {}\n", "\n//! not on line one\n", ""):
+            with self.assertRaises(ValueError) as caught:
+                self.check({"crates/bot-demo/src/sub/mod.rs": body})
+            self.assertIn("crates/bot-demo/src/sub/mod.rs", str(caught.exception))
+            self.assertIn("//!", str(caught.exception))
+
+
 class Folder(unittest.TestCase):
     def run_in(self, files):
         folder = tempfile.TemporaryDirectory()
