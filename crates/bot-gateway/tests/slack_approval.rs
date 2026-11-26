@@ -108,7 +108,7 @@ async fn clicks_that_cannot_decide_never_reach_the_broker_and_say_why_privately(
         .push(button_frame(
             "B3",
             "T1",
-            "C1",
+            "D1",
             "U1",
             "5.5",
             "bot_approve",
@@ -121,18 +121,6 @@ async fn clicks_that_cannot_decide_never_reach_the_broker_and_say_why_privately(
             .await
     );
     assert!(rig.broker.decisions().is_empty());
-    let notices = ephemerals(&rig);
-    assert!(notices[0].contains("등록된 사용자"), "{notices:?}");
-    assert!(
-        notices[1].contains("알 수 없는") && notices[2].contains("알 수 없는"),
-        "{notices:?}"
-    );
-    // 안내는 누른 사람에게만(채널·사용자 지정)
-    let first = &rig.slack.calls("chat.postEphemeral")[0];
-    assert_eq!(
-        (first.body["channel"].as_str(), first.body["user"].as_str()),
-        (Some("C1"), Some("U9"))
-    );
     // 모르는 버튼·다른 워크스페이스의 클릭은 아무 일도 하지 않는다
     rig.slack
         .push(button_frame(
@@ -159,7 +147,27 @@ async fn clicks_that_cannot_decide_never_reach_the_broker_and_say_why_privately(
     assert!(rig.slack.until(|s| s.acks().len() == 5).await);
     settle().await;
     assert!(rig.broker.decisions().is_empty());
-    assert_eq!(rig.slack.calls("chat.postEphemeral").len(), 3);
+    // 각 프레임은 독립적으로 처리한다. 같은 문구를 받는 두 클릭도 채널로 구별해 각각 한 번만 전달됐는지 확인한다.
+    let calls = rig.slack.calls("chat.postEphemeral");
+    let mut notices: Vec<_> = calls
+        .iter()
+        .map(|call| {
+            (
+                call.body["channel"].as_str().expect("채널"),
+                call.body["user"].as_str().expect("수신자"),
+                call.body["text"].as_str().expect("안내 문구"),
+            )
+        })
+        .collect();
+    notices.sort_unstable();
+    assert_eq!(
+        notices,
+        [
+            ("C1", "U1", "알 수 없는 승인 카드예요"),
+            ("C1", "U9", "이 승인은 등록된 사용자만 누를 수 있어요"),
+            ("D1", "U1", "알 수 없는 승인 카드예요"),
+        ]
+    );
 }
 
 #[tokio::test]
