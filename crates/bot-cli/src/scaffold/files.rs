@@ -14,8 +14,8 @@
 //! 일뿐이다 — 이 프로세스가 남이 건드릴 수 없는 데이터를 지우거나, 부모 밖에 쓰는 것.
 use rustix::{
     fs::{
-        AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, Stat, fstat, mkdirat, open, openat,
-        renameat, renameat_with, statat, unlinkat,
+        AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, RenameFlags, Stat, fchmod, flock,
+        fstat, mkdirat, open, openat, renameat, renameat_with, statat, unlinkat,
     },
     io::Errno,
     process::{geteuid, umask},
@@ -57,7 +57,73 @@ fn clone(fd: &OwnedFd) -> Result<OwnedFd, String> {
         .map_err(|_| "폴더를 다시 열지 못했어요".to_owned())
 }
 
+/// 폴더 fd에 잡은 배타 잠금(`flock`). 잠금 파일을 만들지 않으며, 값이 떨어질 때 잠금을 푼다.
+pub struct DirLock(OwnedFd);
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        let _ = flock(&self.0, FlockOperation::Unlock);
+    }
+}
+
+/// `replace_regular`가 스킬 폴더 잠금 안에서 쓰는 고정 임시 파일 이름.
+const TOOL_TMP: &str = ".bot-add-tool.tmp";
+
+/// 이전 강제 종료(`SIGKILL`)로 남은 `.bot-add-tool.tmp`가 우리 소유의 안전한 일반 파일(`nlink == 1`)일 때만 치운다.
+fn clean_stale_tmp(dir: &OwnedFd, rel: &str) -> Result<(), String> {
+    let fd = match openat(
+        dir,
+        TOOL_TMP,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(()),
+        Err(Errno::LOOP) => {
+            return Err(format!(
+                "{rel}의 임시 파일({TOOL_TMP})이 링크라 덮어쓰지 않았어요"
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "{rel}의 임시 파일({TOOL_TMP})을 확인하지 못했어요: {error}"
+            ));
+        }
+    };
+    let stat =
+        fstat(&fd).map_err(|_| format!("{rel}의 임시 파일({TOOL_TMP})을 확인하지 못했어요"))?;
+    let mine = u64::from(stat.st_uid) == u64::from(geteuid().as_raw());
+    if kind(&stat) != FileType::RegularFile || stat.st_nlink != 1 || !mine {
+        return Err(format!(
+            "{rel}의 임시 파일({TOOL_TMP})이 안전한 일반 파일이 아니라 지우지 않았어요"
+        ));
+    }
+    drop(fd);
+    unlinkat(dir, TOOL_TMP, AtFlags::empty())
+        .map_err(|error| format!("{rel}의 이전 임시 파일({TOOL_TMP})을 치우지 못했어요: {error}"))
+}
+
 impl Writer {
+    /// `parts` 폴더에 배타 잠금(`flock`)을 건다. 가는 길이나 대상이 링크면 거절한다.
+    pub fn lock_dir(&self, parts: &[&str]) -> Result<DirLock, String> {
+        let (depth, dir) = self.present(parts)?;
+        if depth < parts.len() {
+            return Err(format!("{} 폴더가 없어요", parts.join("/")));
+        }
+        loop {
+            match flock(&dir, FlockOperation::LockExclusive) {
+                Ok(()) => return Ok(DirLock(dir)),
+                Err(Errno::INTR) => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "{} 폴더 잠금을 잡지 못했어요: {error}",
+                        parts.join("/")
+                    ));
+                }
+            }
+        }
+    }
+
     /// `root`는 사용자가 지정한 기준 폴더로 이미 있는 폴더여야 한다. 그 경로를 여기서 한 번만 연다.
     pub fn new(root: &Path) -> Result<Self, String> {
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
@@ -180,7 +246,7 @@ impl Writer {
         Ok(names)
     }
 
-    /// `parts`가 이미 있는 일반 파일이면 링크를 따라가지 않고 `max_bytes` 이하로 읽는다. 링크·특수 파일·크기 초과는 거절한다.
+    /// `parts`가 이미 있는 일반 파일이면 링크·FIFO 대기 없이 `max_bytes` 이하로 읽는다. 링크·하드링크·특수 파일·크기 초과는 거절한다.
     pub fn read_regular(&self, parts: &[&str], max_bytes: u64) -> Result<Vec<u8>, String> {
         let Some((last, parents)) = parts.split_last() else {
             return Err("빈 경로예요".into());
@@ -196,7 +262,7 @@ impl Writer {
         let fd = openat(
             &dir,
             *last,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(|errno| match errno {
@@ -207,6 +273,9 @@ impl Writer {
         let stat = fstat(&fd).map_err(|_| format!("{shown}을(를) 확인하지 못했어요"))?;
         if kind(&stat) != FileType::RegularFile {
             return Err(format!("{shown}은(는) 일반 파일이 아니에요"));
+        }
+        if stat.st_nlink > 1 {
+            return Err(format!("{shown}은(는) 하드링크라 수정하지 않아요"));
         }
         if stat.st_size < 0 || stat.st_size as u64 > max_bytes {
             return Err(format!(
@@ -226,7 +295,8 @@ impl Writer {
         Ok(buf)
     }
 
-    /// 이미 있는 일반 파일 `rel`을 같은 폴더 안의 임시 파일로 쓴 뒤 원자적으로 바꾼다(링크는 따라가지 않고 거절한다).
+    /// 이미 있는 일반 파일 `rel`을 같은 폴더 안의 고정 임시 파일(`.bot-add-tool.tmp`)로 쓰고 기존 권한을 맞춘 뒤 원자적으로 바꾼다.
+    /// 호출자가 대상 폴더의 `DirLock`을 쥐고 있어야 하며, 링크·하드링크·특수 파일은 거절한다.
     pub fn replace_regular(&self, rel: &str, content: &str) -> Result<(), String> {
         let parts: Vec<&str> = rel.split('/').collect();
         let Some((name, dirs)) = parts.split_last() else {
@@ -239,38 +309,54 @@ impl Writer {
         if depth < dirs.len() {
             return Err(format!("{rel}의 상위 폴더가 없어요"));
         }
-        let stat = statat(&dir, *name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(|_| format!("{rel}을(를) 확인하지 못했어요"))?;
-        match kind(&stat) {
-            FileType::RegularFile => {}
-            FileType::Symlink => return Err(format!("{rel}은(는) 링크라 덮어쓰지 않아요")),
-            _ => return Err(format!("{rel}은(는) 일반 파일이 아니에요")),
+        let existing_fd = openat(
+            &dir,
+            *name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|errno| match errno {
+            Errno::LOOP => format!("{rel}은(는) 링크라 덮어쓰지 않아요"),
+            Errno::NOENT => format!("{rel}이(가) 없어요"),
+            _ => format!("{rel}을(를) 확인하지 못했어요"),
+        })?;
+        let stat = fstat(&existing_fd).map_err(|_| format!("{rel}을(를) 확인하지 못했어요"))?;
+        if kind(&stat) != FileType::RegularFile {
+            return Err(format!("{rel}은(는) 일반 파일이 아니에요"));
         }
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos());
-        for attempt in 0..32u32 {
-            let tmp = format!(".bot-add-tool-{}-{seed:x}-{attempt}", std::process::id());
-            let fd = match openat(
-                &dir,
-                tmp.as_str(),
-                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::from_raw_mode(0o666),
-            ) {
-                Ok(fd) => fd,
-                Err(Errno::EXIST) => continue,
-                Err(error) => return Err(format!("{rel} 임시 파일을 만들지 못했어요: {error}")),
-            };
-            if let Err(error) = File::from(fd).write_all(content.as_bytes()) {
-                let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty());
-                return Err(format!("{rel}을(를) 쓰지 못했어요: {error}"));
-            }
-            return renameat(&dir, tmp.as_str(), &dir, *name).map_err(|error| {
-                let _ = unlinkat(&dir, tmp.as_str(), AtFlags::empty());
-                format!("{rel}을(를) 바꾸지 못했어요: {error}")
-            });
+        if stat.st_nlink > 1 {
+            return Err(format!("{rel}은(는) 하드링크라 덮어쓰지 않아요"));
         }
-        Err(format!("{rel} 임시 파일 이름을 정하지 못했어요"))
+        let existing_mode = Mode::from_raw_mode(stat.st_mode & 0o777);
+        drop(existing_fd);
+
+        clean_stale_tmp(&dir, rel)?;
+        let fd = openat(
+            &dir,
+            TOOL_TMP,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|error| format!("{rel} 임시 파일을 만들지 못했어요: {error}"))?;
+        let mut file = File::from(fd);
+        if let Err(error) = file
+            .write_all(content.as_bytes())
+            .and_then(|()| file.sync_all())
+        {
+            drop(file);
+            let _ = unlinkat(&dir, TOOL_TMP, AtFlags::empty());
+            return Err(format!("{rel}을(를) 쓰지 못했어요: {error}"));
+        }
+        if let Err(error) = fchmod(&file, existing_mode) {
+            drop(file);
+            let _ = unlinkat(&dir, TOOL_TMP, AtFlags::empty());
+            return Err(format!("{rel}의 권한을 맞추지 못했어요: {error}"));
+        }
+        drop(file);
+        renameat(&dir, TOOL_TMP, &dir, *name).map_err(|error| {
+            let _ = unlinkat(&dir, TOOL_TMP, AtFlags::empty());
+            format!("{rel}을(를) 바꾸지 못했어요: {error}")
+        })
     }
 
     /// 새 파일을 만든다(필요한 폴더도 새로 만든다). `rel`은 `/`로 구분한 기준 폴더 아래 상대 경로다.

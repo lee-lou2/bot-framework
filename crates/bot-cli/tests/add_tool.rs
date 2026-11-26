@@ -241,24 +241,47 @@ fn handles_yaml_keywords_empty_and_flow_tools_and_lock_backed_skills() {
     .unwrap();
     assert_eq!(doc.tool_ids, ["first"]);
 
-    // 플로우 배열 + server가 뒤에 있는 변칙 파일도 정규 렌더링으로 안전하게 병합된다
+    // 키 순서가 다른 블록 목록(tools가 server보다 앞)도 주석을 보존하며 덧붙인다
     fs::write(
         &flow_tools,
-        "version: 1\ntools: [{id: first, class: read, scopes: [flow.first], input: {type: object, properties: {}, additionalProperties: false}}]\nserver: flow\n",
+        "# 머리 주석\nversion: 1\ntools:\n  # 첫 도구\n  - id: first\n    class: read\n    scopes: [flow.first]\n    input: {type: object, properties: {}, additionalProperties: false}\n# 서버 주석\nserver: flow\n",
     )
     .unwrap();
     let added2 = add(&profile, &["tool", "flow.second"]);
     assert!(added2.status.success(), "{}", text(&added2));
+    let merged_raw = fs::read_to_string(&flow_tools).unwrap();
+    assert!(
+        merged_raw.contains("# 머리 주석")
+            && merged_raw.contains("# 첫 도구")
+            && merged_raw.contains("# 서버 주석"),
+        "주석이 모두 보존돼야 함:\n{merged_raw}"
+    );
     let doc2 = parse_tools_yaml(
         "flow",
         "skills/flow/tools.yaml",
-        &fs::read(&flow_tools).unwrap(),
+        merged_raw.as_bytes(),
         None,
         true,
         &Limits::default(),
     )
     .unwrap();
     assert_eq!(doc2.tool_ids, ["first", "second"]);
+
+    // 비어 있지 않은 플로우 배열은 주석을 잃지 않도록 원본을 유지하고 붙여 넣을 항목을 안내한다
+    let flow_array = "# 플로우 주석\nversion: 1\ntools: [{id: first, class: read, scopes: [flow.first], input: {type: object, properties: {}, additionalProperties: false}}]\nserver: flow\n";
+    fs::write(&flow_tools, flow_array).unwrap();
+    let refused_flow = add(&profile, &["tool", "flow.second"]);
+    assert!(!refused_flow.status.success(), "{}", text(&refused_flow));
+    let flow_msg = text(&refused_flow);
+    assert!(
+        flow_msg.contains("보존") && flow_msg.contains("- id: second"),
+        "{flow_msg}"
+    );
+    assert_eq!(
+        fs::read_to_string(&flow_tools).unwrap(),
+        flow_array,
+        "플로우 배열 파일은 건드리지 않는다"
+    );
 
     // 기존 tools.yaml에 input 없는 원격 도구 + 유효한 tools.lock.yaml이 있을 때도 잠금 규칙을 지키며 새 도구를 더한다
     let lock_input = json!({"type": "object", "properties": {}, "additionalProperties": false});

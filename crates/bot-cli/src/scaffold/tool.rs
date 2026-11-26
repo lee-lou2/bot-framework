@@ -10,7 +10,7 @@ use bot_profile::{
     Limits,
     locate::{ToolsDoc, parse_tools_yaml},
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::path::Path;
 
 /// YAML 1.2/1.1 모두에서 문자열로 읽히도록 예약 단어는 큰따옴표로 감싼다.
@@ -173,16 +173,16 @@ fn new_tool_value(tool: &str, class: ToolClass, scope: &str) -> Value {
     })
 }
 
-fn format_entry(indent: usize, tool: &str, class: ToolClass, scope: &str) -> String {
+fn format_entry(indent: usize, tool: &str, class: ToolClass, scope: &str, eol: &str) -> String {
     let pad = " ".repeat(indent);
     let inner = " ".repeat(indent + 2);
     format!(
-        "{pad}- id: {}\n\
-         {inner}class: {}\n\
-         {inner}scopes: [{scope}]\n\
-         {inner}secrets: {{}}\n\
-         {inner}egress: []\n\
-         {inner}input: {{type: object, properties: {{}}, additionalProperties: false}}\n",
+        "{pad}- id: {}{eol}\
+         {inner}class: {}{eol}\
+         {inner}scopes: [{scope}]{eol}\
+         {inner}secrets: {{}}{eol}\
+         {inner}egress: []{eol}\
+         {inner}input: {{type: object, properties: {{}}, additionalProperties: false}}{eol}",
         yaml_name(tool),
         class_label(class),
     )
@@ -192,118 +192,126 @@ fn new_tools_yaml(server: &str, tool: &str, class: ToolClass, scope: &str) -> St
     format!(
         "version: 1\nserver: {}\ntools:\n{}",
         yaml_name(server),
-        format_entry(2, tool, class, scope)
+        format_entry(2, tool, class, scope, "\n")
     )
 }
 
-/// 기존 `tools.yaml` 텍스트에 주석·서식을 유지하며 새 항목을 덧붙인 후보를 만든다.
+fn strip_eol(line: &str) -> (&str, &str) {
+    if let Some(raw) = line.strip_suffix("\r\n") {
+        (raw, "\r\n")
+    } else if let Some(raw) = line.strip_suffix('\n') {
+        (raw, "\n")
+    } else {
+        (line, "")
+    }
+}
+
+fn strip_tools_key(raw: &str) -> Option<(&str, &str)> {
+    for prefix in ["tools:", "\"tools\":", "'tools':"] {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            return Some((prefix, rest));
+        }
+    }
+    None
+}
+
+fn strip_empty_flow_list(after_key: &str) -> Option<&str> {
+    let rest = after_key.trim_start_matches([' ', '\t']);
+    let rest = rest.strip_prefix('[')?;
+    let rest = rest.trim_start_matches([' ', '\t']);
+    let tail = rest.strip_prefix(']')?;
+    let check = tail.trim_start_matches([' ', '\t']);
+    (check.is_empty() || check.starts_with('#')).then_some(tail)
+}
+
+fn is_seq_item(trimmed_start: &str) -> bool {
+    trimmed_start == "-" || trimmed_start.starts_with("- ") || trimmed_start.starts_with("-\t")
+}
+
+/// 기존 `tools.yaml`의 주석·줄 끝(`\r\n`/`\n`)·키 순서·들여쓰기를 유지하며 새 항목을 삽입한다.
+/// 비어 있지 않은 플로우 배열 등 주석 보존 편집이 불가능하면 `None`을 돌려주고 원본을 건드리지 않는다.
 fn append_preserving_comments(
     existing_text: &str,
     tool: &str,
     class: ToolClass,
     scope: &str,
-) -> String {
-    // `tools: []` 형태면 빈 배열을 블록 목록으로 바꾼다
-    let mut lines: Vec<String> = existing_text.lines().map(str::to_owned).collect();
-    if let Some(pos) = lines.iter().position(|line| {
-        let trimmed = line.trim_end();
-        trimmed == "tools: []" || trimmed == "tools:[]"
-    }) {
-        lines[pos] = "tools:".to_owned();
-        let entry = format_entry(2, tool, class, scope);
-        let mut out = lines[..=pos].join("\n");
-        out.push('\n');
-        out.push_str(&entry);
-        if pos + 1 < lines.len() {
-            out.push_str(&lines[pos + 1..].join("\n"));
-            out.push('\n');
-        }
-        return out;
-    }
-    let indent = detect_list_indent(existing_text);
-    let mut out = existing_text.to_owned();
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(&format_entry(indent, tool, class, scope));
-    out
-}
+) -> Option<String> {
+    let eol = if existing_text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let lines: Vec<&str> = existing_text.split_inclusive('\n').collect();
+    let (tools_idx, key_prefix, after_key, tools_eol) =
+        lines.iter().enumerate().find_map(|(idx, line)| {
+            let (raw, line_eol) = strip_eol(line);
+            let (prefix, rest) = strip_tools_key(raw)?;
+            Some((idx, prefix, rest, line_eol))
+        })?;
 
-fn detect_list_indent(text: &str) -> usize {
-    let mut in_tools = false;
-    let mut found = None;
-    for line in text.lines() {
-        let trimmed = line.trim();
+    // `tools: []`(+ 선택 인라인 주석) 형태면 그 자리에서 블록 목록으로 바꾼다
+    if let Some(tail) = strip_empty_flow_list(after_key) {
+        let mut out = String::with_capacity(existing_text.len() + 192);
+        for line in &lines[..tools_idx] {
+            out.push_str(line);
+        }
+        out.push_str(key_prefix);
+        out.push_str(tail);
+        out.push_str(if tools_eol.is_empty() { eol } else { tools_eol });
+        out.push_str(&format_entry(2, tool, class, scope, eol));
+        for line in &lines[tools_idx + 1..] {
+            out.push_str(line);
+        }
+        return Some(out);
+    }
+
+    // `tools:` 뒤에 인라인 값이 남아 있으면(예: `tools: [{...}]`) 주석을 잃지 않도록 수동 편집으로 넘긴다
+    let after_trim = after_key.trim_start_matches([' ', '\t']);
+    if !after_trim.is_empty() && !after_trim.starts_with('#') {
+        return None;
+    }
+
+    // `tools:` 블록이 끝나는 지점(다음 최상위 키·문서 끝 표식 직전)과 첫 항목의 들여쓰기를 찾는다
+    let mut last_content_idx = tools_idx;
+    let mut list_indent = None;
+    for (idx, line) in lines.iter().enumerate().skip(tools_idx + 1) {
+        let (raw, _) = strip_eol(line);
+        let trimmed = raw.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if !line.starts_with(' ') && !line.starts_with('\t') {
-            in_tools = trimmed.starts_with("tools:");
+        if raw.starts_with(' ') || raw.starts_with('\t') {
+            let spaces = raw.bytes().take_while(|b| *b == b' ').count();
+            if list_indent.is_none() && is_seq_item(&raw[spaces..]) {
+                list_indent = Some(spaces);
+            }
+            last_content_idx = idx;
             continue;
         }
-        if in_tools {
-            let spaces = line.bytes().take_while(|b| *b == b' ').count();
-            if line[spaces..].starts_with("- ") {
-                found = Some(spaces);
+        // 들여쓰기 0칸 블록 목록(`- id: ...`)은 `tools:` 항목이다
+        if is_seq_item(raw) {
+            if list_indent.is_none() {
+                list_indent = Some(0);
             }
+            last_content_idx = idx;
+            continue;
         }
+        break;
     }
-    found.unwrap_or(2)
-}
 
-/// 텍스트 덧붙이기가 안 맞는 경우(플로우 배열·키 순서 다름 등)를 위한 정규 YAML 렌더링.
-fn render_tools_yaml(doc: &Value) -> String {
-    let server = doc
-        .get("server")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let tools = doc
-        .get("tools")
-        .and_then(Value::as_array)
-        .map_or(&[][..], Vec::as_slice);
-    let mut out = format!("version: 1\nserver: {}\ntools:\n", yaml_name(server));
-    for item in tools {
-        if let Some(map) = item.as_object() {
-            render_tool_map(&mut out, map);
-        }
+    let indent = list_indent.unwrap_or(2);
+    let mut out = String::with_capacity(existing_text.len() + 192);
+    for line in &lines[..=last_content_idx] {
+        out.push_str(line);
     }
-    out
-}
-
-fn render_tool_map(out: &mut String, map: &Map<String, Value>) {
-    // 읽기 쉬운 순서로 키를 배열하고 나머지는 정렬 순으로 붙인다
-    const ORDER: &[&str] = &[
-        "id",
-        "name",
-        "class",
-        "scopes",
-        "external",
-        "effects",
-        "timeout_secs",
-        "destination",
-        "env",
-        "secrets",
-        "egress",
-        "input",
-    ];
-    let mut keys: Vec<&String> = ORDER
-        .iter()
-        .filter_map(|k| map.get_key_value(*k).map(|(key, _)| key))
-        .collect();
-    for key in map.keys() {
-        if !ORDER.contains(&key.as_str()) {
-            keys.push(key);
-        }
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push_str(eol);
     }
-    for (idx, key) in keys.into_iter().enumerate() {
-        let prefix = if idx == 0 { "  - " } else { "    " };
-        let value = &map[key];
-        let rendered = match value {
-            Value::String(s) if matches!(key.as_str(), "id" | "class") => yaml_name(s),
-            _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned()),
-        };
-        out.push_str(&format!("{prefix}{key}: {rendered}\n"));
+    out.push_str(&format_entry(indent, tool, class, scope, eol));
+    for line in &lines[last_content_idx + 1..] {
+        out.push_str(line);
     }
+    Some(out)
 }
 
 fn matches_appended(existing: &ToolsDoc, candidate: &ToolsDoc, expected_new: &Value) -> bool {
@@ -421,9 +429,13 @@ pub fn tool(
     let rel = format!("{skill_dir}/tools.yaml");
     let scope = format!("{skill}.{tool_name}");
 
-    let mut tools_parts: Vec<&str> = location.parts.iter().map(String::as_str).collect();
+    let skill_parts: Vec<&str> = location.parts.iter().map(String::as_str).collect();
+    // 같은 스킬 폴더의 동시 `bot add tool` 읽기·검증·교체를 잠금 파일 없이 직렬화한다
+    let _skill_lock = writer.lock_dir(&skill_parts)?;
+
+    let mut tools_parts = skill_parts.clone();
     tools_parts.push("tools.yaml");
-    let mut lock_parts: Vec<&str> = location.parts.iter().map(String::as_str).collect();
+    let mut lock_parts = skill_parts;
     lock_parts.push("tools.lock.yaml");
     let lock_bytes = if writer.exists(&lock_parts)? {
         Some(writer.read_regular(&lock_parts, limits.max_yaml_bytes)?)
@@ -497,10 +509,17 @@ pub fn tool(
         &limits,
     )
     .is_ok();
+    // 새 도구 단독 항목도 스키마·잠금·규칙을 항상 통과해야 한다
+    let solo = new_tools_yaml(&existing.server, tool_name, class, &scope);
+    parse_tools_yaml(skill, &rel, solo.as_bytes(), None, true, &limits).map_err(|issues| {
+        format!(
+            "새 도구 항목이 검증을 통과하지 못해 아무것도 바꾸지 않았어요:\n{}",
+            format_issues(&issues)
+        )
+    })?;
     let expected_new = new_tool_value(tool_name, class, &scope);
     let existing_text = std::str::from_utf8(&existing_bytes)
         .map_err(|_| format!("{rel}이(가) UTF-8이 아니에요"))?;
-    let candidate_text = append_preserving_comments(existing_text, tool_name, class, &scope);
     let verify = |text: &str| {
         parse_tools_yaml(
             skill,
@@ -514,29 +533,15 @@ pub fn tool(
         .filter(|doc| matches_appended(&existing, doc, &expected_new))
         .is_some()
     };
-    let updated = if verify(&candidate_text) {
-        candidate_text
-    } else {
-        let mut merged = existing.value.clone();
-        if let Some(list) = merged.get_mut("tools").and_then(Value::as_array_mut) {
-            list.push(expected_new.clone());
-        }
-        let rendered = render_tools_yaml(&merged);
-        if !verify(&rendered) {
-            return Err(format!(
-                "수정된 {rel}이 검증을 통과하지 못해 아무것도 바꾸지 않았어요"
-            ));
-        }
-        rendered
+    let Some(updated) = append_preserving_comments(existing_text, tool_name, class, &scope)
+        .filter(|candidate| verify(candidate))
+    else {
+        let snippet = format_entry(2, tool_name, class, &scope, "\n");
+        return Err(format!(
+            "기존 {rel}의 서식·주석을 보존한 채 자동으로 덧붙일 수 없어 파일을 바꾸지 않았어요(예: 비어 있지 않은 플로우 배열 `tools: [...]`).\n\
+             아래 항목을 {rel}의 `tools` 목록에 직접 붙여 넣어 주세요:\n\n{snippet}"
+        ));
     };
-    // 새 도구 단독 항목도 스키마·잠금·규칙을 항상 통과해야 한다
-    let solo = new_tools_yaml(&existing.server, tool_name, class, &scope);
-    parse_tools_yaml(skill, &rel, solo.as_bytes(), None, true, &limits).map_err(|issues| {
-        format!(
-            "새 도구 항목이 검증을 통과하지 못해 아무것도 바꾸지 않았어요:\n{}",
-            format_issues(&issues)
-        )
-    })?;
     if updated.len() as u64 > limits.max_yaml_bytes {
         return Err(format!(
             "{rel}이(가) 크기 한도({} 바이트)를 넘어 아무것도 바꾸지 않았어요",
