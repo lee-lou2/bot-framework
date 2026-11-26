@@ -48,6 +48,7 @@ pub fn deliver_tool() -> Tool {
         class: Risk::Irreversible,
         scopes: BTreeSet::from([super::schedule::CREATE_TOOL.to_owned()]),
         input: JsonPayload(SCHEMA.into()),
+        description: None,
         env: BTreeSet::new(),
         secrets: BTreeMap::new(),
         egress: BTreeSet::new(),

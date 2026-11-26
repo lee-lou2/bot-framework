@@ -263,13 +263,6 @@ fn hint(agent: &Agent) -> String {
     line.trim().to_owned()
 }
 
-fn description(schema: &JsonPayload, id: &ToolId) -> String {
-    serde_json::from_str::<Value>(&schema.0)
-        .ok()
-        .and_then(|v| v.get("description")?.as_str().map(str::to_owned))
-        .unwrap_or_else(|| format!("{} 도구", id.0))
-}
-
 /// 이 run이 쓸 수 있는 범위: 요청 범위 ∩ 에이전트 상한 ∩ 정책 상한
 pub(crate) fn effective_scopes(
     snapshot: &Snapshot,
@@ -297,7 +290,9 @@ fn visible_tools(agent: &Agent, effective: &BTreeSet<String>) -> Vec<(String, To
                 id: id.clone(),
                 kind: ToolKind::Skill,
                 class: tool.class,
-                description: description(&tool.input, id),
+                description: tool
+                    .model_description()
+                    .unwrap_or_else(|| format!("{} 도구", id.0)),
                 input: tool.input.clone(),
             };
             out.push((name.clone(), spec));

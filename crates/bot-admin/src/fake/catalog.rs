@@ -49,6 +49,7 @@ fn tool(server: &str, class: Risk, scopes: BTreeSet<String>) -> Tool {
         class,
         scopes,
         input: JsonPayload(r#"{"type":"object"}"#.to_owned()),
+        description: None,
         env: Default::default(),
         secrets: BTreeMap::new(),
         egress: BTreeSet::new(),

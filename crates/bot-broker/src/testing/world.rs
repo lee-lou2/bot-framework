@@ -23,6 +23,7 @@ pub fn tool(class: Risk, scopes: &[&str]) -> Tool {
         class,
         scopes: set(scopes),
         input: JsonPayload("{\"type\":\"object\"}".into()),
+        description: None,
         env: Default::default(),
         secrets: BTreeMap::new(),
         egress: BTreeSet::new(),

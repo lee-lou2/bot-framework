@@ -21,6 +21,7 @@ fn tool(class: Risk, needs: &[&str], input: &str) -> Tool {
         class,
         scopes: scopes(needs),
         input: JsonPayload(input.into()),
+        description: None,
         env: Default::default(),
         secrets: BTreeMap::new(),
         egress: BTreeSet::new(),

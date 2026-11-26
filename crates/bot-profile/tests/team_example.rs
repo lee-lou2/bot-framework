@@ -158,3 +158,30 @@ fn validates_team_example() {
         "{shown}"
     );
 }
+
+#[test]
+fn shipped_tool_revisions_are_stable() {
+    let set = load(&examples_root(), &HostCatalog::demo(), &Limits::default()).unwrap();
+    for (name, list_revision) in [
+        (
+            "personal",
+            "b8161c32df73d2c13b356042688593009a5075ed4d2cf15c9b1ca16d7ffe05d4",
+        ),
+        (
+            "team",
+            "9386a6b475a2f5dfe42318e8850a142733b2e117f4fc31c096fde6bb120697e0",
+        ),
+    ] {
+        let snap = set.profile(&ProfileId(name.into())).unwrap();
+        let tools = &snap.agents[&agent("main")].skills["agenda"].tools;
+        assert_eq!(tools.len(), 2);
+        assert_eq!(
+            tools[&ToolId("agenda.list".into())].revision.0,
+            list_revision
+        );
+        assert_eq!(
+            tools[&ToolId("agenda.delete".into())].revision.0,
+            "aad70ef628eafcd9e4131bf7d35deb3d151c1661d1b035ad7e88be11e484df7f"
+        );
+    }
+}

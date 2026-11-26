@@ -143,8 +143,8 @@ fn parse_tool(
         .filter(|given| *given != name)
         .map(str::to_owned);
     let remote_name = mcp_name.as_deref().unwrap_or(&name);
-    // `input`을 적으면 그것이 정본이다(실행할 때 서버의 입력 스키마가 같은지만 본다). 생략하면 잠금 파일의 스키마와 정의 해시가 정본이다.
-    let (input, definition) = match (obj.get("input"), lock.and_then(|l| l.tools.get(&name))) {
+    // 인라인 `input`을 생략한 도구만 잠금의 스키마·설명·정의 해시를 함께 쓴다.
+    let (input, locked) = match (obj.get("input"), lock.and_then(|l| l.tools.get(&name))) {
         // (`bot mcp sync`는 선언한 도구를 모두 적으므로 인라인 도구의 항목은 있어도 쓰이지 않는다 — 경고하지 않는다)
         (Some(inline), _) => (inline.clone(), None),
         (None, Some(entry)) if entry.name != remote_name => {
@@ -159,7 +159,7 @@ fn parse_tool(
             );
             return None;
         }
-        (None, Some(entry)) => (entry.input_schema.clone(), Some(entry.sha256.clone())),
+        (None, Some(entry)) => (entry.input_schema.clone(), Some(entry)),
         (None, None) => {
             issues.error_at(
                 "missing-input",
@@ -170,6 +170,7 @@ fn parse_tool(
             return None;
         }
     };
+    let definition = locked.map(|entry| entry.sha256.clone());
     let before = issues.error_count();
     let schema = compile_input(&input, path, at, issues);
     // 목적지 경로는 `$ref`를 펼친 스키마의 속성으로 확인한다(원본 스키마의 최상위가 `$ref`일 수 있다)
@@ -236,6 +237,9 @@ fn parse_tool(
         secrets,
         egress,
         input: JsonPayload(canonical_json(&input)),
+        description: locked
+            .filter(|entry| !entry.description.is_empty())
+            .map(|entry| entry.description.clone()),
         revision: Revision(sha256_hex(canonical_json(&declared).as_bytes())),
         schema: Arc::new(schema?),
         definition,

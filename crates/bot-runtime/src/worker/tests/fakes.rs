@@ -27,7 +27,6 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub(super) fn scopes(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_owned()).collect()
 }
-
 fn tool_decl(needs: &[&str]) -> Tool {
     Tool {
         server: "demo-agenda".into(),
@@ -35,6 +34,7 @@ fn tool_decl(needs: &[&str]) -> Tool {
         class: bot_core::state::Risk::Read,
         scopes: scopes(needs),
         input: JsonPayload(r#"{"type":"object"}"#.into()),
+        description: None,
         env: Default::default(),
         secrets: BTreeMap::new(),
         egress: BTreeSet::new(),

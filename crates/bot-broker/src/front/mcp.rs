@@ -1,5 +1,5 @@
-//! MCP 중계(streamable HTTP, JSON 응답만). 모델 CLI가 보는 도구는 에이전트의 스킬이 선언한 도구뿐이고,
-//! 호출은 모두 브로커(`Broker::call`)를 지난다. 인가·승인·감사는 거기서 한다. 이 모듈은 모양만 옮긴다.
+//! MCP 중계(streamable HTTP, JSON 응답만). 에이전트의 스킬 도구와 호스트 내장 도구를 모델에 제공한다.
+//! 브로커(`Broker::call`)가 도구의 인가·승인·감사를 담당하고, 위임은 호스트의 위임 저장소로 간다.
 //!
 //! - 도구 이름: `skill.tool` → `skill_tool`(Anthropic 도구 이름에 `.`이 못 들어간다. 스킬·도구 이름에는 `_`가 없어 되돌릴 수 있다).
 //! - 호출 ID: CLI가 주는 `_meta."claudecode/toolUseId"`에서 정한다. 같은 도구 사용은 재개돼도 같은 호출이다.
@@ -152,11 +152,12 @@ async fn tools_list(shared: &Shared, session: &Session, id: &Value) -> Vec<u8> {
                     continue;
                 };
                 let name = tool_id.mcp_name();
+                let description = tool.model_description();
                 tools.push((
                     name.clone(),
                     format!(
                         "{{\"description\":{},\"inputSchema\":{schema},\"name\":{}}}",
-                        json_quote(&tool_id.0),
+                        json_quote(description.as_deref().unwrap_or(&tool_id.0)),
                         json_quote(&name)
                     ),
                 ));

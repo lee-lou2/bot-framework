@@ -5,6 +5,8 @@
 mod builtins;
 #[path = "api_flows/checkpoints.rs"]
 mod checkpoints;
+#[path = "api_flows/descriptions.rs"]
+mod descriptions;
 #[path = "api_flows/refusal.rs"]
 mod refusal;
 mod support;

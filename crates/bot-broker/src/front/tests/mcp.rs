@@ -3,6 +3,33 @@
 use super::*;
 
 #[tokio::test]
+async fn mcp_lists_tool_descriptions_from_the_snapshot() {
+    let r = plain().await;
+    let mut source = (*world()).clone();
+    let main = source.agents.get_mut(&AgentId("main".into())).unwrap();
+    let tools = &mut main.skills.get_mut("echo").unwrap().tools;
+    let say = tools.get_mut(&ToolId("echo.say".into())).unwrap();
+    let locked_description = "메시지를 \"그대로\" 전달합니다.\n내용을 입력하세요.";
+    say.description = Some(locked_description.into());
+    say.input = JsonPayload(r#"{"type":"object","description":"스키마 설명"}"#.into());
+    let drop = tools.get_mut(&ToolId("echo.drop".into())).unwrap();
+    drop.input = JsonPayload(r#"{"type":"object","description":"메시지를 지웁니다."}"#.into());
+    r.catalog.publish(Arc::new(source));
+
+    let reply = rpc(&r, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;
+    let value: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
+    let tools = value["result"]["tools"].as_array().unwrap();
+    for (name, description) in [
+        ("echo_say", locked_description),
+        ("echo_drop", "메시지를 지웁니다."),
+        ("echo_locked", "echo.locked"),
+    ] {
+        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(tool["description"], description, "{name}");
+    }
+}
+
+#[tokio::test]
 async fn mcp_negotiates_and_lists_only_the_agents_declared_tools_with_safe_names() {
     let r = plain().await;
     let init = rpc(&r, r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-code","version":"2"}}}"#).await;

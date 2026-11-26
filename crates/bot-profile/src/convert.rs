@@ -93,6 +93,7 @@ fn tool(t: &model::Tool) -> Tool {
         class: t.risk(),
         scopes: t.scopes.clone(),
         input: t.input.clone(),
+        description: t.description.clone(),
         env: t.env.clone(),
         secrets: t.secrets.clone(),
         egress: t.egress.clone(),

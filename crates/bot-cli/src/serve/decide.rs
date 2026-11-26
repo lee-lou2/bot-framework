@@ -163,6 +163,7 @@ mod tests {
             class: Risk::Irreversible,
             scopes: Default::default(),
             input: JsonPayload("{}".into()),
+            description: None,
             env: Default::default(),
             secrets: BTreeMap::new(),
             egress: BTreeSet::new(),

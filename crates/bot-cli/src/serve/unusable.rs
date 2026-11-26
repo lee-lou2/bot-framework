@@ -126,6 +126,7 @@ mod tests {
             class: Risk::Read,
             scopes: Default::default(),
             input: JsonPayload("{}".into()),
+            description: None,
             env: Default::default(),
             secrets: secrets
                 .iter()

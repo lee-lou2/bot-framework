@@ -29,6 +29,7 @@ impl ModelTool {
             class: self.class,
             scopes: Scopes::from([self.id.to_owned()]),
             input: JsonPayload(self.schema.into()),
+            description: None,
             env: Default::default(),
             secrets: Default::default(),
             egress: Default::default(),

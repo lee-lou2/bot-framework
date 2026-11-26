@@ -84,6 +84,8 @@ pub struct Tool {
     pub egress: BTreeSet<String>,
     /// 입력 스키마(정규 JSON)
     pub input: JsonPayload,
+    /// 입력과 함께 잠금에서 가져온 설명.
+    pub description: Option<String>,
     pub revision: Revision,
     pub schema: Arc<Schema>,
     /// `tools.lock.yaml`에서 입력 스키마를 가져온 도구의 정의 해시(`bot_core::mcp::definition_sha256`)

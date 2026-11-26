@@ -88,6 +88,8 @@ pub struct Tool {
     pub class: Risk,
     pub scopes: Scopes,
     pub input: JsonPayload,
+    /// 입력과 함께 `tools.lock.yaml`에서 가져온 설명. 정의 해시에 포함된다.
+    pub description: Option<String>,
     /// Names selected from the calling agent’s inherited non-secret configuration.
     pub env: BTreeSet<String>,
     pub secrets: BTreeMap<String, SecretName>,
@@ -110,6 +112,14 @@ pub const DEFAULT_TOOL_CALL_SECS: u32 = 60;
 pub const MAX_TOOL_CALL_SECS: u32 = 900;
 
 impl Tool {
+    /// 도구 목록에는 잠금의 설명을 우선 쓰고, 없으면 입력 스키마의 최상위 설명을 쓴다.
+    pub fn model_description(&self) -> Option<String> {
+        self.description.clone().or_else(|| {
+            let input: serde_json::Value = serde_json::from_str(&self.input.0).ok()?;
+            input.get("description")?.as_str().map(str::to_owned)
+        })
+    }
+
     /// 실제로 적용하는 호출 시간 한도(초): 선언이 없으면 `DEFAULT_TOOL_CALL_SECS`.
     pub fn call_secs(&self) -> u32 {
         self.timeout_secs.unwrap_or(DEFAULT_TOOL_CALL_SECS)
