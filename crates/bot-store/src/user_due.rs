@@ -336,7 +336,8 @@ impl Store {
                 }
                 let revision = cmd.checked_revision.clone().ok_or(Error::Invalid)?;
                 // 원래 대화의 발송 책임은 예약을 만든 실행에 고정돼 있다.
-                // 푸시 대화인데 발송 키가 비어 있는 구판 실행에서는 새 무책임 푸시 실행을 만들지 않는다.
+                // 푸시 대화인데 발송 키가 비어 있는 구판 실행은 업그레이드 때 매핑을 빠뜨린 경우에만 생긴다.
+                // 자동으로 닫으면 운영자 누락으로 사용자 예약이 되돌릴 수 없이 사라지므로, 발화만 거절해 두고 키를 채우면 다음 점검에 다시 발화하게 둔다.
                 let origin_transport: Option<String> = sqlx::query_scalar(
                     "select reply_transport from bot_runs where profile = $1 and id = $2",
                 )

@@ -142,6 +142,27 @@ async fn null_origin_transport_refuses_push_schedule_fire_and_holds_close_notice
         db.scalar::<i64>("select count(*) from bot_runs").await,
         runs_before
     );
+    // 문서화한 점검 쿼리가 이 활성 예약을 찾고, 발송 키를 채우면 다시 발화할 수 있다.
+    let found: Vec<(String, String, String, String)> = sqlx::query_as(
+        "select s.profile, s.id, s.origin_run, s.origin_kind
+         from bot_user_schedules s
+         join bot_runs r on (r.profile, r.id) = (s.profile, s.origin_run)
+         where s.state = 'active'
+           and s.origin_kind in ('direct', 'channel')
+           and r.reply_transport is null",
+    )
+    .fetch_all(db.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        found,
+        [(
+            "personal".to_owned(),
+            id.0.clone(),
+            origin.attempt.run.0.clone(),
+            "direct".to_owned(),
+        )]
+    );
 
     // 반대로 종료 안내는 예약을 막지 않고 닫히며, 회신은 pending 대신 즉시 held로 열린다.
     assert!(

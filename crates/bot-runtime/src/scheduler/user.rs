@@ -320,6 +320,8 @@ impl Scheduler {
         if first {
             tracing::warn!(
                 code = "user_schedule_refused",
+                profile = %profile,
+                schedule = %id,
                 "scheduler skipped a user schedule"
             );
         }
