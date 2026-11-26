@@ -151,3 +151,161 @@ fn joining_the_same_set_fills_in_the_current_bundles_an_older_version_never_stor
         "합류가 현재 묶음을 채운다"
     );
 }
+
+/// 구판(`417162e`)에서는 유효했으나 신판 SKILL.md 규칙(미닫힘 `---`·32 KiB 초과·front matter)에 걸리는 원본 폴더와 그 `BOTPROFILE1` 묶음.
+fn legacy_v1_folder_and_bundle(c: &Cluster) -> (PathBuf, String, Vec<u8>) {
+    let legacy_root =
+        c.profiles("legacy_v1", |personal| {
+            for (dir, body) in [
+            (
+                "skills/memo",
+                "---\nname: memo\ndescription: HEADER_SENTINEL\n---\nVisible stable paragraph.\n"
+                    .to_owned(),
+            ),
+            ("skills/legacy-unclosed", "---\n구판에서 쓰던 스킬\n".to_owned()),
+            ("skills/legacy-big", "x".repeat(32_769)),
+        ] {
+            let folder = personal.join(dir);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("SKILL.md"), body).unwrap();
+        }
+        });
+    let dir = legacy_root.join("personal");
+    let (_, rev, bytes) =
+        bot_profile::read_legacy_bundle(&dir, &bot_profile::Limits::default()).unwrap();
+    assert!(bytes.starts_with(b"BOTPROFILE1\n"));
+    (dir, rev.0, bytes)
+}
+
+/// `v2` 폴더: 정상 Agent Skills front matter가 든 `memo` 스킬을 포함해 신판(`BOTPROFILE2`)으로 활성화한다.
+fn v2_front_matter_profiles(c: &Cluster) -> PathBuf {
+    c.profiles("v2_fm", |personal| {
+        instructions_changed(personal);
+        let folder = personal.join("skills/memo");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SKILL.md"),
+            "---\nname: memo\ndescription: HEADER_SENTINEL\n---\nVisible stable paragraph.\n",
+        )
+        .unwrap();
+    })
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 대기 중인 승인 카드의 실행·활성 프로필·예약 구간을 구판 `legacy_rev`에 묶어 구판에서 접수한 상태를 재현한다.
+fn pin_parked_run_to_legacy(c: &Cluster, legacy_rev: &str, bundle: Option<&[u8]>) {
+    c.q("truncate {s}.bot_profile_bundles");
+    if let Some(bytes) = bundle {
+        let hex = hex_of(bytes);
+        let done = c.schema.exec(&format!(
+            "insert into {{s}}.bot_profile_bundles (profile, revision, bundle) values ('personal', '{legacy_rev}', decode('{hex}', 'hex'))"
+        ));
+        assert!(done.starts_with("INSERT 0 1"), "{done}");
+    }
+    for stmt in [
+        format!("update {{s}}.bot_runs set revision = '{legacy_rev}' where profile = 'personal'"),
+        format!(
+            "update {{s}}.bot_active_profiles set revision = '{legacy_rev}' where profile = 'personal'"
+        ),
+        format!(
+            "update {{s}}.bot_schedule_segments set revision = '{legacy_rev}' where profile = 'personal'"
+        ),
+    ] {
+        let done = c.schema.exec(&stmt);
+        assert!(done.starts_with("UPDATE "), "{stmt}: {done}");
+    }
+}
+
+#[test]
+fn a_legacy_v1_bundle_with_unclosed_or_oversized_skill_restores_and_resumes_a_pending_card() {
+    let Some((c, _, _, _, active)) = parked_with_a_pending_card() else {
+        return;
+    };
+    let (_, legacy_rev, legacy_bytes) = legacy_v1_folder_and_bundle(&c);
+    let v2 = v2_front_matter_profiles(&c);
+    pin_parked_run_to_legacy(&c, &legacy_rev, Some(&legacy_bytes));
+
+    // 신판은 새 V2 프로필을 활성화하면서 구판 V1 묶음(미닫힘 `---` + 32 KiB 초과)을 오류 없이 복원하고 대기 카드를 이어서 완료한다
+    let second = c.start(&v2, true, &["worker", "admin"]);
+    assert_ne!(c.schema.active(), active, "새 V2 판본이 게시됐다");
+    assert_ne!(
+        c.profile_revision(),
+        legacy_rev,
+        "V2 판본은 구판 V1과 다르다"
+    );
+    let admin = second.admin.as_ref().unwrap();
+    let card = wait_card("재배포 뒤 구판 대기 카드가 사라졌어요", admin);
+    let (status, body) = decide(admin, &card, true);
+    assert_eq!(status, 200, "{body}");
+    wait_until(
+        "구판 승인 카드의 호출이 끝나지 않았어요",
+        || {
+            c.q("select count(*) from {s}.bot_calls where tool = 'agenda.delete' and state = 'done'")
+            == "1"
+        },
+    );
+    assert_eq!(
+        c.q("select count(*) from {s}.bot_runs where state = 'dead'"),
+        "0"
+    );
+}
+
+#[test]
+fn profile_bundle_put_backfills_a_missing_legacy_v1_bundle_for_upgrade() {
+    let Some((c, _, _, _, active)) = parked_with_a_pending_card() else {
+        return;
+    };
+    let (legacy_dir, legacy_rev, _) = legacy_v1_folder_and_bundle(&c);
+    let v2 = v2_front_matter_profiles(&c);
+    pin_parked_run_to_legacy(&c, &legacy_rev, None);
+
+    // 구판 V1 묶음이 누락돼 있으면 기동이 멈춘다
+    let env2 = c.env(&v2);
+    let (code, out) = serve_that_must_stop(&refs(&env2), &["--role", "gateway", "--activate"])
+        .expect("누락된 구판 V1 묶음 없이 시작하지 않아야 한다");
+    assert_eq!(code, Some(1), "{out}");
+    assert!(
+        out.contains(&format!(
+            "프로필 personal 판본 {legacy_rev}: 보관한 묶음이 없어요"
+        )),
+        "{out}"
+    );
+    // `bot profile-bundle put`은 신판 규칙을 통과하지 못하는 옛 원본 폴더에서도 고정된 V1 SHA-256을 재생성해 보충한다(두 번 넣어도 1건)
+    let args = ["profile-bundle", "put", legacy_dir.to_str().unwrap()];
+    for run in 0..2 {
+        let filled = bot(&refs(&env2), &args);
+        assert!(filled.status.success(), "run {run}: {}", text(&filled));
+        assert!(
+            text(&filled).contains(&format!("프로필 personal 판본 {legacy_rev}")),
+            "run {run}: {}",
+            text(&filled)
+        );
+    }
+    assert_eq!(
+        c.q("select count(*) from {s}.bot_profile_bundles"),
+        "1",
+        "같은 구판 폴더를 두 번 보충해도 묶음은 한 건만 남는다"
+    );
+
+    // 이제 신판이 기동하고 대기 카드를 승인해 완료한다
+    let second = c.start(&v2, true, &["worker", "admin"]);
+    assert_ne!(c.schema.active(), active);
+    let admin = second.admin.as_ref().unwrap();
+    let card = wait_card("보충 뒤 대기 카드가 사라졌어요", admin);
+    let (status, body) = decide(admin, &card, true);
+    assert_eq!(status, 200, "{body}");
+    wait_until(
+        "보충 뒤 승인한 호출이 끝나지 않았어요",
+        || {
+            c.q("select count(*) from {s}.bot_calls where tool = 'agenda.delete' and state = 'done'")
+            == "1"
+        },
+    );
+    assert_eq!(
+        c.q("select count(*) from {s}.bot_runs where state = 'dead'"),
+        "0"
+    );
+}

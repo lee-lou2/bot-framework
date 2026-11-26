@@ -14,11 +14,30 @@ use bot_core::{
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAGIC: &[u8] = b"BOTPROFILE1\n";
+const MAGIC_V1: &[u8] = b"BOTPROFILE1\n";
+const MAGIC_V2: &[u8] = b"BOTPROFILE2\n";
+
+/// 묶음 판본(해석 규칙 세대).
+/// - `V1`(`BOTPROFILE1\n`): 구판이 보관한 묶음 또는 `SKILL.md` front matter를 쓰지 않는 프로필. 복원 시 구판의 `SKILL.md` 규칙을 쓴다.
+/// - `V2`(`BOTPROFILE2\n`): `SKILL.md` front matter를 해석·제거하고 에이전트별 32 KiB 상한을 적용한 묶음.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BundleFormat {
+    V1,
+    V2,
+}
+
+impl BundleFormat {
+    fn magic(self) -> &'static [u8] {
+        match self {
+            Self::V1 => MAGIC_V1,
+            Self::V2 => MAGIC_V2,
+        }
+    }
+}
 
 /// 파일을 경로순으로 `u32 경로길이 | 경로 | u64 길이 | 바이트`로 이은 정규 바이트.
-pub fn encode(tree: &Tree) -> Vec<u8> {
-    let mut out = MAGIC.to_vec();
+pub fn encode_with(tree: &Tree, format: BundleFormat) -> Vec<u8> {
+    let mut out = format.magic().to_vec();
     out.extend_from_slice(
         &u32::try_from(tree.files.len())
             .unwrap_or(u32::MAX)
@@ -31,6 +50,11 @@ pub fn encode(tree: &Tree) -> Vec<u8> {
         out.extend_from_slice(bytes);
     }
     out
+}
+
+#[cfg(test)]
+fn encode(tree: &Tree) -> Vec<u8> {
+    encode_with(tree, BundleFormat::V1)
 }
 
 pub fn revision_of(bundle: &[u8]) -> Revision {
@@ -71,10 +95,14 @@ fn path_ok(path: &str) -> bool {
 }
 
 /// 정규 형태만 받는다(경로 오름차순·중복 없음·꼬리 바이트 없음). 한도는 스캔과 같다.
-pub fn decode(bundle: &[u8], limits: &Limits) -> Result<Tree, Issue> {
-    let rest = bundle
-        .strip_prefix(MAGIC)
-        .ok_or_else(|| bad("프로필 묶음이 아니에요"))?;
+pub fn decode(bundle: &[u8], limits: &Limits) -> Result<(BundleFormat, Tree), Issue> {
+    let (format, rest) = if let Some(rest) = bundle.strip_prefix(MAGIC_V2) {
+        (BundleFormat::V2, rest)
+    } else if let Some(rest) = bundle.strip_prefix(MAGIC_V1) {
+        (BundleFormat::V1, rest)
+    } else {
+        return Err(bad("프로필 묶음이 아니에요"));
+    };
     let mut cur = Cursor {
         bytes: rest,
         pos: 0,
@@ -123,7 +151,7 @@ pub fn decode(bundle: &[u8], limits: &Limits) -> Result<Tree, Issue> {
     if cur.pos != rest.len() {
         return Err(bad("꼬리에 남는 바이트가 있어요"));
     }
-    Ok(Tree { files, dirs })
+    Ok((format, Tree { files, dirs }))
 }
 
 /// 승인에 묶는 정책 판본: roles·members·policy와 트리거 주체·승인자 매핑, OpenAI 모델 바인딩의 모델→에이전트·승인 경로 매핑.
@@ -225,9 +253,9 @@ pub fn from_bundle(
             "묶음의 해시가 기록한 판본과 달라요",
         )]);
     }
-    let tree = decode(bundle, limits).map_err(|i| vec![i])?;
+    let (format, tree) = decode(bundle, limits).map_err(|i| vec![i])?;
     let mut issues = Issues::new(limits.max_issues);
-    match build::build(&tree, Some(&profile.0), limits, &mut issues) {
+    match build::build_for_bundle(format, &tree, Some(&profile.0), limits, &mut issues) {
         Some(out) => Ok(out.snapshot),
         None => {
             let mut found = issues.into_vec();
@@ -249,11 +277,19 @@ mod tests {
 
     #[test]
     fn bundle_round_trips_and_is_canonical() {
-        let bundle = encode(&tree());
-        let back = decode(&bundle, &Limits::default()).unwrap();
-        assert_eq!(back.files, tree().files);
-        assert_eq!(encode(&back), bundle);
-        assert_eq!(revision_of(&bundle).0.len(), 64);
+        for format in [BundleFormat::V1, BundleFormat::V2] {
+            let bundle = encode_with(&tree(), format);
+            let (got, back) = decode(&bundle, &Limits::default()).unwrap();
+            assert_eq!(got, format);
+            assert_eq!(back.files, tree().files);
+            assert_eq!(encode_with(&back, format), bundle);
+            assert_eq!(revision_of(&bundle).0.len(), 64);
+        }
+        assert_ne!(
+            revision_of(&encode_with(&tree(), BundleFormat::V1)),
+            revision_of(&encode_with(&tree(), BundleFormat::V2)),
+            "같은 파일 트리라도 묶음 판본(매직)이 다르면 판본 해시가 다르다"
+        );
     }
 
     #[test]
@@ -267,7 +303,7 @@ mod tests {
         assert!(decode(&tail, &limits).is_err());
         let evil = encode(&Tree::from_files([("../x", b"1".to_vec())]));
         assert!(decode(&evil, &limits).is_err());
-        let mut order = MAGIC.to_vec();
+        let mut order = MAGIC_V1.to_vec();
         order.extend_from_slice(&2u32.to_be_bytes());
         for p in ["b", "a"] {
             order.extend_from_slice(&1u32.to_be_bytes());
@@ -305,14 +341,14 @@ mod tests {
                 }
             }
             let outcome =
-                std::panic::catch_unwind(|| decode(&bytes, &limits).map(|t| t.files.len()));
+                std::panic::catch_unwind(|| decode(&bytes, &limits).map(|(_, t)| t.files.len()));
             assert!(outcome.is_ok(), "패닉: {bytes:?}");
         }
     }
 
     /// `(경로, 내용)`을 정규 순서 그대로 이어 붙인다(검증 없이).
     fn raw(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut out = MAGIC.to_vec();
+        let mut out = MAGIC_V1.to_vec();
         out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
         for (path, data) in entries {
             out.extend_from_slice(&(path.len() as u32).to_be_bytes());

@@ -8,7 +8,7 @@ use crate::{
     limits::Limits,
     registry::{Registry, Report},
     scan,
-    snapshot::from_bundle,
+    snapshot::{BundleFormat, from_bundle},
 };
 use bot_core::{
     id::{ProfileId, Revision},
@@ -21,6 +21,23 @@ use std::{collections::BTreeSet, fmt, path::Path, sync::Arc};
 /// 호스트 등록부(서버·모델·입구 별칭)는 보지 않는다: 옛 판본은 지금의 호스트와 맞지 않을 수 있고, 옛 판본의 재개는 호출·승인·게시 직전의 현재 권한 검사가 지킨다.
 /// 판본은 바이트의 해시이고 프로필 ID는 폴더 이름과 `profile.yaml`의 id가 같아야 하므로, 다른 판본·프로필의 폴더는 같은 키를 만들 수 없다.
 pub fn read_bundle(dir: &Path, limits: &Limits) -> Result<(ProfileId, Revision, Vec<u8>), Report> {
+    read_bundle_with(dir, None, limits)
+}
+
+/// 구판(`BOTPROFILE1`) 형식으로 프로필 폴더를 읽어 묶음 `(프로필 ID, 판본, 바이트)`를 만든다 —
+/// 구판이 보관하지 않았던 옛 판본을 원본 폴더로 보충할 때(`bot profile-bundle put`) 원래 SHA-256을 재생성하는 데 쓴다.
+pub fn read_legacy_bundle(
+    dir: &Path,
+    limits: &Limits,
+) -> Result<(ProfileId, Revision, Vec<u8>), Report> {
+    read_bundle_with(dir, Some(BundleFormat::V1), limits)
+}
+
+fn read_bundle_with(
+    dir: &Path,
+    format: Option<BundleFormat>,
+    limits: &Limits,
+) -> Result<(ProfileId, Revision, Vec<u8>), Report> {
     let mut issues = Issues::new(limits.max_issues);
     let name = dir
         .canonicalize()
@@ -38,7 +55,10 @@ pub fn read_bundle(dir: &Path, limits: &Limits) -> Result<(ProfileId, Revision, 
     let built = if issues.has_errors() {
         None
     } else {
-        build::build(&tree, name.as_deref(), limits, &mut issues)
+        match format {
+            Some(fmt) => build::build_for_bundle(fmt, &tree, name.as_deref(), limits, &mut issues),
+            None => build::build(&tree, name.as_deref(), limits, &mut issues),
+        }
     };
     match built {
         Some(out) if !issues.has_errors() => {

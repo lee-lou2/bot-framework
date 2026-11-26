@@ -3,14 +3,21 @@
 //! 폴더를 검증해 만든 묶음은 자기 해시를 판본으로 보관하므로, 프로필 ID와 해시가 맞는 원본일 때만 복원에 쓰인다(다른 폴더는 다른 키가 된다). 호스트 등록부는 보지 않는다.
 
 use crate::settings::Settings;
-use bot_core::{port::Error, profile::ProfileBundles};
-use bot_profile::{Limits, read_bundle};
+use bot_core::{id::Revision, port::Error, profile::ProfileBundles};
+use bot_profile::{Limits, read_bundle, read_legacy_bundle};
 use bot_store::{Config, Store};
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 pub async fn put(settings: &Settings, dir: &Path) -> Result<(), String> {
-    let (profile, revision, bundle) = read_bundle(dir, &Limits::default())
-        .map_err(|report| format!("프로필 폴더를 검증하지 못했어요:\n{report}"))?;
+    let limits = Limits::default();
+    let current = read_bundle(dir, &limits);
+    let legacy = read_legacy_bundle(dir, &limits);
+    let profile_id = match (&current, &legacy) {
+        (Ok((id, _, _)), _) | (_, Ok((id, _, _))) => id.clone(),
+        (Err(report), Err(_)) => {
+            return Err(format!("프로필 폴더를 검증하지 못했어요:\n{report}"));
+        }
+    };
     let url = settings
         .database_url
         .as_deref()
@@ -22,6 +29,21 @@ pub async fn put(settings: &Settings, dir: &Path) -> Result<(), String> {
         .migrate()
         .await
         .map_err(|_| "저장소 마이그레이션에 실패했어요")?;
+    // 구판(`BOTPROFILE1`) 판본이 저장소에 고정돼 있으면 같은 원본 폴더로 그 옛 SHA-256을 재생성해 보충한다
+    let target = BTreeMap::from([(profile_id, Revision(String::new()))]);
+    let pinned = store
+        .pinned_revisions(&target)
+        .await
+        .map_err(|_| "저장소에서 고정 판본을 읽지 못했어요")?;
+    let (profile, revision, bundle) = match (legacy, current) {
+        (Ok((id, rev, bytes)), _) if pinned.contains(&(id.clone(), rev.clone())) => {
+            (id, rev, bytes)
+        }
+        (_, Ok(built)) => built,
+        (_, Err(report)) => {
+            return Err(format!("프로필 폴더를 검증하지 못했어요:\n{report}"));
+        }
+    };
     store
         .put_bundle(profile.clone(), revision.clone(), bundle)
         .await

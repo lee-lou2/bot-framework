@@ -39,6 +39,15 @@ pub struct ParsedAgent {
     pub memory: Vec<MemorySeed>,
 }
 
+/// `SKILL.md` 해석 규칙 세대.
+/// - `Legacy`: 구판(`BOTPROFILE1`) 번들 복원 전용. front matter를 파싱·제거하지 않고 32 KiB 상한도 적용하지 않는다.
+/// - `Strict`: 새 폴더 검증과 `BOTPROFILE2` 복원. Agent Skills front matter 검증·제거와 32 KiB 상한을 적용한다.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SkillMode {
+    Legacy,
+    Strict,
+}
+
 pub struct Parsed {
     pub profile: ProfileParts,
     pub rules: Option<String>,
@@ -46,6 +55,8 @@ pub struct Parsed {
     pub skills: Vec<Arc<Skill>>,
     /// 부모가 자식보다 앞선다.
     pub agents: Vec<ParsedAgent>,
+    /// `Strict` 해석에서 `SKILL.md` front matter를 제거한 스킬이 하나 이상 있는가(`BOTPROFILE2` 판본 선택 기준).
+    pub has_skill_front_matter: bool,
 }
 
 fn text_of<'a>(tree: &'a Tree, path: &str, issues: &mut Issues) -> Option<&'a str> {
@@ -123,10 +134,11 @@ fn trigger_schema_code(doc: &Value, pointer: &str) -> &'static str {
     "schema"
 }
 
-pub fn parse_all(
+pub fn parse_all_with(
     tree: &Tree,
     layout: &Layout,
     folder: Option<&str>,
+    mode: SkillMode,
     limits: &Limits,
     issues: &mut Issues,
 ) -> Option<Parsed> {
@@ -140,11 +152,19 @@ pub fn parse_all(
         .filter(|t| !t.trim().is_empty())
         .map(|t| t.trim_end().to_owned());
     let knowledge = docs(tree, &layout.knowledge, issues);
-    let skills = skills(tree, &layout.skills, limits, issues);
+    let mut has_skill_front_matter = false;
+    let skills = skills(
+        tree,
+        &layout.skills,
+        mode,
+        limits,
+        &mut has_skill_front_matter,
+        issues,
+    );
     let agents: Vec<ParsedAgent> = layout
         .agents
         .iter()
-        .filter_map(|a| agent(tree, a, limits, issues))
+        .filter_map(|a| agent(tree, a, mode, limits, &mut has_skill_front_matter, issues))
         .collect();
     if issues.error_count() > before {
         return None;
@@ -155,6 +175,7 @@ pub fn parse_all(
         knowledge,
         skills,
         agents,
+        has_skill_front_matter,
     })
 }
 
@@ -174,30 +195,50 @@ fn docs(tree: &Tree, paths: &[String], issues: &mut Issues) -> Vec<Document> {
 fn skills(
     tree: &Tree,
     files: &[SkillFiles],
+    mode: SkillMode,
     limits: &Limits,
+    has_skill_front_matter: &mut bool,
     issues: &mut Issues,
 ) -> Vec<Arc<Skill>> {
     files
         .iter()
-        .filter_map(|f| skill(tree, f, limits, issues))
+        .filter_map(|f| {
+            let (skill, has_fm) = skill_with_mode(tree, f, mode, limits, issues)?;
+            *has_skill_front_matter |= has_fm;
+            Some(skill)
+        })
         .collect()
 }
 
-pub(crate) fn skill(
-    tree: &Tree,
-    files: &SkillFiles,
+/// 단일 `SKILL.md` 바이트를 `Strict` 규칙(텍스트·front matter·폴더명·빈 본문·32 KiB)으로 검증한다.
+/// 성공 시 `(description, 본문, front matter 존재 여부)`를 돌려준다. `bot mcp sync` 접속 전 사전 검사도 이 함수를 쓴다.
+pub(crate) fn check_skill_md(
+    skill_name: &str,
+    md_path: &str,
+    bytes: &[u8],
     limits: &Limits,
     issues: &mut Issues,
-) -> Option<Arc<Skill>> {
-    let md_path = files.skill_md.as_deref()?;
-    let md = text_of(tree, md_path, issues)?;
+) -> Option<(Option<String>, String, bool)> {
+    let md = match text::check_text(md_path, bytes) {
+        Ok(t) => t,
+        Err(issue) => {
+            issues.push(issue);
+            return None;
+        }
+    };
     let mut found = Vec::new();
     let parsed = frontmatter::parse(md_path, md, &Kind::Skill, limits, &mut found);
     issues.extend(found);
     let parsed = parsed?;
     let mut ok = true;
-    let body = parsed.body.trim();
-    if body.is_empty() {
+    let has_front_matter = parsed.meta.is_some();
+    // front matter가 없는 평문 스킬은 구판과 바이트 단위로 같도록 끝 공백만 정리한다
+    let body = if has_front_matter {
+        parsed.body.trim()
+    } else {
+        parsed.body.trim_end()
+    };
+    if body.trim().is_empty() {
         issues.error("empty-file", md_path, "SKILL.md에 지침이 없어요");
         ok = false;
     } else if body.len() > limits.max_skill_bytes {
@@ -217,15 +258,14 @@ pub(crate) fn skill(
         .as_ref()
         .and_then(|m| m.get("name"))
         .and_then(Value::as_str)
-        && declared != files.name
+        && declared != skill_name
     {
         issues.error_at(
             "skill-name-mismatch",
             md_path,
             "front matter /name",
             format!(
-                "front matter의 name `{declared}`이(가) 스킬 폴더 이름 `{}`와 달라요",
-                files.name
+                "front matter의 name `{declared}`이(가) 스킬 폴더 이름 `{skill_name}`와 달라요"
             ),
         );
         ok = false;
@@ -255,9 +295,40 @@ pub(crate) fn skill(
             ok = false;
         }
     }
-    if !ok {
-        return None;
-    }
+    ok.then(|| (description, body.to_owned(), has_front_matter))
+}
+
+pub(crate) fn skill(
+    tree: &Tree,
+    files: &SkillFiles,
+    limits: &Limits,
+    issues: &mut Issues,
+) -> Option<Arc<Skill>> {
+    skill_with_mode(tree, files, SkillMode::Strict, limits, issues).map(|(s, _)| s)
+}
+
+fn skill_with_mode(
+    tree: &Tree,
+    files: &SkillFiles,
+    mode: SkillMode,
+    limits: &Limits,
+    issues: &mut Issues,
+) -> Option<(Arc<Skill>, bool)> {
+    let md_path = files.skill_md.as_deref()?;
+    let (description, body, has_front_matter) = match mode {
+        SkillMode::Strict => {
+            let bytes = tree.file(md_path)?;
+            check_skill_md(&files.name, md_path, bytes, limits, issues)?
+        }
+        SkillMode::Legacy => {
+            let md = text_of(tree, md_path, issues)?;
+            if md.trim().is_empty() {
+                issues.error("empty-file", md_path, "SKILL.md가 비어 있어요");
+                return None;
+            }
+            (None, md.trim_end().to_owned(), false)
+        }
+    };
     // 잠금 파일은 tools.yaml이 `input`을 생략한 도구의 입력 스키마·정의 해시의 정본이다. 틀리면 그것을 쓰는 도구가 모두 막히므로 여기서 멈춘다.
     let lock = match files.lock.as_deref() {
         Some(path) if files.tools.is_none() => {
@@ -281,22 +352,27 @@ pub(crate) fn skill(
         }
         None => Vec::new(),
     };
-    Some(Arc::new(Skill {
-        name: files.name.clone(),
-        path: files.dir.clone(),
-        description,
-        instructions: Document {
-            relative_path: md_path.to_owned(),
-            text: body.to_owned(),
-        },
-        tools,
-    }))
+    Some((
+        Arc::new(Skill {
+            name: files.name.clone(),
+            path: files.dir.clone(),
+            description,
+            instructions: Document {
+                relative_path: md_path.to_owned(),
+                text: body,
+            },
+            tools,
+        }),
+        has_front_matter,
+    ))
 }
 
 fn agent(
     tree: &Tree,
     files: &AgentFiles,
+    mode: SkillMode,
     limits: &Limits,
+    has_skill_front_matter: &mut bool,
     issues: &mut Issues,
 ) -> Option<ParsedAgent> {
     let id = AgentId(files.id.clone());
@@ -361,7 +437,14 @@ fn agent(
         description,
         builtin,
         env,
-        skills: skills(tree, &files.skills, limits, issues),
+        skills: skills(
+            tree,
+            &files.skills,
+            mode,
+            limits,
+            has_skill_front_matter,
+            issues,
+        ),
         knowledge: docs(tree, &files.knowledge, issues),
         triggers,
         memory: seeds(tree, &files.memory, &id, limits, issues),
