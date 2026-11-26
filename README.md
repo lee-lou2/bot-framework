@@ -20,6 +20,15 @@ bot serve --role all
 
 `bot`과 `srt`는 두 터미널의 PATH에서 찾을 수 있어야 합니다. 위 DB 명령은 현재 OS 사용자로 로컬 PostgreSQL에 접속할 수 있을 때의 예입니다. 이미 준비한 DB가 있으면 그 접속 주소를 `BOT_DATABASE_URL`에 넣으세요.
 
+로컬에 PostgreSQL이 없다면 Docker로 `127.0.0.1`에만 열리는 데모 전용 PostgreSQL 16을 대신 띄울 수 있습니다(로컬 데모 전용이며 `trust` 인증은 운영 환경에서 쓰지 마세요):
+
+```sh
+docker run -d --rm --name bot-demo-pg -p 127.0.0.1:5432:5432 -e POSTGRES_DB=bot_demo -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16
+export BOT_DATABASE_URL="postgres://postgres@127.0.0.1:5432/bot_demo"
+```
+
+데모가 끝나면 `docker stop bot-demo-pg`로 컨테이너를 정리합니다.
+
 `serve`가 출력한 관리 화면 주소를 열고, 사용자 이름 칸에는 아무 이름을, 비밀번호 칸에는 터미널에 표시된 값을 넣으세요. 터미널 없이 띄울 때는 `BOT_ADMIN_TOKEN_FILE`에 비밀번호를 받을 파일의 절대 경로를 지정하세요(권한 0600). 기본 포트 8787을 사용 중이면 호스트 설정의 `admin.bind`를 바꿀 수 있습니다. [호스트 파일 예시](docs/profile-spec.md#새-프로필의-호스트-설정)
 
 다른 터미널에서 같은 저장소 루트로 이동한 뒤 아래 명령을 실행하세요.
