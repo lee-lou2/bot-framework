@@ -88,6 +88,41 @@ fn validates_team_example() {
     );
     // 도구 선언 예시: 조회는 read, 삭제는 승인이 항상 필요한 irreversible. 자식도 부모의 스킬을 본다
     let agenda = &main.skills["agenda"];
+    assert_eq!(agenda.description, None, "front matter 없는 스킬");
+    let report = &main.skills["report-format"];
+    assert!(
+        report
+            .description
+            .as_deref()
+            .is_some_and(|d| d.contains("결론")),
+        "{:?}",
+        report.description
+    );
+    assert!(
+        report.instructions.text.starts_with("# 보고 형식")
+            && !report.instructions.text.contains("---"),
+        "front matter는 스킬 본문에서 제거된다: {}",
+        report.instructions.text
+    );
+    let delegation = &main.skills["delegation"];
+    assert!(
+        delegation
+            .description
+            .as_deref()
+            .is_some_and(|d| d.contains("하위 에이전트")),
+        "{:?}",
+        delegation.description
+    );
+    assert!(
+        delegation
+            .instructions
+            .text
+            .starts_with("# 위임: 누구에게 맡길까")
+            && !delegation.instructions.text.contains("name: delegation")
+            && !delegation.instructions.text.contains("description:"),
+        "{}",
+        delegation.instructions.text
+    );
     let list = &agenda.tools[&ToolId("agenda.list".into())];
     let delete = &agenda.tools[&ToolId("agenda.delete".into())];
     assert_eq!((list.class, delete.class), (Risk::Read, Risk::Irreversible));

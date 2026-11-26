@@ -366,3 +366,159 @@ fn init_validates_a_private_copy_under_tmpdir_and_leaves_nothing_behind() {
         "아무것도 만들지 않았다"
     );
 }
+
+#[test]
+fn scaffolded_skills_validate_and_reach_model_prompts_without_front_matter() {
+    use bot_core::{
+        command::{JsonPayload, Target, Work},
+        id::{AgentId, Attempt, BindingId, ClaimEpoch, Generation, PrincipalId, ProfileId, RunId},
+        state::{Conversation, ConversationKind, RunContext, RunOrigin},
+    };
+    use bot_profile::{HostCatalog, Limits, load};
+    use bot_runtime::context::{ContextInput, assemble};
+    use std::{
+        collections::BTreeSet,
+        time::{Duration, UNIX_EPOCH},
+    };
+
+    let work = tempfile::tempdir().unwrap();
+    assert!(init(work.path(), "demo", "team").status.success());
+    let profile = profile_dir(work.path(), "demo");
+    for args in [
+        &["skill", "checklist"][..],
+        &["skill", "triage", "--agent", "main/developer"][..],
+        // YAML 키워드와 같은 이름도 따옴표 처리돼 검증을 통과한다
+        &["skill", "null", "--agent", "main/developer"][..],
+    ] {
+        let out = add(&profile, args);
+        assert!(out.status.success(), "{args:?}: {}", text(&out));
+        assert!(
+            text(&out).contains("본문만 전달돼요"),
+            "{args:?}: {}",
+            text(&out)
+        );
+    }
+    let checked = validate(work.path(), "demo");
+    assert!(checked.status.success(), "{}", text(&checked));
+
+    let mut host = HostCatalog::default();
+    host.models
+        .insert("demo".into(), BTreeSet::from(["assistant".into()]));
+    host.cli_accounts.insert("owner".into());
+    let set = load(
+        &work.path().join("demo/profiles"),
+        &host,
+        &Limits::default(),
+    )
+    .unwrap_or_else(|r| panic!("스캐폴드 프로필 검증 실패:\n{r}"));
+    let snap = set.profile(&ProfileId("demo".into())).unwrap();
+    let main = &snap.agents[&AgentId("main".into())];
+    let dev = &snap.agents[&AgentId("main/developer".into())];
+
+    for (agent_skills, name, heading) in [
+        (&main.skills, "report-format", "# 보고 형식"),
+        (&main.skills, "delegation", "# 위임: 누구에게 맡길까"),
+        (&main.skills, "checklist", "# checklist"),
+        (&dev.skills, "triage", "# triage"),
+        (&dev.skills, "null", "# null"),
+    ] {
+        let sk = &agent_skills[name];
+        assert!(sk.description.is_some(), "{name}: description 보존");
+        assert!(
+            sk.instructions.text.starts_with(heading),
+            "{name}: {}",
+            sk.instructions.text
+        );
+        assert!(
+            !sk.instructions.text.starts_with("---")
+                && !sk.instructions.text.contains("description:"),
+            "{name}: front matter가 본문에 남음: {}",
+            sk.instructions.text
+        );
+    }
+
+    let run = |agent_id: &str| RunContext {
+        attempt: Attempt {
+            profile: ProfileId("demo".into()),
+            run: RunId("r1".into()),
+            claim: Some(ClaimEpoch(1)),
+            generation: Generation(1),
+        },
+        root: RunId("r1".into()),
+        principal: PrincipalId("local:owner".into()),
+        agent: AgentId(agent_id.into()),
+        conversation: Conversation {
+            kind: ConversationKind::Cli,
+            id: "owner".into(),
+            thread: None,
+        },
+        binding: BindingId("desk".into()),
+        api: None,
+        scopes: BTreeSet::from(["run".into()]),
+        private_memory_read: false,
+        work: Work {
+            revision: snap.revision.clone(),
+            target: Target::Agent {
+                agent: AgentId(agent_id.into()),
+                instruction: "요약해 줘".into(),
+            },
+            input: JsonPayload(r#"{"text":"요약해 줘"}"#.into()),
+            attachments: vec![],
+            steps: vec![],
+            pass_pos: None,
+        },
+        approver: None,
+        trigger: None,
+        origin: RunOrigin::Message,
+    };
+
+    for (agent_id, expected_headings) in [
+        (
+            "main",
+            &[
+                "### report-format\n# 보고 형식",
+                "### delegation\n# 위임: 누구에게 맡길까",
+                "### checklist\n# checklist",
+            ][..],
+        ),
+        (
+            "main/developer",
+            &[
+                "### report-format\n# 보고 형식",
+                "### triage\n# triage",
+                "### null\n# null",
+            ][..],
+        ),
+    ] {
+        let assembled = assemble(&ContextInput {
+            snapshot: snap,
+            run: &run(agent_id),
+            history: &[],
+            memory: &[],
+            now: UNIX_EPOCH + Duration::from_secs(1_795_487_400),
+        })
+        .unwrap();
+        for heading in expected_headings {
+            assert!(
+                assembled.system.contains(heading),
+                "{agent_id}: {heading} 없음\n{}",
+                assembled.system
+            );
+        }
+        for leaked in [
+            "---\nname:",
+            "name: report-format",
+            "name: delegation",
+            "name: \"checklist\"",
+            "name: \"triage\"",
+            "name: \"null\"",
+            "description:",
+        ] {
+            assert!(
+                !assembled.system.contains(leaked),
+                "{agent_id}: front matter `{leaked}`가 모델 프롬프트에 노출됨\n{}",
+                assembled.system
+            );
+        }
+    }
+}
