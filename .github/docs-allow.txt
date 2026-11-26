@@ -1,4 +1,2 @@
 # Exceptions to .github/scripts/docs_contract.py, one per line: `kind | token | reason`. The reason is required.
 # An exception that nothing needs any more is reported, so delete the line when the document names the token in full.
-route | /v1/admin/audit/verify | docs/admin.md writes it as the shorthand `/audit/verify` right after `GET /v1/admin/audit`
-route | /v1/admin/preapprovals/{profile}/{agent}/{trigger}/resume | docs/admin.md writes it as the shorthand `/resume` right after the `.../pause` route

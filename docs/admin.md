@@ -34,8 +34,10 @@
 | `GET /v1/admin/holds` | 운영자 | 보류된 호출과 단계(원래 영수증 포함) |
 | `POST /v1/admin/holds/{profile}/{run}/{call}/resolve` | 운영자 | 보류 판정(본문에 `hold_id` 필수) |
 | `GET /v1/admin/preapprovals` | 운영자 | 사전 승인 목록 `{"items":[{profile, agent, trigger, grant_id, epoch, paused, used_today, max_per_day}]}`(쿼리 없음, 프로필 선택은 화면) |
-| `POST /v1/admin/preapprovals/{profile}/{agent}/{trigger}/pause` · `/resume` | 운영자 | 트리거 정지·재개. 본문은 정확히 `{"grant_id","epoch"}` |
-| `GET /v1/admin/audit`, `/audit/verify` | 운영자 | 감사 체인(최신순, 한 건 더 읽어 다음 쪽이 있을 때만 `next`, 저장소는 최대 201건을 받는다)과 처음부터 다시 계산한 검증 |
+| `POST /v1/admin/preapprovals/{profile}/{agent}/{trigger}/pause` | 운영자 | 트리거 긴급 정지. 본문은 정확히 `{"grant_id","epoch"}` |
+| `POST /v1/admin/preapprovals/{profile}/{agent}/{trigger}/resume` | 운영자 | 정지된 트리거 재개. 본문은 정확히 `{"grant_id","epoch"}` |
+| `GET /v1/admin/audit` | 운영자 | 감사 체인(최신순, 한 건 더 읽어 다음 쪽이 있을 때만 `next`, 저장소는 최대 201건을 받는다) |
+| `GET /v1/admin/audit/verify` | 운영자 | 감사 체인을 처음부터 다시 계산한 검증 |
 | `GET /v1/admin/status` | 운영자 | 프로필별 실행 수·대기 시간·승인 대기·보류·추적 내보내기 상태 |
 | `GET /v1/admin/map` | 운영자 | 구조 지도와 권한 정보 |
 | `GET /ui` | 모두 | 내장 화면(같은 출처 스크립트·스타일만, 인라인 없음) |
