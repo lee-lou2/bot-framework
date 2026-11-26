@@ -86,7 +86,7 @@ impl Routes {
         let mut resolved = Vec::new();
         for (entrance, owner) in owners() {
             let real = resolve(&entrance, &owner, host, uid_of)?;
-            resolved.push((real, owner, entrance.to_string()));
+            resolved.push((real, owner, entrance));
         }
         let table = Table::build(resolved)?;
         one_profile_per_openai_entrance(&table)?;

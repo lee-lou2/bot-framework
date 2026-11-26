@@ -107,33 +107,32 @@ impl fmt::Display for Owner {
 /// 같은 입구가 두 번 올라왔다.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Conflict {
-    /// 나중에 온 주인이 쓰는 입구의 설명(별칭 수준)
-    pub entrance: String,
-    /// 먼저 온 주인이 쓰는 입구의 설명. 같은 설명이면 같은 별칭을 두 번 쓴 것이고, 다르면 서로 다른 별칭이 호스트 설정에서 같은 실제 입구로 풀린 것이다.
-    pub first_entrance: String,
+    /// 나중에 온 주인이 쓰는 입구(별칭 수준)
+    pub entrance: Entrance,
+    /// 먼저 온 주인이 쓰는 입구. 같으면 같은 별칭을 두 번 쓴 것이고, 다르면 서로 다른 별칭이 호스트 설정에서 같은 실제 입구로 풀린 것이다.
+    pub first_entrance: Entrance,
     pub first: Owner,
     pub second: Owner,
 }
 
 impl Conflict {
-    /// 고치는 방법. 입구 종류는 설명(`Entrance`의 표시)의 앞머리로 가른다. 실제 팀·채널 ID는 싣지 않는다(별칭과 설정 위치만).
+    /// 고치는 방법. 입구 종류는 `Entrance` 변종으로 가른다(새 입구를 더하면 이 `match`가 컴파일 오류로 알려 준다). 실제 팀·채널 ID는 싣지 않는다(별칭과 설정 위치만).
     fn fix(&self) -> &'static str {
         let same = self.first_entrance == self.entrance;
-        let kind = self.entrance.split_whitespace().next().unwrap_or_default();
-        match (kind, same) {
-            ("cli", true) => {
+        match (&self.entrance, same) {
+            (Entrance::Cli { .. }, true) => {
                 "한 입구는 바인딩 하나에만 연결할 수 있어요. 한쪽 바인딩의 `account`를 다른 계정 별칭으로 바꾸거나 바인딩을 지워 주세요"
             }
-            ("cli", false) => {
+            (Entrance::Cli { .. }, false) => {
                 "같은 프로필의 CLI 입구는 OS 사용자마다 하나예요. 두 계정 별칭이 호스트 설정 `gateway.cli.accounts`에서 같은 OS 사용자를 가리켜요 — 계정마다 다른 OS 사용자를 연결하거나 한쪽 바인딩을 지워 주세요"
             }
-            ("slack", true) => {
+            (Entrance::SlackChannel { .. } | Entrance::SlackDm { .. }, true) => {
                 "한 입구는 바인딩 하나에만 연결할 수 있어요. 한쪽 바인딩의 채널(또는 워크스페이스) 별칭을 바꾸거나 바인딩을 지워 주세요"
             }
-            ("slack", false) => {
+            (Entrance::SlackChannel { .. } | Entrance::SlackDm { .. }, false) => {
                 "두 별칭이 호스트 설정 `gateway.slack.workspaces`에서 같은 Slack 채널(또는 팀)을 가리켜요 — 한쪽 별칭을 다른 채널로 바꾸거나 바인딩을 지워 주세요"
             }
-            (_, _) => {
+            (Entrance::Http { .. } | Entrance::HttpModel { .. }, _) => {
                 "한 입구는 바인딩 하나에만 연결할 수 있어요. 한쪽 바인딩의 `endpoint`를 바꾸거나 바인딩을 지워 주세요"
             }
         }
@@ -170,17 +169,17 @@ impl fmt::Display for Conflict {
 impl std::error::Error for Conflict {}
 
 /// 입구 → 주인. 같은 키가 두 번 들어오면 `Conflict`. 조회는 키 정확 일치뿐이다(부분 일치·와일드카드 없음).
-/// 항목마다 오류 문구용 라벨(별칭 수준 설명)을 받는다.
+/// 항목마다 오류 문구용으로 그 입구의 별칭 수준 선언(`Entrance`)을 받는다.
 #[derive(Debug)]
 pub struct Table<K: Ord> {
-    map: BTreeMap<K, (Owner, String)>,
+    map: BTreeMap<K, (Owner, Entrance)>,
 }
 
 impl<K: Ord + Clone> Table<K> {
     pub fn build(
-        entries: impl IntoIterator<Item = (K, Owner, String)>,
+        entries: impl IntoIterator<Item = (K, Owner, Entrance)>,
     ) -> Result<Self, Box<Conflict>> {
-        let mut map: BTreeMap<K, (Owner, String)> = BTreeMap::new();
+        let mut map: BTreeMap<K, (Owner, Entrance)> = BTreeMap::new();
         for (key, owner, label) in entries {
             if let Some((first, first_label)) = map.get(&key) {
                 return Err(Box::new(Conflict {
@@ -212,13 +211,13 @@ impl<K: Ord + Clone> Table<K> {
     }
 }
 
-impl<K: Ord + Clone + fmt::Display> Table<K> {
-    /// 키 자체가 설명이 되는 경우(별칭 수준 표)
+impl Table<Entrance> {
+    /// 키가 곧 별칭 수준 입구인 표
     pub fn build_described(
-        entries: impl IntoIterator<Item = (K, Owner)>,
+        entries: impl IntoIterator<Item = (Entrance, Owner)>,
     ) -> Result<Self, Box<Conflict>> {
         Self::build(entries.into_iter().map(|(key, owner)| {
-            let label = key.to_string();
+            let label = key.clone();
             (key, owner, label)
         }))
     }
@@ -341,12 +340,16 @@ mod tests {
             (
                 real.clone(),
                 owner("notes", "desk"),
-                "cli 계정 owner".to_string(),
+                Entrance::Cli {
+                    account: "owner".into(),
+                },
             ),
             (
                 real,
                 owner("notes", "lab"),
-                "cli 계정 researcher".to_string(),
+                Entrance::Cli {
+                    account: "researcher".into(),
+                },
             ),
         ])
         .unwrap_err();
@@ -404,16 +407,8 @@ mod tests {
             channel: "C1".into(),
         };
         let err = Table::build([
-            (
-                real.clone(),
-                owner("a", "x"),
-                "slack home의 채널 planning".to_string(),
-            ),
-            (
-                real,
-                owner("b", "y"),
-                "slack home의 채널 plan-copy".to_string(),
-            ),
+            (real.clone(), owner("a", "x"), channel("home", "planning")),
+            (real, owner("b", "y"), channel("home", "plan-copy")),
         ])
         .unwrap_err();
         let text = err.to_string();
