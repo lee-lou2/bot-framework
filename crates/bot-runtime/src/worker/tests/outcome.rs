@@ -10,6 +10,7 @@ use bot_core::{
     api::{ApiOrigin, ChatBody, ChatTurn, TurnRole},
     command::*,
     id::*,
+    port::Error,
     state::RunContext,
 };
 use std::sync::{Arc, Mutex};
@@ -56,6 +57,20 @@ async fn stored(model: Arc<dyn ModelRunner>, ctx: RunContext) -> (Outcome, Vec<R
     let outcome = r.worker.execute(ctx).await;
     let outcomes = lock(&r.runs.state).outcomes.clone();
     (outcome, outcomes)
+}
+
+#[tokio::test]
+async fn only_an_unavailable_completion_is_retried() {
+    for (error, failure) in [
+        (Error::Conflict, Failure::Permanent("finish_conflict")),
+        (Error::Invalid, Failure::Permanent("invalid_result")),
+        (Error::Unavailable, Failure::Transient("finish_unavailable")),
+    ] {
+        let r = rig(Cli::new("답", Default::default()));
+        lock(&r.runs.state).finish_error = Some(error);
+        r.worker.execute(agent_run("r1")).await;
+        assert_eq!(lock(&r.runs.state).failed, vec![failure]);
+    }
 }
 
 #[tokio::test]

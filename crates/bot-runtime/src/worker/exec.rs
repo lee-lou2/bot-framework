@@ -132,7 +132,11 @@ impl Worker {
                     self.report(ctx, control, Failure::Permanent("invalid_result"))
                         .await
                 }
-                Err(_) => {
+                Err(Error::Conflict) => {
+                    self.report(ctx, control, Failure::Permanent("finish_conflict"))
+                        .await
+                }
+                Err(Error::Unavailable) => {
                     self.report(ctx, control, Failure::Transient("finish_unavailable"))
                         .await
                 }
