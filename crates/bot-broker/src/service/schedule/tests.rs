@@ -166,10 +166,26 @@ fn timing_checks_wait_until_the_record_is_known_not_to_be_a_replay() {
             .map_err(|_| Error::Invalid)
             .and_then(|(create, _)| create.spec(now))
     };
-    // 지나간 시각·바로 지금은 거절, 미래는 통과
+    // 밀리초로 앞선 시각부터 1,830일 뒤까지 받는다.
     assert!(spec(r#"{"at":"2029-12-31T23:59:59Z","instruction":"x"}"#, "UTC").is_err());
     assert!(spec(r#"{"at":"2030-01-01T00:00:00Z","instruction":"x"}"#, "UTC").is_err());
+    assert!(
+        spec(
+            r#"{"at":"2030-01-01T00:00:00.0009Z","instruction":"x"}"#,
+            "UTC"
+        )
+        .is_err()
+    );
     assert!(spec(r#"{"at":"2030-01-01T00:00:01Z","instruction":"x"}"#, "UTC").is_ok());
+    let limit = now + std::time::Duration::from_secs(1_830 * 24 * 3600);
+    let at = |time| {
+        format!(
+            r#"{{"at":"{}","instruction":"x"}}"#,
+            crate::rfc3339::format_utc(time)
+        )
+    };
+    assert!(spec(&at(limit), "UTC").is_ok());
+    assert!(spec(&at(limit + std::time::Duration::from_millis(1)), "UTC").is_err());
     // 형식이 틀린 시각, 틀린 cron
     assert!(spec(r#"{"at":"tomorrow","instruction":"x"}"#, "UTC").is_err());
     assert!(

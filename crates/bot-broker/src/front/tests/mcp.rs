@@ -440,7 +440,7 @@ async fn a_schedule_created_through_the_relay_goes_through_the_broker() {
         "main",
         &scopes,
     ));
-    let create = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"schedule_create","arguments":{"at":"2030-01-01T12:00:00Z","instruction":"check the mail"},"_meta":{"claudecode/toolUseId":"toolu_sc1"}}}"#;
+    let create = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"schedule_create","arguments":{"at":"1970-01-02T12:00:00Z","instruction":"check the mail"},"_meta":{"claudecode/toolUseId":"toolu_sc1"}}}"#;
     let reply = rpc(&r, create).await;
     assert!(reply.body.contains("sched-001"), "{}", reply.body);
     let list = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"schedule_list","arguments":{},"_meta":{"claudecode/toolUseId":"toolu_sc2"}}}"#;

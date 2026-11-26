@@ -10,6 +10,9 @@ use serde_json::{Value, json};
 /// 이미 발급한 승인과 영수증이 참조하는 호스트 내장 도구 판본.
 pub const REVISION: &str = "builtin-1";
 
+/// `schedule.create`의 한 번 예약을 지금부터 이 밀리초(1,830일)까지 받는다.
+pub const MAX_SCHEDULE_AHEAD_MS: i64 = 5 * 366 * 24 * 3600 * 1000;
+
 /// 모델 목록과 브로커 선언이 공유하는 명세. 각 도구에는 ID와 같은 이름의 스코프가 필요하다.
 pub struct ModelTool {
     pub id: &'static str,

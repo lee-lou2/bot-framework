@@ -155,7 +155,7 @@ fn host_builtin_tools_are_judged_only_by_their_own_argument_checks_never_by_the_
         ("memory.share", r#"{"id":"m-1"}"#),
         (
             "schedule.create",
-            r#"{"at":"2030-01-01T12:00:00Z","instruction":"x"}"#,
+            r#"{"at":"1970-01-13T12:00:00Z","instruction":"x"}"#,
         ),
         ("schedule.list", "{}"),
         ("schedule.cancel", r#"{"id":"s-1"}"#),

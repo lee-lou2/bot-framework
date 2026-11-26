@@ -182,6 +182,56 @@ async fn both_dialects_share_only_the_owners_memory_after_private_approval() {
 }
 
 #[tokio::test]
+async fn both_dialects_record_and_return_a_schedule_beyond_the_time_limit_as_invalid() {
+    for kind in KINDS {
+        let Some(w) = builtin_world().await else {
+            return;
+        };
+        let api = FakeApi::start().await;
+        api.script(calls(
+            kind,
+            "",
+            vec![call(
+                "schedule.create",
+                json!({"at": "9999-01-01T00:00:00Z", "instruction": "알려 주세요"}),
+            )],
+            None,
+        ));
+        api.script(text(kind, "시각을 다시 확인해 주세요", None));
+        let run = accept(&w, "far-future", ConversationKind::Direct).await;
+        let worker = w.worker(&w.pg.store, models(kind, &api), config());
+        assert_eq!(
+            worker.run_once().await,
+            Some(Outcome::Succeeded),
+            "{kind:?}"
+        );
+        let call_id = bot_runtime::model::call_id(&run, 0, 0);
+        assert_eq!(
+            view::marks(&w, &run).await,
+            [(
+                bot_core::cli::CliRefusal::key(&call_id),
+                r#""invalid""#.into()
+            )]
+        );
+        assert_eq!(api.seen().len(), 2);
+        assert!(
+            api.seen()[1].json()["messages"]
+                .to_string()
+                .contains(r#""invalid""#)
+        );
+        assert_eq!(
+            w.pg.scalar::<i64>("select count(*) from bot_audit where action = 'call.invalid' and target = 'schedule.create'").await,
+            1
+        );
+        assert_eq!(
+            w.pg.scalar::<i64>("select count(*) from bot_user_schedules")
+                .await,
+            0
+        );
+    }
+}
+
+#[tokio::test]
 async fn both_dialects_approve_the_destination_then_each_draft_and_can_list_and_cancel() {
     for kind in KINDS {
         let Some(w) = builtin_world().await else {

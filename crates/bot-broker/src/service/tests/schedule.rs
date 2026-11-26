@@ -21,7 +21,7 @@ pub(super) const WITH_SCHEDULE: [&str; 10] = [
     "schedule.cancel",
 ];
 pub(super) const OWNER: &str = "local:owner";
-pub(super) const AT: &str = "2030-01-01T12:00:00Z";
+pub(super) const AT: &str = "1970-01-13T12:00:00Z";
 
 pub(super) fn snapshot_with(revision: &str) -> SnapshotBuilder {
     base(revision)
@@ -172,7 +172,7 @@ fn a_redelivered_call_returns_its_receipt_even_after_the_time_has_passed() {
     assert_eq!(done(create(&w, "c1", &at_args("once"))), first);
     assert_eq!(w.schedules.count(), 1, "다시 만들지 않는다");
     // 예정 시각이 지난 뒤의 재전달도 같은 영수증이다(시간에 기대는 검사는 영수증을 찾은 뒤에 한다)
-    w.clock.set(2_000_000_000 + 1_800_000_000); // 2030-01-01 12:00 UTC는 1893499200이므로 한참 지났다
+    w.clock.set(14 * 24 * 3600);
     assert_eq!(done(create(&w, "c1", &at_args("once"))), first);
     // 같은 호출 ID에 다른 인자·다른 도구는 충돌이다
     assert!(matches!(

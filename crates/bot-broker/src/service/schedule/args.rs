@@ -12,6 +12,7 @@ use crate::{
     rfc3339::{format_utc, parse_utc},
 };
 use bot_core::{
+    builtin::MAX_SCHEDULE_AHEAD_MS,
     command::JsonPayload,
     cron::Cron,
     id::{BindingId, ScheduleId},
@@ -20,7 +21,7 @@ use bot_core::{
     state::{Conversation, ConversationKind},
 };
 use serde_json::{Map, Value};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 인자를 거절한 이유.
 #[derive(Debug, Eq, PartialEq)]
@@ -170,12 +171,19 @@ impl Create {
         })
     }
 
-    /// 새 호출의 시간 검사(`at`은 지금보다 뒤)를 마치고 저장소에 줄 명세를 돌려준다. 이미 끝낸 호출의 재전달에는 부르지 않는다.
+    /// 새 호출의 `at`을 저장소와 같은 밀리초 범위로 검사한다. 이미 끝낸 호출의 재전달에는 부르지 않는다.
     pub(super) fn spec(self, now: SystemTime) -> Result<ScheduleSpec, Error> {
-        match self.spec.timing {
-            Timing::At(at) if at <= now => Err(Error::Invalid), // 지나간 시각
-            _ => Ok(self.spec),
+        if let Timing::At(at) = self.spec.timing {
+            let millis = |time: SystemTime| match time.duration_since(UNIX_EPOCH) {
+                Ok(later) => later.as_millis() as i128,
+                Err(earlier) => -(earlier.duration().as_millis() as i128),
+            };
+            let ahead = millis(at) - millis(now);
+            if ahead <= 0 || ahead > i128::from(MAX_SCHEDULE_AHEAD_MS) {
+                return Err(Error::Invalid);
+            }
         }
+        Ok(self.spec)
     }
 }
 
