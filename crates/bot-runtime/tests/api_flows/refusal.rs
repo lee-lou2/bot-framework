@@ -60,10 +60,10 @@ async fn refusal_before_approval(kind: ApiKind) {
     match kind {
         ApiKind::Anthropic => {
             assert_eq!(
-                view::result_text(&request, "t0c0").as_deref(),
+                view::result_text(&request, "bad").as_deref(),
                 Some("invalid")
             );
-            assert_eq!(view::result_error(&request, "t0c0"), Some(true));
+            assert_eq!(view::result_error(&request, "bad"), Some(true));
         }
         ApiKind::OpenAi => {
             let result = request["messages"]
@@ -132,7 +132,7 @@ async fn a_step_resume_checks_the_receipt_before_replaying_a_conflicting_marker(
     let seen = api.seen();
     assert_eq!(seen.len(), 2);
     assert_eq!(
-        view::result_text(&seen[1].json(), "t0c0").as_deref(),
+        view::result_text(&seen[1].json(), "read-first").as_deref(),
         Some(EVENTS)
     );
 }

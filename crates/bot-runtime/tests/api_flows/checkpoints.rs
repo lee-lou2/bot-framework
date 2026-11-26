@@ -38,24 +38,35 @@ async fn the_result_checkpoint_accepts_one_mib_and_rejects_one_more_byte_after_o
         let tool = "agenda.delete";
         let args = json!({"event": "e1"});
         let assistant = "a".repeat(900 * 1024);
-        // 실제 교환 형식의 고정 부분을 재서 도구 결과를 정확한 경계까지 채운다.
+        api.script(calls(
+            kind,
+            &assistant,
+            vec![call(tool, args.clone())],
+            None,
+        ));
+        api.script(text(kind, "완료", None));
+        let worker = w.worker(&w.pg.store, models(kind, &api), config());
+        assert_eq!(worker.run_once().await, Some(Outcome::Parked));
+        // 실제 교환 형식의 고정 부분(공급자 상태 포함)을 재서 도구 결과를 정확한 경계까지 채운다.
+        let plan: serde_json::Value = serde_json::from_str(
+            &w.pg
+                .scalar::<String>("select body from bot_steps where key = 'turn-0'")
+                .await,
+        )
+        .unwrap();
         let empty = Exchange {
-            text: assistant.clone(),
+            text: assistant,
             calls: vec![DoneCall {
                 call: call_id(&run, 0, 0),
                 tool: ToolId(tool.into()),
                 args: JsonPayload(args.to_string()),
                 end: CallEnd::Done(JsonPayload(r#"{"result":""}"#.into())),
             }],
-            state: None,
+            state: plan["state"].as_str().map(str::to_owned),
         }
         .to_payload();
         w.runner
             .set_default_result(&json!({"result": "r".repeat(bytes - empty.0.len())}).to_string());
-        api.script(calls(kind, &assistant, vec![call(tool, args)], None));
-        api.script(text(kind, "완료", None));
-        let worker = w.worker(&w.pg.store, models(kind, &api), config());
-        assert_eq!(worker.run_once().await, Some(Outcome::Parked));
         let nonce =
             w.pg.scalar::<String>("select nonce from bot_approvals where state = 'pending'")
                 .await;
