@@ -1,6 +1,6 @@
 # AGENTS.md
 
-프로필(에이전트·도구·승인 규칙 선언)을 읽어 봇을 실행하는 Rust 워크스페이스다. 왜 이렇게 만들었나 `docs/why.md`, 흐름 `docs/architecture.md`, 용어 `docs/glossary.md`, 운영 `docs/gateway.md`.
+프로필(에이전트·도구·승인 규칙 선언)을 읽어 봇을 실행하는 Rust 워크스페이스다. 왜 이렇게 만들었나 `docs/why.md`, 흐름 `docs/architecture.md`, 용어 `docs/glossary.md`, 확장 `docs/extending.md`, 운영 `docs/gateway.md`.
 
 ## 지킬 것 (약화하지 말 것)
 
@@ -67,6 +67,7 @@
 | 사전 승인 | `crates/bot-core/src/grant.rs`, `crates/bot-store/src/grants.rs`, `crates/bot-broker/src/preapproval.rs`, `crates/bot-admin/src/preapproval.rs` |
 | 비밀 | 포트 `crates/bot-core/src/port.rs`의 `SecretStore`, 구현 `crates/bot-cli/src/secrets/`, 가림 `crates/bot-cli/src/serve/watched.rs` |
 | 관측·감사 | `crates/bot-core/src/trace.rs`, `crates/bot-admin/src/trace/`, `crates/bot-store/src/audit.rs` |
+| 확장(도구·모델 제공자·채널·보관소·샌드박스·트리거·내장 도구) | `docs/extending.md`, 빠진 곳 점검 `scripts/parity_audit.py` |
 
 ## 불변식 (코드 옆에 적혀 있다)
 
