@@ -4,7 +4,7 @@ use crate::{
     secrets::{env::EnvStore, keychain::KeychainStore, sops::SopsStore},
     settings::{SecretsKind, Settings},
 };
-use bot_core::{port::SecretStore, profile::ProfileCatalog};
+use bot_core::port::SecretStore;
 use bot_gateway::{
     cli::socket::current_uid,
     host::resolve_uid,
@@ -58,11 +58,6 @@ pub fn load(settings: &Settings) -> Result<Loaded, String> {
 /// 활성 프로필 집합 + 호스트 gateway 절로 입구 표를 만들어 본다(별칭 해석·입구 유일성·트리거 검사).
 pub fn check_entrances(active: Active, host: &HostFile) -> Result<Routes, String> {
     Routes::build(active, &host.gateway, &resolve_uid).map_err(|e| e.to_string())
-}
-
-/// 활성 집합의 스냅샷 맵
-pub fn active_of(registry: &Registry) -> Active {
-    registry.active()
 }
 
 /// 설정한 보관소로 SecretStore를 만든다.

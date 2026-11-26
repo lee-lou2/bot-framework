@@ -2,7 +2,7 @@
 //! 가짜 `Attempt`를 만들지 않고, `(프로필, run)`에서 정한 추적 ID와 `bot.request.id`·`bot.run.id` 속성으로 worker 쪽
 //! 추적과 잇는다. 본문·인자·영수증·승인 nonce는 싣지 않는다(허용 어휘 밖).
 use crate::{
-    inbound::{Event, kind_name},
+    inbound::Event,
     ingress::{Admission, Rejection},
 };
 use bot_core::{
@@ -199,8 +199,4 @@ pub fn record_approval(
         span = span.fail("unavailable");
     }
     span.end(tracer);
-}
-
-pub fn conversation_name(kind: &bot_core::state::ConversationKind) -> &'static str {
-    kind_name(kind)
 }

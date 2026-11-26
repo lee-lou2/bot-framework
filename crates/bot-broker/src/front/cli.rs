@@ -125,12 +125,6 @@ impl PlannedCalls {
         self
     }
 
-    /// 릴레이 MCP 서버의 이름(기본 `relay`).
-    pub fn with_server(mut self, server: &str) -> Self {
-        self.server = server.to_owned();
-        self
-    }
-
     /// 기한 안에 키 한 건을 읽는다(기한을 넘기면 확인하지 못한 것이다).
     async fn step(
         &self,

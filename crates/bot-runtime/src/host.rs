@@ -3,7 +3,6 @@
 use crate::model::{ModelRunner, RelayGrant};
 use bot_core::{
     id::{AgentId, Attempt, ProfileId},
-    intake::Outbox,
     ledger::CallLedger,
     port::{Broker, DelegationStore, Gateway, MemoryStore, Reply, RunStore, ScheduleStore},
     profile::ProfileCatalog,
@@ -81,9 +80,6 @@ pub struct SchedulerDeps {
     pub catalog: Arc<dyn ProfileCatalog>,
     pub tracer: Arc<dyn Tracer>,
 }
-
-/// 회신 발송 감시(선택): 푸시 대화의 회신이 오래 점유되지 않은 채 쌓이면 게이트웨이를 다시 깨운다.
-pub type ReplyOutbox = Arc<dyn Outbox>;
 
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
