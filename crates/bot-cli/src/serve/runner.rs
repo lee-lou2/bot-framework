@@ -30,6 +30,24 @@ use std::{
     time::Duration,
 };
 
+/// srt 샌드박스 안 도구 프로세스의 `PATH`: srt 실행 폴더 + 운영자가 `sandbox.srt.extra_path`로 지정한 폴더 + 시스템 기본 경로(중복 제거).
+fn srt_path(srt_dir: &str, extra: &[std::path::PathBuf]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |dir: &str| {
+        if !dir.is_empty() && !parts.iter().any(|existing| existing == dir) {
+            parts.push(dir.to_owned());
+        }
+    };
+    push(srt_dir);
+    for dir in extra {
+        push(&dir.display().to_string());
+    }
+    for base in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+        push(base);
+    }
+    parts.join(":")
+}
+
 /// PATH에서 실행 파일을 찾는다(내장 데모의 srt 위치).
 fn on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     std::env::split_paths(path?)
@@ -218,13 +236,16 @@ async fn local_sandbox(
             })
         })
         .collect();
+    let extra_path = srt
+        .as_ref()
+        .map_or(&[][..], |srt| srt.extra_path.as_slice());
     let sandbox = SrtSandbox::open(
             SrtConfig {
                 binary,
                 work_root,
                 servers,
                 deny_read: denied(settings, &base),
-                path: format!("{srt_dir}:/usr/bin:/bin:/usr/sbin:/sbin"),
+                path: srt_path(&srt_dir, extra_path),
                 terminate_wait: Duration::from_secs(5),
                 host_tools: None,
             },
@@ -346,5 +367,25 @@ mod tests {
         assert_eq!(on_path("srt", Some(&joined)), Some(tool));
         assert_eq!(on_path("absent", Some(&joined)), None);
         assert_eq!(on_path("srt", None), None);
+    }
+
+    #[test]
+    fn srt_path_appends_extra_directories_and_deduplicates() {
+        assert_eq!(
+            srt_path("/opt/srt/bin", &[]),
+            "/opt/srt/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+        assert_eq!(
+            srt_path(
+                "/opt/srt/bin",
+                &[
+                    PathBuf::from("/opt/homebrew/bin"),
+                    PathBuf::from("/opt/srt/bin"),
+                    PathBuf::from("/opt/tools/bin"),
+                    PathBuf::from("/usr/bin"),
+                ],
+            ),
+            "/opt/srt/bin:/opt/homebrew/bin:/opt/tools/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        );
     }
 }

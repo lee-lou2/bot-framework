@@ -104,6 +104,22 @@ fn sandbox_paths_are_absolute_and_the_vm_image_is_pinned_to_a_digest() {
         ok.srt.as_ref().unwrap().binary,
         PathBuf::from("/opt/srt/bin/srt")
     );
+    assert!(ok.srt.as_ref().unwrap().extra_path.is_empty());
+    let with_extra = parse_sandbox(&json!({
+        "srt": {
+            "binary": "/opt/srt/bin/srt",
+            "work_root": "/var/bot/work",
+            "extra_path": ["/opt/homebrew/bin", "/opt/tools/bin", "/opt/homebrew/bin"]
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        with_extra.srt.unwrap().extra_path,
+        vec![
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/opt/tools/bin")
+        ]
+    );
     assert_eq!(
         ok.apple.as_ref().unwrap().relay_bind.unwrap().to_string(),
         "192.168.64.1:9300"
@@ -156,6 +172,26 @@ fn sandbox_paths_are_absolute_and_the_vm_image_is_pinned_to_a_digest() {
         (
             json!({"srt": {"binary": "/srt", "work_root": "/w", "path": "/x"}}),
             "알 수 없는 키",
+        ),
+        (
+            json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": "/opt/bin"}}),
+            "배열",
+        ),
+        (
+            json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": ["rel/bin"]}}),
+            "절대 경로",
+        ),
+        (
+            json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": ["/"]}}),
+            "절대 경로",
+        ),
+        (
+            json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": ["/opt/a:/opt/b"]}}),
+            "`:`",
+        ),
+        (
+            json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": (0..17).map(|i| format!("/opt/b{i}")).collect::<Vec<_>>()}}),
+            "16개",
         ),
         (
             apple(json!({"image": "registry.example/bot-vm:latest"})),
@@ -217,6 +253,7 @@ fn sandbox(image: &str, work: &str, relay: &str) -> Sandbox {
         srt: Some(Srt {
             binary: "/srt".into(),
             work_root: work.into(),
+            extra_path: Vec::new(),
         }),
         apple: Some(Apple {
             image: image.into(),

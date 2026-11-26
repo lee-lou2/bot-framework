@@ -54,6 +54,8 @@ pub enum Provider {
 pub struct Srt {
     pub binary: PathBuf,
     pub work_root: PathBuf,
+    /// 샌드박스 안 도구 프로세스의 `PATH`에 추가할 호스트 절대 폴더 목록(선택, 최대 16개). 홈 밖 CLI 설치 경로(`/opt/homebrew/bin` 등)를 열 때 쓴다.
+    pub extra_path: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -297,10 +299,46 @@ pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
     let srt = match top.get("srt") {
         Some(entry) => {
             let fields = object(entry, "sandbox.srt")?;
-            only(fields, &["binary", "work_root"], "sandbox.srt")?;
+            only(
+                fields,
+                &["binary", "work_root", "extra_path"],
+                "sandbox.srt",
+            )?;
+            let extra_path = match fields.get("extra_path") {
+                None => Vec::new(),
+                Some(raw) => {
+                    let items = raw
+                        .as_array()
+                        .ok_or_else(|| "sandbox.srt.extra_path: 배열이어야 해요".to_owned())?;
+                    if items.len() > 16 {
+                        return Err("sandbox.srt.extra_path: 16개 이하여야 해요".to_owned());
+                    }
+                    let mut dirs = Vec::with_capacity(items.len());
+                    for item in items {
+                        let text = item
+                            .as_str()
+                            .filter(|s| !s.is_empty() && !s.contains('\0') && !s.contains(':'))
+                            .ok_or_else(|| {
+                                "sandbox.srt.extra_path: `:`·널 없는 비어 있지 않은 문자열이어야 해요"
+                                    .to_owned()
+                            })?;
+                        let path_buf = PathBuf::from(text);
+                        if !path_buf.is_absolute() || text == "/" {
+                            return Err(
+                                "sandbox.srt.extra_path: `/`가 아닌 절대 경로여야 해요".to_owned()
+                            );
+                        }
+                        if !dirs.contains(&path_buf) {
+                            dirs.push(path_buf);
+                        }
+                    }
+                    dirs
+                }
+            };
             Some(Srt {
                 binary: absolute(fields, "binary", "sandbox.srt")?,
                 work_root: absolute(fields, "work_root", "sandbox.srt")?,
+                extra_path,
             })
         }
         None => None,
