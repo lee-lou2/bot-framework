@@ -172,14 +172,14 @@ impl Store {
                     id: c.id.clone(),
                     parent: c.parent.clone(),
                     parent_step: c.parent_step.clone(),
-                    attempts,
+                    attempts: c.attempts,
                     cancel_requested: c.cancel,
                     private: false,
                 };
                 let end = if c.cancel {
                     End::Cancelled("cancelled")
                 } else {
-                    End::Dead("lease_expired")
+                    End::Dead("lease_expired", attempts)
                 };
                 end_run(&mut tx, &run, end, "system").await?;
                 tx.commit().await?;
@@ -494,13 +494,13 @@ impl Store {
                 Retry::Dead
             }
             Failure::Permanent(code) => {
-                end_run(tx, run, End::Dead(code), "system").await?;
+                end_run(tx, run, End::Dead(code, run.attempts), "system").await?;
                 Retry::Dead
             }
             Failure::Transient(code) => {
                 let attempts = run.attempts + 1;
                 if attempts >= self.cfg.max_attempts as i32 {
-                    end_run(tx, run, End::Dead(code), "system").await?;
+                    end_run(tx, run, End::Dead(code, attempts), "system").await?;
                     Retry::Dead
                 } else {
                     let delay: i64 = sqlx::query_scalar(

@@ -115,3 +115,82 @@ async fn a_finish_committed_first_keeps_its_reply_and_cancelled_child_wakes_its_
         1
     );
 }
+
+#[tokio::test]
+async fn terminal_retry_and_expiry_consume_the_last_attempt() {
+    for limit in [1, 2] {
+        let Some(db) = TestDb::with(Config {
+            max_attempts: limit,
+            ..Default::default()
+        })
+        .await
+        else {
+            return;
+        };
+        for expiry in [false, true] {
+            let mut at = leased(&db, if expiry { "expiry" } else { "failure" })
+                .await
+                .attempt;
+            let run = at.run.clone();
+            for attempt in 1..=limit {
+                if expiry {
+                    db.expire_lease(&run).await;
+                } else {
+                    let result = runs(&db)
+                        .fail(at.clone(), Failure::Transient("network"))
+                        .await
+                        .unwrap();
+                    assert_eq!(result == Retry::Dead, attempt == limit);
+                    if attempt < limit {
+                        db.make_due(&run).await;
+                    }
+                }
+                let next = runs(&db).claim().await.unwrap();
+                if attempt < limit {
+                    at = next.unwrap().attempt;
+                } else {
+                    assert!(next.is_none());
+                }
+            }
+            assert_eq!(state_of_run(&db, &run).await, "dead");
+            assert!(stale(
+                runs(&db).fail(at, Failure::Transient("network")).await
+            ));
+            assert!(runs(&db).claim().await.unwrap().is_none());
+            let spent: i32 = sqlx::query_scalar("select attempts from bot_runs where id=$1")
+                .bind(&run.0)
+                .fetch_one(db.store.pool())
+                .await
+                .unwrap();
+            assert_eq!(spent as u32, limit);
+            db.store
+                .resume(
+                    profile_id(),
+                    run.clone(),
+                    PrincipalId("operator".into()),
+                    "재개".into(),
+                )
+                .await
+                .unwrap();
+            let again = runs(&db).claim().await.unwrap().unwrap().attempt;
+            runs(&db)
+                .fail(again, Failure::Permanent("invalid"))
+                .await
+                .unwrap();
+            let spent: i32 = sqlx::query_scalar("select attempts from bot_runs where id=$1")
+                .bind(&run.0)
+                .fetch_one(db.store.pool())
+                .await
+                .unwrap();
+            assert_eq!(spent, 0);
+        }
+        let at = leased(&db, "cancel").await.attempt;
+        cancel(&db, &at).await;
+        db.expire_lease(&at.run).await;
+        assert!(runs(&db).claim().await.unwrap().is_none());
+        assert!(
+            db.scalar::<bool>("select attempts = 0 from bot_runs where state = 'cancelled'")
+                .await
+        );
+    }
+}

@@ -28,7 +28,7 @@ pub(crate) struct RunRow {
 
 pub(crate) enum End<'a> {
     Succeeded(&'a str),
-    Dead(&'static str),
+    Dead(&'static str, i32),
     Cancelled(&'static str),
 }
 
@@ -174,13 +174,25 @@ pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: 
     if run.cancel_requested && matches!(end, End::Succeeded(_)) {
         return Err(Error::Stale.into());
     }
-    let (state, result, error, action) = match &end {
-        End::Succeeded(result) => ("succeeded", Some(*result), None, "run.succeeded"),
-        End::Dead(code) => ("dead", None, Some(*code), "run.dead"),
-        End::Cancelled(code) => ("cancelled", None, Some(*code), "run.cancelled"),
+    let (state, result, error, action, attempts) = match &end {
+        End::Succeeded(result) => (
+            "succeeded",
+            Some(*result),
+            None,
+            "run.succeeded",
+            run.attempts,
+        ),
+        End::Dead(code, attempts) => ("dead", None, Some(*code), "run.dead", *attempts),
+        End::Cancelled(code) => (
+            "cancelled",
+            None,
+            Some(*code),
+            "run.cancelled",
+            run.attempts,
+        ),
     };
     sqlx::query(
-        "update bot_runs set state = $3, result = $4, error = $5, lease_until_ms = null, lease_owner = null,
+        "update bot_runs set state = $3, result = $4, error = $5, attempts = $6, lease_until_ms = null, lease_owner = null,
                 wait_kind = null, wait_child = null, finished_ms = bot_now_ms(), updated_ms = bot_now_ms()
          where profile = $1 and id = $2",
     )
@@ -189,6 +201,7 @@ pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: 
     .bind(state)
     .bind(result)
     .bind(error)
+    .bind(attempts)
     .execute(&mut **tx)
     .await?;
     // 끝난 run의 열린 승인은 쓸 수 없다
@@ -201,7 +214,7 @@ pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: 
             End::Succeeded(result) => {
                 json!({"state": "succeeded", "result": serde_json::from_str::<Value>(result).unwrap_or(Value::Null)})
             }
-            End::Dead(code) => json!({"state": "dead", "error": code}),
+            End::Dead(code, _) => json!({"state": "dead", "error": code}),
             End::Cancelled(code) => json!({"state": "cancelled", "error": code}),
         };
         sqlx::query("insert into bot_steps (profile, run, key, body) values ($1, $2, $3, $4) on conflict do nothing")
