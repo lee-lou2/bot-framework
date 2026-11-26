@@ -36,6 +36,7 @@ fn tool(class: Risk, needs: &[&str], input: &str) -> Tool {
 
 fn agenda() -> Skill {
     Skill {
+        description: None,
         instructions: Document {
             relative_path: "skills/agenda/SKILL.md".into(),
             text:

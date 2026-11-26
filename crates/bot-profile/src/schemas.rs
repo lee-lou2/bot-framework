@@ -1,4 +1,4 @@
-//! 번들 스키마(`schemas/v1`: profile·tools·triggers·env·agent). 바이너리에 넣어 두고 처음 쓸 때 한 번만 컴파일한다.
+//! 번들 스키마(`schemas/v1`: profile·tools·triggers·env·agent·skill). 바이너리에 넣어 두고 처음 쓸 때 한 번만 컴파일한다.
 use crate::schema::Schema;
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -8,6 +8,7 @@ const TOOLS: &str = include_str!("../../../schemas/v1/tools.schema.json");
 const TRIGGERS: &str = include_str!("../../../schemas/v1/triggers.schema.json");
 const ENV: &str = include_str!("../../../schemas/v1/env.schema.json");
 const AGENT: &str = include_str!("../../../schemas/v1/agent.schema.json");
+const SKILL: &str = include_str!("../../../schemas/v1/skill.schema.json");
 
 pub struct Bundled {
     pub profile: Schema,
@@ -16,6 +17,8 @@ pub struct Bundled {
     pub env: Schema,
     /// AGENT.md 맨 위 front matter
     pub agent: Schema,
+    /// SKILL.md 맨 위 front matter
+    pub skill: Schema,
 }
 
 fn load(name: &str, text: &str) -> Result<Schema, String> {
@@ -30,6 +33,7 @@ fn build() -> Result<Bundled, String> {
         triggers: load("triggers", TRIGGERS)?,
         env: load("env", ENV)?,
         agent: load("agent", AGENT)?,
+        skill: load("skill", SKILL)?,
     })
 }
 
@@ -52,7 +56,7 @@ mod tests {
         let b = bundled();
         assert!(b.profile.doc().is_object() && b.tools.doc().is_object());
         assert!(b.triggers.doc().is_object() && b.env.doc().is_object());
-        assert!(b.agent.doc().is_object());
+        assert!(b.agent.doc().is_object() && b.skill.doc().is_object());
     }
 
     #[test]
@@ -68,7 +72,14 @@ mod tests {
         for _ in 0..30_000 {
             let text = yaml_soup(&mut rng);
             if let Ok(value) = yaml::parse("fuzz.yaml", &text, &limits) {
-                for schema in [&b.profile, &b.tools, &b.triggers, &b.env, &b.agent] {
+                for schema in [
+                    &b.profile,
+                    &b.tools,
+                    &b.triggers,
+                    &b.env,
+                    &b.agent,
+                    &b.skill,
+                ] {
                     let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         schema.validate(&value)
                     }));

@@ -148,6 +148,33 @@ fn rejects_files_yaml_and_schema_mistakes() {
             "skill-conflict",
         ),
         (
+            "SKILL.md allowed-tools 금지",
+            &[(
+                "agents/main/skills/agenda/SKILL.md",
+                "일정",
+                "---\nname: agenda\nallowed-tools: Bash\n---\n일정",
+            )],
+            "skill-allowed-tools",
+        ),
+        (
+            "SKILL.md name과 폴더 불일치",
+            &[(
+                "agents/main/skills/agenda/SKILL.md",
+                "일정",
+                "---\nname: other\n---\n일정",
+            )],
+            "skill-name-mismatch",
+        ),
+        (
+            "SKILL.md front matter 안 닫힘",
+            &[(
+                "agents/main/skills/agenda/SKILL.md",
+                "일정",
+                "---\nname: agenda\n일정",
+            )],
+            "front-matter-unclosed",
+        ),
+        (
             "빈 AGENT.md",
             &[(
                 AGENT,

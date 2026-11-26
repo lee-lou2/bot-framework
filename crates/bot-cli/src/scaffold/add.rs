@@ -168,6 +168,6 @@ pub fn skill(dir: &Path, name: &str, agent: Option<&str>) -> Result<String, Stri
     let rel = format!("{}/SKILL.md", target.join("/"));
     finish(writer, &rel, &templates::skill_md(name))?;
     Ok(format!(
-        "만들었어요: {rel}\n다음:\n  - SKILL.md의 description과 순서를 채워 주세요(맨 위 `---` 머리말도 지침 글의 일부로 모델에 전달돼요).\n  - 도구(tools.yaml)와 권한은 만들지 않았어요. 도구가 필요하면 tools.yaml을 직접 만들고, 필요한 스코프는 profile.yaml의 roles·policy에 직접 허용해 주세요 — 권한 상한은 자동으로 바꾸지 않아요.\n  - `bot validate`로 확인해 주세요."
+        "만들었어요: {rel}\n다음:\n  - SKILL.md의 description과 순서를 채워 주세요(맨 위 `---` front matter는 메타데이터로 검증하고 모델 프롬프트에는 본문만 전달돼요).\n  - 도구(tools.yaml)와 권한은 만들지 않았어요. 도구가 필요하면 tools.yaml을 직접 만들고, 필요한 스코프는 profile.yaml의 roles·policy에 직접 허용해 주세요 — 권한 상한은 자동으로 바꾸지 않아요.\n  - `bot validate`로 확인해 주세요."
     ))
 }

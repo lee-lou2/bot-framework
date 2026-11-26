@@ -73,6 +73,7 @@ fn agent(a: &model::Agent) -> Agent {
                 (
                     s.name.clone(),
                     Skill {
+                        description: s.description.clone(),
                         instructions: s.instructions.clone(),
                         tools,
                     },

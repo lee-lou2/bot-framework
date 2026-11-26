@@ -510,6 +510,35 @@ class SdkJob(unittest.TestCase):
         self.assertIn("found 2", str(two.exception))
 
 
+class Examples(unittest.TestCase):
+    def check_skill(self, skill_md):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "schemas").mkdir()
+            (root / "schemas/v1").symlink_to(ROOT / "schemas/v1")
+            target = root / "examples/profiles/demo/skills/agenda/SKILL.md"
+            target.parent.mkdir(parents=True)
+            target.write_text(skill_md, encoding="utf-8")
+            with contextlib.chdir(root):
+                checker.check_examples()
+
+    def test_valid_and_plain_skill_front_matter_pass(self):
+        self.check_skill("일정을 조회한다.\n")
+        self.check_skill("---\nname: agenda\ndescription: 일정 조회\nlicense: MIT\ncompatibility: local\nmetadata:\n  author: team\n---\n일정\n")
+        with contextlib.chdir(ROOT):
+            checker.check_examples()
+
+    def test_invalid_skill_front_matter_is_refused(self):
+        for bad in (
+            "---\nname: agenda\nallowed-tools: Bash\n---\n일정\n",
+            "---\nname: other\n---\n일정\n",
+            "---\nname: agenda\n일정\n",
+            "---\nextra: 1\n---\n일정\n",
+        ):
+            with self.assertRaises(Exception, msg=bad):
+                self.check_skill(bad)
+
+
 class Entry(unittest.TestCase):
     def test_the_script_runs_every_check(self):
         with (

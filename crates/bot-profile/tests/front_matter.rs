@@ -153,3 +153,126 @@ fn invalid_builtin_declarations_are_rejected() {
         );
     }
 }
+
+const SKILL_MD: &str = "agents/main/skills/agenda/SKILL.md";
+
+#[test]
+fn skill_front_matter_is_optional_validated_and_stripped_from_instructions() {
+    // front matter가 없는 기존 SKILL.md는 그대로 동작한다
+    let plain = snapshot(&base());
+    let agenda = &plain.agents[&agent("main")].skills["agenda"];
+    assert_eq!(agenda.description, None);
+    assert_eq!(agenda.instructions.text, "일정 목록은 list로 조회한다.");
+
+    // 허용 필드 전체 + 본문 속 구분선(`---`) 보존 + 앞뒤 공백 정리
+    let with_fm = edit(
+        base(),
+        SKILL_MD,
+        "일정 목록은 list로 조회한다.\n",
+        "---\nname: agenda\ndescription:   일정을 조회하고 관리한다  \nlicense: MIT\ncompatibility: 로컬 MCP 서버\nmetadata:\n  author: example-org\n  version: \"1.0\"\n---\n\n# 일정\n일정 목록은 list로 조회한다.\n\n---\n\n추가 메모\n",
+    );
+    let snap = snapshot(&with_fm);
+    let agenda = &snap.agents[&agent("main")].skills["agenda"];
+    assert_eq!(
+        agenda.description.as_deref(),
+        Some("일정을 조회하고 관리한다")
+    );
+    assert_eq!(
+        agenda.instructions.text,
+        "# 일정\n일정 목록은 list로 조회한다.\n\n---\n\n추가 메모"
+    );
+    assert!(
+        !agenda.instructions.text.contains("name: agenda")
+            && !agenda.instructions.text.contains("description:"),
+        "front matter는 스킬 본문에 남지 않는다: {}",
+        agenda.instructions.text
+    );
+
+    // description만 있는 선택적 front matter(name 생략 허용) + 상속 시 자식도 동일 메타·본문을 본다
+    let desc_only = edit(
+        base(),
+        SKILL_MD,
+        "일정 목록은 list로 조회한다.\n",
+        "---\ndescription: 일정 조회\n---\n일정 목록은 list로 조회한다.\n",
+    );
+    let snap = snapshot(&desc_only);
+    assert_eq!(
+        snap.agents[&agent("main/research")].skills["agenda"]
+            .description
+            .as_deref(),
+        Some("일정 조회")
+    );
+    assert_eq!(
+        snap.agents[&agent("main/research")].skills["agenda"]
+            .instructions
+            .text,
+        "일정 목록은 list로 조회한다."
+    );
+}
+
+#[test]
+fn invalid_skill_front_matter_is_rejected() {
+    // allowed-tools 거절 + 권한 출처 안내
+    let allowed = edit(
+        base(),
+        SKILL_MD,
+        "일정",
+        "---\nname: agenda\nallowed-tools: Bash(git:*) Read\n---\n일정",
+    );
+    let report = support::check(&allowed).unwrap_err();
+    assert_eq!(report.codes(), ["skill-allowed-tools"]);
+    let msg = &report.errors().next().unwrap().message;
+    assert!(
+        msg.contains("tools.yaml") && msg.contains("정책"),
+        "권한 출처 안내가 있어야 해요: {msg}"
+    );
+
+    // name과 폴더 이름 불일치 거절
+    let mismatch = edit(base(), SKILL_MD, "일정", "---\nname: other\n---\n일정");
+    assert_eq!(support::codes(&mismatch), ["skill-name-mismatch"]);
+
+    // 닫히지 않은 front matter 거절
+    let unclosed = edit(base(), SKILL_MD, "일정", "---\nname: agenda\n일정");
+    assert_eq!(support::codes(&unclosed), ["front-matter-unclosed"]);
+
+    // front matter만 있고 본문이 없는 SKILL.md 거절
+    let no_body = edit(
+        base(),
+        SKILL_MD,
+        "일정 목록은 list로 조회한다.\n",
+        "---\nname: agenda\ndescription: 일정 조회\n---\n\n",
+    );
+    assert_eq!(support::codes(&no_body), ["empty-file"]);
+
+    // 스키마 위반 및 공백만 있는 값 거절
+    let long_desc = "가".repeat(1025);
+    let long_compat = "나".repeat(501);
+    for (label, front) in [
+        ("알 수 없는 키", "extra: 1".to_owned()),
+        ("대문자 name", "name: Agenda".to_owned()),
+        ("앞 하이픈 name", "name: -agenda".to_owned()),
+        ("연속 하이픈 name", "name: a--b".to_owned()),
+        ("빈 description", "description: \"\"".to_owned()),
+        ("공백만 description", "description: \"   \"".to_owned()),
+        ("1025자 description", format!("description: {long_desc}")),
+        ("공백만 license", "license: \"  \"".to_owned()),
+        ("공백만 compatibility", "compatibility: \"  \"".to_owned()),
+        (
+            "501자 compatibility",
+            format!("compatibility: {long_compat}"),
+        ),
+        ("비문자열 metadata", "metadata:\n  version: 1".to_owned()),
+    ] {
+        let files = edit(
+            base(),
+            SKILL_MD,
+            "일정",
+            &format!("---\n{front}\n---\n일정"),
+        );
+        let codes = support::codes(&files);
+        assert!(
+            !codes.is_empty() && codes.iter().all(|c| *c == "schema"),
+            "{label}: {codes:?}"
+        );
+    }
+}

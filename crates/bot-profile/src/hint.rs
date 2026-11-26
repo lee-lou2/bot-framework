@@ -53,6 +53,10 @@ pub fn pattern_hint(pattern: &str) -> Option<&'static str> {
             "소문자로 시작하고 소문자·숫자·하이픈(-)만 쓸 수 있어요(하이픈을 연달아 쓰거나 끝에 둘 수 없어요). 예: `daily-report`",
         ),
         (
+            "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "소문자·숫자·하이픈(-)만 쓸 수 있어요(앞뒤 하이픈과 연속 하이픈 `--`은 안 돼요). 예: `pdf-processing`",
+        ),
+        (
             "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$",
             "에이전트 이름은 소문자 이름(소문자·숫자·하이픈)을 `/`로 이은 경로예요. 예: `main/research`",
         ),
@@ -283,6 +287,7 @@ mod tests {
         for schema in [
             include_str!("../../../schemas/v1/profile.schema.json"),
             include_str!("../../../schemas/v1/agent.schema.json"),
+            include_str!("../../../schemas/v1/skill.schema.json"),
             include_str!("../../../schemas/v1/env.schema.json"),
             include_str!("../../../schemas/v1/tools.schema.json"),
             include_str!("../../../schemas/v1/triggers.schema.json"),

@@ -112,6 +112,7 @@ fn snapshot(id: &str, agents: Vec<(&str, Agent)>, bindings: Vec<(&str, Binding)>
 
 pub fn personal() -> Snapshot {
     let agenda = || Skill {
+        description: None,
         instructions: doc("agents/main/skills/agenda/SKILL.md"),
         tools: BTreeMap::from([
             (
@@ -214,6 +215,7 @@ pub fn work() -> Snapshot {
         content: "args.message".into(),
     });
     let mail = Skill {
+        description: None,
         instructions: doc("agents/main/skills/mail/SKILL.md"),
         tools: BTreeMap::from([(ToolId("mail.send".into()), send)]),
     };

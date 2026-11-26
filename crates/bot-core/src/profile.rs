@@ -76,6 +76,8 @@ pub struct Document {
 
 #[derive(Clone, Debug)]
 pub struct Skill {
+    /// SKILL.md front matter의 요약 설명(없으면 `None`).
+    pub description: Option<String>,
     pub instructions: Document,
     /// 키는 전체 skill.tool 이름. 서로 다른 에이전트의 가시 범위는 독립적이다.
     pub tools: BTreeMap<ToolId, Tool>,

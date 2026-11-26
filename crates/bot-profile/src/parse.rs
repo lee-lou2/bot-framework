@@ -153,8 +153,59 @@ pub(crate) fn skill(
 ) -> Option<Arc<Skill>> {
     let md_path = files.skill_md.as_deref()?;
     let md = text_of(tree, md_path, issues)?;
-    if md.trim().is_empty() {
-        issues.error("empty-file", md_path, "SKILL.md가 비어 있어요");
+    let mut found = Vec::new();
+    let parsed = frontmatter::parse(md_path, md, &Kind::Skill, limits, &mut found);
+    issues.extend(found);
+    let parsed = parsed?;
+    let mut ok = true;
+    if parsed.body.trim().is_empty() {
+        issues.error("empty-file", md_path, "SKILL.md에 지침이 없어요");
+        ok = false;
+    }
+    if let Some(declared) = parsed
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("name"))
+        .and_then(Value::as_str)
+        && declared != files.name
+    {
+        issues.error_at(
+            "skill-name-mismatch",
+            md_path,
+            "front matter /name",
+            format!(
+                "front matter의 name `{declared}`이(가) 스킬 폴더 이름 `{}`와 달라요",
+                files.name
+            ),
+        );
+        ok = false;
+    }
+    let field = |name: &str| {
+        let text = parsed.meta.as_ref()?.get(name)?.as_str()?;
+        Some(text.trim().to_owned())
+    };
+    let description = field("description");
+    if description.as_deref() == Some("") {
+        issues.error_at(
+            "schema",
+            md_path,
+            "front matter /description",
+            "설명이 비어 있어요",
+        );
+        ok = false;
+    }
+    for (key, label) in [("license", "license"), ("compatibility", "compatibility")] {
+        if field(key).as_deref() == Some("") {
+            issues.error_at(
+                "schema",
+                md_path,
+                format!("front matter /{key}"),
+                format!("{label}가 비어 있어요"),
+            );
+            ok = false;
+        }
+    }
+    if !ok {
         return None;
     }
     // 잠금 파일은 tools.yaml이 `input`을 생략한 도구의 입력 스키마·정의 해시의 정본이다. 틀리면 그것을 쓰는 도구가 모두 막히므로 여기서 멈춘다.
@@ -183,9 +234,10 @@ pub(crate) fn skill(
     Some(Arc::new(Skill {
         name: files.name.clone(),
         path: files.dir.clone(),
+        description,
         instructions: Document {
             relative_path: md_path.to_owned(),
-            text: md.trim_end().to_owned(),
+            text: parsed.body.trim().to_owned(),
         },
         tools,
     }))

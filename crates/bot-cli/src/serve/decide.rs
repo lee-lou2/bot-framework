@@ -184,6 +184,7 @@ mod tests {
             agent.skills.insert(
                 format!("skill-{n}"),
                 Skill {
+                    description: None,
                     instructions: Document {
                         relative_path: format!("skills/{n}/SKILL.md"),
                         text: String::new(),

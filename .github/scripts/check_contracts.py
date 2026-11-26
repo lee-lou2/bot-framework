@@ -58,17 +58,20 @@ def check_examples():
         schema = json.loads(path.read_text())
         Draft202012Validator.check_schema(schema)
         validators[path.name.split(".")[0]] = Draft202012Validator(schema)
-    assert set(validators) == {"profile", "agent", "env", "triggers", "tools"}
+    assert set(validators) == {"profile", "agent", "skill", "env", "triggers", "tools"}
     examples = Path("examples/profiles")
-    for path in examples.rglob("AGENT.md"):
-        lines = path.read_text(encoding="utf-8").splitlines()
-        meta = {}
-        if lines[:1] == ["---"]:
-            if "---" not in lines[1:]:
-                raise ValueError(f"{path}: unclosed front matter")
-            end = lines.index("---", 1)
-            meta = yaml.safe_load("\n".join(lines[1:end]))
-        validators["agent"].validate(meta)
+    for filename, key in (("AGENT.md", "agent"), ("SKILL.md", "skill")):
+        for path in examples.rglob(filename):
+            lines = path.read_text(encoding="utf-8").splitlines()
+            meta = {}
+            if lines[:1] == ["---"]:
+                if "---" not in lines[1:]:
+                    raise ValueError(f"{path}: unclosed front matter")
+                end = lines.index("---", 1)
+                meta = yaml.safe_load("\n".join(lines[1:end]))
+            validators[key].validate(meta)
+            if key == "skill" and isinstance(meta, dict) and "name" in meta and meta["name"] != path.parent.name:
+                raise ValueError(f"{path}: front matter name {meta['name']!r} != folder {path.parent.name!r}")
     for path in examples.rglob("*.yaml"):
         validators[path.stem].validate(yaml.safe_load(path.read_text()))
 

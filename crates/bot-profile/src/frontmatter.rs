@@ -1,4 +1,5 @@
-//! Markdown 맨 위 YAML front matter. AGENT.md는 번들 스키마(`model`·`description`·`builtin`), 기억 시드는 `owner`(필수)·`visibility`.
+//! Markdown 맨 위 YAML front matter. AGENT.md는 번들 스키마(`model`·`description`·`builtin`),
+//! SKILL.md는 번들 스키마(`name`·`description`·`license`·`compatibility`·`metadata`), 기억 시드는 `owner`(필수)·`visibility`.
 use crate::{
     issue::Issue,
     limits::Limits,
@@ -25,6 +26,7 @@ fn memory_schema() -> &'static Schema {
 
 pub enum Kind {
     Agent,
+    Skill,
     Memory,
 }
 
@@ -73,14 +75,26 @@ pub fn parse<'a>(
     };
     let schema = match kind {
         Kind::Agent => &bundled().agent,
+        Kind::Skill => &bundled().skill,
         Kind::Memory => memory_schema(),
     };
     let found = schema.validate(&value);
     for v in &found {
-        issues.push(
-            Issue::error("schema", path, v.message.clone())
-                .at(format!("front matter {}", v.pointer)),
-        );
+        if matches!(kind, Kind::Skill) && v.pointer == "/allowed-tools" {
+            issues.push(
+                Issue::error(
+                    "skill-allowed-tools",
+                    path,
+                    "`allowed-tools`는 쓸 수 없어요. 스킬 문서는 권한을 줄 수 없고, 도구 권한은 `tools.yaml`과 `profile.yaml`의 역할·정책(`roles`·`policy`)에서만 정해요",
+                )
+                .at("front matter /allowed-tools"),
+            );
+        } else {
+            issues.push(
+                Issue::error("schema", path, v.message.clone())
+                    .at(format!("front matter {}", v.pointer)),
+            );
+        }
     }
     found.is_empty().then_some(Parsed {
         meta: Some(value),
@@ -160,5 +174,87 @@ mod tests {
                 .0
                 .is_some()
         );
+    }
+
+    #[test]
+    fn skill_front_matter_follows_agent_skills_fields_and_rejects_allowed_tools() {
+        // front matter가 없으면 평문 그대로
+        assert_eq!(run("본문", &Kind::Skill), (None, vec![]));
+        // 허용 필드 전체
+        let full = "---\nname: pdf-processing\ndescription: PDF 문서를 읽고 정리한다\nlicense: Apache-2.0\ncompatibility: Python 3.12+\nmetadata:\n  author: example-org\n  version: \"1.0\"\n---\n본문";
+        let (meta, codes) = run(full, &Kind::Skill);
+        assert!(codes.is_empty(), "{codes:?}");
+        assert_eq!(
+            meta,
+            Some(json!({
+                "name": "pdf-processing",
+                "description": "PDF 문서를 읽고 정리한다",
+                "license": "Apache-2.0",
+                "compatibility": "Python 3.12+",
+                "metadata": {"author": "example-org", "version": "1.0"}
+            }))
+        );
+        // allowed-tools는 전용 코드와 권한 경로 안내로 거절한다
+        let mut issues = Vec::new();
+        assert!(
+            parse(
+                "skills/x/SKILL.md",
+                "---\nname: x\nallowed-tools: Bash(git:*) Read\n---\n본문",
+                &Kind::Skill,
+                &Limits::default(),
+                &mut issues
+            )
+            .is_none()
+        );
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].code, "skill-allowed-tools");
+        assert_eq!(issues[0].at, "front matter /allowed-tools");
+        assert!(
+            issues[0].message.contains("tools.yaml") && issues[0].message.contains("정책"),
+            "{}",
+            issues[0].message
+        );
+        // 닫히지 않은 front matter와 앵커
+        assert_eq!(
+            run("---\nname: x\n본문", &Kind::Skill).1,
+            ["front-matter-unclosed"]
+        );
+        assert_eq!(
+            run("---\nname: &a x\n---\n본문", &Kind::Skill).1,
+            ["yaml-anchor"]
+        );
+        // 허용 경계값(name 64자, description 1024자, compatibility 500자)
+        let boundary = format!(
+            "---\nname: {}\ndescription: {}\ncompatibility: {}\n---\n본문",
+            "a".repeat(64),
+            "가".repeat(1024),
+            "나".repeat(500),
+        );
+        assert!(run(&boundary, &Kind::Skill).1.is_empty());
+        // 거절 사례: 알 수 없는 키, name 문자·길이 규칙, description·compatibility 길이, metadata 비문자열
+        let bad_cases = [
+            "unknown: 1".to_owned(),
+            "name: PDF-Processing".to_owned(),
+            "name: -pdf".to_owned(),
+            "name: pdf-".to_owned(),
+            "name: pdf--processing".to_owned(),
+            "name: pdf_processing".to_owned(),
+            format!("name: {}", "a".repeat(65)),
+            "description: \"\"".to_owned(),
+            format!("description: {}", "가".repeat(1025)),
+            "compatibility: \"\"".to_owned(),
+            format!("compatibility: {}", "나".repeat(501)),
+            "license: \"\"".to_owned(),
+            "metadata:\n  version: 1.0".to_owned(),
+            "metadata:\n  \"\": x".to_owned(),
+            "metadata: [a]".to_owned(),
+        ];
+        for bad in bad_cases {
+            let codes = run(&format!("---\n{bad}\n---\n본문"), &Kind::Skill).1;
+            assert!(
+                !codes.is_empty() && codes.iter().all(|c| *c == "schema"),
+                "{bad}: {codes:?}"
+            );
+        }
     }
 }

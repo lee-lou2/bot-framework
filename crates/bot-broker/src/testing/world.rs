@@ -281,6 +281,7 @@ impl SnapshotBuilder {
             .skills
             .entry(skill)
             .or_insert_with(|| Skill {
+                description: None,
                 instructions: Document {
                     relative_path: "SKILL.md".into(),
                     text: String::new(),

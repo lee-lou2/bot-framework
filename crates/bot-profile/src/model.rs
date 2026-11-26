@@ -111,6 +111,8 @@ pub struct Skill {
     pub name: String,
     /// 프로필 폴더 기준 스킬 폴더 경로
     pub path: String,
+    /// SKILL.md front matter의 `description`(없으면 `None`)
+    pub description: Option<String>,
     pub instructions: Document,
     pub tools: Vec<Arc<Tool>>,
 }

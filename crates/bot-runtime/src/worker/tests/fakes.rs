@@ -45,6 +45,7 @@ fn agent(parent: Option<&str>, skills: bool) -> Agent {
         agent.skills.insert(
             "agenda".into(),
             Skill {
+                description: None,
                 instructions: Document {
                     relative_path: "skills/agenda/SKILL.md".into(),
                     text: "일정을 다룬다.".into(),

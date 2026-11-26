@@ -154,6 +154,7 @@ mod tests {
                 .skills
                 .entry((*skill).to_owned())
                 .or_insert_with(|| Skill {
+                    description: None,
                     instructions: Document {
                         relative_path: format!("skills/{skill}/SKILL.md"),
                         text: String::new(),
