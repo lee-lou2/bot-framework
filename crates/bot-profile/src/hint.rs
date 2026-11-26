@@ -117,7 +117,7 @@ pub fn pattern_hint(pattern: &str) -> Option<&'static str> {
             "`slack:<워크스페이스 별칭>/<사용자 ID>` 형식이어야 해요(사용자 ID는 Slack 프로필에서 복사한 `U`나 `W`로 시작하는 대문자·숫자). 예: `slack:home/<사용자 ID>`",
         ),
         (
-            "^[ \\t]*(?:@(?:hourly|daily|midnight|weekly|monthly|yearly|annually)|[^@ \\t\\r\\n][^ \\t\\r\\n]*(?:[ \\t]+[^ \\t\\r\\n]+){4})[ \\t]*$",
+            "^[ \\t\\r\\n]*(?:@(?:hourly|daily|midnight|weekly|monthly|yearly|annually)|[^@ \\t\\r\\n][^ \\t\\r\\n]*(?:[ \\t\\r\\n]+[^ \\t\\r\\n]+){4})[ \\t\\r\\n]*$",
             "cron은 '분 시 일 월 요일' 다섯 칸(초 칸 없음) 또는 별칭(@hourly·@daily·@midnight·@weekly·@monthly·@yearly·@annually)이어야 해요. 예: `0 9 * * *`",
         ),
         (

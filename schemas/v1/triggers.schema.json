@@ -26,7 +26,7 @@
           "properties": {
             "cron": {
               "type": "string",
-              "pattern": "^[ \\t]*(?:@(?:hourly|daily|midnight|weekly|monthly|yearly|annually)|[^@ \\t\\r\\n][^ \\t\\r\\n]*(?:[ \\t]+[^ \\t\\r\\n]+){4})[ \\t]*$"
+              "pattern": "^[ \\t\\r\\n]*(?:@(?:hourly|daily|midnight|weekly|monthly|yearly|annually)|[^@ \\t\\r\\n][^ \\t\\r\\n]*(?:[ \\t\\r\\n]+[^ \\t\\r\\n]+){4})[ \\t\\r\\n]*$"
             }
           },
           "required": [

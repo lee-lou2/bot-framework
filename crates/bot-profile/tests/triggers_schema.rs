@@ -126,6 +126,9 @@ fn cron_pattern_accepts_all_valid_expressions_and_rejects_wrong_field_counts_and
         "*/15 9-17 * JAN-MAR MON-FRI",
         "  0   9 * * *  ",
         "0\t9\t*\t*\t*",
+        "0 9 * * *\n",
+        "  @daily\r\n",
+        "0 9\n* * *",
         "0 9 ? * MON",
         "0 9 1 * ?",
         "@hourly",
@@ -148,6 +151,7 @@ fn cron_pattern_accepts_all_valid_expressions_and_rejects_wrong_field_counts_and
     for bad in [
         "",
         "   ",
+        "\n\r\n",
         "*",
         "* * * *",
         "* * * * * *",
@@ -427,4 +431,80 @@ fn schema_rejections_stay_a_subset_of_loader_rejections_and_keep_fixed_codes() {
             "{name}: 정규식 원문이 노출됨: {text}"
         );
     }
+}
+
+#[test]
+fn legacy_v1_bundle_with_multiline_cron_preapproved_and_human_approval_restores_cleanly() {
+    use bot_core::{
+        id::{ProfileId, Revision},
+        port::Reply,
+        profile::{ProfileBundles, ProfileCatalog},
+    };
+    use bot_profile::{Limits, Registry, read_legacy_bundle};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    struct MemBundle(ProfileId, Revision, Vec<u8>);
+    impl ProfileBundles for MemBundle {
+        fn put_bundle(&self, _: ProfileId, _: Revision, _: Vec<u8>) -> Reply<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn bundle(&self, profile: &ProfileId, revision: &Revision) -> Reply<'_, Option<Vec<u8>>> {
+            let hit = (*profile == self.0 && *revision == self.1).then(|| self.2.clone());
+            Box::pin(async move { Ok(hit) })
+        }
+        fn created_ms(&self, _: &ProfileId, _: &Revision) -> Reply<'_, Option<i64>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn pinned_revisions<'a>(
+            &'a self,
+            _: &'a BTreeMap<ProfileId, Revision>,
+        ) -> Reply<'a, BTreeSet<(ProfileId, Revision)>> {
+            Box::pin(async { Ok(BTreeSet::new()) })
+        }
+    }
+
+    // YAML 블록 스칼라(끝 개행 포함) cron + preapproved + human_approval이 든 구판 BOTPROFILE1 번들
+    let yaml = "\
+version: 1
+triggers:
+  - id: notify
+    \"on\":
+      cron: |
+        0 9 * * *
+    principal: \"service:morning\"
+    target: {tool: agenda.notify, args: {report: daily}}
+    preapproved:
+      max_per_day: 3
+      targets:
+        - {operation: post, target: \"channel:reports\"}
+  - id: confirm
+    \"on\": {event: message, binding: team}
+    match: {body.text: \"승인\"}
+    input: {report: body.text}
+    target: {tool: agenda.notify}
+    human_approval:
+      approvers: [\"slack:home/U1\"]
+";
+    let tmp = support::Temp::new("trig-v1");
+    let files = replace_triggers(with_notify_and_slack(), yaml);
+    support::write_profile(tmp.path(), "personal", &files);
+    let (id, rev, bytes) =
+        read_legacy_bundle(&tmp.path().join("personal"), &Limits::default()).unwrap();
+    assert!(bytes.starts_with(b"BOTPROFILE1\n"));
+
+    let store = MemBundle(id.clone(), rev.clone(), bytes);
+    let registry = Registry::new();
+    let wanted = BTreeSet::from([(id.clone(), rev.clone())]);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let restored = rt
+        .block_on(registry.restore(&store, &wanted, &Limits::default()))
+        .expect("구판 BOTPROFILE1 트리거 번들 복원 성공");
+    assert_eq!(restored.len(), 1);
+    let snap = registry.lookup(&id, &rev).unwrap();
+    assert_eq!(
+        snap.agents[&bot_core::id::AgentId("main".into())]
+            .triggers
+            .len(),
+        2
+    );
 }
