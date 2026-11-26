@@ -1,3 +1,5 @@
+//! `schedule.create` 승인 카드에 묶는 인자의 정규 표현과 SHA-256(`CreateSeal`).
+
 use super::{MAX_INSTRUCTION_BYTES, ScheduleSpec, Timing, utc};
 use crate::{canon, port::Error};
 use serde_json::{Value, json};

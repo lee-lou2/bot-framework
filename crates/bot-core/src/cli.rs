@@ -1,4 +1,5 @@
-//! 런타임이 기록하고 MCP 중계가 확인하는 한 모델 응답의 도구 위치.
+//! Claude CLI가 한 모델 응답에서 낸 도구 호출의 **위치**(체크포인트 키)와 실행 전 확정 거절(`CliRefusal`) 계약. 런타임이 기록하고 MCP 중계(브로커 프런트)가 확인한다.
+//! 이름의 `cli`는 Claude CLI다. CLI 입구(`bot_gateway::cli`)나 `bot` 바이너리(`bot-cli` 크레이트)가 아니다.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

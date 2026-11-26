@@ -1,3 +1,5 @@
+//! 명시 목적지 예약의 최종 회신 묶음(`schedule.deliver`): 호출 상수와 승인 카드에 보이는 초안 문서, 수신 경로의 봉인.
+
 use super::{DeliveryDraft, DeliveryTarget};
 use crate::{canon, command::JsonPayload, id::is_name, port::Error, state::ConversationKind};
 use base64::{Engine as _, engine::general_purpose::STANDARD};

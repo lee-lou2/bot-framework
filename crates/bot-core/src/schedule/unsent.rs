@@ -1,3 +1,5 @@
+//! 보내지 못한 예약 회신의 이유(`UnsentReason`)와 정산을 막는 펜스(`DeliveryFence`).
+
 use crate::{
     command::JsonPayload,
     id::{ApprovalId, Attempt, PrincipalId},

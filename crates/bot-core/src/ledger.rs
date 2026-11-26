@@ -127,7 +127,7 @@ pub trait CallLedger: Send + Sync {
     /// 세대·취소·private 플래그·승인 대조와 시작 기록은 같은 커밋이다.
     /// memory.share는 여기서 거절한다. 승인과 공유를 함께 커밋하는 MemoryStore::share를 사용한다.
     fn start(&self, start: StartCall) -> Reply<'_, ()>;
-    /// `start`와 같되 사전 승인(F1)이나 지정한 사람의 증거(F4)를 같은 커밋에서 확인한다. 확인에 실패하면 아무것도 쓰지 않고
+    /// `start`와 같되 사전 승인이나 지정한 사람의 승인 증거를 같은 커밋에서 확인한다. 확인에 실패하면 아무것도 쓰지 않고
     /// `Granted::Refused(고정 사유)`를 돌려준다(호출을 닫는 것은 호출자의 몫이다). 이 권한을 모르는 구현은 거절한다(기본 구현).
     /// 사전 승인이 묶인 run의 직접 호출은 `start`로 시작할 수 없다(권한을 건너뛰지 못한다).
     fn start_with(
@@ -149,7 +149,7 @@ pub trait CallLedger: Send + Sync {
     fn finish_blocked(&self, finish: FinishCall, _why: crate::api::ApprovalBlock) -> Reply<'_, ()> {
         self.finish(finish)
     }
-    /// F3: 직접 호출이 «처리하지 않음»으로 끝났다. `finish.outcome`은 `Done`(표식을 뗀 결과)이어야 한다. 호출 결론·커서 전진(`pos` → 다음 후보 또는 기본 대화)·감사를
+    /// 넘김: 직접 호출이 «처리하지 않음»으로 끝났다. `finish.outcome`은 `Done`(표식을 뗀 결과)이어야 한다. 호출 결론·커서 전진(`pos` → 다음 후보 또는 기본 대화)·감사를
     /// 한 커밋에 기록하고 run을 대기열로 되돌린다. 쓰기 단계·보류·승인·회신이 이미 있거나 커서가 `pos`가 아니면 아무것도 쓰지 않고 `PassNext::Refused`/`Stale`이다.
     /// 사슬을 저장하지 않는 구현은 `Unavailable`이다(기본 구현).
     ///

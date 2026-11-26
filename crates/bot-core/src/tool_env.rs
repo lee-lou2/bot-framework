@@ -1,3 +1,6 @@
+//! 도구 설정과 자격이 쓸 수 없는 환경 변수 이름(로더·셸·샌드박스·프록시)의 공통 판정. 프로필 검증(`bot-profile`)과 도구 실행(`bot-broker`)이 같은 규칙을 쓰도록
+//! `bot_core::profile::forbidden_env_name`으로 내보낸다.
+
 /// 도구 설정과 자격에서 공통으로 차단하는 로더·셸·샌드박스·프록시 환경 이름.
 pub fn forbidden_env_name(name: &str) -> bool {
     let valid = !name.is_empty()

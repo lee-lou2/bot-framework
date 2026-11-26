@@ -1,4 +1,4 @@
-//! Slack 이벤트 선택(F2): 바인딩이 받을 이벤트 종류, 어댑터가 인증한 이벤트 원천, 봇이 참여한 스레드의 증거.
+//! Slack 이벤트 선택: 바인딩이 받을 이벤트 종류, 어댑터가 인증한 이벤트 원천, 봇이 참여한 스레드의 증거.
 use crate::{
     id::{BindingId, ProfileId},
     port::Reply,
@@ -58,7 +58,7 @@ pub enum SourceKind {
     Reaction,
 }
 
-/// 인증된 Slack 어댑터가 **이번 이벤트에서 직접** 읽은 원천. 본문·모델·도구가 만들 수 없고 접수 명령의 `AcceptExtras`로만 간다(F4가 증거로 쓴다).
+/// 인증된 Slack 어댑터가 **이번 이벤트에서 직접** 읽은 원천. 본문·모델·도구가 만들 수 없고 접수 명령의 `AcceptExtras`로만 간다(지정한 사람의 승인이 증거로 쓴다).
 /// 멤버 신원은 여기에 없다 — 접수의 `principal`(인증된 행위자)이 정한다.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SlackSource {
@@ -104,7 +104,7 @@ pub struct BotThread {
     pub root_ts: String,
 }
 
-/// 봇 참여 스레드의 증거 저장소(F2 `thread_reply`의 입장 증거). 수신자가 준 `thread_ts`만으로는 입장시키지 않는다.
+/// 봇 참여 스레드의 증거 저장소(Slack 이벤트 선택 `thread_reply`의 입장 증거). 수신자가 준 `thread_ts`만으로는 입장시키지 않는다.
 pub trait BotThreads: Send + Sync {
     /// 확인된 게시(영수증)나 인증된 자기 봇 메시지로 이 스레드를 기록한다. 이미 있으면 그대로다.
     fn note(&self, thread: BotThread) -> Reply<'_, ()>;

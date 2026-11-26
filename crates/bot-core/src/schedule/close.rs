@@ -1,3 +1,5 @@
+//! 대화에서 만든 예약이 더 이상 발화하지 않는 이유(`CloseReason`).
+
 /// 사용자 예약을 더 이상 발화하지 않는 이유. 같은 종료를 다시 받아도 감사와 안내는 한 번이다.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloseReason {

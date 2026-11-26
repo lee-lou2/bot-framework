@@ -1,3 +1,6 @@
+//! 저장소와 브로커가 같은 뜻으로 쓰는 상태 어휘: run·효과·위험도·가시성의 상태 값, 대화(`Conversation`)와 출처(`RunOrigin`), 실행 맥락(`RunContext`), 승인(`Approval`).
+//! 고정 어휘이므로 변종을 더하면 이 값을 가르는 모든 `match`가 컴파일 오류로 알려 준다(`ConversationKind`처럼 SQL 제약에도 있는 값은 마이그레이션도 함께 바꾼다).
+
 use crate::{command::Work, id::*};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
