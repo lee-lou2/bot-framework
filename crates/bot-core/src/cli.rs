@@ -8,7 +8,7 @@ pub const USE_PREFIX: &str = "cli-use-";
 pub const RECORD_PREFIX: &str = "cli-rec-";
 pub const RESPONSE_PREFIX: &str = "cli-resp-";
 
-/// 검증된 CLI 호출 위치에서 실행 전에 내린 최종 거절. 현재 claim으로 먼저 저장한 뒤
+/// 검증된 모델 호출 위치에서 실행 전에 내린 최종 거절. 현재 claim으로 먼저 저장한 뒤
 /// 모델에 같은 단어를 오류로 돌려준다. 같은 위치는 재전달·재개 때 이 결과를 재생한다.
 /// 판정이나 기록에 실패했거나 실행 여부가 불명인 호출에는 이 표식을 쓸 수 없다.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -26,9 +26,17 @@ pub enum CliRefusal {
 }
 
 impl CliRefusal {
-    /// 검증된 CallId::cli(turn, slot)에 해당하는 run 체크포인트 키.
+    /// CLI와 API 워커가 같은 형식으로 읽는 확정 거절 표식. 기존 키는 저장된 세션과 호환된다.
     pub fn key(call: &crate::id::CallId) -> String {
         format!("cli-refusal-{}", call.0)
+    }
+
+    /// 현재 claim의 체크포인트에 모델이 받을 거절 하나만 저장한다.
+    pub fn step(self, call: &crate::id::CallId) -> crate::command::Step {
+        crate::command::Step {
+            key: Self::key(call),
+            body: crate::command::JsonPayload(serde_json::Value::from(self.word()).to_string()),
+        }
     }
 
     pub fn word(self) -> &'static str {
@@ -41,12 +49,8 @@ impl CliRefusal {
             Self::RateLimited => "unavailable",
         }
     }
-}
 
-impl TryFrom<String> for CliRefusal {
-    type Error = &'static str;
-
-    fn try_from(word: String) -> Result<Self, Self::Error> {
+    pub fn from_word(word: &str) -> Option<Self> {
         [
             Self::UnknownTool,
             Self::Invalid,
@@ -57,7 +61,14 @@ impl TryFrom<String> for CliRefusal {
         ]
         .into_iter()
         .find(|refusal| refusal.word() == word)
-        .ok_or("invalid CLI refusal")
+    }
+}
+
+impl TryFrom<String> for CliRefusal {
+    type Error = &'static str;
+
+    fn try_from(word: String) -> Result<Self, Self::Error> {
+        Self::from_word(&word).ok_or("invalid refusal")
     }
 }
 

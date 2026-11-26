@@ -378,6 +378,7 @@ impl SessionPort for RunSession {
                 Ok(Ran::End(CallEnd::Done(payload))) => {
                     Ok(Slot::Result(ToolOutput::from_payload(&payload.0)))
                 }
+                Ok(Ran::Refused(reason)) => Ok(word(reason.word())),
                 Ok(Ran::End(CallEnd::Denied)) => Ok(word("denied")),
                 Ok(Ran::End(CallEnd::Failed(code))) => Ok(word(match code.as_str() {
                     "invalid_args" => "invalid",

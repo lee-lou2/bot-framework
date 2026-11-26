@@ -186,6 +186,9 @@ pub(crate) fn conversation(request: &ModelRequest) -> Vec<Turn> {
 pub(crate) fn result_text(end: &CallEnd) -> (String, bool) {
     match end {
         CallEnd::Done(result) => (clip(&result.0), false),
+        CallEnd::Failed(code) if bot_core::cli::CliRefusal::from_word(code).is_some() => {
+            (code.clone(), true)
+        }
         CallEnd::Failed(code) => (format!("실패: {code}"), true),
         CallEnd::Denied => (
             "승인되지 않았거나 막혀서 실행하지 않았어요".to_owned(),

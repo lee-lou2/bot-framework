@@ -155,7 +155,7 @@ fn tool_results_and_user_words_stay_out_of_the_system_message() {
         messages[3]["content"],
         "승인되지 않았거나 막혀서 실행하지 않았어요"
     );
-    assert_eq!(messages[4]["content"], "실패: unavailable");
+    assert_eq!(messages[4]["content"], "unavailable");
 }
 
 #[test]

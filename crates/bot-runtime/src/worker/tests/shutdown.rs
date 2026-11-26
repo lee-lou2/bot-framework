@@ -143,6 +143,13 @@ impl Broker for Stuck {
             .push(format!("call_started:{}", call.tool.0));
         Box::pin(std::future::pending())
     }
+    fn call_for_model(&self, call: ToolCall) -> Reply<'_, bot_core::port::ModelCall> {
+        Box::pin(async move {
+            self.call(call)
+                .await
+                .map(bot_core::port::ModelCall::Returned)
+        })
+    }
     fn decide(&self, _: ApprovalId, _: PrincipalId, _: bool) -> Reply<'_, ()> {
         Box::pin(async { Err(Error::Unavailable) })
     }

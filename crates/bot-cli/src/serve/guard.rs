@@ -10,7 +10,7 @@ use bot_core::{
     },
     id::{ApprovalId, Attempt, PrincipalId, RunId},
     intake::{RequestKey, RequestState},
-    port::{Broker, Error, Reply, RunStore},
+    port::{Broker, Error, ModelCall, Reply, RunStore},
     state::RunContext,
 };
 use bot_gateway::active::ActiveCheck;
@@ -189,6 +189,13 @@ impl Broker for GuardedBroker {
             // 구판이면 도구를 시작하지 않는다(일시 실패 — 새 판본의 워커가 이어 간다)
             self.active.verify().await?;
             self.inner.call(call).await
+        })
+    }
+
+    fn call_for_model(&self, call: ToolCall) -> Reply<'_, ModelCall> {
+        Box::pin(async move {
+            self.active.verify().await?;
+            self.inner.call_for_model(call).await
         })
     }
 

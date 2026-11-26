@@ -1,4 +1,4 @@
-//! 실행 전에 확정되는 거절의 사전 판정(CLI 재개의 `CliRefusal` 표식을 남길 근거).
+//! 실행 전에 확정되는 거절의 사전 판정(CLI 프런트와 단계형 워커의 공통 거절 표식).
 //!
 //! 판정은 **실행이 고정한 프로필 판본만** 쓴다(지금 활성 판본·정책·원장 기록·시각에 기대지 않는다). 그래서 같은 계획 위치는 몇 번 다시
 //! 물어도 같은 답이고, 재개가 모델이 본 것과 같은 단어로 이 자리를 마무리할 수 있다.
@@ -6,7 +6,7 @@
 //! - 그 도구 선언의 입력 검사(봉인)가 `Invalid`로 실패한다 → `Invalid`.
 //!
 //! 판본을 확인할 수 없거나 저장소·세대 문제로 답하지 못하면 **오류**다(확정이 아니고 "거절 아님"도 아니다). 저장소 오류가 `Missing`·`Invalid`로
-//! 섞여 나오는 일반 `Broker::call`의 결과로는 구분할 수 없어서, 호출한 쪽이 이 판정을 따로 묻는다. 호스트 내장 도구는 대상이 아니다.
+//! 섞여 나오는 일반 `Broker::call`의 결과로는 구분할 수 없어서, 호출한 쪽이 이 판정을 따로 묻는다. 내장 도구의 입력 검사는 각 처리기와 공유한다.
 
 use super::{
     BrokerService, schedule,
@@ -15,8 +15,9 @@ use super::{
 use crate::resolve::find_tool;
 use bot_core::{
     cli::CliRefusal,
-    command::JsonPayload,
+    command::{JsonPayload, ToolCall},
     id::{Attempt, ToolId},
+    ledger::{CallLedger, CallPhase},
     port::{Error, Reply},
 };
 use std::sync::{
@@ -40,6 +41,40 @@ pub(crate) async fn noting_limit<T>(call: impl Future<Output = T>) -> (T, bool) 
 
 /// 모델이 부르는 내장 위임 도구의 이름(MCP에서 보이는 그대로). 카탈로그에 없고 프런트가 입력·인가를 직접 판정한다.
 pub const DELEGATE_TOOL: &str = "delegate";
+
+pub(crate) fn expected(error: &Error, limited: bool) -> Option<CliRefusal> {
+    Some(match error {
+        Error::Missing => CliRefusal::UnknownTool,
+        Error::Invalid => CliRefusal::Invalid,
+        Error::Denied => CliRefusal::Denied,
+        Error::Conflict => CliRefusal::Conflict,
+        Error::Stale => CliRefusal::Stale,
+        Error::Unavailable if limited => CliRefusal::RateLimited,
+        Error::Unavailable => return None,
+    })
+}
+
+/// 이미 실행 중이거나 원장에 결론이 있으면 그 기록이 우선한다. 입력·도구 없음은 고정 판본의 사전 판정과 일치해야 한다.
+pub(crate) async fn confirm(
+    ledger: &dyn CallLedger,
+    judge: Option<&dyn Preflight>,
+    call: ToolCall,
+    expected: CliRefusal,
+) -> Result<bool, Error> {
+    let known = ledger.lookup(call.attempt.clone(), call.call).await?;
+    if known.is_some_and(|record| !matches!(record.phase, CallPhase::Open { .. })) {
+        return Ok(false);
+    }
+    match expected {
+        CliRefusal::UnknownTool | CliRefusal::Invalid => {
+            let Some(judge) = judge else { return Ok(false) };
+            Ok(judge.refusal(call.attempt, call.tool, call.args).await? == Some(expected))
+        }
+        CliRefusal::Denied | CliRefusal::Conflict | CliRefusal::Stale | CliRefusal::RateLimited => {
+            Ok(true)
+        }
+    }
+}
 
 pub trait Preflight: Send + Sync {
     /// 이 호출이 실행 전에 확정적으로 거절되는가. 현재 claim을 쥔 시도만 묻는다(아니면 `Stale`).

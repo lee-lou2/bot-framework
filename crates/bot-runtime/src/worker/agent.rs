@@ -278,7 +278,13 @@ impl Worker {
                                 state,
                             };
                             if let Err(flow) = self
-                                .checkpoint(ctx, checkpoint::plan_key(turn), plan.to_payload())
+                                .checkpoint(
+                                    ctx,
+                                    Step {
+                                        key: checkpoint::plan_key(turn),
+                                        body: plan.to_payload(),
+                                    },
+                                )
                                 .await
                             {
                                 return flow;
@@ -295,20 +301,22 @@ impl Worker {
                 if let Some(flow) = interrupted(control) {
                     return flow;
                 }
-                match self
+                let end = match self
                     .run_call(ctx, Some(control.released()), snapshot, span, call)
                     .await
                 {
-                    Ok(Ran::End(end)) => done.push(DoneCall {
-                        call: call.call.clone(),
-                        tool: call.tool.clone(),
-                        args: call.args.clone(),
-                        end,
-                    }),
+                    Ok(Ran::End(end)) => end,
+                    Ok(Ran::Refused(reason)) => crate::model::CallEnd::Failed(reason.word().into()),
                     // 승인 대기·보류·위임: 저장소가 run을 멈췄다. 풀리면 같은 차례를 이어 한다
                     Ok(Ran::Parked) => return Flow::Parked,
                     Err(flow) => return flow,
-                }
+                };
+                done.push(DoneCall {
+                    call: call.call.clone(),
+                    tool: call.tool.clone(),
+                    args: call.args.clone(),
+                    end,
+                });
             }
             let exchange = Exchange {
                 text: plan.text,
@@ -316,7 +324,13 @@ impl Worker {
                 state: plan.state,
             };
             if let Err(flow) = self
-                .checkpoint(ctx, checkpoint::end_key(turn), exchange.to_payload())
+                .checkpoint(
+                    ctx,
+                    Step {
+                        key: checkpoint::end_key(turn),
+                        body: exchange.to_payload(),
+                    },
+                )
                 .await
             {
                 return flow;
@@ -326,18 +340,8 @@ impl Worker {
     }
 
     /// 체크포인트를 적는다. 소유권을 잃으면 물러나고, 같은 내용으로 회복할 수 없는 오류는 종결한다.
-    async fn checkpoint(
-        &self,
-        ctx: &RunContext,
-        key: String,
-        body: JsonPayload,
-    ) -> Result<(), Flow> {
-        match self
-            .deps
-            .runs
-            .checkpoint(ctx.attempt.clone(), Step { key, body })
-            .await
-        {
+    pub(super) async fn checkpoint(&self, ctx: &RunContext, step: Step) -> Result<(), Flow> {
+        match self.deps.runs.checkpoint(ctx.attempt.clone(), step).await {
             Ok(()) => Ok(()),
             Err(Error::Stale | Error::Denied | Error::Missing) => Err(Flow::Lost),
             Err(Error::Conflict) => Err(Flow::Fail(Failure::Permanent("checkpoint_conflict"))),

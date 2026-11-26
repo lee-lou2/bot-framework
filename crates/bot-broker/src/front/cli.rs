@@ -16,9 +16,9 @@ use super::CallBook;
 use crate::{canon::canonicalize, json::parse, service::preflight::Preflight};
 use bot_core::{
     cli::{CliGroup, CliRefusal, CliUse, GROUP_PREFIX, USE_PREFIX},
-    command::JsonPayload,
+    command::{JsonPayload, ToolCall},
     id::{Attempt, CallId, ToolId},
-    ledger::{CallLedger, CallPhase},
+    ledger::CallLedger,
     port::{Error, Reply},
 };
 use std::{
@@ -269,28 +269,23 @@ impl CallBook for PlannedCalls {
         expected: CliRefusal,
     ) -> Reply<'_, bool> {
         Box::pin(async move {
-            let deadline = Instant::now() + self.wait;
-            let known = timeout_at(deadline, self.ledger.lookup(attempt.clone(), call))
-                .await
-                .map_err(|_| Error::Unavailable)??;
-            if known.is_some_and(|record| !matches!(record.phase, CallPhase::Open { .. })) {
-                return Ok(false);
-            }
-            match expected {
-                CliRefusal::UnknownTool | CliRefusal::Invalid => {
-                    let Some(judge) = &self.preflight else {
-                        return Ok(false);
-                    };
-                    let refusal = timeout_at(deadline, judge.refusal(attempt, tool, args))
-                        .await
-                        .map_err(|_| Error::Unavailable)??;
-                    Ok(refusal == Some(expected))
-                }
-                CliRefusal::Denied
-                | CliRefusal::Conflict
-                | CliRefusal::Stale
-                | CliRefusal::RateLimited => Ok(true),
-            }
+            let call = ToolCall {
+                attempt,
+                call,
+                tool,
+                args,
+            };
+            tokio::time::timeout(
+                self.wait,
+                crate::service::preflight::confirm(
+                    self.ledger.as_ref(),
+                    self.preflight.as_deref(),
+                    call,
+                    expected,
+                ),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)?
         })
     }
 }

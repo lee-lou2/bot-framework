@@ -3,9 +3,11 @@
 use super::{Flow, Worker, span::RunSpan};
 use crate::model::{CallEnd, PendingCall};
 use bot_core::{
+    cli::CliRefusal,
     command::{CallResult, Delegate, Failure, JsonPayload, ToolCall},
     id::{Attempt, CallId, ToolId},
-    port::Error,
+    ledger::CallPhase,
+    port::{Error, ModelCall, Reply},
     profile::Snapshot,
     state::RunContext,
     trace::key,
@@ -52,6 +54,7 @@ impl CallError {
 /// 모델 차례 안의 호출 하나의 결과.
 pub(super) enum Ran {
     End(CallEnd),
+    Refused(CliRefusal),
     Parked,
 }
 
@@ -80,23 +83,37 @@ impl Worker {
         tool: &ToolId,
         args: &JsonPayload,
     ) -> Result<Called, CallError> {
+        let result = self
+            .call_with(released, attempt, || {
+                self.deps.broker.call(ToolCall {
+                    attempt: attempt.clone(),
+                    call: call.clone(),
+                    tool: tool.clone(),
+                    args: args.clone(),
+                })
+            })
+            .await?;
+        Ok(match result {
+            CallResult::Done(payload) => Called::Done(payload),
+            CallResult::Awaiting(_) | CallResult::Held(_) | CallResult::Passed => Called::Parked,
+        })
+    }
+
+    async fn call_with<'a, T>(
+        &self,
+        released: Option<watch::Receiver<bool>>,
+        attempt: &Attempt,
+        call: impl Fn() -> Reply<'a, T>,
+    ) -> Result<T, CallError> {
         for _ in 0..STALE_RETRIES {
             // 종료 반납 신호가 오면 기다리던 호출을 놓는다: 시작한 도구가 남았으면 정리가 `reap`으로 끝내고, 다음 점유의 브로커가 그 호출을 복구한다
             let result = tokio::select! {
                 biased;
                 () = shutdown_requested(released.clone()) => return Err(CallError::Released),
-                result = self.deps.broker.call(ToolCall {
-                    attempt: attempt.clone(),
-                    call: call.clone(),
-                    tool: tool.clone(),
-                    args: args.clone(),
-                }) => result,
+                result = call() => result,
             };
             match result {
-                Ok(CallResult::Done(payload)) => return Ok(Called::Done(payload)),
-                Ok(CallResult::Awaiting(_) | CallResult::Held(_)) => return Ok(Called::Parked),
-                // 넘김: 저장소가 호출 결론·커서 전진과 함께 run을 다음 후보(또는 기본 대화)로 되돌렸다 — 이 시도는 더 쓸 것이 없다
-                Ok(CallResult::Passed) => return Ok(Called::Parked),
+                Ok(value) => return Ok(value),
                 Err(Error::Denied) => return Err(CallError::Denied),
                 Err(Error::Missing) => return Err(CallError::Missing),
                 Err(Error::Invalid) => return Err(CallError::Invalid),
@@ -129,17 +146,57 @@ impl Worker {
         span: &RunSpan,
         call: &PendingCall,
     ) -> Result<Ran, Flow> {
-        if call.tool.0 == crate::context::DELEGATE_TOOL {
-            return self.run_delegate(ctx, snapshot, span, call).await;
+        let child_finished = ctx.work.steps.iter().any(|s| s.key == call.call.0);
+        let key = CliRefusal::key(&call.call);
+        if !child_finished && let Some(mark) = ctx.work.steps.iter().find(|s| s.key == key) {
+            // 저장된 계획 위치만 재생한다. 영수증이나 진행 중인 효과가 있으면 현재 권한으로 원장을 다시 대조한다.
+            let known = self
+                .deps
+                .ledger
+                .lookup(ctx.attempt.clone(), call.call.clone())
+                .await
+                .map_err(|e| match e {
+                    Error::Stale => Flow::Lost,
+                    _ => Flow::Fail(Failure::Transient("store_unavailable")),
+                })?;
+            if known.is_none_or(|r| matches!(r.phase, CallPhase::Open { .. })) {
+                let reason = serde_json::from_str(&mark.body.0)
+                    .map_err(|_| Flow::Fail(Failure::Permanent("corrupt_checkpoint")))?;
+                return Ok(Ran::Refused(reason));
+            }
         }
-        match self
-            .call_tool(released, &ctx.attempt, &call.call, &call.tool, &call.args)
-            .await
-        {
-            Ok(Called::Done(payload)) => Ok(Ran::End(CallEnd::Done(payload))),
-            Ok(Called::Parked) => Ok(Ran::Parked),
-            Err(error) => end_or_stop(error),
+        let outcome = if call.tool.0 == crate::context::DELEGATE_TOOL {
+            self.run_delegate(ctx, snapshot, span, call).await?
+        } else {
+            let req = ToolCall {
+                attempt: ctx.attempt.clone(),
+                call: call.call.clone(),
+                tool: call.tool.clone(),
+                args: call.args.clone(),
+            };
+            match self
+                .call_with(released, &ctx.attempt, || {
+                    self.deps.broker.call_for_model(req.clone())
+                })
+                .await
+            {
+                Ok(ModelCall::Returned(CallResult::Done(payload))) => {
+                    Ran::End(CallEnd::Done(payload))
+                }
+                Ok(ModelCall::Returned(
+                    CallResult::Awaiting(_) | CallResult::Held(_) | CallResult::Passed,
+                )) => Ran::Parked,
+                Ok(ModelCall::Refused(reason)) => Ran::Refused(reason),
+                Err(error) => return end_or_stop(error),
+            }
+        };
+        if let Ran::Refused(reason) = outcome {
+            if child_finished {
+                return Ok(Ran::End(CallEnd::Denied));
+            }
+            self.checkpoint(ctx, reason.step(&call.call)).await?;
         }
+        Ok(outcome)
     }
 
     async fn run_delegate(
@@ -150,15 +207,15 @@ impl Worker {
         call: &PendingCall,
     ) -> Result<Ran, Flow> {
         let Some((child, instruction)) = Delegate::parse_target(&call.args) else {
-            return Ok(Ran::End(CallEnd::Failed("invalid_args".into())));
+            return Ok(Ran::Refused(CliRefusal::Invalid));
         };
         // 두 판본(실행이 고정한 판본·지금 활성인 판본) 모두에서 직계 자식이어야 한다. 범위는 둘 다에서 허용된 만큼으로 좁힌다.
         // 이미 끝난 자식의 결과를 돌려주는 때도 같다: 위임한 뒤 권한이 바뀌었으면 그 결과를 모델에게 주지 않는다
         let Some(current) = self.deps.catalog.current(&ctx.attempt.profile) else {
-            return Ok(Ran::End(CallEnd::Denied));
+            return Ok(Ran::Refused(CliRefusal::Denied));
         };
         let Ok(scopes) = bot_core::scope::delegation_scopes(ctx, &current, snapshot, &child) else {
-            return Ok(Ran::End(CallEnd::Denied));
+            return Ok(Ran::Refused(CliRefusal::Denied));
         };
         let command = Delegate {
             parent: ctx.attempt.clone(),
@@ -192,11 +249,11 @@ impl Worker {
             }
             Err(Error::Denied) => {
                 span.emit(started.fail("denied"));
-                Ok(Ran::End(CallEnd::Denied))
+                Ok(Ran::Refused(CliRefusal::Denied))
             }
             Err(Error::Invalid | Error::Missing) => {
                 span.emit(started.fail("invalid"));
-                Ok(Ran::End(CallEnd::Failed("invalid_args".into())))
+                Err(Flow::Fail(Failure::Transient("store_unavailable")))
             }
             Err(Error::Conflict) => Err(Flow::Fail(Failure::Permanent("delegate_conflict"))),
             Err(Error::Unavailable) => Err(Flow::Fail(Failure::Transient("store_unavailable"))),

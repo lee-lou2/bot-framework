@@ -17,20 +17,6 @@ use bot_core::{
     port::Error,
 };
 
-/// 이 오류를 확정 거절로 보려면 어떤 거절이어야 하는가(`CallBook::confirm`이 그 호출에서 맞는지 확인한다). `Unavailable`은 **이 호출이 한도에 걸렸을 때만**
-/// `RateLimited`다(`limited`는 이 호출의 결과와 함께 온 원인이다). 그 밖의 `Unavailable`(저장소 장애·원장을 읽지 못함)은 거절이 아니라서 확정하지 않는다.
-pub(super) fn expected(error: &Error, limited: bool) -> Option<CliRefusal> {
-    Some(match error {
-        Error::Missing => CliRefusal::UnknownTool,
-        Error::Invalid => CliRefusal::Invalid,
-        Error::Denied => CliRefusal::Denied,
-        Error::Conflict => CliRefusal::Conflict,
-        Error::Stale => CliRefusal::Stale,
-        Error::Unavailable if limited => CliRefusal::RateLimited,
-        Error::Unavailable => return None,
-    })
-}
-
 /// 거절된 호출에 모델이 볼 단어. 확정이면 표식을 남긴 뒤에만 그 단어이고, 확정이 아니거나 확인·기록하지 못했으면 오류의 단어 그대로다.
 pub(super) async fn word(
     shared: &Shared,
@@ -39,7 +25,7 @@ pub(super) async fn word(
     error: &Error,
     limited: bool,
 ) -> &'static str {
-    let Some(refusal) = expected(error, limited) else {
+    let Some(refusal) = crate::service::preflight::expected(error, limited) else {
         return error_word(error);
     };
     let attempt = session.attempt.clone();

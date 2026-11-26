@@ -31,7 +31,7 @@ use bot_core::{
     command::*,
     id::*,
     ledger::CallLedger,
-    port::{AuditLog, Broker, EffectJournal, MemoryStore, Reply},
+    port::{AuditLog, Broker, EffectJournal, Error, MemoryStore, ModelCall, Reply},
     profile::ProfileCatalog,
     schedule::{ScheduleRoutes, ScheduledReplies, UserSchedules},
     trace::Tracer,
@@ -118,6 +118,29 @@ impl BrokerService {
 impl Broker for BrokerService {
     fn call(&self, call: ToolCall) -> Reply<'_, CallResult> {
         Box::pin(self.call_flow(call))
+    }
+
+    fn call_for_model(&self, call: ToolCall) -> Reply<'_, ModelCall> {
+        Box::pin(async move {
+            let (result, limited) = preflight::noting_limit(self.call(call.clone())).await;
+            let error = match result {
+                Ok(result) => return Ok(ModelCall::Returned(result)),
+                Err(error) => error,
+            };
+            let Some(reason) = preflight::expected(&error, limited) else {
+                return Err(error);
+            };
+            match preflight::confirm(self.parts.ledger.as_ref(), Some(self), call, reason).await {
+                Ok(true) => Ok(ModelCall::Refused(reason)),
+                // 입력·도구 없음이 고정 선언과 일치하지 않으면 저장소에서 비롯된 오류일 수 있다.
+                Ok(false) if matches!(error, Error::Invalid | Error::Missing) => {
+                    Err(Error::Unavailable)
+                }
+                Ok(false) => Err(error),
+                Err(Error::Stale) => Err(Error::Stale),
+                Err(_) => Err(Error::Unavailable),
+            }
+        })
     }
 
     fn decide(&self, nonce: ApprovalId, actor: PrincipalId, allow: bool) -> Reply<'_, ()> {

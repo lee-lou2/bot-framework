@@ -181,7 +181,7 @@ fn earlier_turns_become_tool_use_and_tool_result_pairs_with_request_local_ids() 
         results[0]["content"],
         "승인되지 않았거나 막혀서 실행하지 않았어요"
     );
-    assert_eq!(results[1]["content"], "실패: unavailable");
+    assert_eq!(results[1]["content"], "unavailable");
     // 호출 이름은 이 요청의 별칭표를 거친다(점이 든 ID가 그대로 나가지 않는다)
     assert_eq!(
         first["content"][1]["name"],

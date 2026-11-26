@@ -371,7 +371,7 @@ async fn only_a_direct_child_can_be_delegated_to() {
         );
         assert_eq!(
             model.requests()[1].exchanges[0].calls[0].end,
-            CallEnd::Denied
+            CallEnd::Failed("denied".into())
         );
     }
     // 저장소가 거절해도 모델이 볼 결말이다
@@ -385,7 +385,7 @@ async fn only_a_direct_child_can_be_delegated_to() {
     assert_eq!(r.worker.execute(agent_run("r2")).await, Outcome::Succeeded);
     assert_eq!(
         model.requests()[1].exchanges[0].calls[0].end,
-        CallEnd::Denied
+        CallEnd::Failed("denied".into())
     );
 }
 

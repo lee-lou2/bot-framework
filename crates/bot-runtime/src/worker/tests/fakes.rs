@@ -319,6 +319,13 @@ impl Broker for FakeBroker {
         let next = lock(&self.script).pop_front();
         Box::pin(async move { next.unwrap_or_else(|| done(r#"{"ok":true}"#)) })
     }
+    fn call_for_model(&self, call: ToolCall) -> Reply<'_, bot_core::port::ModelCall> {
+        Box::pin(async move {
+            self.call(call)
+                .await
+                .map(bot_core::port::ModelCall::Returned)
+        })
+    }
     fn decide(&self, _: ApprovalId, _: PrincipalId, _: bool) -> Reply<'_, ()> {
         Box::pin(async { Err(Error::Unavailable) })
     }

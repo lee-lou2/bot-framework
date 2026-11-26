@@ -3,6 +3,8 @@
 
 #[path = "api_flows/checkpoints.rs"]
 mod checkpoints;
+#[path = "api_flows/refusal.rs"]
+mod refusal;
 mod support;
 
 use bot_core::{
@@ -532,7 +534,7 @@ async fn a_failed_delegation_that_created_no_child_leaves_the_runs_usage_known()
         assert!(
             api.seen()[1].json()["messages"]
                 .to_string()
-                .contains("invalid_args")
+                .contains("\"invalid\"")
         );
         // 두 요청 모두 보고됐고 자식이 없으니 합을 안다
         assert_eq!(stored_usage(&w, &run).await, "14/6", "{kind:?}");

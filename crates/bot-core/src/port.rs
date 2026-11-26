@@ -136,8 +136,19 @@ pub trait SecretStore: Send + Sync {
     fn for_profile(&self, profile: ProfileId) -> Reply<'_, Box<dyn ProfileSecrets>>;
 }
 
+/// 모델이 계획한 호출의 정상 결론 또는 원장·입력·한도를 대조해 확인한 실행 전 거절.
+pub enum ModelCall {
+    Returned(CallResult),
+    Refused(crate::cli::CliRefusal),
+}
+
 pub trait Broker: Send + Sync {
     fn call(&self, call: ToolCall) -> Reply<'_, CallResult>;
+    /// 검증된 모델 계획의 호출. 미확정 오류는 바깥 `Err`로 남겨 재판정한다.
+    /// 결정 전용 포트 등 호출 원인을 확인할 수 없는 구현은 실행을 시작하지 않는다.
+    fn call_for_model(&self, _: ToolCall) -> Reply<'_, ModelCall> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
     fn decide(&self, nonce: ApprovalId, actor: PrincipalId, allow: bool) -> Reply<'_, ()>;
 }
 
