@@ -106,6 +106,8 @@ async fn pick_uses_the_eligibility_expression_as_an_index_bound() {
         .unwrap();
     let explain = concat!("explain ", include_str!("../../src/queue/pick.sql"));
     let plan: Vec<String> = sqlx::query_scalar(explain)
+        .bind(Vec::<String>::new())
+        .bind(Vec::<String>::new())
         .fetch_all(&mut *tx)
         .await
         .unwrap();

@@ -23,33 +23,37 @@ use std::{collections::BTreeSet, time::Duration};
 const MAX_BATCH: usize = 512;
 
 struct Cand {
-    profile: String,
-    id: String,
+    run: RunRow,
     state: String,
-    attempts: i32,
     generation: i64,
-    parent: Option<String>,
-    parent_step: Option<String>,
-    cancel: bool,
     /// 직전 claim이 고정했던 호스트 활성 집합(없으면 구판 행·고정하지 않은 핸들)
     claim_set: Option<String>,
 }
 
 /// 가장 오래 기다린 집을 수 있는 run 하나를 잠근다(SKIP LOCKED): 때가 된 ready·retry, 또는 리스가 끝난 leased.
 /// 직렬 키는 고유 색인과 같이 leased 상태가 소유한다. 만료된 소유자 자신은 인계할 수 있다.
-async fn pick(tx: &mut Tx<'_>) -> R<Option<Cand>> {
+async fn pick(
+    tx: &mut Tx<'_>,
+    skipped_profiles: &[String],
+    skipped_runs: &[String],
+) -> R<Option<Cand>> {
     let row = sqlx::query(include_str!("queue/pick.sql"))
+        .bind(skipped_profiles)
+        .bind(skipped_runs)
         .fetch_optional(&mut **tx)
         .await?;
     Ok(row.map(|r| Cand {
-        profile: r.get("profile"),
-        id: r.get("id"),
+        run: RunRow {
+            profile: r.get("profile"),
+            id: r.get("id"),
+            parent: r.get("parent"),
+            parent_step: r.get("parent_step"),
+            attempts: r.get("attempts"),
+            cancel_requested: r.get("cancel_requested"),
+            private: false,
+        },
         state: r.get("state"),
-        attempts: r.get("attempts"),
         generation: r.get("generation"),
-        parent: r.get("parent"),
-        parent_step: r.get("parent_step"),
-        cancel: r.get("cancel_requested"),
         claim_set: r.get("claim_set"),
     }))
 }
@@ -136,87 +140,98 @@ impl Store {
     pub(crate) async fn claim_run(&self) -> R<Option<RunContext>> {
         self.expire_approvals().await?;
         self.sweep_private().await?;
+        let (mut skipped_profiles, mut skipped_runs) = (Vec::new(), Vec::new());
         for _ in 0..8 {
             let mut tx = self.begin_authorized().await?;
-            let Some(c) = pick(&mut tx).await? else {
+            let Some(c) = pick(&mut tx, &skipped_profiles, &skipped_runs).await? else {
                 tx.commit().await?;
                 return Ok(None);
             };
+            let run = c.run;
             let reclaimed = c.state == "leased";
             let pinned = self.activation.as_ref().map(|set| set.0.as_str());
             let forgiven = reclaimed && !handover::spends_attempt(c.claim_set.as_deref(), pinned);
-            let attempts = c.attempts + i32::from(reclaimed && !forgiven);
-            if c.cancel || (reclaimed && attempts >= self.cfg.max_attempts as i32) {
-                if !try_lock_parent(&mut tx, &c.profile, c.parent.as_deref()).await? {
-                    tx.rollback().await?;
-                    return Ok(None);
+            let attempts = run.attempts + i32::from(reclaimed && !forgiven);
+            let end = if run.cancel_requested {
+                End::Cancelled("cancelled")
+            } else if reclaimed && attempts >= self.cfg.max_attempts as i32 {
+                End::Dead("lease_expired", attempts)
+            } else {
+                match load(&mut tx, &run.profile, &run.id).await {
+                    Ok(mut claimed) => {
+                        if let Err(error) = self
+                            .lease_run(&mut tx, &mut claimed.attempt, attempts)
+                            .await
+                        {
+                            // 같은 직렬 키의 다른 작업이 먼저 점유했다.
+                            return if error.is_unique_violation() {
+                                Ok(None)
+                            } else {
+                                Err(error)
+                            };
+                        }
+                        if reclaimed {
+                            crate::approvals::supersede_generation(
+                                &mut tx,
+                                &run.profile,
+                                &run.id,
+                                c.generation,
+                            )
+                            .await?;
+                            let reason = if forgiven {
+                                "set_replaced"
+                            } else {
+                                "lease_expired"
+                            };
+                            audit::append(
+                                &mut tx,
+                                &run.profile,
+                                &Entry::new("system", "run.reclaim", &run.id, reason),
+                            )
+                            .await?;
+                        }
+                        tx.commit().await?;
+                        return Ok(Some(claimed));
+                    }
+                    // 저장한 실행 대상의 해독 오류만 격리한다. SQL 오류는 트랜잭션을 되돌린다.
+                    Err(Fail::Core(Error::Invalid)) => End::Dead("invalid_target", attempts),
+                    Err(error) => return Err(error),
                 }
-                let run = RunRow {
-                    profile: c.profile.clone(),
-                    id: c.id.clone(),
-                    parent: c.parent.clone(),
-                    parent_step: c.parent_step.clone(),
-                    attempts: c.attempts,
-                    cancel_requested: c.cancel,
-                    private: false,
-                };
-                let end = if c.cancel {
-                    End::Cancelled("cancelled")
-                } else {
-                    End::Dead("lease_expired", attempts)
-                };
-                end_run(&mut tx, &run, end, "system").await?;
-                tx.commit().await?;
+            };
+            if !try_lock_parent(&mut tx, &run.profile, run.parent.as_deref()).await? {
+                // 부모 → 자식 순서와 충돌하지 않도록 기다리지 않는다. 이번 점유에서 다른 후보를 본다.
+                tx.rollback().await?;
+                skipped_profiles.push(run.profile);
+                skipped_runs.push(run.id);
                 continue;
             }
-            let moved = sqlx::query(
-                "update bot_runs set state = 'leased',
-                        generation = case when keep_generation then generation else generation + 1 end,
-                        keep_generation = false, claim_epoch = claim_epoch + 1, lease_owner = $3,
-                        lease_until_ms = bot_now_ms() + $4, attempts = $5, wait_kind = null, wait_child = null,
-                        claim_set = $6, updated_ms = bot_now_ms()
-                 where profile = $1 and id = $2",
-            )
-            .bind(&c.profile)
-            .bind(&c.id)
-            .bind(&self.cfg.worker)
-            .bind(self.cfg.lease.as_millis() as i64)
-            .bind(attempts)
-            .bind(pinned)
-            .execute(&mut *tx)
-            .await;
-            if let Err(e) = moved {
-                // 같은 serial_key의 다른 run이 그사이 먼저 실행을 시작했다 — 이번 차례는 양보한다
-                return match Fail::from(e) {
-                    f if f.is_unique_violation() => Ok(None),
-                    f => Err(f),
-                };
-            }
-            if reclaimed {
-                // 인계: 옛 세대가 연 승인은 무효다(옛 버튼 거절). 시작한 호출은 그대로 두고 브로커가 복구를 판정한다
-                crate::approvals::supersede_generation(&mut tx, &c.profile, &c.id, c.generation)
-                    .await?;
-                audit::append(
-                    &mut tx,
-                    &c.profile,
-                    &Entry::new(
-                        "system",
-                        "run.reclaim",
-                        &c.id,
-                        if forgiven {
-                            "set_replaced"
-                        } else {
-                            "lease_expired"
-                        },
-                    ),
-                )
-                .await?;
-            }
-            let claimed = load(&mut tx, &c.profile, &c.id).await?;
+            end_run(&mut tx, &run, end, "system").await?;
             tx.commit().await?;
-            return Ok(Some(claimed));
         }
         Ok(None)
+    }
+
+    /// 잠근 후보의 작업을 해독한 뒤에만 새 점유 토큰을 발급한다.
+    async fn lease_run(&self, tx: &mut Tx<'_>, at: &mut Attempt, attempts: i32) -> R<()> {
+        let (generation, claim): (i64, i64) = sqlx::query_as(
+            "update bot_runs set state = 'leased',
+                    generation = case when keep_generation then generation else generation + 1 end,
+                    keep_generation = false, claim_epoch = claim_epoch + 1, lease_owner = $3,
+                    lease_until_ms = bot_now_ms() + $4, attempts = $5, wait_kind = null, wait_child = null,
+                    claim_set = $6, updated_ms = bot_now_ms()
+             where profile = $1 and id = $2 returning generation, claim_epoch",
+        )
+        .bind(&at.profile.0)
+        .bind(&at.run.0)
+        .bind(&self.cfg.worker)
+        .bind(self.cfg.lease.as_millis() as i64)
+        .bind(attempts)
+        .bind(self.activation.as_ref().map(|set| &set.0))
+        .fetch_one(&mut **tx)
+        .await?;
+        at.generation = Generation(generation as u64);
+        at.claim = Some(ClaimEpoch(claim as u64));
+        Ok(())
     }
 
     /// heartbeat. 다른 소유권 검사와 같이 행을 잠근 뒤 DB 시각을 확인하고 리스를 늘린다.

@@ -3,10 +3,12 @@
 
 use crate::{
     audit::{self, Entry},
+    codec::target_from,
     db::{R, Store},
     finish::*,
 };
 use bot_core::{id::*, port::Error};
+use serde_json::Value;
 use sqlx::Row;
 
 /// 사유는 감사 판정 칸에 앞 200자만 남긴다.
@@ -24,17 +26,16 @@ impl Store {
         reason: &str,
     ) -> R<()> {
         let mut tx = self.begin_authorized().await?;
-        let moved = sqlx::query(
+        let target: Option<Value> = sqlx::query_scalar(
             "update bot_runs set state = 'ready', attempts = 0, error = null, result = null, finished_ms = null,
                     keep_generation = false, cancel_requested = false, updated_ms = bot_now_ms()
-             where profile = $1 and id = $2 and state = 'dead' and not private",
+             where profile = $1 and id = $2 and state = 'dead' and not private returning target",
         )
         .bind(&profile.0)
         .bind(&run.0)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if moved == 0 {
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(target) = target else {
             let exists: bool = sqlx::query_scalar("select exists (select 1 from bot_runs where profile = $1 and id = $2 and not private)")
                 .bind(&profile.0)
                 .bind(&run.0)
@@ -46,7 +47,8 @@ impl Store {
                 Error::Missing
             }
             .into());
-        }
+        };
+        target_from(&target)?;
         audit::append(
             &mut tx,
             &profile.0,

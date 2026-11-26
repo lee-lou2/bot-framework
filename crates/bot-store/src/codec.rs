@@ -127,7 +127,10 @@ pub(crate) fn target_from(value: &Value) -> R<Target> {
             instruction: field("instruction").ok_or(Error::Invalid)?,
         }),
         Some("tool") => {
-            let args = value.get("args").ok_or(Error::Invalid)?;
+            let args = value
+                .get("args")
+                .filter(|args| args.is_object())
+                .ok_or(Error::Invalid)?;
             Ok(Target::Tool {
                 agent,
                 tool: ToolId(field("tool").ok_or(Error::Invalid)?),
