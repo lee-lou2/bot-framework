@@ -242,15 +242,25 @@ impl CallBook for PlannedCalls {
         })
     }
 
-    /// 이 위치에 이미 남은 확정 거절 표식. 같은 키를 다시 읽을 뿐이라 기한은 계획을 기다릴 때와 같고, 읽지 못하면 오류다(실행하지 않는다).
-    /// 읽을 수 없는 표식은 없는 것으로 본다(런타임의 복원과 같다).
+    /// 이 위치에 남은 확정 거절은 원장이 이미 말한 결론에 앞설 수 없다. 손상이나 읽기 실패는 실행을 막는다.
     fn marked(&self, attempt: Attempt, call: CallId) -> Reply<'_, Option<CliRefusal>> {
         Box::pin(async move {
             let deadline = Instant::now() + self.wait;
-            let stored = self
+            let Some(stored) = self
                 .step(&attempt, CliRefusal::key(&call), deadline)
-                .await?;
-            Ok(stored.and_then(|payload| serde_json::from_str::<CliRefusal>(&payload.0).ok()))
+                .await?
+            else {
+                return Ok(None);
+            };
+            let known = timeout_at(deadline, self.ledger.lookup(attempt, call))
+                .await
+                .map_err(|_| Error::Unavailable)??;
+            if !CliRefusal::can_replay(known.as_ref()) {
+                return Ok(None);
+            }
+            CliRefusal::decode(&stored)
+                .map(Some)
+                .map_err(|_| Error::Unavailable)
         })
     }
 

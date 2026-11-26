@@ -302,7 +302,7 @@ impl Worker {
                     return flow;
                 }
                 let end = match self
-                    .run_call(ctx, Some(control.released()), snapshot, span, call)
+                    .run_planned_call(ctx, Some(control.released()), snapshot, span, call)
                     .await
                 {
                     Ok(Ran::End(end)) => end,

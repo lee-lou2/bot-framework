@@ -54,7 +54,7 @@ impl RunSession {
 }
 
 impl RunSession {
-    /// 프런트가 이 자리에 남긴 확정 거절(고정 판본에 없는 도구·입력 검사 실패)의 표식. 체크포인트의 JSON 문자열이고, 읽을 수 없는 표식은 없는 것으로 본다.
+    /// 프런트가 이 자리에 남긴 거절 표식. 값이 손상됐으면 호출을 다시 실행하지 않는다.
     async fn refusal_mark(&self, call: &CallId) -> Result<Option<CliRefusal>, SessionError> {
         let stored = self
             .worker
@@ -63,7 +63,11 @@ impl RunSession {
             .step(self.ctx.attempt.clone(), CliRefusal::key(call))
             .await
             .map_err(session_error)?;
-        Ok(stored.and_then(|payload| serde_json::from_str::<CliRefusal>(&payload.0).ok()))
+        stored
+            .as_ref()
+            .map(CliRefusal::decode)
+            .transpose()
+            .map_err(|_| SessionError::Permanent("corrupt_checkpoint"))
     }
 
     /// 원장에 기록이 없거나 아직 열려 있는 호출에 남은 확정 거절. 원장에 시작·보류·완료·거절이 있으면 표식이 아니라 원장을 따른다(모순이면 원장이 더 구체적이다).
@@ -72,13 +76,10 @@ impl RunSession {
         call: &CallId,
         record: &Option<CallRecord>,
     ) -> Result<Option<CliRefusal>, SessionError> {
-        match record {
-            None
-            | Some(CallRecord {
-                phase: CallPhase::Open { .. },
-                ..
-            }) => self.refusal_mark(call).await,
-            _ => Ok(None),
+        if CliRefusal::can_replay(record.as_ref()) {
+            self.refusal_mark(call).await
+        } else {
+            Ok(None)
         }
     }
 
@@ -86,22 +87,16 @@ impl RunSession {
     /// ② 자식이 없고 프런트가 이 자리를 확정 거절로 닫았으면(표식) 권한·판본이 지금 어떻든 모델이 처음 본 그 단어다: 권한을 다시 얻어도 같은 단어이고 자식은 만들지 않는다.
     /// ③ 둘 다 없으면 `Nothing`이다. 표식이 없을 때의 동작(현재·고정 판본 모두의 직계 인가, 입력 검사)은 그대로다.
     async fn recall_child(&self, slot: &Pending, call: &CallId) -> Result<Delegated, SessionError> {
-        let mark = self.refusal_mark(call).await?;
-        // 표식이 있으면 합성 거절(입력·인가)도 그 단어로 한다: 모델이 본 것과 같아야 한다
-        let synthetic = |fallback: &'static str| match mark {
-            Some(refusal) => Delegated::Refused(refusal),
-            None => Delegated::Result(ToolOutput::notice(fallback)),
-        };
         let Some((child, instruction)) = Delegate::target(&slot.tool_use.input) else {
-            return Ok(synthetic("invalid"));
+            return self.child_refusal(call, Some("invalid")).await;
         };
         let Some(current) = self.worker.deps.catalog.current(&self.ctx.attempt.profile) else {
-            return Ok(synthetic("denied"));
+            return self.child_refusal(call, Some("denied")).await;
         };
         let Ok(scopes) =
             bot_core::scope::delegation_scopes(&self.ctx, &current, &self.snapshot, &child)
         else {
-            return Ok(synthetic("denied"));
+            return self.child_refusal(call, Some("denied")).await;
         };
         let command = Delegate {
             parent: self.ctx.attempt.clone(),
@@ -113,11 +108,23 @@ impl RunSession {
         };
         match self.worker.deps.delegation.result(command).await {
             Ok(Some(body)) => Ok(Delegated::Result(child_output(&body))),
-            Ok(None) => Ok(mark.map_or(Delegated::Nothing, Delegated::Refused)),
+            Ok(None) => self.child_refusal(call, None).await,
             // 기존 자식과 어긋난다: 저장소가 더 구체적이라 표식이 있어도 `denied`다
             Err(Error::Denied) => Ok(Delegated::Result(ToolOutput::notice("denied"))),
             Err(error) => Err(session_error(error)),
         }
+    }
+
+    async fn child_refusal(
+        &self,
+        call: &CallId,
+        fallback: Option<&'static str>,
+    ) -> Result<Delegated, SessionError> {
+        Ok(match (self.refusal_mark(call).await?, fallback) {
+            (Some(refusal), _) => Delegated::Refused(refusal),
+            (None, Some(word)) => Delegated::Result(ToolOutput::notice(word)),
+            (None, None) => Delegated::Nothing,
+        })
     }
 }
 

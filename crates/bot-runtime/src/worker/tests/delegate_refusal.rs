@@ -183,22 +183,24 @@ async fn an_existing_child_or_a_store_mismatch_wins_over_the_mark() {
 }
 
 #[tokio::test]
-async fn without_a_readable_mark_a_delegate_is_judged_and_created_as_before() {
+async fn only_an_absent_mark_allows_the_delegate_to_be_judged_again() {
     let (rig, session) = session_of(agent_run("r1")).await;
     let port = session.0;
     let slot = delegate(valid());
-    // 표식이 없거나 읽을 수 없으면 없는 것이다: 끝난 것이 없고, 마무리하면 같은 호출 ID로 자식을 만든다
-    for junk in [None, Some("\"nope\""), Some("{\"invalid\":null}")] {
-        if let Some(junk) = junk {
-            lock(&rig.ledger.steps).insert(
-                CliRefusal::key(&CallId::cli(7, 0)),
-                JsonPayload(junk.into()),
-            );
-        }
-        assert_eq!(port.ended(&slot).await, Ok(false), "{junk:?}");
-        assert_eq!(port.recall(&slot).await, Ok(None), "{junk:?}");
+    for junk in ["\"nope\"", "{\"invalid\":null}"] {
+        lock(&rig.ledger.steps).insert(
+            CliRefusal::key(&CallId::cli(7, 0)),
+            JsonPayload(junk.into()),
+        );
+        let error = SessionError::Permanent("corrupt_checkpoint");
+        assert_eq!(port.ended(&slot).await, Err(error), "{junk}");
+        assert_eq!(port.recall(&slot).await, Err(error), "{junk}");
+        assert_eq!(port.settle(&slot).await.err(), Some(error), "{junk}");
     }
     assert!(lock(&rig.delegation.requests).is_empty());
+    lock(&rig.ledger.steps).clear();
+    assert_eq!(port.ended(&slot).await, Ok(false));
+    assert_eq!(port.recall(&slot).await, Ok(None));
     assert!(matches!(port.settle(&slot).await, Ok(Slot::Parked)));
     assert_eq!(lock(&rig.delegation.requests).len(), 1);
     // 표식이 없을 때 지금 권한이 없으면 예전처럼 `denied`다

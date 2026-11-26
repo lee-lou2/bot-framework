@@ -82,6 +82,32 @@ pub(super) async fn word(r: &Rig, id: &str, name: &str, args: &str) -> String {
 }
 
 #[tokio::test]
+async fn a_corrupt_refusal_marker_blocks_the_live_call_before_execution() {
+    let r = rig_with(|_| {}, |_| {}, judged(300)).await;
+    record(&r, 4, &[("toolu_bad_mark", "echo_say", "{}")]);
+    r.ledger
+        .add_step(OWNER_RUN, "cli-refusal-cli-4-0", r#""unknown_refusal""#);
+    assert_eq!(
+        word(&r, "toolu_bad_mark", "echo_say", "{}").await,
+        "unavailable"
+    );
+    assert!(r.runner.jobs().is_empty());
+}
+
+#[tokio::test]
+async fn the_live_cli_keeps_the_receipt_over_a_marker_at_the_same_position() {
+    let r = rig_with(|_| {}, |_| {}, judged(300)).await;
+    record(&r, 4, &[("toolu_receipt", "echo_say", "{}")]);
+    let frame = call("toolu_receipt", "echo_say", "{}");
+    let first = rpc(&r, &frame).await;
+    r.ledger
+        .add_step(OWNER_RUN, "cli-refusal-cli-4-0", r#""invalid""#);
+    let replay = rpc(&r, &frame).await;
+    assert_eq!(replay.body, first.body);
+    assert_eq!(r.runner.jobs().len(), 1);
+}
+
+#[tokio::test]
 async fn a_planned_call_to_a_tool_the_pinned_revision_lacks_leaves_an_unknown_tool_marker() {
     let r = rig_with(|_| {}, |_| {}, judged(300)).await;
     record(&r, 4, &[("toolu_a", "echo_nothing", "{}")]);

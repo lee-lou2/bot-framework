@@ -6,7 +6,6 @@ use bot_core::{
     cli::CliRefusal,
     command::{CallResult, Delegate, Failure, JsonPayload, ToolCall},
     id::{Attempt, CallId, ToolId},
-    ledger::CallPhase,
     port::{Error, ModelCall, Reply},
     profile::Snapshot,
     state::RunContext,
@@ -137,8 +136,8 @@ impl Worker {
         )
     }
 
-    /// 모델이 요청한 호출 하나를 실행한다(위임 도구는 가로채 위임으로 보낸다).
-    pub(super) async fn run_call(
+    /// 단계형 워커는 저장해 둔 차례에서 확정 거절을 재생한 뒤 남은 호출을 실행한다.
+    pub(super) async fn run_planned_call(
         &self,
         ctx: &RunContext,
         released: Option<watch::Receiver<bool>>,
@@ -146,9 +145,10 @@ impl Worker {
         span: &RunSpan,
         call: &PendingCall,
     ) -> Result<Ran, Flow> {
-        let child_finished = ctx.work.steps.iter().any(|s| s.key == call.call.0);
         let key = CliRefusal::key(&call.call);
-        if !child_finished && let Some(mark) = ctx.work.steps.iter().find(|s| s.key == key) {
+        if let Some(mark) = ctx.work.steps.iter().find(|s| s.key == key)
+            && !ctx.work.steps.iter().any(|s| s.key == call.call.0)
+        {
             // 저장된 계획 위치만 재생한다. 영수증이나 진행 중인 효과가 있으면 현재 권한으로 원장을 다시 대조한다.
             let known = self
                 .deps
@@ -159,12 +159,24 @@ impl Worker {
                     Error::Stale => Flow::Lost,
                     _ => Flow::Fail(Failure::Transient("store_unavailable")),
                 })?;
-            if known.is_none_or(|r| matches!(r.phase, CallPhase::Open { .. })) {
-                let reason = serde_json::from_str(&mark.body.0)
+            if CliRefusal::can_replay(known.as_ref()) {
+                let reason = CliRefusal::decode(&mark.body)
                     .map_err(|_| Flow::Fail(Failure::Permanent("corrupt_checkpoint")))?;
                 return Ok(Ran::Refused(reason));
             }
         }
+        self.run_call(ctx, released, snapshot, span, call).await
+    }
+
+    /// 표식 대조를 마친 호출 하나를 실행한다. CLI 복원은 세션 포트에서 먼저 대조한다.
+    pub(super) async fn run_call(
+        &self,
+        ctx: &RunContext,
+        released: Option<watch::Receiver<bool>>,
+        snapshot: &Snapshot,
+        span: &RunSpan,
+        call: &PendingCall,
+    ) -> Result<Ran, Flow> {
         let outcome = if call.tool.0 == crate::context::DELEGATE_TOOL {
             self.run_delegate(ctx, snapshot, span, call).await?
         } else {
@@ -191,7 +203,7 @@ impl Worker {
             }
         };
         if let Ran::Refused(reason) = outcome {
-            if child_finished {
+            if ctx.work.steps.iter().any(|s| s.key == call.call.0) {
                 return Ok(Ran::End(CallEnd::Denied));
             }
             self.checkpoint(ctx, reason.step(&call.call)).await?;

@@ -355,11 +355,20 @@ async fn a_confirmed_refusal_mark_closes_the_slot_with_the_same_word_and_never_e
         rig.broker.calls().is_empty(),
         "거절한 호출은 브로커를 부르지 않는다"
     );
-    // 감사 사유 또는 JSON 객체는 종료된 호출을 증명하지 못한다.
+    // 손상된 표식을 만나면 그 자리를 실행하지 않고 중단한다.
     for junk in [json!("secret_missing"), json!({"invalid": null})] {
         mark(&slot, junk.clone());
-        assert_eq!(port.ended(&slot).await, Ok(false), "{junk}");
-        assert_eq!(port.recall(&slot).await, Ok(None), "{junk}");
+        for error in [
+            port.ended(&slot).await.err(),
+            port.recall(&slot).await.err(),
+            port.settle(&slot).await.err(),
+        ] {
+            assert_eq!(
+                error,
+                Some(SessionError::Permanent("corrupt_checkpoint")),
+                "{junk}"
+            );
+        }
     }
     // 원장에 완료·시작·보류가 있으면 표식이 아니라 원장을 따른다
     mark(&slot, json!("invalid"));

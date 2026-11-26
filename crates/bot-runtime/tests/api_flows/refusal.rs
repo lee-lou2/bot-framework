@@ -89,6 +89,55 @@ async fn openai_replays_a_refusal_before_an_approval_wait() {
 }
 
 #[tokio::test]
+async fn a_step_resume_checks_the_receipt_before_replaying_a_conflicting_marker() {
+    let Some(w) = world().await else { return };
+    let api = FakeApi::start().await;
+    let kind = ApiKind::Anthropic;
+    api.script(calls(
+        kind,
+        "",
+        vec![
+            Call {
+                id: "read-first",
+                ..call("agenda.list", json!({}))
+            },
+            Call {
+                id: "approval",
+                ..call("agenda.delete", json!({"event":"e1"}))
+            },
+        ],
+        None,
+    ));
+    api.script(text(kind, "확인했어요", None));
+    let run = w.accept("receipt-before-marker", "일정 확인").await;
+    let worker = w.worker(&w.pg.store, models(kind, &api), config());
+    assert_eq!(worker.run_once().await, Some(Outcome::Parked));
+    let call = bot_runtime::model::call_id(&run, 0, 0);
+    sqlx::query("insert into bot_steps (profile, run, key, body) values ('personal', $1, $2, $3)")
+        .bind(&run.0)
+        .bind(bot_core::cli::CliRefusal::key(&call))
+        .bind(r#""invalid""#)
+        .execute(w.pg.store.pool())
+        .await
+        .unwrap();
+    let nonce =
+        w.pg.scalar::<String>("select nonce from bot_approvals where state = 'pending'")
+            .await;
+    w.broker
+        .decide(ApprovalId(nonce), PrincipalId(OWNER.into()), false)
+        .await
+        .unwrap();
+    assert_eq!(worker.run_once().await, Some(Outcome::Succeeded));
+    assert_eq!(w.runner.jobs().len(), 1);
+    let seen = api.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        view::result_text(&seen[1].json(), "t0c0").as_deref(),
+        Some(EVENTS)
+    );
+}
+
+#[tokio::test]
 async fn changing_the_active_revision_keeps_a_model_call_retryable_on_the_same_claim() {
     let Some(w) = world().await else { return };
     let run = w.accept("call-revision", "일정 조회").await;

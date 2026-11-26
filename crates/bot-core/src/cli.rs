@@ -39,6 +39,16 @@ impl CliRefusal {
         }
     }
 
+    /// 이미 시작했거나 결론이 있는 호출은 원장을 따른다.
+    pub fn can_replay(record: Option<&crate::ledger::CallRecord>) -> bool {
+        record.is_none_or(|row| matches!(row.phase, crate::ledger::CallPhase::Open { .. }))
+    }
+
+    /// 저장한 표식의 단어를 읽는다. 손상된 값으로 같은 위치의 실행을 허용할 수 없다.
+    pub fn decode(body: &crate::command::JsonPayload) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(&body.0)
+    }
+
     pub fn word(self) -> &'static str {
         match self {
             Self::UnknownTool => "unknown_tool",

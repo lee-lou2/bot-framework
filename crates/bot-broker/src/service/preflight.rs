@@ -16,7 +16,7 @@ use bot_core::{
     cli::CliRefusal,
     command::{JsonPayload, ToolCall},
     id::{Attempt, ToolId},
-    ledger::{CallLedger, CallPhase},
+    ledger::CallLedger,
     port::{Error, Reply},
 };
 use std::sync::{
@@ -61,7 +61,7 @@ pub(crate) async fn confirm(
     expected: CliRefusal,
 ) -> Result<bool, Error> {
     let known = ledger.lookup(call.attempt.clone(), call.call).await?;
-    if known.is_some_and(|record| !matches!(record.phase, CallPhase::Open { .. })) {
+    if !CliRefusal::can_replay(known.as_ref()) {
         return Ok(false);
     }
     match expected {
