@@ -325,7 +325,7 @@ impl Worker {
         }
     }
 
-    /// 체크포인트를 적는다. 리스를 잃었으면 물러나고, 저장소 사정이면 다시 시도하게 실패로 올린다.
+    /// 체크포인트를 적는다. 소유권을 잃으면 물러나고, 같은 내용으로 회복할 수 없는 오류는 종결한다.
     async fn checkpoint(
         &self,
         ctx: &RunContext,
@@ -341,7 +341,10 @@ impl Worker {
             Ok(()) => Ok(()),
             Err(Error::Stale | Error::Denied | Error::Missing) => Err(Flow::Lost),
             Err(Error::Conflict) => Err(Flow::Fail(Failure::Permanent("checkpoint_conflict"))),
-            Err(_) => Err(Flow::Fail(Failure::Transient("checkpoint_unavailable"))),
+            Err(Error::Invalid) => Err(Flow::Fail(Failure::Permanent("invalid_checkpoint"))),
+            Err(Error::Unavailable) => {
+                Err(Flow::Fail(Failure::Transient("checkpoint_unavailable")))
+            }
         }
     }
 
