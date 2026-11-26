@@ -21,6 +21,7 @@ use bot_core::{
     trace::{NoopTracer, Tracer, now_nano},
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -356,11 +357,21 @@ impl Ingress {
         let plan = match chosen {
             Some(bound) if bound.trigger.private => {
                 match self
-                    .private(&route, bound, key.clone(), &inbound, &envelope)
+                    .private(
+                        &route,
+                        bound,
+                        key.clone(),
+                        &inbound,
+                        &envelope,
+                        source.as_ref(),
+                    )
                     .await
                 {
                     Ok(PrivateDecision::Consumed) => return Admission::Private,
                     Err(rejection) => return Admission::Rejected(rejection),
+                    Ok(PrivateDecision::Pass) if !bound.trigger.private_pass => {
+                        return Admission::Rejected(Rejection::Forbidden);
+                    }
                     Ok(PrivateDecision::Pass) => {
                         // 민감 DM 입구가 이미 원 요청 ID(`key.request`)로 `bot_requests`에 private 행을 커밋했으므로
                         // 일반 대화로 넘길 때는 충돌하지 않는 요청 ID를 쓴다(Slack 이벤트 중복 제거는 `slack_key`가 지킨다).
@@ -480,6 +491,7 @@ impl Ingress {
         key: RequestKey,
         inbound: &Inbound,
         envelope: &Value,
+        source: Option<&SlackSource>,
     ) -> Result<PrivateDecision, Rejection> {
         let TriggerTarget::Tool { tool, .. } = &bound.trigger.target else {
             return Err(Rejection::Invalid);
@@ -487,13 +499,17 @@ impl Ingress {
         let Some(args) = trigger::tool_args(&bound.trigger, envelope) else {
             return Err(Rejection::Invalid);
         };
+        let source_id = source.map(|s| (s.event_key(), &s.event_id));
+        let bytes = serde_json::to_vec(&(envelope, source_id)).map_err(|_| Rejection::Invalid)?;
         let call = PrivateCall {
             key,
             revision: route.snapshot.revision.clone(),
             conversation: inbound.conversation.clone(),
             agent: bound.agent.clone(),
+            trigger: bound.trigger.id.clone(),
             tool: tool.clone(),
             args: JsonPayload(args),
+            envelope_sha256: Sha256::digest(bytes).into(),
         };
         self.private.receive(call).await.map_err(private_rejection)
     }

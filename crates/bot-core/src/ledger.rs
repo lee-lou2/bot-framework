@@ -166,7 +166,10 @@ pub trait CallLedger: Send + Sync {
 /// 민감 DM 본문은 메모리에서만 처리한다. HMAC과 접수 키만 저장한다.
 pub struct PrivateRequest {
     pub key: crate::intake::RequestKey,
+    /// 전용 처리용 HMAC. 구판 행도 이 형식으로 대조한다.
     pub fingerprint: [u8; 32],
+    /// 선택한 선언이 넘김을 허용할 때만 있는 v2 HMAC. 판본·트리거·전체 봉투까지 묶는다.
+    pub pass_fingerprint: Option<[u8; 32]>,
     pub revision: Revision,
     pub agent: AgentId,
     pub tool: ToolId,
@@ -192,9 +195,14 @@ pub trait PrivateLedger: Send + Sync {
 }
 
 pub enum PrivatePermit {
-    Start(Attempt),
+    Start {
+        attempt: Attempt,
+        /// 최초 접수에서 넘길 봉투가 결속됐고 이번 전달과 일치한다.
+        allow_pass: bool,
+    },
     InProgress,
     Completed,
+    Passed,
     Rejected,
     Held,
 }
@@ -205,6 +213,7 @@ pub enum PrivateOutcome {
     /// 실행기가 전송 전 실패와 이전 프로세스 종료를 확인했다.
     NotSent,
     Completed,
+    Passed,
     Held,
     Rejected,
 }

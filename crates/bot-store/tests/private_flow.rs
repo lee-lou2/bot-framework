@@ -18,7 +18,7 @@ use bot_core::{
     admin::{AdminAct, AdminRead, HoldRef, HoldVerdict, Viewer},
     command::*,
     id::*,
-    intake::{PrivateCall, PrivateIntake, RequestKey},
+    intake::{PrivateCall, PrivateDecision, PrivateIntake, RequestKey},
     ledger::{PrivateLedger, PrivatePermit},
     port::{AuditLog, Error},
     state::{Conversation, ConversationKind, Risk},
@@ -35,21 +35,34 @@ struct Rig {
 }
 
 fn rig(db: &TestDb) -> Rig {
+    rig_with_pass(db, "r1", false)
+}
+
+fn rig_with_pass(db: &TestDb, revision: &str, private_pass: bool) -> Rig {
     let catalog = Arc::new(FakeCatalog::new());
-    catalog.publish(
-        snapshot("personal", "r1")
-            .role("owner", &["run", "inbox.write"])
-            .member(SENDER, &["owner"])
-            .slack_dm_binding("direct", "main")
-            .policy_scopes(&["run", "inbox.write"])
-            .tool(
-                "main",
-                "inbox.receive",
-                tool_decl(Risk::Write, &["inbox.write"]),
-            )
-            .private_trigger("main", "secure", "direct", "inbox.receive")
-            .build(),
-    );
+    let mut snap = snapshot("personal", revision)
+        .role("owner", &["run", "inbox.write"])
+        .member(SENDER, &["owner"])
+        .slack_dm_binding("direct", "main")
+        .policy_scopes(&["run", "inbox.write"])
+        .tool(
+            "main",
+            "inbox.receive",
+            tool_decl(Risk::Write, &["inbox.write"]),
+        )
+        .private_trigger("main", "secure", "direct", "inbox.receive")
+        .build();
+    let agent = Arc::get_mut(&mut snap)
+        .unwrap()
+        .agents
+        .get_mut(&AgentId("main".into()))
+        .unwrap();
+    agent.triggers[0].private_pass = private_pass;
+    let mut other = agent.triggers[0].clone();
+    other.id = "other".into();
+    other.order = 2;
+    agent.triggers.push(other);
+    catalog.publish(snap);
     let runner = Arc::new(FakeRunner::new());
     let gate = PrivateGate::new(
         PrivateParts {
@@ -85,6 +98,8 @@ fn delivery(request: &str, text: &str) -> PrivateCall {
             thread: None,
         },
         agent: AgentId("main".into()),
+        trigger: "secure".into(),
+        envelope_sha256: [1; 32],
         tool: ToolId("inbox.receive".into()),
         args: JsonPayload(serde_json::json!({ "text": text }).to_string()),
     }
@@ -93,6 +108,135 @@ fn delivery(request: &str, text: &str) -> PrivateCall {
 /// 도구가 정상으로 끝났다고 알리는 결과(`isError: false`가 명시돼야 성공으로 적는다).
 fn ok() -> Ran {
     Ran::Done(JsonPayload(r#"{"isError":false,"content":[]}"#.into()))
+}
+
+#[tokio::test]
+async fn a_committed_private_pass_survives_restart_until_public_intake_commits_once() {
+    use bot_core::port::RunStore;
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let first = rig_with_pass(&db, "r1", true);
+    first.runner.script(Ran::Done(JsonPayload(
+        r#"{"content":[],"isError":false,"_meta":{"bot/pass":true}}"#.into(),
+    )));
+    let input = || delivery("public-handoff", SENTINEL);
+    assert_eq!(
+        first.gate.receive(input()).await.unwrap(),
+        PrivateDecision::Pass
+    );
+    assert_eq!(first.runner.jobs().len(), 1);
+    assert_eq!(rows_containing(&db, SENTINEL).await, 0);
+    drop(first);
+
+    let restarted = rig_with_pass(&db, "r1", true);
+    // 도구에 매핑된 인자는 같아도 다른 봉투·선택 선언·판본으로 공개할 수 없다.
+    let mut changed = input();
+    changed.envelope_sha256 = [2; 32];
+    assert!(matches!(
+        restarted.gate.receive(changed).await,
+        Err(Error::Conflict)
+    ));
+    let mut changed = input();
+    changed.trigger = "other".into();
+    assert!(matches!(
+        restarted.gate.receive(changed).await,
+        Err(Error::Conflict)
+    ));
+    let mut changed = input();
+    changed.revision = Revision("r2".into());
+    let newer = rig_with_pass(&db, "r2", true);
+    assert!(matches!(
+        newer.gate.receive(changed).await,
+        Err(Error::Conflict)
+    ));
+    assert!(newer.runner.jobs().is_empty());
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        assert_eq!(
+            restarted.gate.receive(input()).await.unwrap(),
+            PrivateDecision::Pass
+        );
+        let mut cmd = accept_as(
+            "personal",
+            "public-handoff:pass",
+            SENDER,
+            ConversationKind::Direct,
+            "dm-1",
+            SENTINEL,
+        );
+        cmd.event.binding = input().key.binding;
+        ids.push(db.store.accept(cmd).await.unwrap());
+    }
+    assert_eq!(ids[0], ids[1]);
+    assert!(restarted.runner.jobs().is_empty());
+    assert_eq!(
+        db.scalar::<i64>(
+            "select count(*) from bot_audit where action = 'private.finish' and verdict = 'passed'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        db.scalar::<i64>("select count(*) from bot_runs where not private")
+            .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn upgrading_a_completed_private_request_preserves_only_its_private_receipt() {
+    let Some(mut db) = TestDb::new().await else {
+        return;
+    };
+    let before = rig(&db);
+    before.runner.script(ok());
+    let input = || delivery("legacy", SENTINEL);
+    before.gate.receive(input()).await.unwrap();
+    db.sql("alter table bot_runs drop column private_pass")
+        .await;
+    db.sql("delete from _sqlx_migrations where version = 23")
+        .await;
+    db.store.migrate().await.unwrap();
+    db.reconnect().await;
+    let after = rig_with_pass(&db, "r1", true);
+    assert_eq!(
+        after.gate.receive(input()).await.unwrap(),
+        PrivateDecision::Consumed
+    );
+    assert!(matches!(
+        after.gate.receive(delivery("legacy", "변경")).await,
+        Err(Error::Conflict)
+    ));
+    assert!(after.runner.jobs().is_empty());
+    assert_eq!(rows_containing(&db, SENTINEL).await, 0);
+}
+
+#[tokio::test]
+async fn opt_in_without_a_valid_pass_never_grants_public_intake() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let r = rig_with_pass(&db, "r1", true);
+    for (key, result) in [
+        ("normal", ok()),
+        (
+            "malformed",
+            Ran::Done(JsonPayload(
+                r#"{"content":[],"_meta":{"bot/pass":true,"extra":1},"isError":false}"#.into(),
+            )),
+        ),
+    ] {
+        r.runner.script(result);
+        for _ in 0..2 {
+            assert_eq!(
+                r.gate.receive(delivery(key, SENTINEL)).await.unwrap(),
+                PrivateDecision::Consumed
+            );
+        }
+    }
+    assert_eq!(r.runner.jobs().len(), 2);
+    assert_eq!(rows_containing(&db, SENTINEL).await, 0);
 }
 
 fn operator() -> Viewer {
@@ -278,7 +422,8 @@ async fn a_dead_process_becomes_a_durable_hold_without_any_redelivery() {
     };
     // 게이트가 접수만 하고 죽었다(Start를 받았으나 결과를 기록하지 못했다)
     let request = private_request("req-5", 5);
-    let PrivatePermit::Start(_) = PrivateLedger::begin(&db.store, request).await.unwrap() else {
+    let PrivatePermit::Start { .. } = PrivateLedger::begin(&db.store, request).await.unwrap()
+    else {
         panic!("처음 접수는 Start")
     };
     // 리스가 끝나기 전의 재전달은 진행 중으로 본다(새 실행 없음)
@@ -385,6 +530,7 @@ fn private_request(request: &str, fingerprint: u8) -> bot_core::ledger::PrivateR
             request: RequestId(request.into()),
         },
         fingerprint: [fingerprint; 32],
+        pass_fingerprint: None,
         revision: Revision("r1".into()),
         agent: AgentId("main".into()),
         tool: ToolId("inbox.receive".into()),

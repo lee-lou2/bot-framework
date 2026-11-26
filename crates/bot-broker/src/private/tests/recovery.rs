@@ -38,6 +38,7 @@ async fn a_delivery_made_while_the_first_is_still_in_flight_is_not_acknowledged(
         .begin(PrivateRequest {
             key: first.key.clone(),
             fingerprint,
+            pass_fingerprint: None,
             revision: Revision("r1".into()),
             agent: AgentId("main".into()),
             tool: ToolId("inbox.receive".into()),
@@ -46,7 +47,10 @@ async fn a_delivery_made_while_the_first_is_still_in_flight_is_not_acknowledged(
         })
         .await
         .unwrap();
-    assert!(matches!(permit, bot_core::ledger::PrivatePermit::Start(_)));
+    assert!(matches!(
+        permit,
+        bot_core::ledger::PrivatePermit::Start { .. }
+    ));
     let again = receive(&r, standard("req-1")).await;
     assert!(
         matches!(again, Err(Error::Unavailable)),
@@ -132,6 +136,7 @@ async fn a_started_claim_that_loses_its_lease_becomes_a_durable_hold_without_a_r
         .begin(PrivateRequest {
             key: call.key.clone(),
             fingerprint,
+            pass_fingerprint: None,
             revision: Revision("r1".into()),
             agent: AgentId("main".into()),
             tool: ToolId("inbox.receive".into()),
@@ -140,7 +145,7 @@ async fn a_started_claim_that_loses_its_lease_becomes_a_durable_hold_without_a_r
         })
         .await
         .unwrap();
-    let bot_core::ledger::PrivatePermit::Start(attempt) = permit else {
+    let bot_core::ledger::PrivatePermit::Start { attempt, .. } = permit else {
         panic!()
     };
     r.ledger

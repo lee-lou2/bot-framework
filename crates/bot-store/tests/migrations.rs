@@ -79,6 +79,7 @@ async fn a_database_at_the_previous_version_upgrades_in_place() {
     );
     runs(&db).accept(old_http.clone()).await.unwrap();
     let request = PrivateRequest {
+        pass_fingerprint: None,
         key: RequestKey {
             profile: profile_id(),
             binding: BindingId("direct".into()),
@@ -96,7 +97,9 @@ async fn a_database_at_the_previous_version_upgrades_in_place() {
         },
         scopes: scopes(&["inbox.write"]),
     };
-    let PrivatePermit::Start(at) = PrivateLedger::begin(&db.store, request).await.unwrap() else {
+    let PrivatePermit::Start { attempt: at, .. } =
+        PrivateLedger::begin(&db.store, request).await.unwrap()
+    else {
         panic!("Start")
     };
     // 0007 이전 모양으로 되돌린다(열·제약 제거, 적용 기록 삭제)

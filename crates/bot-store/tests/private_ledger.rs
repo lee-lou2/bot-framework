@@ -261,7 +261,10 @@ async fn a_released_row_is_reclaimed_only_by_the_same_redelivery_with_a_new_epoc
         .unwrap();
     assert_eq!(row(&db).await, "ready:-:1:1:false");
     assert!(runs(&db).claim().await.unwrap().is_none());
-    let PrivatePermit::Start(second) = ledger(&db).begin(request("r1", 1)).await.unwrap() else {
+    let PrivatePermit::Start {
+        attempt: second, ..
+    } = ledger(&db).begin(request("r1", 1)).await.unwrap()
+    else {
         panic!("반납된 행은 같은 입력의 재전달이 다시 점유한다")
     };
     assert_eq!(
@@ -286,7 +289,9 @@ async fn a_released_row_is_reclaimed_only_by_the_same_redelivery_with_a_new_epoc
         .await
         .unwrap();
     assert_eq!(row(&db).await, "ready:-:1:2:false");
-    let PrivatePermit::Start(third) = ledger(&db).begin(request("r1", 1)).await.unwrap() else {
+    let PrivatePermit::Start { attempt: third, .. } =
+        ledger(&db).begin(request("r1", 1)).await.unwrap()
+    else {
         panic!("재점유")
     };
     assert_eq!(epoch(&third), 3);

@@ -24,12 +24,14 @@ enum Phase {
     Released,
     Started,
     Completed,
+    Passed,
     Rejected,
     Held,
 }
 
 struct Row {
     fingerprint: [u8; 32],
+    allow_pass: bool,
     agent: AgentId,
     tool: ToolId,
     conversation: (String, String, Option<String>),
@@ -72,6 +74,7 @@ fn label(outcome: &PrivateOutcome) -> &'static str {
         PrivateOutcome::RetryBeforeStart => "retry_before_start",
         PrivateOutcome::NotSent => "not_sent",
         PrivateOutcome::Completed => "completed",
+        PrivateOutcome::Passed => "passed",
         PrivateOutcome::Held => "held",
         PrivateOutcome::Rejected => "rejected",
     }
@@ -133,7 +136,12 @@ impl PrivateLedger for MemPrivateLedger {
             let mut rows = lock(&self.rows);
             let conversation = conversation_key(&request.conversation);
             if let Some(row) = rows.get_mut(&request.key) {
-                let same = row.fingerprint == request.fingerprint
+                let fingerprint = if row.allow_pass {
+                    request.pass_fingerprint.ok_or(Error::Conflict)?
+                } else {
+                    request.fingerprint
+                };
+                let same = row.fingerprint == fingerprint
                     && row.agent == request.agent
                     && row.tool == request.tool
                     && row.conversation == conversation;
@@ -145,20 +153,26 @@ impl PrivateLedger for MemPrivateLedger {
                         row.phase = Phase::Reserved;
                         row.epoch += 1;
                         row.attempt.claim = Some(ClaimEpoch(row.epoch));
-                        PrivatePermit::Start(row.attempt.clone())
+                        PrivatePermit::Start {
+                            attempt: row.attempt.clone(),
+                            allow_pass: row.allow_pass,
+                        }
                     }
                     Phase::Reserved | Phase::Started => PrivatePermit::InProgress,
                     Phase::Completed => PrivatePermit::Completed,
+                    Phase::Passed => PrivatePermit::Passed,
                     Phase::Rejected => PrivatePermit::Rejected,
                     Phase::Held => PrivatePermit::Held,
                 });
             }
             let mut attempt = lock(&self.base).clone().ok_or(Error::Unavailable)?;
+            let allow_pass = request.pass_fingerprint.is_some();
+            let fingerprint = request.pass_fingerprint.unwrap_or(request.fingerprint);
             let epoch = attempt.claim.map_or(1, |c| c.0);
             attempt.claim = Some(ClaimEpoch(epoch));
             lock(&self.stored).push(Stored {
                 key: request.key.clone(),
-                fingerprint: request.fingerprint,
+                fingerprint,
                 agent: request.agent.clone(),
                 tool: request.tool.clone(),
                 scopes: request.scopes,
@@ -166,7 +180,8 @@ impl PrivateLedger for MemPrivateLedger {
             rows.insert(
                 request.key,
                 Row {
-                    fingerprint: request.fingerprint,
+                    fingerprint,
+                    allow_pass,
                     agent: request.agent,
                     tool: request.tool,
                     conversation,
@@ -175,7 +190,10 @@ impl PrivateLedger for MemPrivateLedger {
                     epoch,
                 },
             );
-            Ok(PrivatePermit::Start(attempt))
+            Ok(PrivatePermit::Start {
+                attempt,
+                allow_pass,
+            })
         })();
         Box::pin(async move { result })
     }
@@ -228,6 +246,9 @@ impl PrivateLedger for MemPrivateLedger {
                 (Phase::Reserved, PrivateOutcome::Rejected) => Phase::Rejected,
                 (Phase::Started, PrivateOutcome::NotSent) => Phase::Released,
                 (Phase::Started, PrivateOutcome::Completed) => Phase::Completed,
+                (Phase::Started | Phase::Held, PrivateOutcome::Passed) if row.allow_pass => {
+                    Phase::Passed
+                }
                 (Phase::Started, PrivateOutcome::Held) => Phase::Held,
                 (Phase::Started, PrivateOutcome::Rejected) => Phase::Rejected,
                 _ => return Err(Error::Conflict),

@@ -1,5 +1,5 @@
-//! private DM 접수(`PrivateIntake`). 민감 본문은 지정한 도구에만 전달하고 일반 큐·감사·승인 카드·모델 맥락·추적에
-//! 평문으로 남기지 않는다. 본문은 메모리에서만 처리하고 저장소에는 접수 키와 프로필별 HMAC 지문만 남는다.
+//! private DM 접수(`PrivateIntake`). 지정 도구에 매핑 인자를 전달하고 전용 원장에는 식별자·프로필별 HMAC·판정만 남긴다.
+//! 선택한 선언이 허용한 빈 PASS만 게이트웨이가 원래 봉투를 일반 대화로 접수할 수 있게 한다.
 //!
 //! 일반 호출 원장(`CallLedger`)·워커·모델·기억·회신 포트에는 private 권한을 열지 않는다. 전용 원장(`PrivateLedger`)만
 //! `begin`(리스 점유) → `start`(전송 직전 한 번) → `finish`(고정된 결과 종류만)를 바꾼다. 도구의 결과·오류·영수증은 저장하지
@@ -115,8 +115,10 @@ impl PrivateGate {
             revision,
             conversation,
             agent,
+            trigger,
             tool,
             args,
+            envelope_sha256,
         } = call;
         let parts = &self.parts;
         let snapshot = parts.catalog.current(&key.profile).ok_or(Error::Denied)?;
@@ -132,17 +134,14 @@ impl PrivateGate {
         if conversation.kind != ConversationKind::Direct || !dm {
             return Err(Error::Denied);
         }
-        // 지금 판본에 이 바인딩·에이전트·도구를 가리키는 private 트리거가 있어야 한다.
+        // 같은 도구를 쓰는 선언도 넘김 정책이 다를 수 있다. 게이트웨이가 고른 선언의 정책만 읽는다.
         let owner = snapshot.agents.get(&agent).ok_or(Error::Denied)?;
-        let trigger = owner.triggers.iter().find(|t| {
-            t.private
+        let declaration = owner.triggers.iter().find(|t| {
+            t.id == trigger && t.private
                 && matches!(&t.on, TriggerSource::Event { binding, .. } if *binding == key.binding)
                 && matches!(&t.target, TriggerTarget::Tool { tool: target, .. } if *target == tool)
-        });
-        let private_pass = trigger.is_some_and(|t| t.private_pass);
-        let declared_tool = find_tool(&snapshot, &agent, &tool)
-            .filter(|_| trigger.is_some())
-            .ok_or(Error::Denied)?;
+        }).ok_or(Error::Denied)?;
+        let declared_tool = find_tool(&snapshot, &agent, &tool).ok_or(Error::Denied)?;
         // 승인 카드는 인자를 보여 줘야 하고, 단계 원장은 입력이 섞인 인자 해시를 저장하므로 둘 다 민감 입력에는 쓰지 않는다.
         if declared_tool.effects
             || classify(declared_tool, &snapshot.policy.approve, false).needs_approval()
@@ -197,11 +196,24 @@ impl PrivateGate {
                 sealed.canonical.as_bytes(),
             ],
         );
+        let pass_fingerprint = declaration.private_pass.then(|| {
+            hmac(
+                &hmac_key,
+                &[
+                    b"private-pass/v2",
+                    &fingerprint,
+                    revision.0.as_bytes(),
+                    trigger.as_bytes(),
+                    &envelope_sha256,
+                ],
+            )
+        });
         let permit = parts
             .ledger
             .begin(PrivateRequest {
                 key: key.clone(),
                 fingerprint,
+                pass_fingerprint,
                 revision: revision.clone(),
                 agent,
                 tool: tool.clone(),
@@ -210,7 +222,15 @@ impl PrivateGate {
             })
             .await?;
         match permit {
-            PrivatePermit::Start(attempt) => {
+            PrivatePermit::Start {
+                attempt,
+                allow_pass,
+            } => {
+                let fingerprint = if allow_pass {
+                    pass_fingerprint.ok_or(Error::Denied)?
+                } else {
+                    fingerprint
+                };
                 *label = "accepted";
                 // 출처는 게이트웨이가 인증한 입구(대화 종류·발신자)로 정한다. 모델 인자나 요청 ID로 추정하지 않는다.
                 let origin = RunOrigin::from_ingress(&conversation.kind, &key.principal);
@@ -227,7 +247,7 @@ impl PrivateGate {
                     fingerprint,
                     checked_revision: snapshot.revision.clone(),
                     reply_to,
-                    private_pass,
+                    private_pass: allow_pass,
                 };
                 let result = self.execute(run).await;
                 if result.is_err() {
@@ -244,6 +264,12 @@ impl PrivateGate {
             PrivatePermit::Completed | PrivatePermit::Held => {
                 *label = "duplicate";
                 Ok(PrivateDecision::Consumed)
+            }
+            PrivatePermit::Passed => {
+                *label = "duplicate";
+                pass_fingerprint
+                    .map(|_| PrivateDecision::Pass)
+                    .ok_or(Error::Denied)
             }
             PrivatePermit::Rejected => {
                 *label = "duplicate";
@@ -303,28 +329,28 @@ impl PrivateGate {
                 run.attempt.run.0, run.attempt.generation.0
             ),
         };
-        let (outcome, passed) = match self.parts.runner.run(job).await {
+        let outcome = match self.parts.runner.run(job).await {
             // 도구가 오류로 끝났다고 알려도(`isError`) 일부 효과가 났을 수 있다: 성공으로 적지 않고 보류한다.
-            Ok(Ran::Done(payload)) if reports_error(&payload.0) => (PrivateOutcome::Held, false),
+            Ok(Ran::Done(payload)) if reports_error(&payload.0) => PrivateOutcome::Held,
             // 민감 DM 전용 도구가 «처리하지 않음» 표식을 돌려줬다: `private_pass: true`이고 유효한 빈 표식일 때만 일반 DM 대화로 넘긴다.
             Ok(Ran::Done(payload)) if crate::service::pass::carries_marker(&payload.0) => {
                 let (_, marker) = crate::service::pass::split(&payload);
                 if run.private_pass && marker.is_some_and(|m| m.valid) {
-                    (PrivateOutcome::Completed, true)
+                    PrivateOutcome::Passed
                 } else {
-                    (PrivateOutcome::Held, false)
+                    PrivateOutcome::Held
                 }
             }
-            Ok(Ran::Done(_)) => (PrivateOutcome::Completed, false),
+            Ok(Ran::Done(_)) => PrivateOutcome::Completed,
             // 서버가 실행 전에 확정적으로 거절했다(잘못된 요청·인자): 외부 효과가 없다.
-            Ok(Ran::Rejected | Ran::Refused(_)) => (PrivateOutcome::Rejected, false),
-            Ok(Ran::NotSent) => (PrivateOutcome::NotSent, false),
+            Ok(Ran::Rejected | Ran::Refused(_)) => PrivateOutcome::Rejected,
+            Ok(Ran::NotSent) => PrivateOutcome::NotSent,
             // 결과를 막았어도 도구는 이미 실행됐다(외부 효과가 불명이다): 거절로 단정하지 않고 보류한다.
             // 보냈는지 모르거나 실행기가 실패했을 때도 보류하고 원문으로 다시 실행하지 않는다.
-            Ok(Ran::Blocked(_) | Ran::Unknown(_)) | Err(_) => (PrivateOutcome::Held, false),
+            Ok(Ran::Blocked(_) | Ran::Unknown(_)) | Err(_) => PrivateOutcome::Held,
         };
         let result = match outcome {
-            PrivateOutcome::Completed if passed => Ok(PrivateDecision::Pass),
+            PrivateOutcome::Passed => Ok(PrivateDecision::Pass),
             PrivateOutcome::Completed | PrivateOutcome::Held => Ok(PrivateDecision::Consumed),
             PrivateOutcome::NotSent | PrivateOutcome::RetryBeforeStart => Err(Error::Unavailable),
             PrivateOutcome::Rejected => Err(Error::Denied),
@@ -378,6 +404,7 @@ fn reports_error(payload: &str) -> bool {
 fn outcome_label(outcome: &PrivateOutcome) -> &'static str {
     match outcome {
         PrivateOutcome::Completed => "completed",
+        PrivateOutcome::Passed => "passed",
         PrivateOutcome::Held => "held",
         PrivateOutcome::NotSent => "not_sent",
         PrivateOutcome::RetryBeforeStart => "retry",

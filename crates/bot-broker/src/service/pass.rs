@@ -1,7 +1,7 @@
 //! F3: 직접 도구의 «처리하지 않음» 표식. 도구가 성공 결과 최상위 `_meta["bot/pass"] = true`와 빈 `content`만 돌려주면 이 이벤트를 처리하지 않았다는 뜻이고,
 //! 호스트는 호출 결론·커서 전진(다음 후보 또는 기본 대화)·감사를 **한 커밋**으로 기록해(`CallLedger::finish_pass`) run을 대기열로 되돌린다.
 //!
-//! - 해석하는 곳: 일반 Slack 직접 트리거의 호출뿐(접수가 사슬을 남긴 run의 현재 후보 호출 ID). 모델·위임·HTTP·cron·민감 DM 호출의 표식은 해석하지 않고 떼어 낸다 —
+//! - 해석하는 곳: 일반 Slack 직접 트리거의 호출뿐(접수가 사슬을 남긴 run의 현재 후보 호출 ID). 민감 DM은 전용 원장이 별도로 판정한다. 모델·위임·HTTP·cron 호출의 표식은 떼어 낸다 —
 //!   그 호출들의 결과는 표식이 없던 때와 바이트가 같다.
 //! - 표식은 정확히 `{"content":[],"isError":false,"_meta":{"bot/pass":true}}`일 때만 유효하다. 본문·structuredContent·오류·wake·불리언 `true`가 아닌 값이
 //!   함께 오면 `invalid_pass`로 그 후보에서 닫는다(다음 실행 0).
@@ -63,7 +63,7 @@ pub(crate) fn split(payload: &JsonPayload) -> (JsonPayload, Option<Marker>) {
     )
 }
 
-/// 이 결과의 `_meta`에 표식이 있는가(민감 DM 전용 경로가 «실패로 닫는다»를 판정하는 데 쓴다).
+/// 이 결과의 `_meta`에 표식이 있는가(민감 DM 전용 경로의 넘김·보류 판정에 쓴다).
 pub fn carries_marker(payload: &str) -> bool {
     matches!(parse(payload), Some(Value::Object(map))
         if map.get("_meta").and_then(Value::as_object).is_some_and(|meta| meta.contains_key(PASS_KEY)))

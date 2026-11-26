@@ -35,14 +35,18 @@ pub struct RunProgress {
     pub waiting_approval: bool,
 }
 
-/// body/args를 로그·일반 큐·승인 카드·모델에 보관하지 않는다.
+/// 지정 도구만 매핑 인자를 받는다. 전용 원장은 원문을 저장하지 않는다.
 pub struct PrivateCall {
     pub key: RequestKey,
     pub revision: Revision,
     pub conversation: Conversation,
     pub agent: AgentId,
+    /// 게이트웨이가 이 에이전트에서 사건·조건·순위로 선택한 선언.
+    pub trigger: String,
     pub tool: ToolId,
     pub args: JsonPayload,
+    /// 일반 대화로 넘길 수 있는 전체 봉투와 인증된 이벤트 식별의 지문. 메모리에서만 HMAC의 입력으로 쓴다.
+    pub envelope_sha256: [u8; 32],
 }
 
 /// 민감 DM 입구의 처리 결과. `Pass`는 `private_pass: true` 트리거의 도구가 민감 입력이 아님을 확인하고 일반 대화로 넘겼을 때만 돌려준다.

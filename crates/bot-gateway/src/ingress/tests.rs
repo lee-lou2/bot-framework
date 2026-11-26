@@ -413,6 +413,70 @@ async fn private_pass_uses_distinct_request_id_for_normal_dm() {
 }
 
 #[tokio::test]
+async fn only_the_selected_private_trigger_may_release_the_event() {
+    #[derive(Default)]
+    struct AlwaysPass(Mutex<Vec<(String, [u8; 32])>>);
+    impl PrivateIntake for AlwaysPass {
+        fn receive(&self, call: PrivateCall) -> bot_core::port::Reply<'_, PrivateDecision> {
+            assert_eq!(call.args.0, "{}");
+            self.0
+                .lock()
+                .unwrap()
+                .push((call.trigger, call.envelope_sha256));
+            Box::pin(async { Ok(PrivateDecision::Pass) })
+        }
+    }
+    let mut closed = event_trigger("closed", "direct", tool_target("inbox.receive", "{}"));
+    closed.private = true;
+    closed.order = 2;
+    let mut open = closed.clone();
+    open.id = "open".into();
+    open.order = 1;
+    open.private_pass = true;
+    open.conditions
+        .insert("body.text".into(), JsonPayload(r#""일반 질문""#.into()));
+    let rig = rig_with(
+        base().trigger("main", open).trigger("main", closed),
+        |host| {
+            host.limits.per_principal_per_min = Some(30);
+        },
+    );
+    let private = Arc::new(AlwaysPass::default());
+    let ingress = Ingress::new(
+        rig.catalog,
+        rig.ingress.host.clone(),
+        rig.store.clone(),
+        private.clone(),
+    )
+    .with_uid_resolver(|account| Ok(account.uid.unwrap()));
+    assert_eq!(
+        ingress.admit(slack_dm("U1", "ev-1", "민감 질문")).await,
+        Admission::Rejected(Rejection::Forbidden)
+    );
+    assert!(rig.store.accepted().is_empty());
+    let public = || slack_dm("U1", "ev-2", "일반 질문");
+    rig.store.fail_next(Error::Unavailable);
+    assert!(!ingress.admit(public()).await.settled());
+    for _ in 0..2 {
+        assert_eq!(ingress.admit(public()).await, accepted("run-1"));
+    }
+    assert_eq!(rig.store.accepted().len(), 1);
+    let mut changed = public();
+    changed.attachments.push("slack:home/F1".into());
+    ingress.admit(changed).await;
+    let mut changed = public();
+    changed.body["detail"] = json!("매핑하지 않은 값");
+    ingress.admit(changed).await;
+    let calls = private.0.lock().unwrap();
+    assert_eq!(calls[0].0, "closed");
+    assert!(calls[1..].iter().all(|(id, _)| id == "open"));
+    assert_eq!(calls[1].1, calls[2].1);
+    assert_eq!(calls[1].1, calls[3].1);
+    assert_ne!(calls[1].1, calls[4].1);
+    assert_ne!(calls[1].1, calls[5].1);
+}
+
+#[tokio::test]
 async fn a_store_outage_is_not_settled_so_the_source_redelivers() {
     let rig = rig(base());
     rig.store.fail_next(Error::Unavailable);

@@ -171,6 +171,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "slack_events",
         include_str!("../migrations/0022_slack_events.sql"),
     ),
+    (
+        23,
+        "private pass",
+        include_str!("../migrations/0023_private_pass.sql"),
+    ),
 ];
 
 fn migrator() -> Migrator {

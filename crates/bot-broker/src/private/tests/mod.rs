@@ -113,6 +113,14 @@ pub(super) fn delivery(
             thread: None,
         },
         agent: AgentId("main".into()),
+        trigger: match (binding, tool) {
+            ("channel", _) => "wrong",
+            (_, "inbox.delete") => "danger",
+            (_, "inbox.steps") => "steps",
+            _ => "secure",
+        }
+        .into(),
+        envelope_sha256: [1; 32],
         tool: ToolId(tool.into()),
         args: bot_core::command::JsonPayload(text.into()),
     }
@@ -127,6 +135,38 @@ pub(super) async fn receive(
 
 pub(super) fn standard(request: &str) -> PrivateCall {
     delivery(request, "local:owner", "direct", "inbox.receive", SENTINEL)
+}
+
+#[tokio::test]
+async fn the_selected_declaration_owns_its_pass_policy_even_when_targets_match() {
+    for allows in [false, true] {
+        let r = rig(true);
+        let mut snap = world("r1");
+        let agent = Arc::get_mut(&mut snap)
+            .unwrap()
+            .agents
+            .get_mut(&AgentId("main".into()))
+            .unwrap();
+        let secure = agent
+            .triggers
+            .iter_mut()
+            .find(|t| t.id == "secure")
+            .unwrap();
+        secure.order = 1;
+        secure.private_pass = allows;
+        let mut other = secure.clone();
+        other.id = "other".into();
+        other.order = 2;
+        other.private_pass = !allows;
+        agent.triggers.insert(0, other);
+        r.catalog.publish(snap);
+        r.runner.script(Ran::Done(bot_core::command::JsonPayload(
+            r#"{"content":[],"isError":false,"_meta":{"bot/pass":true}}"#.into(),
+        )));
+        let decision = receive(&r, standard("req-1")).await.unwrap();
+        assert_eq!(decision == PrivateDecision::Pass, allows);
+        assert_eq!(r.runner.jobs().len(), 1);
+    }
 }
 
 #[tokio::test]

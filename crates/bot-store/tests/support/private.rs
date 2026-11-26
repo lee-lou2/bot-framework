@@ -21,6 +21,7 @@ pub fn request(request: &str, fingerprint: u8) -> PrivateRequest {
             request: RequestId(request.into()),
         },
         fingerprint: [fingerprint; 32],
+        pass_fingerprint: None,
         revision: Revision("r1".into()),
         agent: AgentId("main".into()),
         tool: ToolId(TOOL.into()),
@@ -39,7 +40,7 @@ pub fn ledger(db: &TestDb) -> &dyn PrivateLedger {
 
 pub async fn reserve(db: &TestDb, name: &str, fingerprint: u8) -> Attempt {
     match ledger(db).begin(request(name, fingerprint)).await.unwrap() {
-        PrivatePermit::Start(at) => at,
+        PrivatePermit::Start { attempt: at, .. } => at,
         _ => panic!("처음 접수는 Start"),
     }
 }
