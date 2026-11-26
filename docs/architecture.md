@@ -33,7 +33,7 @@ flowchart LR
 - **Broker**는 도구 호출을 인가하고 감사한다. 허가된 호출에 한해 MCP 서버를 시작하거나, 호스트에 등록한 원격(Streamable HTTP) 서버에 직접 접속한다([원격 도구 서버](plugins.md#원격-도구-서버streamable-http)). 모델용 채널은 외부 모델 이용도 중계한다. 도구의 외부 API 호출은 해당 서버가 맡는다.
 - **Store**는 PG에 접수, 큐, 기억, 승인, 영수증, 회신을 기록한다. **Admin**은 axum UI/API로 권한에 맞는 실행·승인·보류를 보여 준다. OTLP는 요청·자식·시도·도구 ID를 잇는다. 추적 수집기 장애와 관계없이 원장은 보존한다.
 
-핵심 용어는 프로필(격리 단위), 에이전트(역할 폴더), 스킬(지침·도구), 게이트웨이(입출구), 트리거(실행 조건), 실행(run), 브로커(도구 호출 관문), 효과(effect, 외부 쓰기) 여덟 개다.
+핵심 용어는 프로필(격리 단위), 에이전트(역할 폴더), 스킬(지침·도구), 게이트웨이(입출구), 트리거(실행 조건), 실행(run), 브로커(도구 호출 관문), 효과(effect, 외부 쓰기) 여덟 개다. 코드 이름과 크레이트마다 다르게 쓰이는 말은 [용어집](glossary.md)에 모았다.
 
 ### Claude Code가 브로커에 연결하는 방법
 
@@ -93,9 +93,9 @@ Rust 어댑터는 열린 리스너의 실제 주소 하나로 init용 `BOT_RELAY
 | bot-runtime | 워커·예약·위임 및 Apple container VM에서 모델 CLI 실행 | core |
 | bot-broker | 도구 인가·승인, 모델 프록시 및 srt에서 MCP 도구 실행 | core |
 | bot-gateway | CLI·Slack·HTTP 접수와 회신 | core |
-| bot-admin | 관리 API와 UI | core |
+| bot-admin | 관리 API·UI와 OTLP 추적 내보내기(모든 역할이 쓴다) | core |
 | bot-cli | bot 바이너리, SecretStore 구현과 역할 조립 | 위 7개 |
 
-CLI는 공통 포트 `bot_core::sandbox::Sandbox<Spec>`에 모델용 Apple container VM과 도구 서버용 srt 어댑터를 각각 주입한다.
+샌드박스 포트는 둘이다. 모델용 Apple container VM(`ContainerSandbox`)은 `bot_core::sandbox::Sandbox<ModelSpec>`을, 도구 서버용 srt(`SrtSandbox`)는 이름만 같은 별개의 `bot_broker::sandbox::Sandbox`를 구현한다. 둘을 묶는 공통 포트는 없고, CLI가 각각의 어댑터를 주입한다.
 
 실행 설정은 BOT_ 접두사를 사용한다. 프로필 루트는 BOT_PROFILES로 주입한다. 공개 워크스페이스는 실제 프로필 이름·코드·경로에 의존하지 않는다.

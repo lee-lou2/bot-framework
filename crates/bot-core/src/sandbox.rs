@@ -1,4 +1,5 @@
-//! 모델 실행과 MCP 도구 실행이 공유하는 OS 샌드박스 경계.
+//! 모델 샌드박스(VM) 포트. 구현은 `bot-runtime`의 `ContainerSandbox` 하나다.
+//! 도구 서버(srt)의 샌드박스는 이름만 같은 별개 트레이트 `bot_broker::sandbox::Sandbox`이고, 둘을 묶는 공통 포트는 없다(`docs/glossary.md`).
 use crate::{id::Attempt, port::Reply};
 use std::{future::Future, path::PathBuf, pin::Pin, time::Duration};
 
@@ -25,7 +26,7 @@ pub struct Mount {
     pub guest: String,
 }
 
-/// 호스트가 조립한 모델 CLI 요청. 어댑터는 현재 claim의 전용 브로커 IPC만 연결한다.
+/// 호스트가 조립한 모델 CLI 요청. 어댑터는 현재 claim의 브로커 프런트(릴레이 HTTP) 한 곳에만 닿게 한다.
 /// 입력은 읽기 전용이고 scratch만 쓰기 가능하다. 경로 매핑을 보장할 수 없으면 실행을 거절한다.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ModelSpec {

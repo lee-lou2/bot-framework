@@ -1,8 +1,8 @@
 //! `bot serve --role …` — 역할을 조립해 시작한다. 시작 전에 모든 검증(프로필·호스트 등록부·입구 표·자격·저장소)을 끝내고
 //! 하나라도 어긋나면 일·발송 0으로 멈춘다. 종료 신호(SIGINT·SIGTERM)는 여기서 소유해 모든 역할에 같은 토큰으로 전한다.
 //!
-//! 조립된 역할: `gateway`·`admin`. 나머지(scheduler·worker·broker)는 각 크레이트의 시작 함수가 생기면 연결한다 —
-//! 그 전에는 요청한 역할 중 하나라도 조립되지 않았으면 이름과 이유를 밝히고 아무것도 시작하지 않는다(`all`도 같다).
+//! 조립하는 역할: `gateway`·`scheduler`·`worker`·`admin`(`all`은 이 넷). 브로커는 `worker` 안에서 같은 프로세스로 돌기 때문에 별도 역할이 아니다 —
+//! `--role broker`를 요청하면 이유를 밝히고 아무것도 시작하지 않는다(`not_assembled`).
 mod activation;
 mod admin;
 pub mod claude;

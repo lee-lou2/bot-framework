@@ -7,7 +7,7 @@ use bot_core::{
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// 프로필이 선언한 입구(별칭 수준). `profile-spec.md`의 바인딩 네 가지와 1:1이다.
+/// 프로필이 선언한 입구(별칭 수준). `profile-spec.md`의 바인딩 종류와 변종이 1:1이다.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Entrance {
     /// 호스트가 OS 사용자에 연결한 별칭
