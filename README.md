@@ -43,9 +43,9 @@ export BOT_DATABASE_URL="postgres://postgres@127.0.0.1:5432/bot_demo"
 
 팀 프로필 템플릿은 팀 리드 아래에 개발·디자인·기획·운영 에이전트를 나눈 복사용 예시이고, 같은 준비로 `bot chat --profile team "오늘 일정 알려줘"`를 해 볼 수 있습니다. [팀 예시 프로필](examples/profiles/team) · [팀 템플릿 안내](docs/team-template.md)
 
-내 프로필은 `bot init my-bot --template team`(`personal`·`team`·`company`)으로 호스트 설정 예시와 프로필 폴더를 만들고, 출력된 안내대로 환경 변수를 정한 뒤 `bot validate`와 `bot doctor`로 점검합니다. 에이전트와 스킬 뼈대는 `bot add agent main/cs`, `bot add skill triage --agent main/cs`로 더합니다. 권한 상한은 자동으로 바꾸지 않습니다. [명령 안내](docs/gateway.md#자격-보관소와-명령)
+내 프로필은 `bot init my-bot --template team`(`personal`·`team`·`company`)으로 호스트 설정 예시와 프로필 폴더를 만들고, 출력된 안내대로 환경 변수를 정한 뒤 `bot validate`와 `bot doctor`로 점검합니다. 에이전트·스킬·도구 뼈대는 `bot add agent main/cs`, `bot add skill triage --agent main/cs`, `bot add tool triage.lookup`으로 더합니다. 권한 상한은 자동으로 바꾸지 않습니다. [첫 도구 만들기](docs/first-tool.md) · [명령 안내](docs/gateway.md#자격-보관소와-명령)
 
-[왜 이렇게 만들었나](docs/why.md) · [전체 구조](docs/architecture.md) · [프로필 작성](docs/profile-spec.md) · [보안](docs/security.md) · [장애 복구](docs/reliability.md) · [MCP 도구](docs/plugins.md) · [관리·관측](docs/admin.md) · [게이트웨이](docs/gateway.md) · [배포 점검](docs/release.md) · [로드맵](docs/roadmap.md)
+[왜 이렇게 만들었나](docs/why.md) · [전체 구조](docs/architecture.md) · [프로필 작성](docs/profile-spec.md) · [첫 도구 만들기](docs/first-tool.md) · [보안](docs/security.md) · [장애 복구](docs/reliability.md) · [MCP 도구](docs/plugins.md) · [관리·관측](docs/admin.md) · [게이트웨이](docs/gateway.md) · [배포 점검](docs/release.md) · [로드맵](docs/roadmap.md)
 
 ## 라이선스
 
