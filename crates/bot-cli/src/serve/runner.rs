@@ -286,6 +286,61 @@ mod tests {
         assert!(paths.iter().all(|path| path.exists()));
     }
 
+    /// 도구가 읽지 못하는 곳의 전체 집합을 고정한다: 설치 기준·프로필 루트·호스트 설정·소켓·관리 비밀 파일·(있으면) 홈, 그리고 파일 기반 보관소(SOPS)의 암호화 파일.
+    /// 환경 변수·키체인 보관소는 도구가 읽을 파일이 따로 없다. 파일 기반 보관소를 더해도 이 집합에 자기 파일이 따라오는지 이 시험이 지킨다.
+    #[test]
+    fn the_denied_set_holds_the_host_files_and_the_file_of_a_file_backed_secret_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "x").unwrap();
+            path
+        };
+        let (host, socket, token, sops) = (
+            file("host.json"),
+            file("gateway.sock"),
+            file("admin.token"),
+            file("secrets.sops.json"),
+        );
+        let profiles = dir.path().join("profiles");
+        let base = dir.path().join("installs");
+        std::fs::create_dir(&profiles).unwrap();
+        std::fs::create_dir(&base).unwrap();
+        let settings = |secrets: &str| {
+            Settings::read(&|name| match name {
+                "BOT_PROFILES" => Some(profiles.display().to_string()),
+                "BOT_HOST_CONFIG" => Some(host.display().to_string()),
+                "BOT_SOCKET" => Some(socket.display().to_string()),
+                "BOT_ADMIN_TOKEN_FILE" => Some(token.display().to_string()),
+                "BOT_SECRETS" => Some(secrets.to_owned()),
+                _ => None,
+            })
+            .unwrap()
+        };
+        // 홈은 시험을 돌리는 환경에 따라 있을 수 있다
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() && path.exists());
+        let expected = |secret_file: Option<&PathBuf>| {
+            let mut paths = vec![
+                base.clone(),
+                profiles.clone(),
+                host.clone(),
+                socket.clone(),
+                token.clone(),
+            ];
+            paths.extend(secret_file.cloned());
+            paths.extend(home.clone());
+            paths.sort();
+            paths.dedup();
+            paths
+        };
+        assert_eq!(denied(&settings("env"), &base), expected(None));
+        assert_eq!(denied(&settings("keychain"), &base), expected(None));
+        let sops_settings = settings(&format!("sops:{}", sops.display()));
+        assert_eq!(denied(&sops_settings, &base), expected(Some(&sops)));
+    }
+
     fn host_with(servers: &str, extra: &str) -> crate::host::HostFile {
         crate::host::parse(&format!(r#"{{"version": 1, "servers": {servers}{extra}}}"#)).unwrap()
     }
