@@ -44,13 +44,23 @@ impl UxStore {
     }
 
     pub fn set_progress(&self, run: &RunId, state: RunState) {
+        self.set_progress_detail(run, state, None, None);
+    }
+
+    pub fn set_progress_detail(
+        &self,
+        run: &RunId,
+        state: RunState,
+        active_agent: Option<&str>,
+        active_tool: Option<&str>,
+    ) {
         self.progress.lock().unwrap().insert(
             run.clone(),
             RunProgress {
                 state,
                 cancel_requested: false,
-                active_agent: None,
-                active_tool: None,
+                active_agent: active_agent.map(str::to_owned),
+                active_tool: active_tool.map(str::to_owned),
                 waiting_approval: false,
             },
         );

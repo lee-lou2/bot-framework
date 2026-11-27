@@ -179,10 +179,10 @@ v2.0은 Slack 이벤트와 버튼 클릭을 오직 [Socket Mode](https://docs.sl
 
 ### 진행 표시와 중지
 
-1:1 DM과 채널 봇 멘션의 일반 수락 실행(`Admission::Accepted`)은 실시간 진행 상태를 표시하고 스레드 내 취소를 지원합니다(`crates/bot-gateway/src/slack/ux.rs`, `crates/bot-gateway/src/slack/ux/cards.rs`, `crates/bot-gateway/src/slack/ux/stop.rs`). 멘션 없는 `thread_reply`, `reaction_added`, 비공개 DM에는 진행 UI와 중지 처리가 적용되지 않습니다.
+1:1 DM과 채널 봇 멘션의 일반 수락 실행(`Admission::Accepted`)은 실시간 진행 상태를 표시하고 스레드 내 취소를 지원합니다(`crates/bot-gateway/src/slack/ux.rs`, `crates/bot-gateway/src/slack/ux/cards.rs`, `crates/bot-gateway/src/slack/ux/stop.rs`, `crates/bot-gateway/src/slack/ux/stream.rs`). 멘션 없는 `thread_reply`, `reaction_added`, 비공개 DM에는 진행 UI와 중지 처리가 적용되지 않습니다.
 
 - **메모리 내 감시**: 최대 30분(`WATCH_LIMIT`) 동안 실행을 추적합니다. 게이트웨이 재시작, 만료, 완료 이후에는 Agent 중지 버튼이 동작하지 않고, 중지 명령은 일반 질문으로 접수되며, 만료된 확인 카드 버튼은 `STOP_GONE`(`"This task has already finished or the prompt has expired."`)으로 갱신됩니다.
-- **진행 표시**: 👀(`eyes`) 리액션을 달고 `chat.startStream` / `chat.appendStream` / `chat.stopStream`으로 진행 요약을 스트리밍하며, 응답 게시 또는 감시 종료 전에 `chat.delete`로 진행 카드를 제거하고 성공 시 ✅(`white_check_mark`), 실패/취소 시 ❌(`x`)로 교체합니다. 순수 장식용(API 실패가 실행이나 전달을 막지 않음)이며 고정 상태 문구, 에이전트 약칭, 도구 이름만 표시하고 사용자 텍스트·시크릿·인자·초안은 절대 노출하지 않습니다.
+- **진행 표시**: 👀(`eyes`) 리액션을 달고 `chat.startStream` / `chat.appendStream` / `chat.stopStream`으로 진행 요약을 스트리밍하며(`chat.delete` 전에 `task_update`를 `complete`로 마감), 성공 시 ✅(`white_check_mark`), 실패/취소 시 ❌(`x`)로 교체합니다. 같은 스레드에 여러 요청이 동시에 돌 때는 한 번에 하나의 진행 카드만 유지하고, 표시 중이던 요청이 끝나면 `session_status: "processing"`을 유지한 채 다음 활성 요청으로 순차 인계해 모든 요청이 끝날 때까지 상태를 이어서 표시합니다. 순수 장식용(API 실패가 실행이나 전달을 막지 않음)이며 고정 상태 문구, 에이전트 약칭, 도구 이름만 표시하고 사용자 텍스트·시크릿·인자·초안은 절대 노출하지 않습니다.
 - **중지 경로**: (1) Slack Agent 중지 버튼(`agent_session_stopped`)이 확인 카드를 게시; (2) 활성 스레드의 단독 중지 명령(`"stop"`, `"cancel"`, `"abort"`, `"halt"`, `"stop please"`, `"cancel please"` — 채널에서는 봇 멘션 필요, 1:1 DM에서는 불필요; 추가 텍스트가 있으면 새 요청으로 접수)이 즉시 중지; (3) 확인 카드 버튼 **Stop here**(`bot_stop_confirm`)와 **Continue**(`bot_stop_continue`)로 최종 확정.
 - **권한과 실행**: 요청자 또는 현재 리비전의 `admin`/`owner` 역할 멤버만 중지할 수 있습니다(그 외에는 `chat.postEphemeral`로 임시 안내 표시). 확정된 중지는 실행과 하위 트리 전체에 `RunAdmin::cancel`을 호출하고 `slack_user_stop`을 감사 기록하며 ❌와 함께 중지 카드를 게시합니다. 확인 전에 이미 완료되었다면 완료 사실을 알립니다.
 

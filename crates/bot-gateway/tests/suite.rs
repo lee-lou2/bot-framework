@@ -61,6 +61,8 @@ mod slack_evidence_seam;
 mod slack_reactions;
 #[path = "suite/slack_ux.rs"]
 mod slack_ux;
+#[path = "suite/slack_ux_stream.rs"]
+mod slack_ux_stream;
 #[path = "suite/token_rejected.rs"]
 mod token_rejected;
 #[path = "suite/trace.rs"]

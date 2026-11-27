@@ -351,7 +351,12 @@ async fn failed_cancel_is_not_acked_and_does_not_post_stop_ack_until_retry_succe
 
 #[tokio::test]
 async fn overlapping_runs_in_one_thread_never_close_the_other_runs_stream() {
-    let rig = ux_rig(vec![personal()], None, None).await;
+    let rig = ux_rig(
+        vec![personal()],
+        None,
+        Some((Duration::from_millis(20), Duration::from_secs(30))),
+    )
+    .await;
     rig.slack
         .push(mention_frame(
             "E1",
@@ -382,23 +387,25 @@ async fn overlapping_runs_in_one_thread_never_close_the_other_runs_stream() {
             "<@UBOT> second request",
         ))
         .await;
+    assert!(rig.slack.until(|s| s.acks().contains(&"E2".into())).await);
     assert!(
         rig.slack
-            .until(|s| s.calls("chat.startStream").len() == 2)
+            .until(|s| s.calls("reactions.add").len() == 2)
             .await
     );
-    let ts2 = rig.slack.calls("chat.startStream")[1].reply["ts"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_ne!(ts1, ts2);
+    settle().await;
+    assert_eq!(
+        rig.slack.calls("chat.startStream").len(),
+        1,
+        "second concurrent run must not steal or recreate the thread's open stream"
+    );
 
     let accepted = rig.store.inner.accepted();
     assert_eq!(accepted.len(), 2);
     let run1 = accepted[0].run.clone();
     let run2 = accepted[1].run.clone();
 
-    // Completing run1 must not close or delete run2's active progress stream (ts2).
+    // Completing run1 closes run1's stream (ts1) and hands off to run2 (ts2) without closing ts2.
     let snap = personal().build();
     let mut item = outgoing(
         "personal",
@@ -419,6 +426,17 @@ async fn overlapping_runs_in_one_thread_never_close_the_other_runs_stream() {
         attachments: vec![],
     };
     let _ = rig.gateway.sender().send(&snap, &item, &body).await;
+    assert!(
+        rig.slack
+            .until(|s| s.calls("chat.startStream").len() == 2)
+            .await
+    );
+    let ts2 = rig.slack.calls("chat.startStream")[1].reply["ts"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(ts1, ts2);
+
     rig.store.set_progress(&run1, RunState::Succeeded);
     assert!(
         rig.slack
