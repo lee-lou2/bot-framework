@@ -1,4 +1,4 @@
-// Approvals & Holds view: pending approval cards, operator hold resolution forms with two-step pinning, and recent decisions.
+// Approvals & Holds view: attention summary, pending approval cards, operator hold resolution forms with two-step pinning, and recent decisions.
 (function (root) {
   "use strict";
   const D = root.BotDom, A = root.BotApi, B = root.BotLabels, P = root.BotHoldPin, { h, icon, code } = D;
@@ -10,11 +10,12 @@
   const flat = (rows) => [].concat.apply([], rows);
 
   function create(app, box) {
-    const st = { pending: [], next: null, recent: [], holds: null, holdsErr: null, loaded: false, epoch: 0 };
+    const st = { pending: [], next: null, recent: [], holds: null, holdsErr: null, loaded: false, epoch: 0, filter: "all" };
     const ui = { busy: {}, notes: {}, forms: {} };
     let apMemo = {}, holdMemo = {}, recentMemo = {};
 
     const apCount = h("em"), holdCount = h("em"), recentCount = h("em");
+    const summaryBar = h("div", { class: "inbox-bar" });
     const apBox = h("div", { class: "cards", "aria-label": "Pending approvals" }), apNone = h("div");
     const moreBtn = h("button", { type: "button", class: "btn", text: "Load more", onclick: () => more() });
     const moreBox = h("div", { class: "more" }, [moreBtn]);
@@ -23,13 +24,11 @@
     const recent = h("details", { class: "recent" }, [h("summary", null, [h("span", { text: "Recent decisions" }), recentCount]), recentBody]);
     const holdTitle = h("h3", { class: "sec-t", id: "hold-title", tabindex: "-1" }, [h("span", { text: "Holds" }), holdCount]);
     const apTitle = h("h3", { class: "sec-t", id: "ap-title", tabindex: "-1" }, [h("span", { text: "Pending approvals" }), apCount]);
+    const apSec = h("section", { class: "sec", "aria-labelledby": "ap-title" }, [apTitle, apNone, apBox, moreBox]);
     const holdSec = h("section", { class: "sec", "aria-labelledby": "hold-title" }, [holdTitle, h("p", { class: "sec-h", text: "Calls paused because an external write outcome could not be confirmed. Verify at the destination and record a verdict: executed with a receipt, or not executed to resume the call (private DMs close and require a new request)." }), holdNone, holdBox]);
     const sub = h("p", { class: "sub" });
-    const stack = h("div", { class: "stack" }, [
-      h("section", { class: "sec", "aria-labelledby": "ap-title" }, [apTitle, apNone, apBox, moreBox]),
-      holdSec, h("section", { class: "sec" }, [recent]),
-    ]);
-    box.appendChild(h("div", { class: "wrap" }, [h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "Approvals & Holds" }), sub])]), stack]));
+    const stack = h("div", { class: "stack" }, [apSec, holdSec, h("section", { class: "sec" }, [recent])]);
+    box.appendChild(h("div", { class: "wrap" }, [h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "Approvals & Holds" }), sub])]), summaryBar, stack]));
     box.classList.add("decide");
 
     const opOnly = () => app.me().operator;
@@ -52,6 +51,10 @@
         if (r[2]) { if (r[2].error) st.holdsErr = r[2].error; else { st.holds = r[2].items; st.holdsErr = null; } }
         st.loaded = true;
         app.noteProfiles(st.pending.concat(st.recent).map((a) => a.profile).concat((st.holds || []).map((x) => x.profile)));
+        if (app.setBadges) {
+          const hn = (st.holds || []).length;
+          app.setBadges({ decide: st.pending.length + hn, decideTone: hn > 0 ? "bad" : "warn" });
+        }
         render();
       });
     }
@@ -76,8 +79,9 @@
       const bodyWhy = !why && a.approve_blocked ? "Cannot approve because the card does not show the full " + (a.tool === "schedule.deliver" ? "delivery draft" : "memory ID and body") + ". You can still deny it." : "", shown = why || bodyWhy;
       const off = !!busy || !!why, whyId = "ap-why-" + a.nonce, tid = "ap-t-" + a.nonce;
       const btn = (allow, cls, ic, text, busyText) => h("button", { type: "button", class: "btn " + cls, disabled: off || (allow && !!bodyWhy), "aria-describedby": shown ? whyId : null, onclick: () => decide(a, allow) }, [icon(ic, { size: 14 }), h("span", { text: busy === (allow ? "allow" : "deny") ? busyText : text })]);
-      return h("article", { class: "acard", "aria-labelledby": tid }, [
-        h("header", { class: "ac-h" }, [h("h4", { class: "ac-title", id: tid }, [code(a.tool)]), B.riskPill(a.risk), D.untilEl(a.expires_ms, { cls: "ac-left" })]),
+      const cardCls = "acard" + (mine && !over && !bodyWhy ? " is-mine" : !mine ? " is-other" : "");
+      return h("article", { class: cardCls, "aria-labelledby": tid }, [
+        h("header", { class: "ac-h" }, [h("h4", { class: "ac-title", id: tid }, [code(a.tool)]), B.riskPill(a.risk), mine ? D.pill("Assigned to you", "info", null) : null, D.untilEl(a.expires_ms, { cls: "ac-left" })]),
         h("p", { class: "ac-who" }, ["Requester ", code(a.requester), " · Approver ", code(a.approver), mine ? h("span", { class: "me", text: " (you)" }) : null]),
         a.render.length ? h("dl", { class: "facts ac-render" }, flat(a.render.map((l) => [h("dt", { text: l.label }), h("dd", null, [l.label === DRAFT ? h("pre", { class: "ac-draft", tabindex: "0", "aria-label": "Raw delivery draft", text: l.value }) : l.value])]))) : h("p", { class: "sec-h", text: a.render_hidden ? "Card body is visible only to the requester. Requester, approver, and args hash remain visible." : "No target or change details to display." }),
         h("p", { class: "ac-meta" }, [multi ? "Profile " + a.profile + " · " : null, "Args hash ", B.hash8(a.args_sha256), " · Run ", runLink(a.profile, a.run), " · Call ", code(a.call), " · Policy rev ", code(a.policy_revision), " · Tool rev ", code(a.tool_revision)]),
@@ -105,12 +109,13 @@
     }
     function renderApprovals() {
       const multi = !app.profile(), me = app.me().principal;
-      D.sync(apBox, st.pending.map((a) => ({ key: a.nonce, sig: JSON.stringify([a, multi, me, ui.busy[a.nonce] || "", ui.notes[a.nonce] || null, a.expires_ms <= D.now()]), build: () => ({ node: approvalCard(a, multi) }) })), apMemo, { stagger: true });
-      apCount.textContent = st.loaded ? String(st.pending.length) + (st.next ? "+" : "") : "";
+      const list = st.filter === "mine" ? st.pending.filter((a) => a.approver === me) : st.pending;
+      D.sync(apBox, list.map((a) => ({ key: a.nonce, sig: JSON.stringify([a, multi, me, ui.busy[a.nonce] || "", ui.notes[a.nonce] || null, a.expires_ms <= D.now()]), build: () => ({ node: approvalCard(a, multi) }) })), apMemo, { stagger: true });
+      apCount.textContent = st.loaded ? String(list.length) + (st.next && st.filter !== "mine" ? "+" : "") : "";
       D.clear(apNone);
       if (!st.loaded) apNone.appendChild(D.skeleton(3));
-      else if (!st.pending.length) apNone.appendChild(D.empty("No pending approvals", "Tool calls requiring human approval will appear here.", "check"));
-      moreBox.hidden = !st.next;
+      else if (!list.length) apNone.appendChild(D.empty(st.filter === "mine" ? "No approvals assigned to you" : "No pending approvals", st.filter === "mine" ? "Switch to All open to see requests waiting on other approvers." : "Tool calls requiring human approval will appear here.", "check"));
+      moreBox.hidden = !st.next || st.filter === "mine";
     }
 
     function renderRecent() {
@@ -238,7 +243,7 @@
         const cancel = h("button", { type: "button", class: "btn quiet", text: "Cancel", hidden: true, onclick: disarm });
         const sum = h("p", { class: "rf-sum", role: "status", hidden: true }), err = h("p", { class: "rf-err", role: "alert", hidden: true });
         parts[k] = { input, btn, btnText, cancel, sum, err };
-        return h("form", { class: "rform", "aria-labelledby": fid + "-t", onsubmit: (ev) => submit(k, ev), onkeydown: (ev) => { if (ev.key === "Escape" && f.arm && !f.busy) { ev.stopPropagation(); disarm(); } } }, [h("h5", { id: fid + "-t", text: spec.title }), h("p", { class: "rf-help", id: fid + "-h", text: help }), h("label", { class: "rf-field", for: fid }, [h("span", { text: spec.label }), input]), sum, err, h("div", { class: "rf-act" }, [btn, cancel])]);
+        return h("form", { class: "rform is-" + k, "aria-labelledby": fid + "-t", onsubmit: (ev) => submit(k, ev), onkeydown: (ev) => { if (ev.key === "Escape" && f.arm && !f.busy) { ev.stopPropagation(); disarm(); } } }, [h("h5", { id: fid + "-t", text: spec.title }), h("p", { class: "rf-help", id: fid + "-h", text: help }), h("label", { class: "rf-field", for: fid }, [h("span", { text: spec.label }), input]), sum, err, h("div", { class: "rf-act" }, [btn, cancel])]);
       };
       let pick = null;
       if (held.length > 1) {
@@ -257,7 +262,7 @@
       return node;
     }
     function renderHolds() {
-      holdSec.hidden = !opOnly();
+      holdSec.hidden = !opOnly() || st.filter === "mine" || st.filter === "approvals";
       if (!opOnly()) return;
       const items = st.holds || [];
       D.sync(holdBox, items.map((x) => ({ key: holdKey(x), sig: JSON.stringify(x), build: () => ({ node: holdCard(x) }) })), holdMemo, { stagger: true });
@@ -268,9 +273,28 @@
       else if (!st.holds) holdNone.appendChild(D.skeleton(3));
       else if (!items.length) holdNone.appendChild(D.empty("No held calls", "No external writes are paused with an unknown outcome.", "check"));
     }
+    function renderBar() {
+      D.clear(summaryBar);
+      const mine = st.pending.filter((a) => a.approver === app.me().principal).length;
+      const holdsN = (st.holds || []).length;
+      const opts = [
+        ["all", "All open", st.pending.length + (opOnly() ? holdsN : 0)],
+        ["mine", "Assigned to me", mine],
+        ["approvals", "Approvals", st.pending.length],
+      ];
+      if (opOnly()) opts.push(["holds", "Holds", holdsN]);
+      const chips = h("div", { class: "chips", role: "group", "aria-label": "Filter inbox" }, opts.map(([v, label, n]) =>
+        h("button", { type: "button", class: "fchip", "aria-pressed": String(st.filter === v), onclick: () => { st.filter = v; render(); } }, [h("span", { text: label }), h("em", { text: String(n) })]),
+      ));
+      summaryBar.appendChild(chips);
+      if (opOnly() && holdsN > 0 && st.filter === "all") {
+        summaryBar.appendChild(h("button", { type: "button", class: "btn sm inbox-jump", onclick: () => { if (holdTitle.scrollIntoView) holdTitle.scrollIntoView({ behavior: "smooth" }); holdTitle.focus(); } }, [icon("alert", { size: 13 }), h("span", { text: holdsN + (holdsN === 1 ? " hold needs review" : " holds need review") })]));
+      }
+    }
     function render() {
-      sub.textContent = opOnly() ? "Manage pending approvals and held calls in one place." : "Shows only approvals you requested or are assigned to decide.";
-      renderApprovals(); renderHolds(); renderRecent();
+      sub.textContent = opOnly() ? "Approve pending actions and resolve held external writes." : "Shows approvals you requested or are assigned to decide.";
+      apSec.hidden = st.filter === "holds";
+      renderBar(); renderApprovals(); renderHolds(); renderRecent();
     }
     render();
 

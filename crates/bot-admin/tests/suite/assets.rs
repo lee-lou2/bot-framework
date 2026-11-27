@@ -22,6 +22,8 @@ const EXPECTED: &[&str] = &[
     "map.css",
     "map.js",
     "needs.js",
+    "overview.css",
+    "overview.js",
     "panel.js",
     "preapproval.js",
     "preapprovals.css",

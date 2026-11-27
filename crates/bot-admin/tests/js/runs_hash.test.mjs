@@ -21,7 +21,7 @@ tabs.appendChild(mk("span", "tab-ink"));
 const auto = mk("input", "auto");
 auto.checked = true;
 const main = mk("main", "main");
-for (const id of ["boot", "view-structure", "view-runs", "view-decide", "view-preapprovals", "view-access", "view-audit", "view-status"]) {
+for (const id of ["boot", "view-overview", "view-structure", "view-runs", "view-decide", "view-preapprovals", "view-access", "view-audit", "view-status"]) {
   main.appendChild(mk("section", id));
 }
 for (const el of [mk("span", "mark"), mk("span", "sel-ic"), mk("span", "search-ic"), mk("span", "fit-ic"), mk("button", "zin"), mk("button", "zout"), tabs, mk("span", "who"), profileSel, auto, mk("span", "stamp"), mk("div", "notice"), main, mk("div", "toast")]) {
@@ -63,7 +63,7 @@ globalThis.fetch = fakeFetch((c) => {
 let capturedApp = null;
 const stub = { create(app) { capturedApp = app; return { load: () => Promise.resolve(), reset() {}, show() {}, hide() {} }; } };
 Object.assign(globalThis.window, {
-  BotStructure: stub, BotDecide: stub, BotPreapprovals: stub,
+  BotOverview: stub, BotStructure: stub, BotDecide: stub, BotPreapprovals: stub,
   BotAccess: stub, BotAudit: stub, BotStatus: stub,
 });
 

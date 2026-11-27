@@ -2,14 +2,17 @@
 .pcards { grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); }
 .pcard { border-left-color: var(--good); }
 .pcard.is-paused { border-left-color: var(--warn); }
-.pc-help { margin: 0; color: var(--ink-3); font-size: 13px; }
+.pc-meta { padding: 8px 10px; border-radius: var(--r-sm); background: var(--canvas); border: 1px solid var(--line); }
+.pc-help { margin: 0; color: var(--ink-3); font-size: 12px; line-height: 1.5; }
 .pc-use { display: grid; gap: 6px; }
-.pc-use-t { margin: 0; color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; }
-.meter { height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
-.meter > i { display: block; width: calc(var(--pct, 0) * 1%); height: 100%; border-radius: inherit; background: var(--accent); }
+.pc-use-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
+.pc-use-t { margin: 0; color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.pc-use-pct { color: var(--ink-3); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.meter { height: 9px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.meter > i { display: block; width: calc(var(--pct, 0) * 1%); height: 100%; border-radius: inherit; background: var(--accent); transition: width 260ms var(--ease); }
 .meter.is-full > i { background: var(--warn); }
-.pc-sum { margin: 0; padding: var(--s2) var(--s3); border-radius: var(--r-sm); background: var(--warn-wash); color: var(--warn-ink); font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
-.btn.stop { background: var(--bad-solid); border-color: var(--bad-solid); color: var(--on-bad); box-shadow: none; backdrop-filter: none; }
+.pc-sum { margin: 0; padding: var(--s2) var(--s3); border-radius: var(--r-sm); background: var(--warn-wash); color: var(--warn-ink); font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.btn.stop { background: var(--bad-solid); border-color: var(--bad-solid); color: var(--on-bad); box-shadow: none; }
 /* Base .btn:hover:not(:disabled) has higher specificity; override to preserve solid fill on hover. */
 @media (hover: hover) { .btn.stop:hover:not(:disabled) { background: var(--bad-solid); border-color: var(--bad-solid); filter: brightness(1.08); } }
 .ac-note.is-ok { background: var(--good-wash); color: var(--good-ink); }

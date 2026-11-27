@@ -1,24 +1,35 @@
-// Read-only Audit view: reverse-chronological hash-chained log and chain verification.
+// Read-only Audit view: searchable reverse-chronological hash-chained log and chain verification.
 (function (root) {
   "use strict";
   const D = root.BotDom, A = root.BotApi, B = root.BotLabels, { h, icon, code } = D;
   const PAGE = 50;
 
   function create(app, box) {
-    const st = { items: [], next: null, loaded: false, busyMore: false, epoch: 0, check: null, checking: false, around: null };
+    const st = { items: [], next: null, loaded: false, busyMore: false, epoch: 0, check: null, checking: false, around: null, query: "", verdict: "" };
     let memo = {}, amemo = {};
 
     // Keep the ticking relative time outside the status live region to avoid every-second screen reader announcements.
     const live = h("span", { class: "verify-live", role: "status" }), ago = h("span", { class: "verify-t" });
     const result = h("p", { class: "verify" }, [live, ago]);
     const verifyBtn = h("button", { type: "button", class: "btn", onclick: () => verify() }, [icon("check", { size: 14 }), h("span", { text: "Verify chain" })]);
+    const searchIn = h("input", { type: "search", placeholder: "Filter loaded entries by actor, action, target…", "aria-label": "Filter audit entries", oninput: (e) => { st.query = e.target.value; render(); } });
+    const chipsBox = h("div", { class: "chips", role: "group", "aria-label": "Filter by verdict" });
     const tableBox = h("div", { class: "audit-table" }), aroundBox = h("div", { class: "audit-around" });
     const moreBtn = h("button", { type: "button", class: "btn", text: "Load more", onclick: () => more() });
     const moreBox = h("div", { class: "more" }, [moreBtn]);
     box.appendChild(h("div", { class: "wrap" }, [
-      h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "Audit" }), h("p", { class: "sub", text: "Hash-chained audit log in reverse chronological order. Verification reports the first sequence where tampering breaks the chain." })]), h("div", { class: "ph-act verify-box" }, [verifyBtn, result])]),
+      h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "Audit" }), h("p", { class: "sub", text: "Tamper-evident hash-chained activity log in reverse chronological order" })]), h("div", { class: "ph-act verify-box" }, [verifyBtn, result])]),
+      h("div", { class: "toolbar" }, [h("label", { class: "searchbox" }, [icon("search", { size: 15 }), searchIn]), chipsBox]),
       h("div", { class: "stack" }, [aroundBox, tableBox, moreBox]),
     ]));
+
+    function renderChips() {
+      D.clear(chipsBox);
+      [["", "All"], ["allow", "Allowed"], ["deny", "Denied"], ["confirmed", "Confirmed"], ["not_executed", "Not executed"], ["ok", "OK"]].forEach(([v, label]) => {
+        chipsBox.appendChild(h("button", { type: "button", class: "fchip", "aria-pressed": String(st.verdict === v), text: label, onclick: () => { st.verdict = v; renderChips(); render(); } }));
+      });
+    }
+    renderChips();
 
     function verify() {
       if (st.checking) return;
@@ -68,10 +79,17 @@
       return { cls: e.seq === broken ? "is-broken" : "", cells };
     }
     const columns = (multi) => { const head = ["Seq", "Time", "Actor", "Action", "Target", "Verdict", "Hash", "Prev hash"]; if (multi) head.splice(2, 0, "Profile"); return head; };
+    function matches(e, q) {
+      if (st.verdict && e.verdict !== st.verdict) return false;
+      if (!q) return true;
+      const hay = [e.seq, e.profile || "", e.actor, e.action, B.AUDIT_ACTION[e.action] || "", e.target, e.verdict].join(" ").toLowerCase();
+      return hay.indexOf(q) >= 0;
+    }
     function render() {
-      const multi = !app.profile(), broken = st.check && !st.check.ok ? st.check.broken_at : null;
-      const sig = JSON.stringify([st.items, multi, broken, st.loaded]);
-      D.patch(tableBox, [{ key: "table", sig, build: () => ({ node: st.loaded ? D.table(columns(multi), st.items.map((e) => row(e, multi, broken)), { num: [0], narrow: multi ? [0, 6, 7, 8] : [0, 5, 6, 7], label: "Audit log table", emptyTitle: "No audit entries", emptyHint: "Entries are recorded as approvals, decisions, and tool calls occur.", emptyIcon: "inbox" }) : D.skeleton(5) }) }], memo, {});
+      const multi = !app.profile(), broken = st.check && !st.check.ok ? st.check.broken_at : null, q = st.query.trim().toLowerCase();
+      const shown = (q || st.verdict) ? st.items.filter((e) => matches(e, q)) : st.items;
+      const sig = JSON.stringify([shown, multi, broken, st.loaded, q, st.verdict]);
+      D.patch(tableBox, [{ key: "table", sig, build: () => ({ node: st.loaded ? D.table(columns(multi), shown.map((e) => row(e, multi, broken)), { num: [0], narrow: multi ? [0, 6, 7, 8] : [0, 5, 6, 7], label: "Audit log table", emptyTitle: (q || st.verdict) ? "No matching audit entries" : "No audit entries", emptyHint: (q || st.verdict) ? "Clear filters or load more entries." : "Entries are recorded as approvals, decisions, and tool calls occur.", emptyIcon: "inbox" }) : D.skeleton(5) }) }], memo, {});
       // Chain verification spans all profiles, so always show the Profile column in the break context table.
       const near = broken !== null && st.around ? [{ key: "around", sig: JSON.stringify([st.around, broken]), build: () => ({ node: h("section", { class: "sec warnsec" }, [h("h3", { class: "sec-t" }, [h("span", { text: "Entries around break" }), h("em", { text: "#" + broken })]), h("p", { class: "sec-h", text: "The highlighted row is where hash verification first failed. This entry or a preceding entry may have been altered." }), D.table(columns(true), st.around.map((e) => row(e, true, broken)), { num: [0], narrow: [0, 6, 7, 8], label: "Entries around broken chain table" })]) }) }] : [];
       D.patch(aroundBox, near, amemo, {});

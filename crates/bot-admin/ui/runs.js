@@ -1,16 +1,17 @@
-// Runs view: filterable run list and detail pane (lineage, wait reason, controls, child runs, tool calls, and effects).
+// Runs view: searchable, state-filtered run list and detail pane (lineage, wait reason, controls, child runs, calls, effects).
 (function (root) {
   "use strict";
   const D = root.BotDom, A = root.BotApi, B = root.BotLabels, { h, icon, code } = D;
   const PAGE = 30;
 
   function create(app, box) {
-    const st = { items: [], next: null, state: "", sel: null, detail: null, detailErr: null, loaded: false, busyMore: false, epoch: 0, dkey: null };
+    const st = { items: [], next: null, state: "", query: "", sel: null, detail: null, detailErr: null, loaded: false, busyMore: false, epoch: 0, dkey: null };
     const controls = root.BotRunControl.create(app);
     let memo = {}, dmemo = {}, body = null;
     const selKey = () => (st.sel ? st.sel.profile + "|" + st.sel.run : null);
 
-    const stateSel = h("select", { id: "run-state", "aria-label": "Filter by state", onchange: (e) => { st.state = e.target.value; clearList(); app.refresh(true); } }, [h("option", { value: "", text: "All" })].concat(B.RUN_ORDER.map((s) => h("option", { value: s, text: B.RUN_STATE[s][0] }))));
+    const searchIn = h("input", { type: "search", placeholder: "Filter loaded runs by ID, agent, principal, error…", "aria-label": "Filter runs", oninput: (e) => { st.query = e.target.value; renderList(); } });
+    const chipsBox = h("div", { class: "chips", role: "group", "aria-label": "Filter by state" });
     const count = h("p", { class: "rl-count", "aria-live": "polite" });
     const list = h("ul", { class: "rl", "aria-label": "Run list" });
     const none = h("div", { class: "rl-none" });
@@ -19,9 +20,25 @@
     // Do not mark the detail pane aria-live because relative timestamps update every second; move focus on open instead.
     const detail = h("section", { class: "rd-pane", "aria-label": "Run details", tabindex: "-1" });
     const split = h("div", { class: "split" }, [h("section", { class: "rl-pane", "aria-label": "Runs" }, [count, list, none, moreBox]), detail]);
-    const head = h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "Runs" }), h("p", { class: "sub", text: "Status and history of runs started by messages, schedules, or delegations" })]), h("label", { class: "field ph-act" }, [h("span", { class: "lab", text: "State" }), h("span", { class: "sel" }, [stateSel, h("span", { class: "sel-ic" }, [icon("down", { size: 14 })])])])]);
-    box.appendChild(h("div", { class: "wrap" }, [head, split]));
+    const head = h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "Runs" }), h("p", { class: "sub", text: "Monitor live executions, inspect tool calls and effects, and resume or cancel runs" })])]);
+    const bar = h("div", { class: "toolbar" }, [h("label", { class: "searchbox" }, [icon("search", { size: 15 }), searchIn]), chipsBox]);
+    box.appendChild(h("div", { class: "wrap" }, [head, bar, split]));
     box.classList.add("runs");
+
+    function renderChips() {
+      D.clear(chipsBox);
+      const opts = [["", "All"]].concat(B.RUN_ORDER.map((s) => [s, B.RUN_STATE[s][0]]));
+      opts.forEach(([v, label]) => {
+        chipsBox.appendChild(h("button", { type: "button", class: "fchip", "aria-pressed": String(st.state === v), text: label, onclick: () => {
+          if (st.state === v) return;
+          st.state = v;
+          renderChips();
+          clearList();
+          app.refresh(true);
+        } }));
+      });
+    }
+    renderChips();
     renderAll();
 
     function clearList() { st.items = []; st.next = null; st.loaded = false; st.epoch++; memo = {}; D.clear(list); renderList(); }
@@ -38,6 +55,7 @@
         if (!ctx.manual && controls.busy()) return;
         st.items = r[0].items; st.next = r[0].next; st.loaded = true;
         app.noteProfiles(st.items.map((x) => x.profile));
+        if (!st.state && app.setBadges) app.setBadges({ dead: st.items.filter((x) => x.state === "dead").length });
         if (r[1] && r[1].want === selKey()) { st.detail = r[1].d || null; st.detailErr = r[1].e || null; }
         renderAll();
       });
@@ -81,33 +99,42 @@
     }
 
     function meta(r) {
-      const parts = [r.principal, B.conversation(r.kind) + (r.trigger ? " " + r.trigger : ""), "gen " + r.generation, "attempt " + r.attempts];
-      if (r.waiting) parts.push(B.waitingShort(r.waiting));
-      if (r.error) parts.push("error " + r.error);
+      const parts = [B.conversation(r.kind) + (r.trigger ? " · " + r.trigger : ""), r.principal];
+      if (r.attempts > 1 || r.generation > 1) parts.push("gen " + r.generation + " · " + r.attempts + " attempts");
       return parts.join(" · ");
+    }
+    function matchesRun(r, q) {
+      if (!q) return true;
+      const hay = [r.run, r.agent, r.profile, r.principal, r.trigger || "", r.error || "", r.kind || "", r.state || ""].join(" ").toLowerCase();
+      return hay.indexOf(q) >= 0;
     }
     function row(r, multi) {
       const k = r.profile + "|" + r.run;
+      const alert = r.error ? h("span", { class: "ri-flag is-bad", text: "Error: " + r.error })
+        : r.waiting ? h("span", { class: "ri-flag is-warn", text: B.waitingShort(r.waiting) }) : null;
       return h("li", null, [h("button", { type: "button", class: "ri", "data-run": k, onclick: () => open(r.profile, r.run) }, [
         h("span", { class: "ri-main" }, [code(r.run), h("span", { class: "ri-agent", text: r.agent }), multi ? h("span", { class: "ri-prof", text: r.profile }) : null]),
         h("span", { class: "ri-state" }, [B.runPill(r.state)]),
-        h("span", { class: "ri-meta", text: meta(r) }),
+        h("span", { class: "ri-meta" }, [D.text(meta(r)), alert]),
         D.timeEl(r.updated_ms, { cls: "ri-time" }),
       ])]);
     }
     function renderList() {
-      const multi = !app.profile();
-      D.sync(list, st.items.map((r) => ({ key: r.profile + "|" + r.run, sig: JSON.stringify([r, multi]), build: () => ({ node: row(r, multi) }) })), memo);
+      const multi = !app.profile(), q = st.query.trim().toLowerCase();
+      const visible = q ? st.items.filter((r) => matchesRun(r, q)) : st.items;
+      D.sync(list, visible.map((r) => ({ key: r.profile + "|" + r.run, sig: JSON.stringify([r, multi]), build: () => ({ node: row(r, multi) }) })), memo);
       const sel = selKey();
       Array.prototype.forEach.call(list.children, (li) => {
         const b = li.firstChild, on = b.getAttribute("data-run") === sel;
         b.classList.toggle("is-selected", on);
         if (on) b.setAttribute("aria-current", "true"); else b.removeAttribute("aria-current");
       });
-      count.textContent = st.loaded ? (st.items.length ? st.items.length + (st.next ? "+" : "") + " runs" : "") : "";
+      count.textContent = st.loaded
+        ? (visible.length ? (q ? visible.length + " of " + st.items.length + " loaded runs" : st.items.length + (st.next ? "+" : "") + (st.items.length === 1 ? " run" : " runs")) : "")
+        : "";
       D.clear(none);
       if (!st.loaded) none.appendChild(D.skeleton(4));
-      else if (!st.items.length) none.appendChild(D.empty(st.state ? "No runs in this state" : "No runs yet", st.state ? "Choose another state or return to All." : "Runs started by conversations or schedules will appear here.", "run"));
+      else if (!visible.length) none.appendChild(D.empty(q ? "No matching runs" : st.state ? "No runs in this state" : "No runs yet", q ? "Clear the search box or load more runs." : st.state ? "Choose another state or return to All." : "Runs started by conversations or schedules will appear here.", "run"));
       renderMore();
     }
     function renderMore() {
@@ -116,7 +143,7 @@
       moreBtn.textContent = st.busyMore ? "Loading…" : "Load more";
     }
 
-    const line = (k, v) => [h("dt", { text: k }), h("dd", null, [v])];
+    const factCard = (k, v) => h("div", { class: "rd-kv" }, [h("span", { class: "rd-k", text: k }), h("div", { class: "rd-v" }, [v])]);
     function section(title, n, kid) { return h("section", { class: "sec" }, [h("h3", { class: "sec-t" }, [h("span", { text: title }), n !== null ? h("em", { text: String(n) }) : null]), kid]); }
     function crumbs(d) {
       const last = d.lineage.length - 1;
@@ -129,19 +156,19 @@
       let href = null;
       try { const u = new URL(r.trace_link); href = u.protocol === "https:" || u.protocol === "http:" ? u.href : null; } catch (e) { href = null; }
       const id = code(r.trace_id.slice(0, 8), r.trace_id);
-      if (!href) return h("span", null, [id, h("span", { class: "dim", text: " (no trace link configured)" })]);
+      if (!href) return h("span", null, [id, h("span", { class: "dim", text: " (no link)" })]);
       return h("span", { class: "trace" }, [h("a", { class: "xlink", href, target: "_blank", rel: "noreferrer noopener" }, [h("span", { text: "Open trace" }), icon("external", { size: 12 })]), id]);
     }
     function waitLine(r, rootHold) {
       const w = B.waiting(r.waiting);
-      let kids = null;
+      let kids = null, cls = "rd-wait";
       if (w) kids = [icon("pause", { size: 14 }), w];
       else if (r.state === "retry") kids = [icon("pause", { size: 14 }), h("span", { text: "Waiting for next retry after an error." })];
-      else if (r.state === "dead") kids = [icon("alert", { size: 14 }), h("span", null, ["Stopped after exhausting retries.", r.error ? [" Last error: ", code(r.error)] : null])];
+      else if (r.state === "dead") { cls = "rd-wait is-bad"; kids = [icon("alert", { size: 14 }), h("span", null, ["Stopped after exhausting retries.", r.error ? [" Last error: ", code(r.error)] : null])]; }
       if (!kids) return null;
       const go = r.waiting && (r.waiting.on === "approval" || (r.waiting.on === "hold" && app.me().operator && !rootHold));
       if (go) kids.push(h("button", { type: "button", class: "btn sm", text: "View in Approvals & Holds", onclick: () => app.go("decide", { profile: r.profile }) }));
-      return h("p", { class: "rd-wait" }, kids);
+      return h("p", { class: cls }, kids);
     }
     function childList(d) {
       if (!d.children.length) return h("p", { class: "sec-h", text: "No child runs." });
@@ -156,26 +183,33 @@
     function sections(d) {
       const r = d.run, k = (s) => s;
       const action = root.BotRunControl.offered(d, app.me().operator);
+      const waitNode = waitLine(r, action === "held");
       return [
         { key: k("head"), sig: JSON.stringify([r.run, r.state]), build: () => ({ node: h("header", { class: "rd-head" }, [h("button", { type: "button", class: "btn back", onclick: close }, [icon("back", { size: 14 }), h("span", { text: "List" })]), h("div", { class: "rd-title" }, [h("p", { class: "ovl", text: "Run" }), h("h3", null, [code(r.run)])]), B.runPill(r.state)]) }) },
         { key: k("crumbs"), sig: JSON.stringify(d.lineage.map((x) => [x.run, x.agent])), build: () => ({ node: crumbs(d) }) },
-        { key: k("wait"), sig: JSON.stringify([r.state, r.waiting, r.error, app.me().operator, action === "held"]), build: () => ({ node: waitLine(r, action === "held") || h("p", { class: "rd-wait is-none", text: "Not waiting." }) }) },
+        ...(waitNode ? [{ key: k("wait"), sig: JSON.stringify([r.state, r.waiting, r.error, app.me().operator, action === "held"]), build: () => ({ node: waitNode }) }] : []),
         ...(action ? [{ key: k("control"), sig: JSON.stringify([r.profile, r.run, r.state, r.generation, d.control]), build: () => ({ node: controls.mount(d, action) }) }] : []),
-        { key: k("facts"), sig: JSON.stringify(r), build: () => ({ node: h("dl", { class: "facts rd-facts" }, [].concat(
-          line("Profile", r.profile), line("Agent", code(r.agent)), line("Principal", code(r.principal)),
-          line("Origin", h("span", null, [B.conversation(r.kind), r.trigger ? [" · Trigger ", code(r.trigger)] : null])),
-          line("Gen & attempts", "Gen " + r.generation + " · " + r.attempts + (r.attempts === 1 ? " attempt" : " attempts")), line("Delegation step", r.step ? code(r.step) : "-"),
-          line("Created", D.when(r.created_ms)), line("Updated", h("span", null, [D.when(r.updated_ms), " · ", D.timeEl(r.updated_ms)])),
-          line("Private memory read", r.private_memory_read ? "Yes" : "No"), line("Last error", r.error ? code(r.error) : "-"), line("Trace", traceNode(r)))) }) },
-        { key: k("children"), sig: JSON.stringify(d.children), build: () => ({ node: section("Child runs", d.children.length, childList(d)) }) },
+        { key: k("facts"), sig: JSON.stringify(r), build: () => ({ node: h("div", { class: "rd-grid" }, [
+          factCard("Profile & agent", h("span", null, [D.text(r.profile + " · "), code(r.agent)])),
+          factCard("Principal", code(r.principal)),
+          factCard("Origin", h("span", null, [B.conversation(r.kind), r.trigger ? [" · ", code(r.trigger)] : null])),
+          factCard("Gen & attempts", "Gen " + r.generation + " · " + r.attempts + (r.attempts === 1 ? " attempt" : " attempts")),
+          factCard("Created", D.when(r.created_ms)),
+          factCard("Updated", h("div", { class: "rd-stack" }, [h("span", { text: D.when(r.updated_ms) }), D.timeEl(r.updated_ms, { cls: "dim" })])),
+          factCard("Private memory read", r.private_memory_read ? "Yes" : "No"),
+          factCard("Trace", traceNode(r)),
+          r.step ? factCard("Delegation step", code(r.step)) : null,
+          r.error ? factCard("Last error", h("span", { class: "ri-flag is-bad" }, [code(r.error)])) : null,
+        ]) }) },
         { key: k("calls"), sig: JSON.stringify(d.calls), build: () => ({ node: section("Tool calls", d.calls.length, callTable(d)) }) },
         { key: k("effects"), sig: JSON.stringify(d.effects), build: () => ({ node: section("Effects", d.effects.length, effectTable(d)) }) },
+        { key: k("children"), sig: JSON.stringify(d.children), build: () => ({ node: section("Child runs", d.children.length, childList(d)) }) },
       ];
     }
     function renderDetail() {
       const key = selKey();
       if (st.dkey !== key) { D.clear(detail); dmemo = {}; body = null; st.dkey = key; }
-      if (!key) { D.clear(detail); detail.appendChild(D.empty("Select a run", "Pick a run from the list to inspect its lineage, tool calls, and effects.", "run")); st.dkey = null; return; }
+      if (!key) { D.clear(detail); detail.appendChild(D.empty("Select a run", "Pick a run from the list to inspect its lineage, tool calls, effects, and controls.", "run")); st.dkey = null; return; }
       if (!st.detail) {
         D.clear(detail); dmemo = {}; body = null;
         const back = h("button", { type: "button", class: "btn back", onclick: close }, [icon("back", { size: 14 }), h("span", { text: "List" })]);
@@ -193,7 +227,7 @@
       apply(arg) {
         if (arg && arg.run) { open(arg.profile, arg.run, true); return; }
         clearSel();
-        if (arg && arg.state !== undefined) { st.state = arg.state || ""; stateSel.value = st.state; clearList(); }
+        if (arg && arg.state !== undefined) { st.state = arg.state || ""; renderChips(); clearList(); }
       },
       hash() { return runHash(); },
       selected() { return !!st.sel; },

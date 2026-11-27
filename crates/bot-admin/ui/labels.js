@@ -14,8 +14,16 @@
   const CALL_ERROR = { denied: "Denied", timeout: "Timed out", invalid_result: "Invalid result format", outcome_unknown: "Outcome unknown", execution_failed: "Execution failed" };
   const HOLD_REASON = { outcome_unknown: "Outcome unknown", unknown_outcome: "Outcome unknown", owner_lost: "Previous execution outcome unconfirmed", no_evidence: "No evidence of execution", response_unknown: "Final response unknown", effects_unresolved: "Unresolved steps remain", previous_process_unconfirmed: "Previous runner exit unconfirmed", missing_transport: "Delivery adapter not configured" };
   const CONVERSATION = { direct: "Direct message", channel: "Channel", cli: "CLI", http: "HTTP", scheduled: "Scheduled" };
-  const AUDIT_ACTION = { "approval.decide": "Approval decision", "hold.resolve": "Hold resolution", "profile.activate": "Profile activation", "tool.call": "Tool call", "preapproval.pause": "Pause pre-approval", "preapproval.resume": "Resume pre-approval" };
-  const AUDIT_VERDICT = { allow: ["Allowed", "ok", "on"], deny: ["Denied", "off", "off"], ok: ["OK", "ok", "on"], confirmed: ["Confirmed executed", "ok", "on"], not_executed: ["Confirmed not executed", "warn", "held"] };
+  const AUDIT_ACTION = {
+    "approval.decide": "Approval decision", "hold.resolve": "Hold resolution", "profile.activate": "Profile activation",
+    "tool.call": "Tool call", "preapproval.pause": "Pause pre-approval", "preapproval.resume": "Resume pre-approval",
+    "run.resume": "Resume run", "run.cancel": "Cancel run", "run.cancelled": "Run cancelled",
+  };
+  const AUDIT_VERDICT = {
+    allow: ["Allowed", "ok", "on"], deny: ["Denied", "off", "off"], ok: ["OK", "ok", "on"],
+    confirmed: ["Confirmed executed", "ok", "on"], not_executed: ["Confirmed not executed", "warn", "held"],
+    operator_requested: ["Operator requested", "info", "on"],
+  };
 
   const fromTable = (t) => (key) => { const m = t[key]; return m ? pill(m[0], m[1], m[2]) : pill(key === null || key === undefined || key === "" ? "-" : "Other", "off"); };
   const runPill = fromTable(RUN_STATE), callPill = fromTable(CALL_STATE), effectPill = fromTable(EFFECT_STATE);
@@ -69,7 +77,7 @@
     secret: { declared: "Declared" },
   };
   const TRIGGER_ON = { cron: "Scheduled (cron)", event: "Event", http: "HTTP request" };
-  const ADAPTER = { cli: "CLI", slack: "Slack", http: "HTTP" };
+  const ADAPTER = { cli: "CLI", slack: "Slack", http: "HTTP", openai: "OpenAI API" };
   const RESPONSE = { accepted: "Accept immediately (202)", sync: "Return tool result" };
   const factLabel = (kind, key) => (FACT[kind] && FACT[kind][key]) || key;
 

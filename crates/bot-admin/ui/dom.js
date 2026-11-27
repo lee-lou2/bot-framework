@@ -61,6 +61,17 @@
     power: [P("M12 3.5v8"), P("M7.2 6.6a7.5 7.5 0 1 0 9.6 0")],
     eye: [P("M2.5 12s3.4-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.4 6.5-9.5 6.5S2.5 12 2.5 12z"), ["circle", { cx: 12, cy: 12, r: 2.8 }]],
     external: [P("M14 4h6v6"), P("M20 4l-9 9"), P("M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4")],
+    home: [P("M4 10.5L12 4l8 6.5V19a1.5 1.5 0 0 1-1.5 1.5h-4.5v-5.5h-4v5.5H5.5A1.5 1.5 0 0 1 4 19z")],
+    activity: [P("M3 12h4l2.4-6.5 4.2 13L16 12h5")],
+    audit: [P("M6 4h9l3 3v13a1.5 1.5 0 0 1-1.5 1.5h-10.5A1.5 1.5 0 0 1 4.5 20V5.5A1.5 1.5 0 0 1 6 4z"), P("M9 11h6M9 15h4")],
+    sliders: [P("M4 7h16M4 17h16"), ["circle", { cx: 9, cy: 7, r: 2.2 }], ["circle", { cx: 15, cy: 17, r: 2.2 }]],
+    refresh: [P("M20 12a8 8 0 1 1-2.3-5.7L20 8.5"), P("M20 4v4.5h-4.5")],
+    sun: [["circle", { cx: 12, cy: 12, r: 4 }], P("M12 3v2M12 19v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M3 12h2M19 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4")],
+    moon: [P("M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10z")],
+    monitor: [["rect", { x: 3.5, y: 4.5, width: 17, height: 12, rx: 2 }], P("M9 20h6M12 16.5V20")],
+    menu: [P("M4 7h16M4 12h16M4 17h16")],
+    grid: [["rect", { x: 4, y: 4, width: 6.5, height: 6.5, rx: 1.5 }], ["rect", { x: 13.5, y: 4, width: 6.5, height: 6.5, rx: 1.5 }], ["rect", { x: 4, y: 13.5, width: 6.5, height: 6.5, rx: 1.5 }], ["rect", { x: 13.5, y: 13.5, width: 6.5, height: 6.5, rx: 1.5 }]],
+    network: [["circle", { cx: 12, cy: 5, r: 2.2 }], ["circle", { cx: 5.5, cy: 18, r: 2.2 }], ["circle", { cx: 18.5, cy: 18, r: 2.2 }], P("M12 7.2V12M12 12l-5 4.4M12 12l5 4.4")],
   };
   function icon(name, opts) {
     opts = opts || {};
@@ -90,7 +101,7 @@
     el._n = to;
     const fmt = o.format || String;
     if (!isFinite(to) || reduced() || from === to || !root.requestAnimationFrame || to - from > 1e6) { el.textContent = fmt(to); return; }
-    const t0 = root.performance.now(), dur = o.duration || 480;
+    const t0 = root.performance.now(), dur = o.duration || 420;
     el.textContent = fmt(from);
     const step = (t) => {
       const p = Math.min(1, (t - t0) / dur);
