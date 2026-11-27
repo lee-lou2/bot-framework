@@ -1,9 +1,7 @@
 //! Slack reply sender for markdown messages, approval cards, and external file uploads.
 use super::{
     api::{Body, Raw, SlackApi},
-    blocks::{
-        PLAIN_LIMIT, card_blocks, card_fits, card_text, fits_block, markdown_block, neutralize,
-    },
+    blocks::{PLAIN_LIMIT, card_blocks, card_fits, card_text, neutralize, text_blocks},
     creds::{BotCheck, Credentials},
 };
 use crate::{
@@ -150,7 +148,7 @@ fn sendable(body: &ReplyBody) -> bool {
         return false;
     }
     match body.text.as_deref() {
-        Some(text) if !fits_block(text) => {
+        Some(text) if text_blocks(text).is_none() => {
             body.approval.is_none() && neutralize(text).chars().count() <= PLAIN_LIMIT
         }
         _ => true,
@@ -215,17 +213,19 @@ impl SlackSender {
         body: &ReplyBody,
     ) -> Delivery {
         let card = body.approval.as_ref();
-        // Never truncate message text: use plain text when it exceeds the markdown block limit.
-        if body.text.as_deref().is_some_and(|text| !fits_block(text)) {
-            return match (card, body.text.as_deref()) {
-                (None, Some(text)) => {
-                    self.post_plain(token, channel, thread, &neutralize(text))
-                        .await
+        // Never truncate message text: use plain text when it exceeds Block Kit limits.
+        let mut blocks = match body.text.as_deref() {
+            Some(text) => match text_blocks(text) {
+                Some(blocks) => blocks,
+                None if card.is_none() => {
+                    return self
+                        .post_plain(token, channel, thread, &neutralize(text))
+                        .await;
                 }
-                _ => Delivery::Rejected,
-            };
-        }
-        let mut blocks: Vec<Value> = body.text.iter().map(|t| markdown_block(t)).collect();
+                None => return Delivery::Rejected,
+            },
+            None => Vec::new(),
+        };
         match card {
             Some(card) if card_fits(card) => blocks.extend(card_blocks(card)),
             Some(_) => {
