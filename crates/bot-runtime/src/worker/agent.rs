@@ -11,9 +11,7 @@ use super::{
 };
 use crate::{
     context::{self, Assembled, ContextError, ContextInput},
-    model::{
-        DoneCall, Exchange, ModelError, ModelMeta, ModelRunner, ModelStep, RunnerKind, Session,
-    },
+    model::{DoneCall, Exchange, ModelError, ModelMeta, ModelRunner, ModelStep, Session},
 };
 use bot_core::{
     attachments,
@@ -255,19 +253,9 @@ impl Worker {
                 return Flow::Fail(Failure::Permanent("invalid_chat"));
             }
         };
-        let Some(runner) = self.deps.models.runner(&attempt.profile, &assembled.model) else {
-            return Flow::Fail(Failure::Permanent("unknown_model"));
-        };
-        let flow = match runner.kind() {
-            RunnerKind::Loop => {
-                self.loop_run(ctx, control, span, &snapshot, runner.as_ref(), assembled)
-                    .await
-            }
-            RunnerKind::Step => {
-                self.step_run(ctx, control, span, &snapshot, runner.as_ref(), assembled)
-                    .await
-            }
-        };
+        let flow = self
+            .run_with_fallback(ctx, control, span, &snapshot, assembled)
+            .await;
         if matches!(flow, Flow::Done(..)) {
             self.auto_capture_memory(ctx, &snapshot.revision, &query, &memory)
                 .await;
@@ -275,7 +263,8 @@ impl Worker {
         flow
     }
 
-    async fn loop_run(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn loop_run(
         &self,
         ctx: &RunContext,
         control: &Control,
@@ -283,6 +272,7 @@ impl Worker {
         snapshot: &Arc<Snapshot>,
         runner: &dyn ModelRunner,
         assembled: Assembled,
+        attempt_index: usize,
     ) -> Flow {
         let alias = assembled.model.clone();
         // Dropping `grant` when this function exits revokes only this attempt's relay token.
@@ -309,7 +299,7 @@ impl Worker {
         let started = now_nano();
         let meta = runner.meta(&alias);
         let result = runner.step(request).await;
-        self.model_span(span, 0, &alias, meta.as_ref(), started, &result);
+        self.model_span(span, attempt_index, &alias, meta.as_ref(), started, &result);
         match result {
             Ok(ModelStep::Final { text, outcome, .. }) => {
                 answer(ctx, &text, outcome, ctx.attempt.generation == Generation(1))
@@ -319,7 +309,7 @@ impl Worker {
         }
     }
 
-    async fn step_run(
+    pub(super) async fn step_run(
         &self,
         ctx: &RunContext,
         control: &Control,

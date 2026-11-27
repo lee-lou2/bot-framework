@@ -182,3 +182,26 @@ fn codex_and_agy_cli_kinds_have_distinct_stable_fingerprint_tags_and_apple_image
     assert_ne!(multi, multi_changed);
     assert_ne!(multi, multi_both);
 }
+
+#[test]
+fn fallback_target_binds_activation_fingerprint_while_omitting_it_preserves_legacy_bytes() {
+    let cli_without = print(json!({"a": agy(), "b": claude()}));
+    let mut cli_with_fb = agy();
+    cli_with_fb["fallback"] = json!("b");
+    let cli_with = print(json!({"a": cli_with_fb, "b": claude()}));
+    assert_ne!(cli_without, cli_with);
+
+    let api_without = print(json!({"a": anthropic(), "b": openai()}));
+    let mut api_with_fb = anthropic();
+    api_with_fb["fallback"] = json!("b");
+    let api_with = print(json!({"a": api_with_fb, "b": openai()}));
+    assert_ne!(api_without, api_with);
+    assert_eq!(
+        cli_with,
+        "24c5390b099bcfdeb6e5294cd83f2f06ce2a4f24a2dd3cd00fa8bf8671e8304c"
+    );
+    assert_eq!(
+        api_with,
+        "b9821298f232a7557405ae874bcc8488e55cc3204c3817131abb9384f919b7f1"
+    );
+}

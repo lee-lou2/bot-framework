@@ -5,6 +5,7 @@ mod delivery;
 mod fake_ledger;
 mod fake_runs;
 mod fakes;
+mod fallback;
 mod lifecycle;
 mod memory_judge;
 mod outcome;

@@ -222,6 +222,31 @@ async fn openai_key_slots_must_hold_key_shaped_distinct_values() {
     assert!(missing.is_empty(), "{missing:?}");
 }
 
+#[test]
+fn fallback_targets_require_secrets_and_vm_images() {
+    let snapshot = profile("personal").build();
+    let providers = r#", "providers": {
+        "assistant": {"kind": "agy-cli", "model": "gemini-4-hydrogen", "endpoint": "https://generativelanguage.googleapis.com", "secret": "gemini-key", "effort": "xhigh", "fallback": "backup"},
+        "backup": {"kind": "claude-cli", "model": "claude-sonnet-5-5", "endpoint": "https://proxy.example", "secret": "claude-key", "effort": "medium"},
+        "plain": {"kind": "demo"}}"#;
+    let d = "a".repeat(64);
+    let agy_only = format!(
+        r#"{providers}, "sandbox": {{"apple": {{"images": {{"agy": "a@sha256:{d}"}}, "network": "bot-internal"}}}}"#
+    );
+    let host_missing_claude = host_with(&agy_only);
+    assert_eq!(
+        model_secrets(&snapshot, &host_missing_claude),
+        BTreeSet::from(["gemini-key".to_owned(), "claude-key".to_owned()])
+    );
+    let msg = missing_model_sandbox(&snapshot, &host_missing_claude).unwrap();
+    assert!(msg.contains("sandbox.apple.images.claude"), "{msg}");
+
+    let both = format!(
+        r#"{providers}, "sandbox": {{"apple": {{"images": {{"agy": "a@sha256:{d}", "claude": "c@sha256:{d}"}}, "network": "bot-internal"}}}}"#
+    );
+    assert!(missing_model_sandbox(&snapshot, &host_with(&both)).is_none());
+}
+
 #[tokio::test]
 async fn the_same_key_value_in_two_profiles_is_caught_too() {
     use bot_gateway::testing::MemorySecrets;

@@ -14,6 +14,11 @@ use std::{sync::Arc, time::Duration};
 /// Resolves a model alias to a runner permitted for the profile (`None` fails the run with `unknown_model`).
 pub trait Models: Send + Sync {
     fn runner(&self, profile: &ProfileId, alias: &str) -> Option<Arc<dyn ModelRunner>>;
+
+    /// Ordered fallback aliases to try if the primary model fails before committing incompatible progress.
+    fn fallbacks(&self, _profile: &ProfileId, _alias: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Issues a per-attempt broker front relay token for `Loop` runners (dropping `RelayGrant` revokes only that attempt's token).

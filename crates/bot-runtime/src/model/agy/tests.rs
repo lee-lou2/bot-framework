@@ -191,6 +191,38 @@ fn catalog_model_and_args_enforce_stream_json_and_refuse_builtins() {
             "/work/agy.settings.json",
         ]
     );
+    let hydrogen = CliModel {
+        id: "gemini-4-hydrogen".into(),
+        ..model("xhigh")
+    };
+    assert_eq!(AgyRunner::catalog_model(&hydrogen), "gemini-4-hydrogen");
+    assert_eq!(
+        AgyRunner::args(&hydrogen, &BTreeSet::new()).unwrap(),
+        [
+            "--print=",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--disable-slash-commands",
+            "--model",
+            "gemini-4-hydrogen",
+            "--effort",
+            "xhigh",
+            "--settings",
+            "/work/agy.settings.json",
+        ]
+    );
+    let suffixed = CliModel {
+        id: "gemini-4-hydrogen-xhigh".into(),
+        ..model("xhigh")
+    };
+    assert!(
+        !AgyRunner::args(&suffixed, &BTreeSet::new())
+            .unwrap()
+            .iter()
+            .any(|a| a == "--effort")
+    );
     assert_eq!(
         AgyRunner::args(&model("low"), &BTreeSet::from([Builtin::Read])).unwrap_err(),
         ModelError::Failed {

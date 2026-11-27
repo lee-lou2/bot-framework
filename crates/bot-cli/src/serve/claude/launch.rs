@@ -2,7 +2,7 @@
 // VM boot order is type-enforced (`ContainerSandbox::start` -> `Anchored` -> bind relay on gateway IP -> `relay`),
 // because the host-only gateway address is only bindable while the anchor VM is up.
 use crate::{
-    execution::{Apple, Provider},
+    execution::{Apple, Provider, reachable_aliases},
     host::HostFile,
     install,
     serve::{runner::default_work, upstream::HttpsUpstream},
@@ -45,12 +45,10 @@ pub fn operational(
     installs: Option<&Path>,
     uid: u32,
 ) -> Result<super::ClaudeParts, String> {
-    let required: BTreeSet<CliKind> = host
-        .catalog
-        .models
-        .values()
-        .flatten()
-        .filter_map(|alias| host.providers.get(alias).and_then(Provider::cli_kind))
+    let roots = host.catalog.models.values().flatten().map(String::as_str);
+    let required: BTreeSet<CliKind> = reachable_aliases(&host.providers, roots)
+        .into_iter()
+        .filter_map(|alias| host.providers.get(&alias).and_then(Provider::cli_kind))
         .collect();
     let apple = host.sandbox.apple.as_ref().ok_or_else(|| {
         let names = required

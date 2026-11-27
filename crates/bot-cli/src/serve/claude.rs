@@ -1,7 +1,7 @@
 //! Host assembly for VM-hosted CLI model runs (`claude-cli`, `codex-cli`, `agy-cli`): broker relay front, Apple VM, and park tracking.
 use super::{guard::GuardedUpstream, watched::Watched};
 use crate::{
-    execution::{CliProvider, Provider},
+    execution::{CliProvider, Provider, reachable_aliases},
     host::HostFile,
     settings::SecretsKind,
     validate::{missing_named, model_secrets},
@@ -96,11 +96,14 @@ pub async fn missing_keys(
 }
 
 pub fn needed(host: &HostFile) -> bool {
-    host.catalog.models.values().flatten().any(|alias| {
-        host.providers
-            .get(alias)
-            .is_some_and(Provider::needs_model_vm)
-    })
+    let roots = host.catalog.models.values().flatten().map(String::as_str);
+    reachable_aliases(&host.providers, roots)
+        .into_iter()
+        .any(|alias| {
+            host.providers
+                .get(&alias)
+                .is_some_and(Provider::needs_model_vm)
+        })
 }
 
 fn cli_protocol(kind: CliKind) -> Protocol {
@@ -162,6 +165,7 @@ pub fn model_host(host: &HostFile) -> Result<ModelHost, String> {
             endpoint,
             secret,
             effort: _,
+            fallback: _,
         }) = provider
         else {
             continue;
@@ -204,12 +208,12 @@ pub fn model_host(host: &HostFile) -> Result<ModelHost, String> {
         .models
         .iter()
         .map(|(profile, aliases)| {
+            let reachable = reachable_aliases(&host.providers, aliases.iter().map(String::as_str));
             (
                 ProfileId(profile.clone()),
-                aliases
-                    .iter()
-                    .filter(|alias| providers.contains_key(*alias))
-                    .cloned()
+                reachable
+                    .into_iter()
+                    .filter(|alias| providers.contains_key(alias))
                     .collect(),
             )
         })

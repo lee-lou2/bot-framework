@@ -455,7 +455,10 @@ fn rig_full(models: Arc<dyn Models>, cfg: WorkerConfig, relays: Arc<dyn Relays>)
     let memory = Arc::new(FakeMemory::default());
     let gateway = Arc::new(FakeGateway::default());
     let catalog = FakeCatalog::new(snapshot());
-    let ledger = Arc::new(FakeLedger::default());
+    let ledger = Arc::new(FakeLedger {
+        runs: Some(runs.clone()),
+        ..FakeLedger::default()
+    });
     *lock(&ledger.active) = Some(Revision("r1".into()));
     let spans = Arc::new(Spans::default());
     let deps = Deps {

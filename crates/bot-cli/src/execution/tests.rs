@@ -30,6 +30,7 @@ fn providers_are_demo_or_a_claude_cli_with_an_https_upstream_and_a_secret_name()
             endpoint: "https://api.example.com:8443/v1/messages".into(),
             secret: "upstream-key".into(),
             effort: None,
+            fallback: None,
         })
     );
     let multi = parse_providers(&json!({
@@ -346,6 +347,7 @@ fn claude(endpoint: &str, secret: &str) -> BTreeMap<String, Provider> {
             endpoint: endpoint.into(),
             secret: secret.into(),
             effort: None,
+            fallback: None,
         }),
     )]
     .into()

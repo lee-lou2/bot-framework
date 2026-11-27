@@ -68,7 +68,7 @@ In every CLI mode, the broker injects the real upstream provider key only on the
 
 ## Host Configuration & Model Execution
 
-In `BOT_HOST_CONFIG`, `models` declares allowed model aliases per profile, and `providers` defines how each alias runs — for example `{"models":{"personal":["assistant"]},"providers":{"assistant":{"kind":"demo"}}}` for the account-free local demo. VM CLI providers (`claude-cli`, `codex-cli`, `agy-cli`) require upstream `model`, HTTPS `endpoint`, and profile secret name `secret`, with optional `effort` (`low`, `medium`, `high`, `xhigh`, `max`; defaults to `medium`).
+In `BOT_HOST_CONFIG`, `models` declares allowed model aliases per profile, and `providers` defines how each alias runs — for example `{"models":{"personal":["assistant"]},"providers":{"assistant":{"kind":"demo"}}}` for the account-free local demo. VM CLI providers (`claude-cli`, `codex-cli`, `agy-cli`) require upstream `model`, HTTPS `endpoint`, and profile secret name `secret`, with optional `effort` (`low`, `medium`, `high`, `xhigh`, `max`; defaults to `medium`). Any non-demo provider may also set optional `fallback` to another provider alias (acyclic chain, max depth 8); fallback targets enter the activation fingerprint, secret validation, and VM image checks, and the worker falls back only when switching preserves zero-duplicate-effect safety (zero committed ledger steps across `Loop` runners, or checkpointed `Step`-to-`Step` handoff).
 
 ### Choosing a Model Runner
 
