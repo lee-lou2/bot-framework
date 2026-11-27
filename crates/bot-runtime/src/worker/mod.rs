@@ -16,7 +16,7 @@ pub use delivery::Delivery;
 use crate::host::{Deps, Handback, Quiesce, WorkerConfig};
 use bot_core::{
     command::{Failure, Finish, Retry, RunOutcome},
-    memory::Embedder,
+    memory::{Embedder, MemoryJudge},
 };
 use std::sync::Arc;
 use tokio::{sync::watch, task::JoinSet};
@@ -62,6 +62,7 @@ pub struct Worker {
     pub(crate) handback: Option<Arc<dyn Handback>>,
     pub(crate) quiesce: Option<Arc<dyn Quiesce>>,
     pub(crate) embedder: Option<Arc<dyn Embedder>>,
+    pub(crate) memory_judge: Option<Arc<dyn MemoryJudge>>,
 }
 
 impl Worker {
@@ -73,12 +74,19 @@ impl Worker {
             handback: None,
             quiesce: None,
             embedder: None,
+            memory_judge: None,
         }
     }
 
     #[must_use]
     pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
+        self
+    }
+
+    #[must_use]
+    pub fn with_memory_judge(mut self, judge: Arc<dyn MemoryJudge>) -> Self {
+        self.memory_judge = Some(judge);
         self
     }
 

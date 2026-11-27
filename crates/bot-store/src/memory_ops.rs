@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use sqlx::Row;
 
 /// Near-duplicate cosine similarity cutoff for skipping redundant active saves without an LLM call.
-const NEAR_DUP_COS: f32 = 0.94;
+pub(crate) const NEAR_DUP_COS: f32 = 0.94;
 
 fn parse_saved(result: &str) -> Option<MemorySaved> {
     let Value::Object(map) = serde_json::from_str::<Value>(result).ok()? else {
@@ -45,7 +45,7 @@ fn parse_forgotten(result: &str) -> Option<MemoryId> {
         .map(|s| MemoryId(s.to_owned()))
 }
 
-async fn lock_owner_quota(tx: &mut Tx<'_>, profile: &str, owner: &str) -> R<()> {
+pub(crate) async fn lock_owner_quota(tx: &mut Tx<'_>, profile: &str, owner: &str) -> R<()> {
     sqlx::query(
         "select pg_advisory_xact_lock(hashtextextended('bot.memory:' || $1 || ':' || $2, 0))",
     )

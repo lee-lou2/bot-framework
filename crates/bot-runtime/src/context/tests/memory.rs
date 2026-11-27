@@ -237,3 +237,18 @@ fn operator_authored_sections_stay_in_the_system_prompt() {
     }
     assert_eq!(seen(&out, "MEMORY-B-2"), (0, 1));
 }
+
+#[test]
+fn memory_save_scope_adds_guidance_before_untrusted_reference_notice() {
+    let mut snap = snapshot();
+    snap.policy.scopes.insert("memory.save".into());
+    snap.agents
+        .get_mut(&AgentId("main".into()))
+        .unwrap()
+        .scopes
+        .insert("memory.save".into());
+    let run = run_context("main", &["run", "memory.save"], "Remember my preference");
+    let out = build(&snap, &run, &[], &[shared("Existing note")]);
+    assert!(out.system.contains("## Memory"), "{}", out.system);
+    assert!(out.system.ends_with(SYSTEM_NOTICE), "{}", out.system);
+}

@@ -86,6 +86,10 @@ impl ApiEndpoint {
         self.loopback
     }
 
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
     pub fn url(&self, suffix: &str) -> String {
         let scheme = match self.scheme {
             Scheme::Http => "http",

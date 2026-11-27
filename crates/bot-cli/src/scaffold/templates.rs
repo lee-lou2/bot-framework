@@ -129,7 +129,7 @@ id: "__ID__"                  # Must match the folder name (lowercase, digits, h
 timezone: UTC                 # IANA timezone used by cron triggers
 model: assistant              # Model alias allowed for this profile in host.json
 roles:
-  owner: [run]                # Role = set of scopes; `run` allows chatting with agents
+  owner: [run, memory.search, memory.save, memory.forget]   # Role = set of scopes; `run` allows chatting, `memory.*` allows private memory in DM/CLI
 members:
   - {identity: "local:owner", roles: [owner]}   # CLI account `owner` mapped to this OS user in host.json
 bindings:
@@ -176,7 +176,7 @@ id: "__ID__"                  # Must match the folder name (lowercase, digits, h
 timezone: Asia/Seoul          # IANA timezone used by cron triggers
 model: assistant              # Model alias allowed for this profile in host.json
 roles:
-  lead: [run]                 # Role = set of scopes; `run` allows chatting with agents
+  lead: [run, memory.search, memory.save, memory.forget]   # Role = set of scopes; `run` allows chatting, `memory.*` allows private memory in DM/CLI
 members:
   - {identity: "local:owner", roles: [lead]}   # CLI account `owner` mapped to this OS user in host.json
   # Add teammates by Slack identity (register workspace alias in host.json):
@@ -185,7 +185,7 @@ bindings:
   - {id: desk, adapter: cli, account: owner, agent: main}   # Humans talk only to main (team lead)
 secrets: []                   # Declare secret names only; values live in the host secret store
 policy:
-  scopes: [run]               # Profile-wide ceiling
+  scopes: [run, memory.search, memory.save, memory.forget]   # Profile-wide ceiling
   agents:                     # Per-agent ceilings (omitted agents inherit their parent ceiling)
     main/developer: [run]
     main/designer: [run]
@@ -310,7 +310,7 @@ id: "__ID__"                  # Must match the folder name (lowercase, digits, h
 timezone: Asia/Seoul          # IANA timezone used by cron triggers
 model: assistant              # Model alias allowed for this profile in host.json
 roles:
-  owner: [run]                # Role = set of scopes; `run` allows chatting with agents
+  owner: [run, memory.search, memory.save, memory.forget]   # Role = set of scopes; `run` allows chatting, `memory.*` allows private memory in DM/CLI
 members:
   - {identity: "local:owner", roles: [owner]}   # CLI account `owner` mapped to this OS user in host.json
   # Add staff by Slack identity (register workspace alias in host.json):
@@ -319,7 +319,7 @@ bindings:
   - {id: desk, adapter: cli, account: owner, agent: main}   # Humans talk only to main (manager)
 secrets: []                   # Declare secret names only; values live in the host secret store
 policy:
-  scopes: [run]               # Profile-wide ceiling
+  scopes: [run, memory.search, memory.save, memory.forget]   # Profile-wide ceiling
   agents:                     # Per-agent ceilings (omitted agents inherit their parent ceiling)
     main/product: [run]
     main/support: [run]

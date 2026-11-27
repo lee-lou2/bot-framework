@@ -152,6 +152,24 @@ pub trait MemoryStore: Send + Sync {
     ) -> Reply<'_, ()> {
         Box::pin(async { Ok(()) })
     }
+    /// Host-owned automatic private memory save (fenced to live attempt & active revision; skips if model already saved/forgot in this run).
+    fn auto_save(
+        &self,
+        _attempt: Attempt,
+        _checked_revision: Revision,
+        _spec: crate::memory::MemorySave,
+    ) -> Reply<'_, Option<crate::memory::MemorySaved>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// Host-owned automatic private memory forget (private owner-only rows; skips if model already saved/forgot in this run).
+    fn auto_forget(
+        &self,
+        _attempt: Attempt,
+        _checked_revision: Revision,
+        _id: MemoryId,
+    ) -> Reply<'_, bool> {
+        Box::pin(async { Ok(false) })
+    }
     /// Atomically verifies approval, owner, and content digest, then consumes approval, shares, completes the call, and audits;
     /// digest mismatch returns `Conflict` and retries of completed calls do not alter visibility.
     fn share(&self, start: crate::ledger::StartCall, id: MemoryId) -> Reply<'_, MemoryId>;

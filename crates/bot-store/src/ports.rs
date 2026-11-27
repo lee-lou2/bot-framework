@@ -27,8 +27,8 @@ use bot_core::{
         PrivateOutcome, PrivatePermit, PrivateRequest, PrivateStart, StartCall, StoredApproval,
     },
     port::{
-        AuditLog, DelegationStore, EffectJournal, EffectPermit, MemoryStore, Reply, RunAdmin,
-        RunStore, ScheduleStore,
+        AuditLog, DelegationStore, EffectJournal, EffectPermit, Reply, RunAdmin, RunStore,
+        ScheduleStore,
     },
     profile::ActiveRevisions,
     schedule::{
@@ -364,71 +364,6 @@ impl EffectJournal for Store {
 
     fn record(&self, attempt: Attempt, call: CallId, status: EffectStatus) -> Reply<'_, ()> {
         reply!(async move { self.effect_record(&attempt, &call, status).await })
-    }
-}
-
-impl MemoryStore for Store {
-    fn preview(&self, attempt: Attempt, id: MemoryId) -> Reply<'_, MemoryPreview> {
-        reply!(async move { self.memory_preview(&attempt, &id).await })
-    }
-
-    fn share(&self, start: StartCall, id: MemoryId) -> Reply<'_, MemoryId> {
-        reply!(self.memory_share(start, id))
-    }
-
-    fn search(&self, attempt: Attempt, query: String) -> Reply<'_, Vec<MemoryHit>> {
-        reply!(async move { self.memory_search(&attempt, &query).await })
-    }
-
-    fn search_hybrid(
-        &self,
-        attempt: Attempt,
-        query: bot_core::memory::MemoryQuery,
-    ) -> Reply<'_, Vec<MemoryHit>> {
-        reply!(async move { self.memory_search_hybrid(&attempt, &query).await })
-    }
-
-    fn change(&self, attempt: Attempt, change: MemoryChange) -> Reply<'_, MemoryId> {
-        reply!(async move { self.memory_change(&attempt, change).await })
-    }
-
-    fn save(
-        &self,
-        start: StartCall,
-        spec: bot_core::memory::MemorySave,
-    ) -> Reply<'_, bot_core::memory::MemorySaved> {
-        reply!(self.memory_save(start, spec))
-    }
-
-    fn forget(&self, start: StartCall, id: MemoryId) -> Reply<'_, MemoryId> {
-        reply!(self.memory_forget(start, id))
-    }
-
-    fn unembedded(
-        &self,
-        profile: ProfileId,
-        model: String,
-        dim: u32,
-        limit: u32,
-    ) -> Reply<'_, Vec<bot_core::memory::UnembeddedMemory>> {
-        reply!(async move { self.memory_unembedded(&profile, &model, dim, limit).await })
-    }
-
-    fn store_embedding(
-        &self,
-        profile: ProfileId,
-        id: MemoryId,
-        body_sha256: [u8; 32],
-        embedding: bot_core::memory::MemoryEmbedding,
-    ) -> Reply<'_, ()> {
-        reply!(async move {
-            self.memory_store_embedding(&profile, &id, body_sha256, &embedding)
-                .await
-        })
-    }
-
-    fn seed(&self, seed: MemorySeed) -> Reply<'_, ()> {
-        reply!(self.memory_seed(seed))
     }
 }
 

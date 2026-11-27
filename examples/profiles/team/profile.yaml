@@ -5,8 +5,8 @@ id: team                      # Must match the folder name (lowercase, digits, h
 timezone: Asia/Seoul          # IANA timezone used for cron triggers and chat schedules
 model: assistant              # Model alias allowed by the host (the built-in demo host allows `assistant` for `team`)
 roles:                        # Role -> scope list; scopes authorize tools and built-in capabilities
-  lead: [run, calendar.read, calendar.delete, schedule.create, schedule.list, schedule.cancel]
-  member: [run, calendar.read, schedule.list]
+  lead: [run, calendar.read, calendar.delete, schedule.create, schedule.list, schedule.cancel, memory.search, memory.save, memory.forget]
+  member: [run, calendar.read, schedule.list, memory.search, memory.save, memory.forget]
   digest: [run, calendar.read]    # Read-only service principal for scheduled summaries
 members:
   - {identity: "local:team", roles: [lead]}         # Demo CLI account `team` (mapped by host to OS user)
@@ -20,7 +20,7 @@ bindings:                     # External entrances -> agent; humans talk only to
   # - {id: channel, adapter: slack, workspace: home, channel: team, agent: main}
 secrets: []                   # Secret names only; actual values live in the host secret store (e.g. secrets: [tracker-reader])
 policy:
-  scopes: [run, calendar.read, calendar.delete, schedule.create, schedule.list, schedule.cancel]  # Profile-wide ceiling
+  scopes: [run, calendar.read, calendar.delete, schedule.create, schedule.list, schedule.cancel, memory.search, memory.save, memory.forget]  # Profile-wide ceiling
   agents:                     # Per-agent ceilings; omitted agents inherit their parent's ceiling
     main/developer: [run]
     main/designer: [run]

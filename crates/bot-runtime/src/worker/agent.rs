@@ -133,6 +133,77 @@ impl Worker {
             .await
     }
 
+    /// Evaluates eligible 1:1 DM/CLI user messages with the configured System One judge and commits private saves/forgets.
+    async fn auto_capture_memory(
+        &self,
+        ctx: &RunContext,
+        checked_revision: &bot_core::id::Revision,
+        query: &str,
+        recalled: &[bot_core::command::MemoryHit],
+    ) {
+        let Some(judge) = &self.memory_judge else {
+            return;
+        };
+        if ctx.root != ctx.attempt.run
+            || ctx.origin != bot_core::state::RunOrigin::Message
+            || !ctx.principal.is_human()
+            || !matches!(
+                ctx.conversation.kind,
+                ConversationKind::Direct | ConversationKind::Cli
+            )
+            || context::is_chat(ctx)
+            || query.trim().is_empty()
+        {
+            return;
+        }
+        let candidates: Vec<bot_core::memory::MemoryCandidate> = recalled
+            .iter()
+            .filter(|h| h.visibility == bot_core::state::Visibility::Private)
+            .take(8)
+            .map(|h| bot_core::memory::MemoryCandidate {
+                id: h.id.clone(),
+                text: h.text.clone(),
+            })
+            .collect();
+        let Ok(decision) = judge.judge(&ctx.attempt.profile, query, &candidates).await else {
+            return;
+        };
+        match decision {
+            bot_core::memory::MemoryDecision::None => {}
+            bot_core::memory::MemoryDecision::Save { items, supersedes } => {
+                let mut pending_supersede = supersedes;
+                for item in items {
+                    let embedding = match &self.embedder {
+                        Some(emb) => emb
+                            .embed(&ctx.attempt.profile, &item.text)
+                            .await
+                            .ok()
+                            .flatten(),
+                        None => None,
+                    };
+                    let spec = bot_core::memory::MemorySave {
+                        text: item.text,
+                        kind: item.kind,
+                        supersedes: pending_supersede.take(),
+                        embedding,
+                    };
+                    let _ = self
+                        .deps
+                        .memory
+                        .auto_save(ctx.attempt.clone(), checked_revision.clone(), spec)
+                        .await;
+                }
+            }
+            bot_core::memory::MemoryDecision::Forget(id) => {
+                let _ = self
+                    .deps
+                    .memory
+                    .auto_forget(ctx.attempt.clone(), checked_revision.clone(), id)
+                    .await;
+            }
+        }
+    }
+
     pub(super) async fn agent(&self, ctx: &RunContext, control: &Control, span: &RunSpan) -> Flow {
         let attempt = &ctx.attempt;
         let Some(snapshot) = self
@@ -161,7 +232,7 @@ impl Worker {
             }
         };
         let query = context::query_text(ctx);
-        let memory = match self.recall_memory(attempt, query).await {
+        let memory = match self.recall_memory(attempt, query.clone()).await {
             Ok(hits) => hits,
             Err(Error::Stale | Error::Denied | Error::Missing) => return Flow::Lost,
             Err(_) => Vec::new(),
@@ -187,7 +258,7 @@ impl Worker {
         let Some(runner) = self.deps.models.runner(&attempt.profile, &assembled.model) else {
             return Flow::Fail(Failure::Permanent("unknown_model"));
         };
-        match runner.kind() {
+        let flow = match runner.kind() {
             RunnerKind::Loop => {
                 self.loop_run(ctx, control, span, &snapshot, runner.as_ref(), assembled)
                     .await
@@ -196,7 +267,12 @@ impl Worker {
                 self.step_run(ctx, control, span, &snapshot, runner.as_ref(), assembled)
                     .await
             }
+        };
+        if matches!(flow, Flow::Done(..)) {
+            self.auto_capture_memory(ctx, &snapshot.revision, &query, &memory)
+                .await;
         }
+        flow
     }
 
     async fn loop_run(

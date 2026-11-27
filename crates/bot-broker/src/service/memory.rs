@@ -2,8 +2,8 @@
 //!
 //! - `memory.search` runs hybrid (embedding + lexical) recall under run visibility/taint rules.
 //! - `memory.save` and `memory.forget` are restricted to the authenticated human owner in 1:1 DM/CLI.
-//! - `memory.save` escalates to owner approval whenever the run is private-tainted or policy-gated,
-//!   and only computes embeddings after approval passes so untrusted/tainted text is never sent upstream early.
+//! - `memory.save` requires owner approval only when `policy.approve` lists `memory.save`, and only
+//!   computes embeddings after approval passes so unapproved text is never sent upstream early.
 
 mod args;
 pub(super) use args::judged;
