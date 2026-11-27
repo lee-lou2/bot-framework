@@ -63,12 +63,11 @@ pub(super) async fn rig(
     rig_with(front, limits, None).await
 }
 
-/// 호출 ID 원천을 갈아 끼운 장치(기본은 `DirectIds`).
-/// 장치의 원장과 브로커(실행 전 확정 거절의 사전 판정)로 호출 ID 원천을 만든다.
+/// Factory for overriding `CallBook` (default: `DirectIds`) using the test ledger and broker.
 pub(super) type MakeCalls =
     Box<dyn FnOnce(&Arc<MemLedger>, &Arc<BrokerService>) -> Arc<dyn CallBook>>;
 
-/// 브로커를 감싸는 장치(시험이 브로커의 답을 바꿔 끼운다). 실제 브로커는 사전 판정과 호출 ID 원천에는 그대로 쓰인다.
+/// Factory for wrapping `Broker` while keeping the real `BrokerService` for preflight and `CallBook`.
 pub(super) type MakeBroker = Box<dyn FnOnce(Arc<BrokerService>) -> Arc<dyn Broker>>;
 
 pub(super) async fn rig_with(
@@ -165,7 +164,7 @@ pub(super) async fn rig_full(
         })
         .unwrap();
     let turns = Arc::new(RecordingTurns::new());
-    // 표식은 실제 체크포인트처럼 원장의 run 체크포인트에도 쓰인다(`CallBook::marked`가 읽는 곳)
+    // Mirror refusal markers into run checkpoints where `CallBook::marked` reads them.
     turns.mirror_into(ledger.clone());
     let delegation = Arc::new(FakeDelegation::new());
     let park = Arc::new(RecordingPark::new());
@@ -345,7 +344,7 @@ async fn a_streaming_model_request_is_relayed_as_sse_with_the_providers_key_not_
     assert!(headers.contains(&("anthropic-beta".into(), "claude-code-20250219".into())));
     assert!(
         headers.iter().all(|(_, v)| !v.contains(&r.token)),
-        "세션 토큰은 상류로 가지 않는다"
+        "session token must not be forwarded upstream"
     );
     assert!(sent.contains("\"model\":\"model-large\""), "{sent}");
 }
@@ -444,7 +443,7 @@ async fn requests_without_a_valid_session_never_reach_the_model_or_the_tools() {
         assert!(!reply.body.contains(&r.token));
     }
     assert!(r.upstream.requests().is_empty() && r.runner.jobs().is_empty());
-    // `Authorization: Bearer`로도, `x-api-key`로도 같은 세션이다
+    // Both `Authorization: Bearer` and `x-api-key` authenticate the same session.
     let by_bearer = post(
         "/v1/messages",
         Some(&format!("Bearer {}", r.token)),
@@ -463,7 +462,7 @@ async fn a_revoked_session_stops_working_and_so_does_a_run_that_changed_hands() 
             .status,
         200
     );
-    r.ledger.bump_claim("r1"); // 같은 세대에서 새 리스: 옛 claim을 쥔 세션
+    r.ledger.bump_claim("r1");
     let stale = raw(r.front.addr(), &messages(&r, r#"{"messages":[]}"#)).await;
     assert_eq!(
         (stale.status, stale.body.as_str()),
@@ -479,9 +478,8 @@ async fn a_revoked_session_stops_working_and_so_does_a_run_that_changed_hands() 
     assert_eq!(
         r.upstream.requests().len(),
         1,
-        "인계된 run의 요청은 상류까지 가지 않는다"
+        "stale run request must not reach upstream"
     );
-    // 호스트가 세션을 거두면 401이다
     let fresh = Attempt {
         claim: Some(r.ledger.claim_epoch("r1")),
         ..r.attempt.clone()
@@ -505,7 +503,7 @@ async fn a_revoked_session_stops_working_and_so_does_a_run_that_changed_hands() 
     )
     .await;
     assert_eq!(ok.status, 200);
-    // 같은 run의 다른 claim이 발급받은 토큰은 건드리지 않고, 자기 시도의 토큰만 거둔다
+    // Revoking another claim's attempt must not revoke this claim's token.
     let other = Attempt {
         claim: Some(ClaimEpoch(99)),
         ..r.attempt.clone()

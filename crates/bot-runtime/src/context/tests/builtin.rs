@@ -1,4 +1,4 @@
-//! 내장 도구 노출 규칙 시험: 예약 이름 중복 제거 · 요청/정책 상한 · 슈퍼 관리자 전용 관리 도구.
+//! Built-in tool visibility tests: reserved-name deduplication, ceilings, and super-admin tools.
 
 use super::*;
 
@@ -10,7 +10,7 @@ fn only_builtin_tools_inside_the_agent_ceiling_are_listed_once() {
     let agent = snap.agents.get_mut(&AgentId("main".into())).unwrap();
     agent.scopes.insert("schedule.list".into());
     agent.scopes.insert("schedule.deliver".into());
-    // 호스트에서 잘못 만든 판본이 예약 이름을 스킬 도구로 넣어도 내장 선언 하나만 쓴다.
+    // Even if a malformed snapshot registers a reserved name as a skill tool, only the built-in spec is exposed.
     let skill = agent.skills.get_mut("agenda").unwrap();
     for id in ["schedule.list", "schedule.deliver"] {
         skill
@@ -60,7 +60,6 @@ fn builtin_tools_and_skill_tools_respect_policy_agents_ceiling_and_run_scopes() 
     ];
     let ids = |out: &Assembled| out.tools.iter().map(|t| t.id.0.clone()).collect::<Vec<_>>();
 
-    // 1) 요청 범위(run.scopes)에 없는 내장 도구는 에이전트·정책에 있어도 보이지 않는다
     let narrow_run = build(
         &snap,
         &run_context("main", &["run", "calendar.read"], "x"),
@@ -70,7 +69,7 @@ fn builtin_tools_and_skill_tools_respect_policy_agents_ceiling_and_run_scopes() 
     assert!(!ids(&narrow_run).contains(&"schedule.list".to_owned()));
     assert!(!ids(&narrow_run).contains(&"memory.share".to_owned()));
 
-    // 2) policy.agents 에이전트 상한이 좁히면 스킬 도구와 내장 도구 모두 가려진다(자식도 부모 상한을 상속한다)
+    // policy.agents ceilings cap both skill and built-in tools and are inherited by child agents.
     snap.policy.agents.insert(
         AgentId("main".into()),
         scopes(&["run", "calendar.read", "schedule.list"]),
@@ -100,10 +99,9 @@ fn super_admin_manage_tools_are_only_exposed_to_super_admins_with_scopes() {
     snap.policy.scopes = scopes(&manage_scopes);
     snap.agents.get_mut(&AgentId("main".into())).unwrap().scopes = scopes(&manage_scopes);
 
-    // 일반 멤버는 스코프가 있어도 슈퍼 관리자 전용 도구를 보지 못한다
     let regular = build(
         &snap,
-        &run_context("main", &manage_scopes, "스킬 만들어줘"),
+        &run_context("main", &manage_scopes, "Create a skill"),
         &[],
         &[],
     );
@@ -111,15 +109,14 @@ fn super_admin_manage_tools_are_only_exposed_to_super_admins_with_scopes() {
     for id in [SKILL_INSPECT_TOOL, SKILL_CREATE_TOOL, MCP_ADD_TOOL] {
         assert!(
             !regular_ids.contains(&id),
-            "일반 사용자에게 `{id}`가 노출되면 안 돼요: {regular_ids:?}"
+            "regular user must not see `{id}`: {regular_ids:?}"
         );
     }
 
-    // 슈퍼 관리자는 허용된 관리 도구를 본다
     snap.super_admins.insert(PrincipalId("local:owner".into()));
     let admin = build(
         &snap,
-        &run_context("main", &manage_scopes, "스킬 만들어줘"),
+        &run_context("main", &manage_scopes, "Create a skill"),
         &[],
         &[],
     );
@@ -127,16 +124,15 @@ fn super_admin_manage_tools_are_only_exposed_to_super_admins_with_scopes() {
     for id in [SKILL_INSPECT_TOOL, SKILL_CREATE_TOOL, MCP_ADD_TOOL] {
         assert!(
             admin_ids.contains(&id),
-            "슈퍼 관리자에게 `{id}`가 보여야 해요: {admin_ids:?}"
+            "super-admin should see `{id}`: {admin_ids:?}"
         );
     }
     let mcp_add = admin.tools.iter().find(|t| t.id.0 == MCP_ADD_TOOL).unwrap();
     assert_eq!(mcp_add.class, Risk::Write);
 
-    // 스코프 상한에 없는 관리 도구는 슈퍼 관리자여도 보이지 않는다
     let narrow = build(
         &snap,
-        &run_context("main", &["run", SKILL_INSPECT_TOOL], "조회"),
+        &run_context("main", &["run", SKILL_INSPECT_TOOL], "Inspect"),
         &[],
         &[],
     );
@@ -145,13 +141,12 @@ fn super_admin_manage_tools_are_only_exposed_to_super_admins_with_scopes() {
     assert!(!narrow_ids.contains(&SKILL_CREATE_TOOL));
     assert!(!narrow_ids.contains(&MCP_ADD_TOOL));
 
-    // policy.agents 상한이 관리 도구를 막으면 슈퍼 관리자여도 보이지 않는다
     snap.policy
         .agents
         .insert(AgentId("main".into()), scopes(&["run", SKILL_INSPECT_TOOL]));
     let capped = build(
         &snap,
-        &run_context("main", &manage_scopes, "스킬 만들어줘"),
+        &run_context("main", &manage_scopes, "Create a skill"),
         &[],
         &[],
     );

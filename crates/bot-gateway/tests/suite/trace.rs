@@ -1,4 +1,4 @@
-//! 계측 시험: 접수·회신·승인이 `core::trace` 스팬으로 남고, 본문·인자·nonce·영수증은 어디에도 실리지 않는다.
+//! Telemetry tests: ingress, delivery, and approval spans stay within the fixed vocabulary and omit bodies, args, nonces, and receipts.
 use bot_core::{
     id::{PrincipalId, ProfileId, RequestId, RunId},
     port::Error,
@@ -23,7 +23,7 @@ use bot_gateway::{
 use serde_json::json;
 use std::sync::Arc;
 
-const MARKER: &str = "합성-민감-표식-c41f";
+const MARKER: &str = "synthetic-sensitive-marker-c41f";
 
 fn host() -> HostConfig {
     HostConfig::from_json(
@@ -175,7 +175,7 @@ fn assert_vocabulary(span: &SpanRecord) {
     for (name, _) in &span.attrs {
         assert!(
             key::ALLOWED.contains(name) || *name == key::BOT_PRIVATE,
-            "허용 어휘 밖의 키 {name}"
+            "attribute key outside allowed vocabulary: {name}"
         );
     }
 }
@@ -202,10 +202,9 @@ async fn an_accepted_chat_leaves_one_ingress_span_with_run_and_outcome() {
     assert_eq!(span.str(key::BOT_CONVERSATION_KIND), Some("cli"));
     assert_eq!(span.error, None);
     assert_eq!(flag(span, key::BOT_PRIVATE), None);
-    // 같은 (프로필, run)의 스팬은 한 추적에 모인다
+    // Spans for the same `(profile, run)` share one trace ID.
     let ids = observe::ids(&ProfileId("personal".into()), &RunId("run-1".into()));
     assert_eq!(span.ids.trace, ids.trace);
-    // 본문은 어디에도 없다
     assert!(!text_of(span).contains(MARKER));
 }
 
@@ -221,7 +220,7 @@ async fn a_private_dm_is_marked_private_and_carries_no_content() {
     assert_eq!(
         span.str(key::BOT_RUN_ID),
         None,
-        "큐에 들어가지 않았으니 run이 없다"
+        "private DM is not enqueued so it has no run ID"
     );
     assert!(!text_of(&span).contains(MARKER));
     assert!(rig.store.accepted().is_empty());
@@ -235,11 +234,11 @@ async fn rejections_are_traced_with_their_classification() {
     rig.ingress.admit(cli("r1", "hi")).await;
     let slack = rig.tracer.named("ingress slack").remove(0);
     assert_eq!(slack.str(key::BOT_OUTCOME), Some("unregistered"));
-    assert_eq!(slack.error, None, "정상 거절은 오류 상태가 아니다");
+    assert_eq!(slack.error, None, "expected rejection is not an error span");
     let cli_span = rig.tracer.named("ingress cli").remove(0);
     assert_eq!(cli_span.str(key::BOT_OUTCOME), Some("unavailable"));
     assert_eq!(cli_span.error, Some("unavailable"));
-    // 등록되지 않은 입구는 프로필을 알 수 없어 스팬이 없다
+    // Unregistered entrances have no resolved profile and emit no span.
     let mut stranger = cli("r2", "hi");
     stranger.real = Real::Cli {
         uid: 999,
@@ -262,7 +261,6 @@ async fn http_requests_record_the_method_and_route_but_not_the_body() {
     assert!(!text_of(&span).contains("\"to\""));
 }
 
-/// 요청이 보낸 method·경로로 만든 HTTP 요청(등록된 트리거 정의와 같은지는 시험이 정한다).
 fn http_at(request: &str, method: &str, path: &str) -> Inbound {
     let mut inbound = http(request);
     inbound.event = Event::Http {
@@ -275,7 +273,6 @@ fn http_at(request: &str, method: &str, path: &str) -> Inbound {
 #[tokio::test]
 async fn an_http_request_that_matches_no_trigger_leaves_fixed_values_not_what_the_caller_sent() {
     let rig = rig();
-    // 호출자가 경로에 식별자·비밀을 실었다 / 알 수 없는 method / 등록된 경로에 다른 method
     let leaks = [
         ("u1", "POST", "/notify/user-4242-key-abcdef0123456789"),
         ("u2", "PURGE-ME-9917", "/notify"),
@@ -295,9 +292,9 @@ async fn an_http_request_that_matches_no_trigger_leaves_fixed_values_not_what_th
         assert_eq!(span.str(key::HTTP_REQUEST_METHOD), Some("_OTHER"));
         let all = text_of(span);
         for needle in ["4242", "abcdef0123456789", "PURGE-ME-9917", "NOTIFY"] {
-            assert!(!all.contains(needle), "{needle}이(가) 스팬에 있다: {all}");
+            assert!(!all.contains(needle), "{needle} leaked into span: {all}");
         }
-        assert_eq!(span.str(key::BOT_TRIGGER), None, "맞은 트리거가 없다");
+        assert_eq!(span.str(key::BOT_TRIGGER), None, "no trigger matched");
     }
 }
 
@@ -327,7 +324,6 @@ async fn a_reply_delivery_joins_the_trace_of_the_run_it_answers() {
         .with_uid_resolver(|account| Ok(account.uid.unwrap()))
         .with_tracer(tracer.clone()),
     );
-    // run-1을 만든 접수
     ingress.admit(cli("r1", "hi")).await;
     let secrets = MemorySecrets::new(&[("personal", "bot-token", b"test-bot-1")]);
     let gateway = SlackGateway::new(
@@ -351,7 +347,6 @@ async fn a_reply_delivery_joins_the_trace_of_the_run_it_answers() {
         dm_destination.clone(),
         &json!({"text": MARKER}).to_string(),
     ));
-    // 거절되는 회신(없는 주체)과 불명(Held)이 되는 회신도 함께
     outbox.push(outgoing(
         "personal",
         2,
@@ -371,7 +366,6 @@ async fn a_reply_delivery_joins_the_trace_of_the_run_it_answers() {
     assert_eq!(sent.error, None);
     assert_eq!(spans[1].str(key::BOT_OUTCOME), Some("rejected"));
     assert_eq!(spans[1].error, Some("rejected"));
-    // 접수 스팬과 같은 추적(같은 프로필·run)이고, 영수증·본문은 싣지 않는다
     let ingress_span = tracer.named("ingress cli").remove(0);
     assert_eq!(sent.ids.trace, ingress_span.ids.trace);
     assert_ne!(sent.ids.span, ingress_span.ids.span);
@@ -382,7 +376,6 @@ async fn a_reply_delivery_joins_the_trace_of_the_run_it_answers() {
             "{text}"
         );
     }
-    // 불명 결과는 오류 분류 held
     slack.script(
         "chat.postMessage",
         bot_gateway::testing::slack::Scripted::Raw {

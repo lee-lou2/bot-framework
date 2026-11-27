@@ -1,21 +1,4 @@
-//! 호스트 등록부(BOT_HOST_CONFIG, JSON). 운영자가 프로필 밖에서 정하는 것: 설치한 도구 서버·프로필별 허용 모델·egress 상한,
-//! 그리고 입구(CLI·Slack·HTTP)의 실제 대상과 자격 이름·한도(`gateway` 절, bot-gateway가 해석).
-//!
-//! ```json
-//! {"version": 1,
-//!  "gateway": {"cli": {"accounts": {"owner": {"os_user": "me"}}}},
-//!  "servers": {"agenda": {"root": "/opt/bot/servers/agenda", "command": ["bin/server", "--stdio"]}},
-//!  "models": {"personal": ["assistant"]},
-//!  "providers": {"assistant": {"kind": "demo"}},
-//!  "egress": {"personal": ["calendar.example:443"]},
-//!  "sandbox": {"srt": {"binary": "/opt/srt/bin/srt", "work_root": "/var/bot/work"}},
-//!  "limits": {"tool_call_max_secs": 300},
-//!  "admin": {"bind": "127.0.0.1:8787"}}
-//! ```
-//! `limits.tool_call_max_secs`: 도구가 `timeout_secs`로 선언할 수 있는 호출 시간 한도(초)의 천장(기본 60·최대 900, `crate::tool_limits`). 활성화 지문에 든다.
-//! `admin`은 관리 화면 설정(`bot_admin::AdminSettings`, docs/admin.md)이고 생략해도 로컬 기본값으로 동작한다.
-//! `providers`(모델 별칭의 실행 방법)·`sandbox`(srt·VM)는 모양만 검사한다 — 실제로 필요한 것은 런타임 역할이다(`execution`).
-//! 모르는 최상위 키는 거절한다. 파일이 없으면 내장 데모 호스트(`demo`)를 쓴다.
+//! Host registry (`host.json`) parsing, demo defaults, UID pinning, and authority fingerprint.
 use crate::{
     execution::{self, Provider, Sandbox},
     install::{ServerSpec, Servers, parse_all},
@@ -56,37 +39,28 @@ fn bad(message: impl Into<String>) -> HostFileError {
     HostFileError(message.into())
 }
 
-/// 프로필별 사설/로컬 고정 egress 매핑(`host:port -> ip:port`).
+/// Per-profile pinned private/local egress mappings (`host:port -> ip:port`).
 pub type PrivateEgressMap = BTreeMap<String, BTreeMap<(String, u16), std::net::SocketAddr>>;
 
-/// 해석한 호스트 등록부
 pub struct HostFile {
     pub gateway: HostConfig,
     pub catalog: HostCatalog,
-    /// 관리 화면 설정(비밀 값은 담지 않는다)
     pub admin: AdminSettings,
-    /// 도구 서버 설치 명세(별칭 → 설치 폴더·실행 명령). 내장 데모 호스트는 `attach_demo_server`가 채운다.
     pub servers: BTreeMap<String, ServerSpec>,
-    /// 원격(Streamable HTTP) 도구 서버(별칭 → 접속 대상). 설치할 파일이 없고 브로커가 직접 연결한다.
     pub remote_servers: BTreeMap<String, Remote>,
-    /// 모델 별칭 → 실행 방법
     pub providers: BTreeMap<String, Provider>,
-    /// srt·VM 설정(런타임 역할이 쓴다)
     pub sandbox: Sandbox,
-    /// 도구 호출 시간 한도의 천장(`limits` 절). 활성화 지문에 든다.
     pub limits: HostLimits,
-    /// 프로필별 사설/로컬 고정 egress 매핑(`private_egress` 절). 비어 있지 않으면 활성화 지문에 든다.
     pub private_egress: PrivateEgressMap,
-    /// 파일 없이 내장 데모로 만든 것인가
     pub demo: bool,
 }
 
 pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
     let Ok(Value::Object(mut top)) = serde_json::from_str::<Value>(text) else {
-        return Err(bad("호스트 설정은 JSON 객체여야 해요"));
+        return Err(bad("host config must be a JSON object"));
     };
     if top.remove("version").and_then(|v| v.as_u64()) != Some(1) {
-        return Err(bad("version: 1이 필요해요"));
+        return Err(bad("version: 1 is required"));
     }
     let gateway = match top.remove("gateway") {
         Some(value) => HostConfig::from_value(value).map_err(|e| bad(e.to_string()))?,
@@ -129,7 +103,7 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         None => default_admin(),
     };
     if let Some(unknown) = top.keys().next() {
-        return Err(bad(format!("알 수 없는 최상위 키예요: {unknown}")));
+        return Err(bad(format!("unknown top-level key: {unknown}")));
     }
     Ok(HostFile {
         catalog: HostCatalog {
@@ -161,13 +135,12 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
 }
 
 impl HostFile {
-    /// 권한이 달라지는 호스트 설정의 지문(활성화 판본에 묶는다). `revisions`는 서버 설치 판본이다.
     pub fn authority_fingerprint(
         &self,
         revisions: &BTreeMap<String, bot_core::id::Revision>,
     ) -> Result<[u8; 32], String> {
         let gateway = bot_gateway::mapping::fingerprint(&self.gateway)
-            .map_err(|e| format!("입구 매핑을 확인하지 못했어요: {e}"))?;
+            .map_err(|e| format!("could not verify entrance mapping: {e}"))?;
         let base = execution::authority_fingerprint(
             &gateway,
             &self.catalog,
@@ -175,18 +148,14 @@ impl HostFile {
             &self.sandbox,
             revisions,
         );
-        // 도구 호출 시간 한도의 천장도 권한이다(천장을 바꾸면 활성화 사건). 기본 천장이면 지문이 그대로다.
+        // Each optional binding leaves the base digest unchanged when at its default/empty state.
         let base = crate::tool_limits::bind(base, &self.limits);
         let base = bind_private_egress(base, &self.private_egress);
         let base = bind_super_admins(base, &self.catalog.super_admins);
-        // 관측(OTLP 추적·로그·이슈 트래커) 설정도 권한이다: 어디로 무엇을 내보내는지가 바뀌거나 거두어지면 활성화 사건이라, 옛 설정으로 남은
-        // 프로세스가 구판이 되어 내보내기 문이 닫힌다. 관측을 쓰지 않는 호스트는 지문이 그대로다.
         Ok(bot_admin::obs_fingerprint(base, &self.admin))
     }
 
-    /// 내장 데모 호스트에 합성 일정 서버(`examples/servers/demo-agenda`)를 연결한다. 프로필 루트(`BOT_PROFILES`) 옆의
-    /// `servers/demo-agenda`를 먼저 찾고, 없으면 이 바이너리를 빌드한 저장소의 `examples/`를 찾는다. 둘 다 없으면 서버 없이
-    /// 둔다(별칭만 있다 — 도구 호출은 설치 판본이 없어 일시 실패한다).
+    /// Attaches the synthetic `demo-agenda` server next to `profiles_root` (or from `examples/` in this repo).
     pub fn attach_demo_server(&mut self, profiles_root: Option<&Path>) {
         let sibling = profiles_root
             .and_then(Path::parent)
@@ -213,8 +182,7 @@ impl HostFile {
         }
     }
 
-    /// 계정 별칭이 가리키는 OS 사용자를 **한 번만** 풀어 실효 uid로 고정한다. 활성화 판본의 지문·입구 표(인증)·관리 화면의 운영자
-    /// 신원·소켓 확인이 모두 같은 표를 쓰게 한다 — 따로 다시 풀면 사이에 계정이 바뀌어 결과가 달라질 수 있다.
+    /// Resolves `os_user` aliases to numeric UIDs once so fingerprint, routes, and admin identity stay consistent.
     pub fn pin_uids(&mut self) -> Result<(), String> {
         for (alias, account) in &mut self.gateway.cli.accounts {
             let uid = bot_gateway::host::resolve_uid(account)
@@ -228,13 +196,11 @@ impl HostFile {
     }
 }
 
-/// 키를 모두 생략한 관리 화면 설정(루프백 기본 주소, 추적 내보내기 없음)
 fn default_admin() -> AdminSettings {
     AdminSettings::from_json(&Value::Object(Default::default()))
-        .expect("빈 admin 설정은 항상 올바르다")
+        .expect("empty admin settings are always valid")
 }
 
-/// 프로필 검증이 쓰는 호스트 목록. 입구 별칭은 gateway 절에서 파생한다.
 fn catalog(
     gateway: &HostConfig,
     servers: BTreeSet<String>,
@@ -265,7 +231,6 @@ fn catalog(
             })
             .collect(),
         http_endpoints: gateway.http.endpoints.keys().cloned().collect(),
-        // OpenAI 호환 입구 별칭 → 키 슬롯이 가리키는 주체 집합(승인 매핑의 요청자 검증용)
         openai_endpoints: gateway
             .http
             .openai
@@ -288,16 +253,15 @@ fn catalog(
 }
 
 pub fn load(path: &Path) -> Result<HostFile, HostFileError> {
-    let meta = std::fs::metadata(path).map_err(|_| bad("호스트 설정 파일을 읽지 못했어요"))?;
+    let meta = std::fs::metadata(path).map_err(|_| bad("could not read host config file"))?;
     if !meta.is_file() || meta.len() > MAX_BYTES {
-        return Err(bad("호스트 설정은 1 MiB 이하의 일반 파일이어야 해요"));
+        return Err(bad("host config must be a regular file at most 1 MiB"));
     }
-    let text =
-        std::fs::read_to_string(path).map_err(|_| bad("호스트 설정 파일을 읽지 못했어요"))?;
+    let text = std::fs::read_to_string(path).map_err(|_| bad("could not read host config file"))?;
     parse(&text)
 }
 
-/// README 5분 시작의 호스트: 합성 일정 서버·로컬 데모 모델, CLI 계정 `owner`(예시 `personal`)와 `team`(예시 `team`)은 모두 이 프로세스를 실행한 OS 사용자.
+/// Built-in demo host mapping both `owner` and `team` CLI accounts to `uid`.
 pub fn demo(uid: u32) -> HostFile {
     let mut gateway = HostConfig::default();
     for alias in ["owner", "team"] {
@@ -317,7 +281,6 @@ pub fn demo(uid: u32) -> HostFile {
         admin: default_admin(),
         servers: BTreeMap::new(),
         remote_servers: BTreeMap::new(),
-        // 내장 데모: 데모 모델은 외부 키·VM이 필요 없다
         providers: BTreeMap::from([("assistant".to_owned(), Provider::Demo)]),
         sandbox: Sandbox::default(),
         limits: HostLimits::default(),
@@ -376,7 +339,6 @@ mod tests {
                 "hooks": {"issuer": "i", "audience": "a", "key": "k"}}}}}"#,
         )
         .unwrap();
-        // 같은 주체를 가리키는 슬롯(회전용)은 하나로 모이고, 웹훅 입구는 OpenAI 표에 없다
         assert_eq!(
             host.catalog.openai_endpoints,
             BTreeMap::from([(
@@ -397,10 +359,8 @@ mod tests {
         .unwrap();
         assert_eq!(host.providers["assistant"], Provider::Demo);
         assert!(host.sandbox.srt.is_some() && host.sandbox.apple.is_none());
-        // 게이트웨이만 쓰는 호스트는 providers·sandbox가 없어도 된다
         let bare = parse(r#"{"version": 1}"#).unwrap();
         assert!(bare.providers.is_empty() && bare.sandbox == Sandbox::default());
-        // 잘못된 모양은 어느 명령에서든 거절한다(pi는 어댑터 전에는 쓸 수 없다, 릴레이는 전체 인터페이스 금지)
         for bad in [
             r#"{"version": 1, "providers": {"a": {"kind": "pi"}}}"#,
             r#"{"version": 1, "sandbox": {"apple": {"image": "x", "network": "n", "relay_bind": "0.0.0.0:1"}}}"#,
@@ -408,7 +368,6 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
-        // 내장 데모는 외부 키·VM이 필요 없는 데모 모델을 쓴다
         assert_eq!(demo(501).providers["assistant"], Provider::Demo);
     }
 
@@ -420,23 +379,20 @@ mod tests {
         let profiles = dir.path().join("profiles");
         std::fs::create_dir_all(&profiles).unwrap();
         let mut host = demo(501);
-        assert!(host.servers.is_empty(), "연결 전에는 서버가 없다");
+        assert!(host.servers.is_empty(), "no server before attaching");
         host.attach_demo_server(Some(&profiles));
         let spec = &host.servers["demo-agenda"];
         assert_eq!(spec.root, std::fs::canonicalize(&server).unwrap());
         assert_eq!(spec.command, ["bin/server", "--stdio"]);
-        // 프로필 루트 옆에 없으면 저장소의 examples를 쓴다(이 저장소에는 있다)
         let mut fallback = demo(501);
         fallback.attach_demo_server(Some(&dir.path().join("elsewhere/profiles")));
         let root = &fallback.servers["demo-agenda"].root;
         assert!(root.ends_with("examples/servers/demo-agenda"), "{root:?}");
-        // 별칭은 서버 설치와 무관하게 호스트 목록에 있다
         assert!(fallback.catalog.servers.contains("demo-agenda"));
     }
 
     #[test]
     fn the_demo_host_knows_both_example_profiles() {
-        // 예시 폴더의 개인 비서(personal, 계정 owner)와 팀 템플릿(team, 계정 team)이 같은 내장 데모 호스트로 함께 검증된다
         let host = demo(501);
         let accounts: Vec<&str> = host
             .gateway
@@ -483,12 +439,10 @@ mod tests {
             (None, Some(me))
         );
         assert_eq!(accounts["fixed"].uid, Some(4242));
-        // 이름으로 풀든 번호로 고정하든 같은 지문이고, 이후에는 다시 풀지 않아도 같다
         assert_eq!(
             bot_gateway::mapping::fingerprint(&host.gateway).unwrap(),
             before
         );
-        // 풀 수 없는 사용자는 고정 단계(시작 전)에서 멈춘다
         let mut ghost = parse(
             r#"{"version": 1, "gateway": {"cli": {"accounts": {"owner": {"os_user": "no-such-user-zzz"}}}}}"#,
         )
@@ -507,7 +461,6 @@ mod tests {
             (custom.admin.bind.to_string(), custom.admin.max_failures),
             ("127.0.0.1:9100".to_owned(), 3)
         );
-        // 루프백 밖 주소는 원격 허용을 명시해야 하고, 모르는 키는 거절한다
         for bad_admin in [
             r#"{"bind": "0.0.0.0:8787"}"#,
             r#"{"nope": true}"#,
@@ -524,33 +477,27 @@ mod tests {
             (r#"{"version": 1, "adnim": {}}"#, "adnim"),
             (r#"{"gateway": {}}"#, "version"),
             (r#"{"version": 2}"#, "version"),
-            ("[]", "JSON 객체"),
-            (r#"{"version": 1, "servers": "demo"}"#, "객체"),
-            (
-                r#"{"version": 1, "servers": ["demo-agenda"]}"#,
-                "옛 별칭 배열",
-            ),
+            ("[]", "JSON object"),
+            (r#"{"version": 1, "servers": "demo"}"#, "object"),
+            (r#"{"version": 1, "servers": ["demo-agenda"]}"#, "servers"),
             (
                 r#"{"version": 1, "servers": {"Demo": {"root": "/a", "command": ["x"]}}}"#,
-                "이름 규칙",
+                "servers.Demo",
             ),
             (
                 r#"{"version": 1, "servers": {"demo": {"root": "/a", "command": ["x"], "revision": "1"}}}"#,
-                "자동으로 계산",
+                "revision",
             ),
-            (r#"{"version": 1, "models": {"Bad": ["a"]}}"#, "프로필 이름"),
-            (
-                r#"{"version": 1, "models": {"p": ["A B"]}}"#,
-                "올바르지 않은",
-            ),
+            (r#"{"version": 1, "models": {"Bad": ["a"]}}"#, "models"),
+            (r#"{"version": 1, "models": {"p": ["A B"]}}"#, "models.p"),
             (
                 r#"{"version": 1, "egress": {"p": ["no-port"]}}"#,
-                "올바르지 않은",
+                "egress.p",
             ),
             (r#"{"version": 1, "gateway": {"slak": {}}}"#, "slak"),
         ] {
             let message = parse(json).err().map(|e| e.to_string()).unwrap_or_default();
-            assert!(message.contains(needle), "{json} → {message}");
+            assert!(message.contains(needle), "{json} -> {message}");
         }
         assert!(parse(r#"{"version": 1}"#).is_ok());
     }

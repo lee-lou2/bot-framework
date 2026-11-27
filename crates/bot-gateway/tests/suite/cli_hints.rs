@@ -1,5 +1,4 @@
-//! `bot chat`이 입구가 없다고 돌아올 때(M6): 이 OS 사용자가 쓸 수 있는 프로필을 알려 주고 고치는 곳(호스트 설정 `gateway.cli.accounts`)을 말한다.
-//! 와이어의 `code`는 그대로(`no_entrance`·`profile_required`)이고 `message`만 길어진다. 다른 사용자의 프로필 이름은 싣지 않는다.
+//! CLI entrance error hints: reachable profiles and `gateway.cli.accounts` guidance without leaking other users' profiles.
 use bot_core::profile::Adapter;
 use bot_gateway::{
     cli::{
@@ -41,7 +40,7 @@ fn desk(profile_name: &str, account: &str) -> Fixture {
         .policy_scopes(&["run"])
 }
 
-/// 계정 별칭마다 접속 uid를 따로 정한다(`mine`은 접속한 사용자, `other`는 다른 OS 사용자).
+/// Maps each account alias to the caller's uid (`true`) or another OS user (`false`).
 async fn rig(accounts: &[(&str, bool)], profiles: Vec<Fixture>) -> Rig {
     let me = socket::current_uid().unwrap();
     let mut map = serde_json::Map::new();
@@ -75,7 +74,7 @@ fn chat(profile: Option<&str>) -> Chat {
         profile: profile.map(str::to_owned),
         request: "r1".into(),
         thread: None,
-        text: "안녕".into(),
+        text: "hello".into(),
         wait: true,
     }
 }
@@ -83,7 +82,7 @@ fn chat(profile: Option<&str>) -> Chat {
 async fn failure(rig: &Rig, request: &Chat) -> (String, String) {
     match client::chat(&rig.socket, request, |_| {}).await.unwrap() {
         Outcome::Failed { code, message, .. } => (code, message),
-        other => panic!("실패를 기대했는데 {other:?}"),
+        other => panic!("expected failure, got {other:?}"),
     }
 }
 
@@ -98,30 +97,28 @@ async fn a_profile_the_user_cannot_reach_names_the_profiles_the_user_can() {
         ],
     )
     .await;
-    // 없는 프로필
     let (code, message) = failure(&rig, &chat(Some("nosuch"))).await;
     assert_eq!(code, "no_entrance");
     assert!(
-        message.contains("프로필 `nosuch`에는 이 사용자에게 연결된 입구가 없어요"),
+        message.contains("No entrance is mapped to this user for profile `nosuch`"),
         "{message}"
     );
     assert!(
-        message.contains("쓸 수 있는 프로필: personal, work"),
+        message.contains("Available profiles: personal, work"),
         "{message}"
     );
     assert!(message.contains("--profile personal"), "{message}");
-    // 있지만 다른 OS 사용자의 프로필: 같은 문구이고, 다른 사용자의 프로필 이름은 목록에 없다
+    // Another OS user's profile gives the same hint and never lists that profile.
     let (code, message) = failure(&rig, &chat(Some("other"))).await;
     assert_eq!(code, "no_entrance");
     assert!(
-        message.contains("쓸 수 있는 프로필: personal, work"),
+        message.contains("Available profiles: personal, work"),
         "{message}"
     );
     assert!(
         !message.contains("other,") && !message.ends_with("other"),
         "{message}"
     );
-    // 프로필을 안 골랐는데 여러 개: 고를 수 있는 이름을 보여 준다
     let (code, message) = failure(&rig, &chat(None)).await;
     assert_eq!(code, "profile_required");
     assert!(message.contains("personal, work"), "{message}");
@@ -131,26 +128,24 @@ async fn a_profile_the_user_cannot_reach_names_the_profiles_the_user_can() {
 
 #[tokio::test]
 async fn a_user_with_no_entrance_at_all_is_told_where_the_account_is_connected() {
-    // 모든 계정이 다른 OS 사용자에게 연결돼 있다
     let rig = rig(&[("owner", false)], vec![desk("personal", "owner")]).await;
     for request in [chat(None), chat(Some("personal"))] {
         let (code, message) = failure(&rig, &request).await;
         assert_eq!(code, "no_entrance");
         assert!(
-            message.contains("이 사용자에게 연결된 입구가 없어요"),
+            message.contains("No entrance is mapped to this user"),
             "{message}"
         );
         assert!(
             message.contains("`account`") && message.contains("`gateway.cli.accounts`"),
             "{message}"
         );
-        assert!(message.contains("OS 사용자"), "{message}");
+        assert!(message.contains("OS user"), "{message}");
         assert!(
             !message.contains("personal,"),
-            "프로필 이름을 늘어놓지 않는다: {message}"
+            "must not enumerate other users' profiles: {message}"
         );
     }
-    // 결과 조회도 같은 문구다
     let outcome = client::result(&rig.socket, Some("nosuch"), "r1", false, |_| {})
         .await
         .unwrap();
@@ -168,7 +163,7 @@ async fn the_one_reachable_profile_is_still_picked_without_a_choice() {
         vec![desk("personal", "owner"), desk("other", "second")],
     )
     .await;
-    // 입구가 하나뿐이면 고르지 않아도 그 프로필로 간다(문구가 길어져도 이 동작은 그대로다). 요청이 없으니 `not_found`까지 간다.
+    // A single reachable profile is auto-selected; a missing request reaches `not_found`.
     let outcome = client::result(&rig.socket, None, "r1", false, |_| {})
         .await
         .unwrap();

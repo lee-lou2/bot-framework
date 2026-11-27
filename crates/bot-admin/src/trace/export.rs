@@ -1,6 +1,4 @@
-//! OTLP 추적 내보내기: 프로필마다 독립된 한정 큐·작업·차단기를 둔다. `record`는 동기·무대기·무실패다.
-//! `http://`(루프백·사설망, 외부는 `remote: true`)와 `https://`(Langfuse·LangSmith·원격 OTLP 수집기)를 모두 지원한다.
-//! 수집기가 느리거나 죽어도 실행은 영향이 없다: 큐가 차면 버리고(`dropped`), 연속 실패하면 차단기가 열려 배치를 버린다.
+//! Per-profile OTLP trace exporter with bounded queues, circuit breakers, activation gate, and non-blocking `Tracer::record`.
 
 use super::{
     Ids, Redactor, SpanRecord, Tracer, Val,
@@ -31,14 +29,13 @@ pub use crate::obs::runtime::{Options, Stats};
 const OTLP_CONTENT_TYPE: &str = "application/x-protobuf";
 const DEFAULT_TRACE_PATH: &str = "/v1/traces";
 
-/// 헤더 값: 평문(비밀이 아닌 것) 또는 프로필 비밀 이름(보낼 때마다 SecretStore에서 받는다).
 #[derive(Clone, PartialEq)]
 pub enum HeaderValue {
     Plain(String),
     Secret(SecretName),
 }
 
-/// 진단 출력에 헤더 값을 싣지 않는다(실수로 평문에 넣은 토큰이 로그에 남지 않게).
+/// Redacts plain header values in debug output so accidentally placed tokens never leak into logs.
 impl std::fmt::Debug for HeaderValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -51,28 +48,22 @@ impl std::fmt::Debug for HeaderValue {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Backend {
     pub name: String,
-    /// `http(s)://호스트[:포트][/경로]`. Langfuse·LangSmith 등 표준 OTLP/HTTP 끝점을 그대로 받는다.
     pub endpoint: String,
     pub headers: Vec<(String, HeaderValue)>,
-    /// 화면 링크 틀. `{trace_id}`를 추적 ID로 바꾼다(`http://`·`https://`).
     pub link: Option<String>,
-    /// 사설망 밖일 수 있는 수집기로 **평문** `http://` 전송을 해도 된다는 운영자의 명시(`https://`는 필요 없다).
+    /// Allows plaintext `http://` to non-private hosts (`https://` does not require this).
     pub remote: bool,
 }
 
-/// 프로필별 추적 설정. `backend`가 없으면 그 프로필은 내보내지 않는다.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProfileTrace {
     pub backend: Option<Backend>,
     pub ids: Ids,
-    /// 내용 속성(프롬프트·인자·결과)을 가림 처리해 내보낼지. 기본 꺼짐.
     pub content: bool,
-    /// 0.0..=1.0. 추적 ID 값으로 정하므로 모든 프로세스가 같은 결론이다.
     pub sample: f64,
 }
 
 impl ProfileTrace {
-    /// 시작하지 않고 설정만 검사한다(`Exporter::start`와 같은 규칙: 주소·헤더·링크 틀·표본 범위).
     pub fn check(&self, profile: &ProfileId) -> Result<(), String> {
         validate(profile, self).map(|_| ())
     }
@@ -100,7 +91,7 @@ struct Lane {
     shared: Arc<Shared>,
 }
 
-/// `Exporter`를 모두 놓으면 송신기가 닫히고, 작업은 남은 큐를 비운 뒤 끝나며 SecretStore 참조를 놓는다.
+/// Dropping all `Exporter` handles closes lane channels so background workers drain and release `SecretStore`.
 pub struct Exporter {
     lanes: BTreeMap<ProfileId, Lane>,
     door: Arc<Door>,
@@ -108,7 +99,7 @@ pub struct Exporter {
 
 fn validate(p: &ProfileId, t: &ProfileTrace) -> Result<Option<Target>, String> {
     if !(0.0..=1.0).contains(&t.sample) {
-        return Err(format!("{}: sample은 0.0~1.0이어야 한다", p.0));
+        return Err(format!("{}: sample must be between 0.0 and 1.0", p.0));
     }
     let Some(b) = &t.backend else { return Ok(None) };
     let hint = format!("admin.trace.{}.remote", p.0);
@@ -119,7 +110,7 @@ fn validate(p: &ProfileId, t: &ProfileTrace) -> Result<Option<Target>, String> {
             HeaderValue::Secret(_) => "",
         };
         if !header_ok(name, plain) {
-            return Err(format!("{}: 잘못된 헤더 이름 또는 값", p.0));
+            return Err(format!("{}: invalid header name or value", p.0));
         }
     }
     let link_ok = |l: &str| {
@@ -129,7 +120,7 @@ fn validate(p: &ProfileId, t: &ProfileTrace) -> Result<Option<Target>, String> {
     };
     if b.link.as_deref().is_some_and(|l| !link_ok(l)) {
         return Err(format!(
-            "{}: 링크 틀은 http(s)://…{{trace_id}}… 모양이어야 한다",
+            "{}: link template must match http(s)://...{{trace_id}}...",
             p.0
         ));
     }
@@ -191,8 +182,7 @@ struct Worker {
 }
 
 impl Worker {
-    /// 순서가 중요하다: ① 헤더 준비(교체된 키가 가림 목록에 들어간다) → ② 그때의 가림 목록으로 본문 생성 →
-    /// ③ 전송 직전 문 확인 → ④ 전송.
+    /// Order matters: resolve headers first (registering rotated secrets in `Redactor`), then encode body, check gate, and POST.
     async fn send(&self, batch: Vec<SpanRecord>) -> Result<(), Fail> {
         let (Some(target), policy) = (
             &self.shared.target,
@@ -277,7 +267,6 @@ impl Worker {
 }
 
 impl Exporter {
-    /// 프로필마다 작업을 띄운다(tokio 런타임 안에서 불러야 한다). 설정이 잘못되면 시작하지 않는다.
     pub fn start(
         config: BTreeMap<ProfileId, ProfileTrace>,
         secrets: Option<Arc<dyn SecretStore>>,
@@ -287,7 +276,6 @@ impl Exporter {
         Self::start_with_client(config, secrets, redactor, opts, None)
     }
 
-    /// 시험용: 로컬 HTTPS 자체 서명 인증서를 신뢰하는 클라이언트로 시작한다.
     #[cfg(any(test, feature = "testing"))]
     pub fn start_with_root_pem(
         config: BTreeMap<ProfileId, ProfileTrace>,
@@ -314,7 +302,7 @@ impl Exporter {
         let has_active = targets.values().any(Option::is_some);
         let runtime = tokio::runtime::Handle::try_current();
         if runtime.is_err() && has_active {
-            return Err("추적 내보내기는 tokio 런타임 안에서 시작해야 한다".to_owned());
+            return Err("trace exporter must be started inside a tokio runtime".to_owned());
         }
         let client = if has_active {
             match custom_client {
@@ -362,7 +350,6 @@ impl Exporter {
         Ok(Arc::new(Self { lanes, door }))
     }
 
-    /// 내보내기 문을 단다(한 번만). 참을 돌려주는 동안만 보내고, 거짓이거나 `timeout` 안에 답이 없으면 그 배치를 버린다.
     pub fn set_gate(&self, check: Fence, timeout: Duration) -> bool {
         self.door.set(check, timeout)
     }
@@ -376,7 +363,6 @@ impl Exporter {
         Some(lane.c.snapshot(backend))
     }
 
-    /// 화면 링크. 틀이 설정된 프로필만 만든다.
     pub fn link(&self, profile: &ProfileId, trace: &[u8; 16]) -> Option<String> {
         let template = self
             .lanes
@@ -390,7 +376,6 @@ impl Exporter {
         Some(template.replace("{trace_id}", &crate::json::hex(trace)))
     }
 
-    /// 큐와 전송 중인 것이 모두 끝날 때까지 기다린다(종료·시험용). 제한 시간 안에 비면 참.
     pub async fn flush(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -409,7 +394,6 @@ impl Exporter {
     }
 }
 
-/// 스팬 하나가 큐에서 차지하는 대략의 바이트. 호출자가 거대한 값을 넣어도 큐 메모리가 한없이 늘지 않게 한다.
 const MAX_SPAN_BYTES: usize = 256 * 1024;
 
 fn weight(s: &SpanRecord) -> usize {

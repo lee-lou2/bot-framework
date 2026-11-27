@@ -1,4 +1,4 @@
-//! API 직접 호출 실행기의 순수 부분 시험(주소 규칙·도구 이름 별칭표·요청 만들기·응답 읽기). 실제 HTTP 전송과 워커·브로커를 거치는 시험은 `tests/api_*.rs`다.
+//! Pure unit tests for direct API runner endpoints, tool aliasing, request building, and response parsing.
 
 mod anthropic;
 mod endpoint;
@@ -37,7 +37,6 @@ pub(super) fn assistant(text: &str) -> Message {
     }
 }
 
-/// 읽기 도구 하나(입력 스키마 지정)
 pub(super) fn tool(id: &str, description: &str, schema: &str) -> ToolSpec {
     ToolSpec {
         id: ToolId(id.into()),
@@ -61,7 +60,7 @@ pub(super) fn request(
             claim: Some(ClaimEpoch(1)),
         },
         model: "assistant".into(),
-        system: "너는 일정 비서다. 사용자의 일정을 한국어로 정리한다.".into(),
+        system: "You are a schedule assistant. Summarize the user's schedule concisely.".into(),
         conversation,
         tools,
         exchanges,
@@ -102,10 +101,9 @@ pub(super) fn exchange(text: &str, calls: Vec<DoneCall>, state: Option<&str>) ->
     }
 }
 
-/// 만든 요청 본문을 JSON으로 읽는다.
 pub(super) fn body_of(kind: ApiKind, request: &ModelRequest) -> Value {
     let built = kind
         .build(&settings(kind), request)
-        .unwrap_or_else(|e| panic!("요청을 만들지 못했어요: {e:?}"));
+        .unwrap_or_else(|e| panic!("failed to build request: {e:?}"));
     serde_json::from_slice(&built.body).unwrap()
 }

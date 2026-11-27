@@ -1,5 +1,5 @@
-//! 이슈 트래커 내보내기 실행기: 한정 큐·폭주 억제(cooldown)·샘플링·차단기·활성화 문·가림 장치를 둔다.
-//! `IssueReporter::report`는 동기·무대기·무실패이며, 내보내기 실패는 카운터·분류에만 기록한다(재귀 방지).
+//! Async issue tracker exporter with bounded queue, cooldown throttling, sampling, circuit breaker, and redaction.
+//! `IssueReporter::report` is sync, non-blocking, and infallible; export errors only update counters to avoid recursion.
 
 use super::sentry::{self, ENVELOPE_CONTENT_TYPE};
 use crate::{
@@ -28,7 +28,6 @@ use tokio::sync::mpsc;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_COOLDOWN_KEYS: usize = 512;
 
-/// 지원하는 이슈 트래커 규격(추후 다른 어댑터를 같은 구조로 더할 수 있다).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IssueKind {
     Sentry,
@@ -49,18 +48,15 @@ impl IssueKind {
     }
 }
 
-/// 호스트 단위 이슈 트래커 설정(`admin.issues`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct IssueConfig {
     pub kind: IssueKind,
     pub name: String,
-    /// Sentry Envelope 끝점(예: `https://o123.ingest.sentry.io/api/456/envelope/`).
     pub endpoint: String,
-    /// 인증 키(Sentry public key)의 SecretStore 참조. 루프백 `http://`에서만 생략할 수 있다.
+    /// SecretStore reference for the Sentry public key; optional only on loopback `http://`.
     pub key: Option<SecretRef>,
     pub environment: Option<String>,
     pub release: Option<String>,
-    /// 0.0..=1.0. 사건 ID 값으로 결정적으로 샘플링한다.
     pub sample: f64,
     pub remote: bool,
 }
@@ -71,11 +67,10 @@ impl IssueConfig {
     }
 }
 
-/// 이슈 내보내기 런타임 옵션(기본 재전송·큐 옵션 + 동일 `(kind, target)` 폭주 억제 간격).
 #[derive(Clone, Debug)]
 pub struct IssueOptions {
     pub runtime: Options,
-    /// 같은 `(kind, target)` 조합을 연속으로 보낼 때의 최소 간격(기본 5초, 0이면 끔).
+    /// Minimum interval between consecutive sends for the same `(kind, target)` (0 disables).
     pub cooldown: Duration,
 }
 
@@ -98,7 +93,7 @@ fn short_tag_ok(s: &str) -> bool {
 
 fn validate(cfg: &IssueConfig) -> Result<Target, String> {
     if !(0.0..=1.0).contains(&cfg.sample) {
-        return Err("admin.issues.sample: 0.0~1.0이어야 한다".to_owned());
+        return Err("admin.issues.sample: must be between 0.0 and 1.0".to_owned());
     }
     let target = validate_endpoint(
         "admin.issues",
@@ -109,15 +104,19 @@ fn validate(cfg: &IssueConfig) -> Result<Target, String> {
     )?;
     if cfg.key.is_none() && !(target.scheme == Scheme::Http && target.is_loopback()) {
         return Err(
-            "admin.issues.key: 루프백 http:// 목 서버가 아니면 인증 키(secret)가 필요하다"
+            "admin.issues.key: auth key secret is required unless targeting loopback http://"
                 .to_owned(),
         );
     }
     if cfg.environment.as_deref().is_some_and(|e| !short_tag_ok(e)) {
-        return Err("admin.issues.environment: 제어 문자 없는 1~128자여야 한다".to_owned());
+        return Err(
+            "admin.issues.environment: must be 1..=128 chars without control characters".to_owned(),
+        );
     }
     if cfg.release.as_deref().is_some_and(|r| !short_tag_ok(r)) {
-        return Err("admin.issues.release: 제어 문자 없는 1~128자여야 한다".to_owned());
+        return Err(
+            "admin.issues.release: must be 1..=128 chars without control characters".to_owned(),
+        );
     }
     Ok(target)
 }
@@ -128,7 +127,6 @@ struct Shared {
     c: Counters,
 }
 
-/// 이슈 트래커 내보내기 핸들(`IssueReporter` 구현). 꺼져 있어도(`None`) `report`는 안전하게 무시한다.
 pub struct IssueExporter {
     tx: Option<mpsc::Sender<IssueEvent>>,
     sample: f64,
@@ -249,7 +247,7 @@ impl IssueExporter {
         };
         let runtime = tokio::runtime::Handle::try_current();
         if runtime.is_err() && target.is_some() {
-            return Err("이슈 트래커 내보내기는 tokio 런타임 안에서 시작해야 한다".to_owned());
+            return Err("issue exporter must be started inside a tokio runtime".to_owned());
         }
         let client = if let Some(t) = &target {
             match custom_client {
@@ -351,7 +349,7 @@ impl IssueExporter {
     }
 }
 
-/// RFC 4122 UUID v4 변형 비트(`id[8]` 상위 2비트 고정)가 표본 분포를 치우치게 하지 않도록 SHA-256으로 균일화한다.
+/// SHA-256 whitens RFC 4122 v4 variant bits (`id[8]`) so deterministic sampling stays uniform.
 fn issue_sample_hit(event_id: &[u8; 16], rate: f64) -> bool {
     let digest = Sha256::digest(event_id);
     let mut uniform = [0u8; 16];
@@ -404,7 +402,7 @@ mod tests {
         }
         assert!(
             (800..=1200).contains(&hits_quarter),
-            "sample=0.25 표본 비율이 치우쳤다: {hits_quarter}/4000"
+            "sample=0.25 hit rate skewed: {hits_quarter}/4000"
         );
     }
 
@@ -428,7 +426,7 @@ mod tests {
         let len = exporter.seen.lock().unwrap().len();
         assert!(
             len <= MAX_COOLDOWN_KEYS,
-            "쿨다운 맵 크기가 상한을 넘었다: {len}"
+            "cooldown map exceeded limit: {len}"
         );
     }
 }

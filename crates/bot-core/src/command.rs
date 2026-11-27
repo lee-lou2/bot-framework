@@ -1,6 +1,4 @@
-//! 포트가 주고받는 명령과 값: 접수(`Envelope`·`Accept`·`Target`) → 실행(`Work`·`Step`·`Finish`·`Failure`) → 도구 호출(`ToolCall`·`CallResult`·`EffectRequest`)
-//! → 위임(`Delegate`) → 기억·예약·감사. 데이터 모양이 중심이고, 이 값들을 어떻게 저장하고 판정하는지는 `port.rs`의 포트를 구현하는 크레이트의 몫이다.
-//! 이름에 주의한다: `port::Reply<'a, T>`는 회신이 아니라 포트 메서드의 비동기 반환형 별칭이다(`docs/glossary.md`).
+//! Command and value types exchanged across store, runtime, broker, and gateway ports.
 
 use crate::{id::*, intake::PushTransportId, state::*};
 use std::{
@@ -8,20 +6,19 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// 경계에서 스키마 검증을 마친 UTF-8 JSON 문서. 인코더 선택은 어댑터 소유다.
+/// Schema-validated UTF-8 JSON document at a trust boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JsonPayload(pub String);
 
-/// HTTP 트리거가 대조한 대문자 메서드와 입구 아래 경로. 경로는 /로 시작하고 쿼리를 제외한다.
+/// Uppercase HTTP method and mount-relative path (leading `/`, no query string).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpRoute {
     pub method: String,
     pub path: String,
-    /// 최초 라우팅에서 정한 응답 방식. 중복 접수 해시에서 제외한다.
+    /// Response mode chosen at initial routing; excluded from duplicate-intake hashing.
     pub response: crate::profile::ResponseMode,
 }
 
-/// 어댑터 인증 후 만든 봉투. 민감 DM은 일반 접수 전에 지정 도구로 보낸다.
 #[derive(Clone, Debug)]
 pub struct Envelope {
     pub profile: ProfileId,
@@ -29,7 +26,7 @@ pub struct Envelope {
     pub binding: BindingId,
     pub principal: PrincipalId,
     pub conversation: Conversation,
-    /// 인증된 HTTP 어댑터에서만 Some이다. 경로와 메서드는 접수 중복 판정에 함께 쓴다.
+    /// Present only for authenticated HTTP intake; method and path join duplicate-intake detection.
     pub http: Option<HttpRoute>,
     pub attachments: Vec<String>,
     pub body: JsonPayload,
@@ -48,10 +45,10 @@ pub enum Target {
     },
 }
 
-/// scopes는 접수 시점 요청자 권한의 스냅샷이다. 브로커는 호출마다 현재 정책과 교집합을 취한다.
+/// `scopes` snapshots requester permissions at intake; the broker intersects with current policy on every call.
 #[derive(Clone, Debug)]
 pub struct Accept {
-    /// 인증된 입구가 정한 원래 대화의 발송 책임. 조회로 받는 입구와 정적 예약은 None이다.
+    /// Delivery responsibility set by authenticated push ingress; `None` for pull ingress and static schedules.
     pub reply_transport: Option<PushTransportId>,
     pub event: Envelope,
     pub approver: Option<PrincipalId>,
@@ -60,12 +57,11 @@ pub struct Accept {
     pub scopes: BTreeSet<String>,
 }
 
-/// 접수 명령에 어댑터가 덧붙이는 것. 인증된 어댑터만 채운다(본문·모델·도구가 만들 수 없다). 비어 있으면 일반 접수다.
+/// Populated only by authenticated adapters (never from payloads, models, or tools).
 #[derive(Clone, Debug, Default)]
 pub struct AcceptExtras {
-    /// 이번 Slack 이벤트의 인증된 원천(Slack 이벤트 선택과 지정한 사람의 승인 증거를 접수할 때)
     pub source: Option<crate::slack::SlackSource>,
-    /// 직접 도구가 넘길 수 있는 후보 사슬(넘김). 첫 후보는 접수의 `target`이다.
+    /// Direct-tool pass chain; the first candidate is `Accept.target`.
     pub chain: Option<crate::pass::PassChain>,
 }
 
@@ -82,8 +78,7 @@ pub enum CallResult {
     Done(JsonPayload),
     Awaiting(ApprovalId),
     Held(CallId),
-    /// 넘김: 직접 호출이 «처리하지 않음»(`bot/pass`)으로 끝났고 저장소가 호출 결론·커서 전진과 함께 run을 다음 후보(또는 기본 대화)로 되돌렸다.
-    /// 이 시도는 더 쓸 것이 없다(리스를 놓았다).
+    /// Direct call yielded `bot/pass`; store advanced the cursor, re-queued the run for the next candidate (or default agent), and released the lease.
     Passed,
 }
 
@@ -102,10 +97,10 @@ pub struct Occurrence {
     pub scheduled_at: std::time::SystemTime,
 }
 
-/// scopes는 런타임이 프로필 정책으로 좁힌 값이다. 저장소는 부모 범위의 부분집합만 받는다.
+/// `scopes` is narrowed by runtime policy; the store accepts only subsets of the parent's scopes.
 #[derive(Clone, Debug)]
 pub struct Delegate {
-    /// 위임을 인가한 활성 프로필 판본. 부모 실행의 고정 판본과 별도로 검사한다.
+    /// Active profile revision that authorized delegation, checked independently of the parent run's pinned revision.
     pub checked_revision: Revision,
     pub parent: Attempt,
     pub step: String,
@@ -115,7 +110,7 @@ pub struct Delegate {
 }
 
 impl Delegate {
-    /// MCP 호출과 세션 재개가 같은 두 필드에서 위임 대상과 지시를 읽는다.
+    /// Shared parser for both MCP calls and session resume.
     pub fn target(input: &serde_json::Value) -> Option<(AgentId, String)> {
         let object = input.as_object()?;
         let child = object.get("agent")?.as_str()?;
@@ -141,23 +136,18 @@ pub struct EffectRequest {
 pub struct EffectStatus {
     pub effect: EffectId,
     pub state: EffectState,
-    /// Held에서 소비 전인 운영자 판정만 반환한다. NotExecuted는 같은 단계로 다시 점유를 요청할 수 있다.
-    /// 조회 자체는 전송을 허가하지 않으며, 도구의 결과 보고에는 None을 쓴다.
+    /// Only unconsumed operator decisions while `Held`; `NotExecuted` allows reclaiming the same step. Lookups never authorize transmission, and tool result reports pass `None`.
     pub resolution: Option<EffectResolution>,
     pub receipt: Option<String>,
 }
 
-// ---- 실행(큐) ----
-
-/// 재개용 체크포인트 한 칸. key는 run 안에서 유일하다. 같은 key의 재기록은 같은 내용일 때만 받는다.
-/// 자식 결과도 위임 단계 key로 여기에 들어온다.
+/// Resume checkpoint; `key` is unique per run, and duplicate writes succeed only with identical content. Child delegation results also land here under their step key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step {
     pub key: String,
     pub body: JsonPayload,
 }
 
-/// claim이 돌려주는 실행 내용. 접수 때 고정한 값과 체크포인트다.
 #[derive(Clone, Debug)]
 pub struct Work {
     pub revision: Revision,
@@ -165,41 +155,39 @@ pub struct Work {
     pub input: JsonPayload,
     pub attachments: Vec<String>,
     pub steps: Vec<Step>,
-    /// 넘김: 사슬이 있는 접수의 후보 커서(0이 첫 후보). 사슬이 없으면 None이다. 커서가 후보 수와 같으면 기본 대화 차례다(대상이 에이전트).
+    /// Pass-chain cursor (`0` = first candidate, `None` = no chain); equal to chain length means default agent turn.
     pub pass_pos: Option<u32>,
 }
 
-/// 결과와 원래 대화로 보낼 답을 한 커밋에 기록한다. 답 순번은 목록 위치다.
+/// Committed atomically with the run result; reply order matches `answers` indices.
 #[derive(Clone, Debug)]
 pub struct Finish {
     pub result: JsonPayload,
     pub answers: Vec<JsonPayload>,
 }
 
-/// 현재 소유자가 완료를 보고한 트랜잭션이 실제로 커밋한 종결 상태.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Completion {
     Succeeded,
     Cancelled,
 }
 
-/// 공급자가 보고한 토큰 수. 입력(`prompt`)은 공급자가 정의한 캐시 입력 토큰을 한 번 포함한다.
+/// Provider-reported token counts; `prompt` includes provider-defined cached input tokens once.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TokenUsage {
     pub prompt: u64,
     pub completion: u64,
 }
 
-/// 성공 완료와 같은 커밋에 저장하는 실행 계량. 기본은 «잘리지 않음·사용량 모름»이다.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RunOutcome {
-    /// 최종 글이 호스트 상한(최대 출력 토큰)으로 실제로 잘렸다.
+    /// True when output hit the host max-output-tokens ceiling.
     pub truncated: bool,
-    /// 실제 전체 실행의 신뢰할 수 있는 계수가 모두 있을 때만 Some. 재개·위임·미측정으로 합계를 보장할 수 없으면 None이다(0으로 채우지 않는다).
+    /// Present only when reliable totals cover the entire run; `None` across resumes, delegations, or unmeasured runs (never zero-filled).
     pub usage: Option<TokenUsage>,
 }
 
-/// 사유는 고정 어휘 코드만 쓴다(로그·감사에 자유 문장을 남기지 않는다).
+/// Fixed vocabulary reason codes only (never free-form sentences or payloads).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failure {
     Transient(&'static str),
@@ -212,20 +200,18 @@ pub enum Retry {
     Dead,
 }
 
-/// heartbeat 결과. 취소 요청은 다음 외부 효과 전에 확인한다.
+/// Checked before the next external side effect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Beat {
     pub cancel_requested: bool,
 }
 
-/// 같은 대화의 이전 차례. from이 None이면 에이전트의 답이다.
+/// Prior conversation turn; `from: None` denotes an agent reply.
 #[derive(Clone, Debug)]
 pub struct Turn {
     pub from: Option<PrincipalId>,
     pub text: String,
 }
-
-// ---- 기억 ----
 
 #[derive(Clone, Debug)]
 pub struct MemoryHit {
@@ -234,17 +220,17 @@ pub struct MemoryHit {
     pub text: String,
 }
 
-/// 승인 카드는 이 조회가 돌려준 본문 전체를 사용한다. 본문은 진단 출력에서 제외한다.
+/// Full body shown on approval cards; intentionally omits `Debug` to avoid leaking text in diagnostics.
 #[derive(Clone, PartialEq, Eq)]
 pub struct MemoryPreview {
     pub id: MemoryId,
     pub visibility: Visibility,
     pub text: String,
-    /// 정규화하거나 공백을 지우지 않은 UTF-8 본문의 SHA-256.
+    /// SHA-256 of the raw UTF-8 body without normalization or whitespace trimming.
     pub sha256: [u8; 32],
 }
 
-/// 소유자가 본 본문과 기억 ID를 묶는다. 두 문자열 키는 RFC 8785 순서다.
+/// Binds the memory ID and reviewed body digest; keys follow RFC 8785 order.
 pub fn memory_share_hash(id: &MemoryId, body_sha256: &[u8; 32]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
 
@@ -253,7 +239,7 @@ pub fn memory_share_hash(id: &MemoryId, body_sha256: &[u8; 32]) -> [u8; 32] {
     Sha256::digest(args.to_string().as_bytes()).into()
 }
 
-/// profile 활성화 때 한 번 등록한다. (profile, agent, path, sha256)가 같으면 다시 만들지 않는다.
+/// Registered once on profile activation; deduplicated by `(profile, agent, path, sha256)`.
 #[derive(Clone, Debug)]
 pub struct MemorySeed {
     pub profile: ProfileId,
@@ -265,22 +251,20 @@ pub struct MemorySeed {
     pub text: String,
 }
 
-// ---- 예약 ----
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TriggerSpec {
     pub approver: Option<PrincipalId>,
     pub trigger: String,
     pub cron: String,
     pub timezone: String,
-    /// 상태 확인용. 발생 생략·합치기를 허용하는 유일한 종류다.
+    /// Health-check schedule; the only kind allowed to skip or coalesce occurrences.
     pub beat: bool,
     pub principal: PrincipalId,
     pub scopes: BTreeSet<String>,
     pub target: Target,
 }
 
-/// 프로필 판본의 정적 예약 정의. 활성 집합을 게시하는 트랜잭션의 DB 시각이 구간 경계다.
+/// Static schedule definitions for a revision; segment boundaries use the activating transaction's DB timestamp.
 #[derive(Clone, Debug)]
 pub struct ScheduleSet {
     pub profile: ProfileId,
@@ -288,7 +272,7 @@ pub struct ScheduleSet {
     pub triggers: Vec<TriggerSpec>,
 }
 
-/// (from, until] 구간에 적용되는 정의. until이 None이면 현재 구간이다.
+/// Applies over `(from, until]`; `until: None` is the current open segment.
 #[derive(Clone, Debug)]
 pub struct Segment {
     pub revision: Revision,
@@ -302,20 +286,18 @@ pub struct ScheduledTrigger {
     pub profile: ProfileId,
     pub agent: AgentId,
     pub trigger: String,
-    /// 이 시각 이하의 발생은 접수를 마쳤다.
+    /// Occurrences at or before this timestamp have been accepted.
     pub cursor: SystemTime,
-    /// cursor 이후에 걸친 구간만, 오래된 순서.
+    /// Segments overlapping `> cursor`, oldest first.
     pub segments: Vec<Segment>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ScheduleSnapshot {
-    /// DB 시각. 스케줄러 호스트 시계는 쓰지 않는다.
+    /// Database clock; never the scheduler host clock.
     pub now: SystemTime,
     pub triggers: Vec<ScheduledTrigger>,
 }
-
-// ---- 감사 ----
 
 #[derive(Clone, Debug)]
 pub struct AuditEntry {
@@ -331,7 +313,7 @@ pub struct AuditEntry {
 pub struct ChainReport {
     pub entries: u64,
     pub head: [u8; 32],
-    /// 체인이 처음 어긋난 순번. None이면 정상이다.
+    /// First sequence number where the audit chain breaks, or `None` when intact.
     pub first_bad: Option<u64>,
 }
 
@@ -345,8 +327,8 @@ mod tests {
         for (id, body, expected) in [
             (
                 "m-1",
-                "한 줄\n",
-                "e470c9310bd403e534e248a2a3063f5ef8c074d09714d8efe073d5b1a9a01083",
+                "café line\n",
+                "fa455d313c54c40e6005e3fc99b90ed36384fa17eabaefad6e30e475c1b50d40",
             ),
             (
                 "m-\"\\",

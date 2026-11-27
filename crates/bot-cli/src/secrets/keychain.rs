@@ -1,5 +1,4 @@
-//! macOS 키체인 SecretStore. 서비스 `bot/<profile>`, 계정 `<name>`인 일반 암호 항목을 `security` 명령으로 읽는다.
-//! 호출자가 프로필·전체 키를 넘길 수 없고(프로필은 핸들을 만들 때 고정), 명령 인자에는 이름만 있다 — 값은 파이프로만 온다.
+//! macOS Keychain `SecretStore` backed by `/usr/bin/security` under `bot/<profile>`.
 use super::checked_profile;
 use bot_core::{
     id::{ProfileId, SecretName},
@@ -11,7 +10,7 @@ use std::{
 };
 
 const SECURITY: &str = "/usr/bin/security";
-/// `security find-generic-password`의 «항목 없음» 종료 코드
+/// Exit code from `security find-generic-password` when the item does not exist.
 const NOT_FOUND: i32 = 44;
 const MAX_VALUE: usize = 64 * 1024;
 
@@ -20,24 +19,21 @@ pub struct KeychainStore {
 }
 
 impl KeychainStore {
-    /// macOS에서만 쓸 수 있다.
     pub fn new() -> Result<Self, String> {
         if cfg!(target_os = "macos") {
             Ok(Self {
                 program: SECURITY.into(),
             })
         } else {
-            Err("키체인 보관소는 macOS에서만 쓸 수 있어요".into())
+            Err("keychain secret store is only available on macOS".into())
         }
     }
 
-    /// 시험용: `security` 대신 이 실행 파일을 쓴다. 운영 빌드에는 포함하지 않는다.
     #[cfg(any(test, feature = "testing"))]
     pub fn with_program(program: PathBuf) -> Self {
         Self { program }
     }
 
-    /// macOS 키체인에 `bot/<profile>` / `<name>` 항목을 저장(또는 갱신)한다.
     pub async fn set_secret(
         &self,
         profile: &ProfileId,
@@ -83,7 +79,6 @@ impl KeychainStore {
         .map_err(|_| Error::Unavailable)?
     }
 
-    /// macOS 키체인에서 `bot/<profile>` / `<name>` 항목을 삭제한다(이미 없으면 성공).
     pub async fn unset_secret(&self, profile: &ProfileId, name: &SecretName) -> Result<(), Error> {
         let profile = checked_profile(profile)?;
         let service = format!("bot/{profile}");
@@ -135,7 +130,7 @@ fn lookup(program: &Path, service: &str, name: &str) -> Result<Vec<u8>, Error> {
         .env_clear()
         .stdin(Stdio::null())
         .stderr(Stdio::null());
-    // 로그인 키체인을 찾으려면 홈이 필요하다. 그 밖의 환경은 넘기지 않는다.
+    // Forward only HOME so `security` can locate the user's login keychain.
     if let Some(home) = std::env::var_os("HOME") {
         command.env("HOME", home);
     }
@@ -175,7 +170,6 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    /// `security`를 흉내 내는 실행 파일: 서비스 bot/personal의 calendar-reader만 있다.
     fn fake(dir: &Path) -> PathBuf {
         let path = dir.join("security");
         std::fs::write(
@@ -207,7 +201,6 @@ mod tests {
                 .unwrap(),
             "synthetic-keychain-value"
         );
-        // 다른 프로필은 같은 이름이어도 자기 서비스만 본다
         assert!(matches!(
             resolve(&store, "work", "calendar-reader").await,
             Err(Error::Missing)

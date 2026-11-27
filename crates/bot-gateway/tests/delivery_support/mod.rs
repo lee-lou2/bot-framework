@@ -1,4 +1,4 @@
-//! 회신 발송 시험 공용 조립: 가짜 Slack·메모리 outbox·`Deliverer`.
+//! Shared reply delivery test harness: fake Slack, memory outbox, and `Deliverer`.
 #![allow(dead_code)]
 use bot_core::state::{Conversation, ConversationKind};
 use bot_gateway::{
@@ -24,14 +24,13 @@ pub struct Rig {
     pub outbox: Arc<MemoryOutbox>,
     pub deliverer: Arc<Deliverer>,
     pub catalog: Arc<TestCatalog>,
-    /// 봇 참여 스레드 증거(확인된 게시가 여기에 남는다)
+    /// Recorded bot-participated thread evidence (confirmed posts are logged here).
     pub threads: Arc<MemoryThreads>,
     gateway: Arc<SlackGateway>,
     ingress: Arc<Ingress>,
 }
 
 impl Rig {
-    /// 이 조립의 입구 표·발송기로 소유자 DM 승인 카드 전달 루프를 만든다
     pub fn card_deliverer(
         &self,
         jobs: Arc<dyn bot_gateway::slack::cards::CardOutbox>,
@@ -39,7 +38,6 @@ impl Rig {
         bot_gateway::slack::cards::CardDeliverer::new(jobs, self.ingress.clone(), self.sender())
     }
 
-    /// 이 조립의 Slack 발송기(회신 발송과 같은 자격·API 클라이언트)
     pub fn sender(&self) -> bot_gateway::slack::send::SlackSender {
         self.gateway.sender()
     }
@@ -57,7 +55,7 @@ pub async fn rig_with(profile: Fixture, secrets: Arc<MemorySecrets>, base: Optio
     rig_on(HOST, profile, secrets, base).await
 }
 
-/// 호스트 등록부를 바꿔 끼운 조립(발송 직전 대조 시험)
+/// Harness with a custom host registry for pre-send verification tests.
 pub async fn rig_on(
     host: &str,
     profile: Fixture,
@@ -67,7 +65,7 @@ pub async fn rig_on(
     build(host, profile, secrets, base, None).await
 }
 
-/// 봇 토큰을 보관소에서 다시 읽는 간격을 줄인 조립(교체한 토큰이 다음 발송에 확인되는지 보는 시험)
+/// Harness with a reduced bot-token cache TTL for token-rotation tests.
 pub async fn rig_ttl(secrets: Arc<MemorySecrets>, ttl: Duration) -> Rig {
     build(HOST, personal(), secrets, None, Some(ttl)).await
 }

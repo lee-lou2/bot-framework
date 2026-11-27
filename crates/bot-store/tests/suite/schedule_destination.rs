@@ -1,10 +1,10 @@
-//! 명시 목적지(다른 수신자) 예약: 승인한 호출의 명세로만 만들고, 발화할 때마다 목적지를 그 run에 고정한다.
+//! Explicit-destination user schedules: require an approved creation call and pin the destination on each firing.
 
 use crate::support::{schedule::*, *};
 use bot_core::{id::*, ledger::*, port::*, schedule::*, state::*};
 
 const OWNER: &str = "local:owner";
-/// 슬랙의 `팀ID/채널ID` 꼴: 예약을 만들 때부터 발화·고정까지 바뀌지 않는다
+/// Canonical Slack `team/channel` destination preserved from creation through firing.
 const DEST: &str = "T123/C456";
 
 fn target(kind: ConversationKind) -> DeliveryTarget {
@@ -24,7 +24,6 @@ async fn a_destination_schedule_needs_the_approved_call_and_each_firing_fixes_th
         return;
     };
     let run = run_in(&db, "r1", OWNER, ConversationKind::Direct).await;
-    // 푸시 대화(direct·channel)가 아닌 목적지는 DB를 만지기 전에 거절한다
     for kind in [
         ConversationKind::Http,
         ConversationKind::Cli,
@@ -46,7 +45,6 @@ async fn a_destination_schedule_needs_the_approved_call_and_each_firing_fixes_th
         args_sha256: hash,
         ..binding(attempt, "c1", "n1")
     };
-    // 수신자를 지정한 생성 카드는 확인한 등록부의 집합을 고정한 핸들로만 열린다
     let pinned = db.store.for_activation(Revision("set-1".into()));
     CallLedger::open_approval(&pinned, open_create(for_create(&run.attempt), &spec))
         .await
@@ -66,7 +64,6 @@ async fn a_destination_schedule_needs_the_approved_call_and_each_firing_fixes_th
             vec!["irreversible".to_owned()],
         ))
     };
-    // 승인한 호출이 아니면 만들지 않고, 승인한 명세와 다른 목적지로도 만들지 않는다
     assert!(matches!(
         users(&db)
             .create(start_call(&resumed.attempt, "c1", None), spec.clone())
@@ -94,7 +91,6 @@ async fn a_destination_schedule_needs_the_approved_call_and_each_firing_fixes_th
     assert_eq!(column::<String>(&db, &id, "dest_kind").await, "direct");
     assert_eq!(column::<String>(&db, &id, "dest_id").await, DEST);
 
-    // 발화: 접수와 같은 커밋에서 목적지를 run에 고정한다(원래 대화는 그대로다)
     make_due(&db, &id, 5_000).await;
     let at_ms = column::<i64>(&db, &id, "at_ms").await;
     let cursor = column::<i64>(&db, &id, "cursor_ms").await;
@@ -112,7 +108,7 @@ async fn a_destination_schedule_needs_the_approved_call_and_each_firing_fixes_th
         })
         .await
         .unwrap()
-        .expect("발화한 run");
+        .expect("fired run");
     let row: (String, String, String, Option<String>, String) = sqlx::query_as(
         "select dest_binding, dest_kind, dest_id, dest_thread, state from bot_deliveries where run = $1",
     )
@@ -137,9 +133,9 @@ async fn a_destination_schedule_needs_the_approved_call_and_each_firing_fixes_th
         ))
         .await,
         "c1",
-        "원래 대화에서 발화한다"
+        "fires in the origin conversation"
     );
-    // 이미 접수한 실행의 목적지는 예약이 바뀌어도 그대로다
+    // Changing the schedule row later must not alter an already-fired run's pinned destination.
     db.sql("update bot_user_schedules set dest_id = 'D1'").await;
     assert_eq!(
         db.scalar::<String>("select dest_id from bot_deliveries")

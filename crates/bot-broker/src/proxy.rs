@@ -1,14 +1,8 @@
-//! egress 프록시: 도구 서버가 외부로 나가는 유일한 길. 호출마다 하나를 열고 호출이 끝나면 닫는다.
+//! Per-call egress CONNECT proxy enforcing credentials, exact host:port allowlists, and public IPs.
 //!
-//! HTTP `CONNECT` 터널만 연다. 요청마다 다음을 순서대로 확인한다.
-//! 1. 호출 전용 자격(`Proxy-Authorization: Basic`): 같은 호스트의 다른 프로세스가 이 허용 목록을 빌려 쓰지 못하게 한다.
-//! 2. 정확한 `호스트:포트`가 허용 목록(`egress::EgressPolicy`)에 있는가(와일드카드·접미사 일치 없음).
-//! 3. 이름을 풀어 얻은 주소가 모두 공개 주소인가(`egress::vet_resolved`). 연결은 검사한 주소에 고정한다.
-//!
-//! 리디렉션은 도구가 새 `CONNECT`로 따르므로 요청마다 같은 검사를 다시 받는다.
-//! 평문 HTTP 프록시(절대 URI 요청)는 열지 않는다. 예외는 브로커가 직접 받는 전용 주소(`LOCAL_HOST`) 하나다:
-//! 표준 입출력 밖의 통로(FD)를 줄 수 없는 샌드박스의 도구가 단계 원장 콜백(`effect.request`·`effect.status`)을
-//! 같은 호출 전용 자격으로 보낸다. 이 주소는 허용 목록과 무관하게 바깥으로 나가지 않고 `LocalService`가 처리한다.
+//! Opens HTTP `CONNECT` tunnels only after checking per-call Basic credentials, exact `host:port`
+//! policy, and resolved public IP addresses (pinning the connection to the vetted IP). The only
+//! plain-HTTP exception is `LOCAL_HOST` for sandbox effect-ledger callbacks handled in-process.
 
 use crate::egress::{EgressPolicy, parse_target, vet_resolved};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -30,17 +24,14 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-/// 브로커가 직접 처리하는 전용 호스트 이름. 예약된 최상위 도메인(`.invalid`)이라 실제 이름 풀이는 어디서도 성공하지 않는다.
+/// Reserved `.invalid` host intercepted locally for effect-ledger callbacks; never routed externally.
 pub const LOCAL_HOST: &str = "bot-effects.invalid";
-/// 전용 주소의 요청 본문 상한(단계 원장 프레임 한도와 같다).
 const MAX_LOCAL_BODY: usize = 64 * 1024;
 
-/// 전용 주소로 온 프레임 한 줄을 처리해 응답 한 줄을 돌려준다.
 pub trait LocalService: Send + Sync {
     fn handle(&self, frame: Vec<u8>) -> Reply<'_, Vec<u8>>;
 }
 
-/// 요청 머리 상한.
 const MAX_HEAD: usize = 8 * 1024;
 
 pub trait Duplex: AsyncRead + AsyncWrite + Send + Unpin {}
@@ -54,7 +45,6 @@ pub trait Connector: Send + Sync {
     fn connect(&self, addr: SocketAddr) -> Reply<'_, Box<dyn Duplex>>;
 }
 
-/// 운영체제 이름 해석.
 pub struct SystemResolver;
 
 impl Resolver for SystemResolver {
@@ -69,7 +59,6 @@ impl Resolver for SystemResolver {
     }
 }
 
-/// 일반 TCP 연결.
 pub struct TcpConnector;
 
 impl Connector for TcpConnector {
@@ -86,19 +75,15 @@ impl Connector for TcpConnector {
 #[derive(Clone)]
 pub struct ProxyConfig {
     pub policy: EgressPolicy,
-    /// 운영자가 사설망을 명시적으로 열었을 때만 true.
     pub allow_private: bool,
-    /// 운영자가 호스트 설정에 명시한 사설/로컬 고정 목적지 `(host, port) -> SocketAddr`.
-    /// `policy`를 통과한 정확한 대상에만 적용되며, 공개 도메인의 DNS 재바인딩 보호는 그대로 유지된다.
+    /// Operator-pinned private/local `(host, port) -> SocketAddr` overrides for policy-allowed targets.
     pub private_routes: std::collections::BTreeMap<(String, u16), SocketAddr>,
     pub user: String,
     pub password: String,
     pub head_timeout: Duration,
     pub connect_timeout: Duration,
-    /// 터널 하나의 최대 수명.
     pub tunnel_limit: Duration,
     pub max_connections: usize,
-    /// 전용 주소 처리기. 없으면 전용 주소도 평문 프록시 요청으로 보고 거절한다.
     pub local: Option<Arc<dyn LocalService>>,
 }
 
@@ -129,7 +114,6 @@ struct Counters {
     malformed: AtomicU64,
 }
 
-/// 거절·터널 수. 시험과 운영 관측용이다.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Stats {
     pub tunnels: u64,
@@ -155,7 +139,6 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    /// 루프백의 빈 포트에 연다.
     pub async fn start(
         cfg: ProxyConfig,
         resolver: Arc<dyn Resolver>,
@@ -196,7 +179,6 @@ impl Proxy {
         }
     }
 
-    /// 새 연결을 받지 않고 열린 터널도 끊는다.
     pub async fn stop(self) {
         let _ = self.stop.send(true);
         let _ = self.accept.await;
@@ -240,7 +222,7 @@ struct Head {
     leftover: Vec<u8>,
 }
 
-/// 요청 머리를 읽는다. 머리 뒤에 이미 도착한 바이트(TLS 첫 메시지 등)는 `leftover`로 보존한다.
+/// Reads request headers while preserving already-buffered post-header bytes (e.g., TLS ClientHello).
 async fn read_head(client: &mut TcpStream) -> Option<Head> {
     let mut buf = Vec::with_capacity(512);
     let mut chunk = [0u8; 1024];
@@ -286,12 +268,12 @@ async fn read_head(client: &mut TcpStream) -> Option<Head> {
         }
         if name.eq_ignore_ascii_case("proxy-authorization") {
             if authorization.is_some() {
-                return None; // 같은 머리가 둘이면 어느 쪽이 옳은지 모호하다
+                return None;
             }
             authorization = Some(value.trim().to_owned());
         }
     }
-    // 메서드는 호출한 쪽이 다시 가른다(405를 돌려주려면 머리가 정상이어야 한다).
+    // Defer method dispatch to the caller so well-formed unsupported methods return 405.
     Some(Head {
         target: format!("{method} {target}"),
         authorization,
@@ -372,7 +354,6 @@ async fn serve(mut client: TcpStream, shared: &Shared, mut stop: watch::Receiver
     let _ = client.shutdown().await;
 }
 
-/// 전용 주소(`POST http://bot-effects.invalid/effect`)의 요청 하나. 같은 호출 전용 자격을 요구하고 바깥으로 나가지 않는다.
 async fn serve_local(
     mut client: TcpStream,
     shared: &Shared,
@@ -444,7 +425,6 @@ fn credentials_match(header: Option<&str>, cfg: &ProxyConfig) -> bool {
     )
 }
 
-/// 길이가 같을 때 모든 바이트를 본다(비교 시간이 맞은 접두어 길이를 흘리지 않는다).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }

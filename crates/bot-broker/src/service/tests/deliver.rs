@@ -1,5 +1,4 @@
-//! 예약 회신 전송(`schedule.deliver`): 호스트 전용 입구 `ScheduleDelivery::release`.
-//! 승인자는 예약을 만든 본인이고, 카드에는 수신 경로와 모든 답이 한 글자도 줄이지 않고 담기며, 저장소가 승인 소비·outbox·완료를 한 커밋으로 쓴다.
+//! Scheduled reply delivery (`schedule.deliver`) via host-only `ScheduleDelivery::release`.
 
 use super::{
     schedule::{OWNER, WITH_SCHEDULE, at_args, schedule_world, snapshot_with},
@@ -7,6 +6,7 @@ use super::{
 };
 use crate::canon::sha256;
 use bot_core::{
+    cards::LABEL_TOOL,
     command::JsonPayload,
     ledger::{ApprovalState, CallLedger, CallPhase, StartCall},
     schedule::{
@@ -18,7 +18,7 @@ use bot_core::{
 };
 
 pub(super) const RUN: &str = "r1";
-pub(super) const TEXT: &str = "월간 보고서를 보냅니다";
+pub(super) const TEXT: &str = "Sending monthly report";
 
 fn draft_of(answers: &[&str]) -> DeliveryDraft {
     DeliveryDraft {
@@ -76,21 +76,20 @@ fn refused(w: &World, word: &str) -> bool {
         .contains(&("schedule.refuse".into(), word.into()))
 }
 
-/// 카드의 `전송 초안` 행을 이어 붙인 값(이어지는 줄은 공백 두 칸으로 시작한다).
 fn card_document(w: &World, nonce: &ApprovalId) -> String {
     let card = w.ledger.stored_approval(nonce).card.0;
-    let value: serde_json::Value = serde_json::from_str(&card).expect("카드 JSON");
+    let value: serde_json::Value = serde_json::from_str(&card).expect("card JSON");
     let lines: Vec<&str> = value["approval"]["lines"]
         .as_array()
         .expect("lines")
         .iter()
-        .map(|line| line.as_str().expect("줄"))
+        .map(|line| line.as_str().expect("line"))
         .collect();
     let label = format!("{DELIVERY_CARD_LABEL}: ");
     let first = lines
         .iter()
         .position(|line| line.starts_with(&label))
-        .expect("전송 초안 행");
+        .expect("delivery draft line");
     let mut out = lines[first][label.len()..].to_owned();
     for line in &lines[first + 1..] {
         match line.strip_prefix("  ") {
@@ -105,13 +104,11 @@ fn card_document(w: &World, nonce: &ApprovalId) -> String {
 fn the_owner_sees_the_whole_draft_and_it_is_sent_once_after_approval() {
     let w = deliver_world();
     let nonce = awaiting(release(&w));
-    // 승인 전에는 아무것도 보내지 않는다
     assert!(w.replies.outbox().is_empty());
     assert!(matches!(
         w.ledger.phase(RUN, DELIVER_CALL),
         CallPhase::Open { approval: Some(_) }
     ));
-    // 승인 결합값: 예약을 만든 본인이 요청자이자 승인자, 되돌릴 수 없는 호출, 승인 문서의 해시
     let stored = w.ledger.stored_approval(&nonce);
     let expected = draft(TEXT);
     assert_eq!(stored.approval.tool.0, DELIVER_TOOL);
@@ -127,20 +124,20 @@ fn the_owner_sees_the_whole_draft_and_it_is_sent_once_after_approval() {
     );
     assert_eq!(stored.approval.args_sha256, expected.sha256().unwrap());
     assert_eq!(stored.reasons, vec!["irreversible".to_string()]);
-    // 카드: 도구·승인자·수신 경로와 모든 답이 든 문서 전체(해시가 이 문서에서 나왔다)
     let document = card_document(&w, &nonce);
     assert_eq!(document, expected.approval_json().unwrap());
     assert_eq!(sha256(&document), stored.approval.args_sha256);
     assert!(document.contains(TEXT) && document.contains("channel-a") && document.contains("team"));
     assert!(
-        stored.card.0.contains("도구: schedule.deliver"),
+        stored
+            .card
+            .0
+            .contains(&format!("{LABEL_TOOL}: schedule.deliver")),
         "{}",
         stored.card.0
     );
-    // 승인하면 한 번만 보낸다
     w.decide(&nonce, OWNER, true).unwrap();
     let receipt = done(release(&w));
-    // 영수증은 저장소가 정한 `{"queued":N}`(N은 outbox에 등록한 답 개수)이고 브로커는 그 바이트를 그대로 돌려준다
     assert_eq!(receipt, r#"{"queued":1}"#);
     assert_eq!(receipt, expected.queued_receipt().0);
     assert_eq!(w.ledger.approval_state(&nonce), ApprovalState::Consumed);
@@ -151,12 +148,11 @@ fn the_owner_sees_the_whole_draft_and_it_is_sent_once_after_approval() {
         ("team", "channel-a")
     );
     assert_eq!(sent[0].answers, vec![text_answer(TEXT)]);
-    // 재시도는 같은 영수증이고 다시 보내지 않는다(초안을 다시 읽지도 않는다)
+    // Retries replay the stored receipt without re-reading the draft or sending again.
     assert_eq!(done(release(&w)), receipt);
-    w.replies.set_draft(RUN, draft("나중에 달라진 내용"));
+    w.replies.set_draft(RUN, draft("changed content later"));
     assert_eq!(done(release(&w)), receipt);
     assert_eq!(w.replies.outbox().len(), 1);
-    // 스팬: 호스트 전용 호출도 일반 호출과 같은 모양으로 남고 내용은 싣지 않는다
     let spans = w.tracer.spans();
     assert!(spans.iter().all(|s| {
         s.str(key::GEN_AI_OPERATION_NAME) == Some("execute_tool")
@@ -173,16 +169,16 @@ fn the_owner_sees_the_whole_draft_and_it_is_sent_once_after_approval() {
 fn a_pending_card_is_the_same_card_until_it_is_decided() {
     let w = deliver_world();
     let nonce = awaiting(release(&w));
-    assert_eq!(awaiting(release(&w)), nonce, "새 카드를 또 열지 않는다");
+    assert_eq!(awaiting(release(&w)), nonce, "must not open a second card");
     assert!(w.replies.outbox().is_empty());
 }
 
 #[test]
 fn every_answer_and_attachment_is_on_the_card_in_order_or_nothing_is_sent() {
     let w = schedule_world();
-    let first = text_answer("첫 회신");
+    let first = text_answer("first reply");
     let second = serde_json::json!({
-        "text": "다음",
+        "text": "next",
         "attachments": [{"name": "note.txt", "type": "text/plain", "data": "b25lCnR3bw=="}]
     })
     .to_string();
@@ -190,16 +186,15 @@ fn every_answer_and_attachment_is_on_the_card_in_order_or_nothing_is_sent() {
     let nonce = awaiting(release(&w));
     let document = card_document(&w, &nonce);
     let (a, b) = (
-        document.find("첫 회신").unwrap(),
-        document.find("다음").unwrap(),
+        document.find("first reply").unwrap(),
+        document.find("next").unwrap(),
     );
-    assert!(a < b, "답은 보낼 순서대로 보인다: {document}");
+    assert!(a < b, "answers must appear in send order: {document}");
     assert!(
         document.contains(r#""text":"one\ntwo""#),
-        "첨부 원문이 보인다: {document}"
+        "decoded attachment text must be visible: {document}"
     );
     w.decide(&nonce, OWNER, true).unwrap();
-    // 영수증의 N은 등록한 답의 개수다(첨부는 그 답에 포함된다)
     assert_eq!(done(release(&w)), r#"{"queued":2}"#);
     assert_eq!(w.replies.outbox()[0].answers, vec![first, second]);
 }
@@ -207,13 +202,13 @@ fn every_answer_and_attachment_is_on_the_card_in_order_or_nothing_is_sent() {
 #[test]
 fn a_draft_the_card_cannot_show_in_full_is_refused_without_any_record() {
     let image = serde_json::json!({
-        "text": "그림",
+        "text": "image",
         "attachments": [{"name": "a.png", "type": "image/png", "data": "aGk="}]
     })
     .to_string();
     for answers in [
         vec![image],
-        vec![text_answer("정상"), r#"{"text":"x","extra":1}"#.to_owned()],
+        vec![text_answer("ok"), r#"{"text":"x","extra":1}"#.to_owned()],
         vec![r#"{"attachments":[]}"#.to_owned()],
         vec![],
     ] {
@@ -222,21 +217,23 @@ fn a_draft_the_card_cannot_show_in_full_is_refused_without_any_record() {
         w.replies.set_draft(RUN, draft_of(&refs));
         assert!(matches!(release(&w), Err(Error::Denied)), "{answers:?}");
         assert!(refused(&w, "card_unsupported"));
-        assert!(!w.ledger.has_call(RUN, DELIVER_CALL), "기록하지 않는다");
+        assert!(
+            !w.ledger.has_call(RUN, DELIVER_CALL),
+            "must not record call"
+        );
         assert!(w.replies.outbox().is_empty());
     }
 }
 
 #[test]
 fn the_card_line_limit_is_checked_before_recording_and_the_edge_fits_exactly() {
-    // 문서 자체는 core 한도 안인데 카드의 실제 줄 한도(머리줄 포함)를 넘는 크기: 일부만 보여 주지 않고 거절한다.
+    // Fits within core's document limit (2500 * 3 bytes) but exceeds the card's 20-line limit once headers are counted.
     let w = schedule_world();
-    w.replies.set_draft(RUN, draft(&"가".repeat(2500)));
-    assert!(draft(&"가".repeat(2500)).approval_json().is_ok());
+    w.replies.set_draft(RUN, draft(&"★".repeat(2500)));
+    assert!(draft(&"★".repeat(2500)).approval_json().is_ok());
     assert!(matches!(release(&w), Err(Error::Denied)));
     assert!(refused(&w, "card_unsupported"));
     assert!(!w.ledger.has_call(RUN, DELIVER_CALL));
-    // 경계: 카드에 다 담기는 가장 큰 크기까지는 전체를 보여 주고, 하나 더 크면 거절한다
     let fits = |n: usize| {
         let w = schedule_world();
         w.replies.set_draft(RUN, draft(&"x".repeat(n)));
@@ -245,7 +242,7 @@ fn the_card_line_limit_is_checked_before_recording_and_the_edge_fits_exactly() {
                 assert_eq!(
                     card_document(&w, &nonce),
                     draft(&"x".repeat(n)).approval_json().unwrap(),
-                    "{n}자는 전부 보여야 한다"
+                    "all {n} bytes must appear in full"
                 );
                 true
             }
@@ -263,16 +260,14 @@ fn the_card_line_limit_is_checked_before_recording_and_the_edge_fits_exactly() {
             high = mid;
         }
     }
-    assert!(fits(low) && !fits(low + 1), "경계 {low}");
+    assert!(fits(low) && !fits(low + 1), "boundary {low}");
 }
 
 #[test]
 fn without_a_frozen_draft_or_a_store_nothing_happens() {
-    // 동결한 초안이 없다(일반 실행·원래 대화로 보내는 답)
     let w = schedule_world();
     assert!(matches!(release(&w), Err(Error::Missing)));
     assert!(!w.ledger.has_call(RUN, DELIVER_CALL));
-    // 초안 저장소를 붙이지 않았다
     let w = deliver_world();
     let bare = w.bare();
     assert!(matches!(
@@ -286,7 +281,6 @@ fn without_a_frozen_draft_or_a_store_nothing_happens() {
 #[test]
 fn only_the_human_who_made_the_schedule_can_release_it() {
     let w = deliver_world();
-    // 서비스 주체의 실행
     w.ledger.add_run(run_context(
         "personal",
         "r2",
@@ -301,7 +295,6 @@ fn only_the_human_who_made_the_schedule_can_release_it() {
         Err(Error::Denied)
     ));
     assert!(refused(&w, "not_human"));
-    // 승인자를 확인할 수 없는 실행(예약 출처가 없다)
     let mut ctx = run_context("personal", "r3", 1, OWNER, "main", &WITH_SCHEDULE);
     ctx.conversation.kind = ConversationKind::Scheduled;
     w.ledger.add_run(ctx);
@@ -311,7 +304,7 @@ fn only_the_human_who_made_the_schedule_can_release_it() {
         Err(Error::Denied)
     ));
     assert!(refused(&w, "not_owner"));
-    // 예약 출처의 승인자가 요청자와 다른 사람이면 요청자가 곧 승인자인 이 입구에서는 승인자가 없는 것이다
+    // Trigger whose approver differs from requester has no requester-as-owner approver here.
     w.publish(
         snapshot_with("r1b")
             .cron_trigger("main", "alice-job", "local:alice", Some(OWNER))
@@ -330,7 +323,6 @@ fn only_the_human_who_made_the_schedule_can_release_it() {
         Err(Error::Denied)
     ));
     assert!(!w.ledger.has_call("r4", DELIVER_CALL));
-    // 예약을 만들 때 필요했던 스코프가 지금 없다
     w.publish(
         base("r2")
             .role("owner", &["run"])
@@ -342,7 +334,7 @@ fn only_the_human_who_made_the_schedule_can_release_it() {
     for run in ["r1", "r2", "r3", "r4"] {
         assert!(
             !w.ledger.has_call(run, DELIVER_CALL),
-            "{run}: 기록하지 않는다"
+            "{run}: must not record call"
         );
     }
     assert!(w.replies.outbox().is_empty());
@@ -352,18 +344,15 @@ fn only_the_human_who_made_the_schedule_can_release_it() {
 fn only_the_designated_human_decides_and_a_stale_button_changes_nothing() {
     let w = deliver_world();
     let nonce = awaiting(release(&w));
-    // 다른 사람은 승인할 수 없다
     assert!(matches!(
         w.decide(&nonce, "local:alice", true),
         Err(Error::Denied)
     ));
     assert_eq!(w.ledger.approval_state(&nonce), ApprovalState::Pending);
-    // 카드를 띄운 뒤 판본이 바뀌었다: 옛 버튼은 거절된다
     w.publish(snapshot_with("r2").build());
     assert!(matches!(w.decide(&nonce, OWNER, true), Err(Error::Stale)));
     assert_eq!(w.ledger.approval_state(&nonce), ApprovalState::Superseded);
     assert!(w.replies.outbox().is_empty());
-    // 스코프가 철회된 판본에서는 승인해도 닫힌다
     let w = deliver_world();
     let nonce = awaiting(release(&w));
     w.publish(
@@ -379,7 +368,6 @@ fn only_the_designated_human_decides_and_a_stale_button_changes_nothing() {
 
 #[test]
 fn an_owner_rejection_ends_the_occurrence_as_rejected_and_an_expired_approval_is_only_denied() {
-    // 소유자가 거절했다: 이 발생을 «거절»로 끝낸다(영수증이 결과이고 보내지 않으며 안내도 없다)
     let w = deliver_world();
     let nonce = awaiting(release(&w));
     w.decide(&nonce, OWNER, false).unwrap();
@@ -394,9 +382,7 @@ fn an_owner_rejection_ends_the_occurrence_as_rejected_and_an_expired_approval_is
         w.ledger.phase(RUN, DELIVER_CALL),
         CallPhase::Done(_)
     ));
-    // 재시도는 같은 영수증이다
     assert_eq!(done(release(&w)), receipt);
-    // 승인했지만 만료됐다: 소유자가 거절한 것이 아니다(기존 거절)
     let w = deliver_world();
     let nonce = awaiting(release(&w));
     w.decide(&nonce, OWNER, true).unwrap();
@@ -409,29 +395,28 @@ fn an_owner_rejection_ends_the_occurrence_as_rejected_and_an_expired_approval_is
 
 #[test]
 fn a_draft_or_recipient_that_changed_after_the_card_is_never_sent_and_keeps_the_approval() {
-    // 카드를 본 뒤 초안이 달라졌다: 새 문서의 지문이 호출에 묶인 지문과 달라 이어가지 못한다
     let w = deliver_world();
     let nonce = awaiting(release(&w));
     w.decide(&nonce, OWNER, true).unwrap();
-    w.replies.set_draft(RUN, draft("전혀 다른 내용"));
+    w.replies
+        .set_draft(RUN, draft("completely different content"));
     assert!(matches!(release(&w), Err(Error::Conflict)));
     assert!(w.replies.outbox().is_empty());
     assert_eq!(w.ledger.approval_state(&nonce), ApprovalState::Approved);
-    // 원래 초안이면 같은 승인으로 보낼 수 있다
     w.replies.set_draft(RUN, draft(TEXT));
     done(release(&w));
     assert_eq!(w.replies.outbox().len(), 1);
-    // 기록과 커밋 사이에 초안이 달라졌다(저장소가 지금 초안으로 지문을 다시 계산한다)
+    // Draft modified between begin and commit: store recomputes digest and rejects.
     let w = deliver_world();
     let nonce = awaiting(release(&w));
     w.decide(&nonce, OWNER, true).unwrap();
     let replies = w.replies.clone();
     w.ledger
-        .set_after_begin(move || replies.set_draft(RUN, draft("커밋 직전에 바뀐 내용")));
+        .set_after_begin(move || replies.set_draft(RUN, draft("changed right before commit")));
     assert!(matches!(release(&w), Err(Error::Conflict)));
     assert!(w.replies.outbox().is_empty());
     assert_eq!(w.ledger.approval_state(&nonce), ApprovalState::Approved);
-    // 수신 경로를 정하는 활성 집합이 달라졌다
+    // Active activation set changed after the card was issued.
     let w = deliver_world();
     let nonce = awaiting(release(&w));
     w.decide(&nonce, OWNER, true).unwrap();
@@ -460,19 +445,18 @@ fn the_general_path_can_never_preclaim_the_reserved_call_id() {
     }
     assert!(
         !w.ledger.has_call(RUN, DELIVER_CALL),
-        "어떤 도구로도 기록하지 않는다"
+        "must not record under any tool"
     );
     assert!(
         w.audit
             .verdicts()
             .contains(&("call.refuse".into(), "reserved_call".into()))
     );
-    // 모델이 호스트 전용 도구를 다른 호출 ID로 불러도 없는 것처럼 답한다
+    // Calling the host-only tool under another call ID returns Missing.
     assert!(matches!(
         w.call("c1", "schedule.deliver", "{}"),
         Err(Error::Missing)
     ));
-    // 막힌 뒤에도 호스트 전용 입구는 그대로 열린다
     let nonce = awaiting(release(&w));
     w.decide(&nonce, OWNER, true).unwrap();
     done(release(&w));

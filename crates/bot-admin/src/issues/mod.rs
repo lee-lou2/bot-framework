@@ -1,5 +1,4 @@
-//! 이슈 트래커 내보내기(Sentry Envelope v7 프로토콜 호환: Sentry·GlitchTip·Bugsink).
-//! 공통 보고 계약(`bot_core::issue::IssueReporter`)을 구현한다.
+//! Issue tracker export implementing `bot_core::issue::IssueReporter` via Sentry Envelope v7.
 
 mod export;
 mod fingerprint;

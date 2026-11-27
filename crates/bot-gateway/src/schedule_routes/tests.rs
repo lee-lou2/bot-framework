@@ -21,7 +21,6 @@ fn routes_for(host: &str) -> HostRoutes {
             },
             "main",
         )
-        // 다른 팀(T9)의 같은 채널 ID(C1)
         .binding(
             "abroad",
             Adapter::SlackChannel {
@@ -90,7 +89,6 @@ fn target(binding: &str, kind: ConversationKind, id: &str, thread: Option<&str>)
     }
 }
 
-/// 결과를 비교하기 쉬운 값으로: 확정된 `conversation.id` 또는 오류 이름
 fn run(
     routes: &HostRoutes,
     profile: &str,
@@ -124,7 +122,6 @@ fn an_alias_a_channel_id_and_the_canonical_path_all_pin_the_same_team_and_channe
             "{name}"
         );
     }
-    // 바인딩·종류·스레드는 그대로 둔다
     let wanted = target(
         "team",
         ConversationKind::Channel,
@@ -146,7 +143,6 @@ fn an_alias_a_channel_id_and_the_canonical_path_all_pin_the_same_team_and_channe
 #[test]
 fn the_team_follows_the_binding_so_the_same_channel_id_of_another_team_is_refused() {
     let routes = routes_for(HOST);
-    // `abroad`는 다른 팀(T9)의 채널 C1이다: 채널 ID만 주면 그 팀으로 고정된다
     for name in ["planning", "C1", "T9/C1"] {
         assert_eq!(
             channel(&routes, "abroad", name).as_deref(),
@@ -154,7 +150,6 @@ fn the_team_follows_the_binding_so_the_same_channel_id_of_another_team_is_refuse
             "{name}"
         );
     }
-    // 다른 팀의 정규 경로는 이 바인딩의 것이 아니다(양쪽 모두)
     assert_eq!(channel(&routes, "abroad", "T1/C1"), Err("denied"));
     assert_eq!(channel(&routes, "team", "T9/C1"), Err("denied"));
 }
@@ -162,25 +157,20 @@ fn the_team_follows_the_binding_so_the_same_channel_id_of_another_team_is_refuse
 #[test]
 fn recipients_outside_the_profiles_registered_channel_are_refused() {
     let routes = routes_for(HOST);
-    // 같은 워크스페이스의 다른 채널·팀이 다른 정규 경로·모르는 이름
     for name in ["ops", "C2", "T1/C2", "T2/C1", "elsewhere", "c1"] {
         assert_eq!(channel(&routes, "team", name), Err("denied"), "{name}");
     }
-    // 이 프로필에 없는 바인딩
     assert_eq!(channel(&routes, "nowhere", "planning"), Err("denied"));
-    // 프로필마다 자기 바인딩만 본다: work의 team은 ops 채널이다
     let planning = target("team", ConversationKind::Channel, "planning", None);
     assert_eq!(run(&routes, "work", &planning), Err("denied"));
     let ops = target("team", ConversationKind::Channel, "ops", None);
     assert_eq!(run(&routes, "work", &ops).as_deref(), Ok("T1/C2"));
-    // 활성 집합에 없는 프로필
     assert_eq!(run(&routes, "ghost", &planning), Err("denied"));
 }
 
 #[test]
 fn dm_http_and_cli_entrances_and_non_channel_conversations_are_never_recipients() {
     let routes = routes_for(HOST);
-    // DM(수신자를 하나로 정할 수 없다)·CLI·HTTP·OpenAI 바인딩은 어떤 종류·ID로도 거절
     for binding in ["dm", "desk", "hook", "compat"] {
         for kind in [ConversationKind::Channel, ConversationKind::Direct] {
             for id in ["D1", "C1", "T1/C1", "planning"] {
@@ -193,7 +183,6 @@ fn dm_http_and_cli_entrances_and_non_channel_conversations_are_never_recipients(
             }
         }
     }
-    // 채널 바인딩이어도 대화 종류가 채널이 아니면 거절
     for kind in [
         ConversationKind::Direct,
         ConversationKind::Cli,
@@ -212,7 +201,6 @@ fn malformed_input_is_invalid_before_the_registry_is_asked() {
         assert_eq!(channel(&routes, "team", id), Err("invalid"), "{id:?}");
     }
     assert_eq!(channel(&routes, "team", &"C".repeat(80)), Err("invalid"));
-    // 정규 모양이 아닌 경로는 모르는 이름이다
     for id in ["T1/", "/C1", "T1/C1/C2", "t1/c1", "T1/C-1", "a b"] {
         assert_eq!(channel(&routes, "team", id), Err("denied"), "{id:?}");
     }
@@ -239,13 +227,9 @@ fn a_pinned_path_stops_resolving_when_the_registry_changes() {
         )
     };
     let cases = [
-        // 채널을 뺐다
         ws("T1", r#"{"ops": "C2"}"#),
-        // 팀이 바뀌었다
         ws("T2", r#"{"planning": "C1"}"#),
-        // 별칭이 다른 채널을 가리킨다
         ws("T1", r#"{"planning": "C7"}"#),
-        // 워크스페이스를 통째로 뺐다
         r#"{"slack": {"workspaces": {}}}"#.to_owned(),
         "{}".to_owned(),
     ];

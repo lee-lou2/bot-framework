@@ -1,11 +1,11 @@
-//! 관리 조회의 승인 부분: 목록(필터·정렬·커서)과 상세, 카드 줄 렌더. 기억 공유 카드(`본문`)와 예약 회신 카드(`전송 초안`)는 소유자에게만 원문을 준다.
+//! Admin approval listings, detail lookups, and card rendering with owner-only body redaction.
 
 use crate::db::{R, Store, ms_to_time};
 use bot_core::builtin::{CardBody as Body, card_body};
 use bot_core::{admin::*, id::*, port::Error};
 use sqlx::{Row, postgres::PgRow};
 
-/// 단순 `<시각>:<ID>` 커서(승인 대기 목록과 다른 목록들이 같이 쓴다).
+/// `<ms>:<id>` keyset cursor.
 fn cursor(after: &Option<String>) -> (Option<i64>, Option<String>) {
     match after.as_deref().and_then(|a| a.split_once(':')) {
         Some((ms, id)) => (ms.parse().ok(), Some(id.to_owned())),
@@ -13,7 +13,7 @@ fn cursor(after: &Option<String>) -> (Option<i64>, Option<String>) {
     }
 }
 
-/// 처리 시각 순 목록의 커서 `<처리 시각 또는 -1>:<대기 여부 0|1>:<대기면 만료 시각, 아니면 0>:<nonce>`.
+/// `<decided_ms_or_-1>:<is_pending_0_or_1>:<expires_ms_or_0>:<nonce>` cursor for decided/all listings.
 fn processed_cursor(after: &Option<String>) -> Option<(i64, i32, i64, String)> {
     let mut parts = after.as_deref()?.splitn(4, ':');
     let decided = parts.next()?.parse().ok()?;
@@ -22,23 +22,21 @@ fn processed_cursor(after: &Option<String>) -> Option<(i64, i32, i64, String)> {
     Some((decided, pending, expires, parts.next()?.to_owned()))
 }
 
-/// 브로커가 렌더링한 카드의 줄(`라벨: 값`)을 (라벨, 값) 쌍으로 바꾼다. 제목이 맨 앞이다.
-/// 긴 원문 카드는 줄 상한 안에서 이어 쓴다(첫 줄 `본문: `·`전송 초안: `, 이어지는 줄은 공백 두 칸으로 시작).
-/// 그 조각을 이어 붙여 풀어 **한 행(원문 전체)**으로 준다: 소비자가 `memory_share_hash(기억 ID, SHA-256(본문))`나 초안의 SHA-256을 승인의
-/// 인자 해시와 대조해 "보이는 것 = 승인한 것"을 확인할 수 있다. 풀 수 없으면 그 행을 주지 않는다(대조가 실패로 끝난다).
+/// Parses broker-rendered card lines into `(label, value)` rows with the title first.
+/// Joins wrapped `Body` / `Delivery draft` continuations into one full row so callers can verify
+/// the visible text against `args_sha256`; omits the row if unparseable.
 fn render_of(card: &str, body: Body) -> Vec<(String, String)> {
     let label = match body {
         Body::None => None,
-        Body::Share => Some("본문"),
+        Body::Share => Some(bot_core::cards::LABEL_BODY),
         Body::Draft => Some(bot_core::schedule::DELIVERY_CARD_LABEL),
     };
     let (mut out, joined) = bot_core::cards::split_render(card, label);
     if let Some(joined) = joined {
-        // 풀 수 없는 본문도 행을 주지 않는다(소비자는 이 행이 정확히 하나여야 승인하고 그 지문이 승인 해시와 같아야 한다)
         match body {
             Body::Share => {
                 if let Ok(text) = serde_json::from_str::<String>(&joined) {
-                    out.push(("본문".to_owned(), text));
+                    out.push((bot_core::cards::LABEL_BODY.to_owned(), text));
                 }
             }
             Body::Draft => out.push((bot_core::schedule::DELIVERY_CARD_LABEL.to_owned(), joined)),
@@ -48,8 +46,7 @@ fn render_of(card: &str, body: Body) -> Vec<(String, String)> {
     out
 }
 
-/// 기억 공유 카드는 기억 본문 전체를, 예약 회신 카드는 전송 초안 전체를 싣는다: 요청자이자 승인자인 소유자 본인이 아닌 조회자(운영자 포함)에게는
-/// 원문을 주지 않고 `render`를 비운다(안내 문구는 화면이 맡는다). 메타데이터(상태·위험·판본·해시)와 감사는 그대로다.
+/// Redacts card contents for memory-share and scheduled-delivery approvals unless the viewer is both requester and approver.
 fn render_for(
     viewer: &Viewer,
     approval: &bot_core::state::Approval,
@@ -88,10 +85,9 @@ pub(crate) fn approval_view(row: &PgRow, viewer: &Viewer) -> R<ApprovalView> {
 }
 
 impl Store {
-    /// 승인 목록. 필터를 LIMIT 전에 적용하고 커서는 정렬 키와 같다. 소유자 DM으로 전달 중인(영수증 확정 전) 카드는 대기 행에서 뺀다: 열리지 않은 카드다.
-    /// - Pending: 만료가 가까운 순(`expires_at` ASC, `nonce` ASC).
-    /// - Decided: 대기를 벗어난 모든 상태(자동 만료·대체 포함), 처리 시각 최신순(시각 없는 행은 뒤, 같은 시각은 `nonce` ASC).
-    /// - All: 처리 행이 먼저(Decided와 같은 순서), 날짜 없는 대기 행은 마지막이며 그 묶음은 Pending과 같이 만료가 가까운 순이다.
+    /// Lists approvals filtered before `LIMIT`, excluding unposted owner-DM cards from pending results.
+    /// Order: `Pending` by `(expires_ms ASC, nonce ASC)`; `Decided` by `(decided_ms DESC, nonce ASC)`;
+    /// `All` lists decided rows first, then pending rows by soonest expiry.
     pub(crate) async fn admin_approvals(
         &self,
         viewer: &Viewer,

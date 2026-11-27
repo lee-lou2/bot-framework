@@ -10,7 +10,7 @@ use std::time::{Duration, UNIX_EPOCH};
 fn spec(timing: Timing) -> ScheduleSpec {
     ScheduleSpec {
         timing,
-        instruction: "확인\n해 줘".into(),
+        instruction: "check\nplease".into(),
         quiet: false,
         destination: None,
     }
@@ -32,14 +32,14 @@ fn the_card_hashes_the_rfc3339_instant_at_the_stored_precision() {
     let first = at("2030-01-01T12:00:00.25Z").seal_create().unwrap();
     assert_eq!(
         first.canonical,
-        r#"{"at":"2030-01-01T12:00:00.250Z","instruction":"확인\n해 줘","quiet":false}"#
+        r#"{"at":"2030-01-01T12:00:00.250Z","instruction":"check\nplease","quiet":false}"#
     );
     assert_eq!(
         format!(
             "{:x}",
             sha2::digest::Output::<sha2::Sha256>::from(first.sha256)
         ),
-        "7e0d4934ac11c63b79764f61108dee971c8d0425b1e061a001a4d1854a983b31"
+        "bfc59438f51ee026b2ae3b4a5f98760a89bcda188d8897d85b1ef506165df8da"
     );
     for equivalent in [
         "2030-01-01T12:00:00.250000000Z",
@@ -56,7 +56,7 @@ fn the_card_hashes_the_rfc3339_instant_at_the_stored_precision() {
             .seal_create()
             .unwrap()
             .canonical,
-        r#"{"at":"1970-01-01T00:00:00Z","instruction":"확인\n해 줘","quiet":false}"#
+        r#"{"at":"1970-01-01T00:00:00Z","instruction":"check\nplease","quiet":false}"#
     );
 }
 
@@ -65,7 +65,7 @@ fn cron_binds_the_resolved_zone_and_uses_the_same_expression_as_storage() {
     let s = cron("@daily", "Asia/Seoul").seal_create().unwrap();
     assert_eq!(
         s.canonical,
-        r#"{"cron":"0 0 * * *","instruction":"확인\n해 줘","quiet":false,"timezone":"Asia/Seoul"}"#
+        r#"{"cron":"0 0 * * *","instruction":"check\nplease","quiet":false,"timezone":"Asia/Seoul"}"#
     );
     assert_eq!(
         s.sha256,
@@ -137,7 +137,7 @@ fn changing_only_the_slack_team_invalidates_both_approvals() {
         let draft = DeliveryDraft {
             activation: Revision("set-a".into()),
             target,
-            answers: vec![JsonPayload(r#"{"text":"준비됐어요"}"#.into())],
+            answers: vec![JsonPayload(r#"{"text":"ready"}"#.into())],
         };
         (
             schedule.seal_create().unwrap().sha256,

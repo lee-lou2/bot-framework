@@ -1,14 +1,9 @@
-//! private DM 접수(`PrivateIntake`). 지정 도구에 매핑 인자를 전달하고 전용 원장에는 식별자·프로필별 HMAC·판정만 남긴다.
-//! 선택한 선언이 허용한 빈 PASS만 게이트웨이가 원래 봉투를 일반 대화로 접수할 수 있게 한다.
+//! Private DM intake gate forwarding mapped arguments directly to a declared tool with HMAC-only ledger tracking.
 //!
-//! 일반 호출 원장(`CallLedger`)·워커·모델·기억·회신 포트에는 private 권한을 열지 않는다. 전용 원장(`PrivateLedger`)만
-//! `begin`(리스 점유) → `start`(전송 직전 한 번) → `finish`(고정된 결과 종류만)를 바꾼다. 도구의 결과·오류·영수증은 저장하지
-//! 않고 버린다(도구가 입력을 결과에 되돌려 줄 수 있다).
-//!
-//! 순서: 게이트웨이가 넘긴 판본이 지금 활성 판본과 같은지 → 현재 판본의 private 트리거(그 바인딩·에이전트·도구)와 대조 →
-//! 승인 카드가 필요한 도구·단계 원장을 쓰는 도구(`effects`)는 거절 → 주체의 현재 권한 → 입력 봉인(검증·정규화) →
-//! 프로필별 HMAC 지문 → `begin`. 같은 접수 키의 재전달은 호출을 늘리지 않는다(`InProgress`는 ACK하지 않고 다시 시도하게 한다).
-//! 시작 전 실패는 리스를 반납해(`RetryBeforeStart`) 같은 입력의 재전달이 이어 가게 하고, 전송 뒤 결과를 모르면 보류한다.
+//! Never exposes private inputs to `CallLedger`, workers, models, memory, or reply ports; `PrivateLedger`
+//! records only IDs, profile-keyed HMACs, and fixed outcomes (`begin -> start -> finish`), discarding all
+//! tool results, errors, and receipts. Only an allowed valid empty `bot/pass` lets the gateway fall back
+//! to normal conversation intake.
 
 use crate::{
     classify::classify,
@@ -31,10 +26,10 @@ use bot_core::{
 };
 use std::sync::Arc;
 
-/// 프로필별 지문 키의 자격 이름. 운영자가 프로필마다 등록한다. 없으면 안전하게 중복을 가릴 수 없으므로 접수하지 않는다.
+/// Profile-scoped HMAC key name for private intake deduplication; intake fails closed if absent.
 pub const FINGERPRINT_SECRET: &str = "private-intake";
 
-/// 호스트만 쓰는 자격 이름인가. 도구의 환경으로는 이름이 같아도 풀어 전달하지 않는다(일반 호출·비공개 접수 모두).
+/// Host-only secret names that are never resolved into any tool's environment.
 pub fn reserved_secret(name: &SecretName) -> bool {
     name.as_str() == FINGERPRINT_SECRET
 }
@@ -54,16 +49,13 @@ pub struct PrivateGate {
     limiter: Arc<Limiter>,
 }
 
-/// 접수를 마친 한 건의 실행에 필요한 값. 원문은 `canonical`뿐이고 실행기에만 간다.
 struct Exec {
     attempt: Attempt,
     principal: PrincipalId,
-    /// 게이트웨이가 인증한 입구(대화 종류와 발신자)로 정한 출처.
     origin: RunOrigin,
     tool: ToolId,
     resolved: Resolved,
     canonical: String,
-    /// 도구가 고른 환경 변수(일반 호출과 같은 규칙으로 읽은 값).
     env: Vec<(String, String)>,
     fingerprint: [u8; 32],
     checked_revision: Revision,
@@ -122,11 +114,10 @@ impl PrivateGate {
         } = call;
         let parts = &self.parts;
         let snapshot = parts.catalog.current(&key.profile).ok_or(Error::Denied)?;
-        // 게이트웨이가 확인한 판본은 지금 활성 판본이어야 한다(다르면 지금 판본으로 바꿔치기하지 않고 거절한다).
         if revision != snapshot.revision {
             return Err(Error::Stale);
         }
-        // 민감 입력은 1:1 대화(DM)로만 받는다: 대화 종류가 Direct이고 바인딩이 이 에이전트(또는 조상)의 Slack DM이어야 한다.
+        // Sensitive intake requires a direct conversation on a Slack DM binding for this agent (or an ancestor).
         let dm = snapshot.bindings.get(&key.binding).is_some_and(|b| {
             (b.agent == agent || agent.0.starts_with(&format!("{}/", b.agent.0)))
                 && matches!(b.source, Adapter::SlackDm { .. })
@@ -134,7 +125,6 @@ impl PrivateGate {
         if conversation.kind != ConversationKind::Direct || !dm {
             return Err(Error::Denied);
         }
-        // 같은 도구를 쓰는 선언도 넘김 정책이 다를 수 있다. 게이트웨이가 고른 선언의 정책만 읽는다.
         let owner = snapshot.agents.get(&agent).ok_or(Error::Denied)?;
         let declaration = owner.triggers.iter().find(|t| {
             t.id == trigger && t.private
@@ -142,7 +132,7 @@ impl PrivateGate {
                 && matches!(&t.target, TriggerTarget::Tool { tool: target, .. } if *target == tool)
         }).ok_or(Error::Denied)?;
         let declared_tool = find_tool(&snapshot, &agent, &tool).ok_or(Error::Denied)?;
-        // 승인 카드는 인자를 보여 줘야 하고, 단계 원장은 입력이 섞인 인자 해시를 저장하므로 둘 다 민감 입력에는 쓰지 않는다.
+        // Approval cards display arguments and effect journals store argument hashes, so neither is permitted for private intake.
         if declared_tool.effects
             || classify(declared_tool, &snapshot.policy.approve, false).needs_approval()
         {
@@ -159,15 +149,12 @@ impl PrivateGate {
         if declared_tool.scopes.is_empty() || !declared_tool.scopes.is_subset(&scopes) {
             return Err(Error::Denied);
         }
-        // 설치한 서버가 있어야 하고, 도구 판본에 설치 판본을 묶는다(일반 호출과 같은 규칙).
         let image = parts
             .runner
             .installed(&declared_tool.server)
             .ok_or(Error::Denied)?;
-        // 샌드박스가 실행할 수 없는 서버(상태 볼륨을 요구하는데 지원하지 않음)는 접수를 기록하기 전에 거절한다.
         parts.runner.admit(&declared_tool.server)?;
         let runnable = pinned_to_image(declared_tool.clone(), &image);
-        // 도구가 고른 환경 변수의 값은 이 에이전트의 환경에서만 읽는다(일반 호출과 같다. 이름이 없으면 시작하지 않는다).
         let env = selected_env(declared_tool, &agent, &snapshot, &snapshot).ok_or(Error::Denied)?;
         let sealed = parts.sealer.seal(declared_tool, &args)?;
         drop(args);
@@ -189,7 +176,7 @@ impl PrivateGate {
                 key.request.0.as_bytes(),
                 agent.0.as_bytes(),
                 tool.0.as_bytes(),
-                // 회신 목적지(대화 ID·스레드)를 최초 요청에 묶는다: 같은 인자라도 다른 대화·스레드면 다른 요청이다.
+                // Bind reply destination (conversation ID and thread) so different threads are distinct requests.
                 conversation.id.as_bytes(),
                 conversation.thread.as_deref().unwrap_or("").as_bytes(),
                 &[u8::from(conversation.thread.is_some())],
@@ -232,7 +219,6 @@ impl PrivateGate {
                     fingerprint
                 };
                 *label = "accepted";
-                // 출처는 게이트웨이가 인증한 입구(대화 종류·발신자)로 정한다. 모델 인자나 요청 ID로 추정하지 않는다.
                 let origin = RunOrigin::from_ingress(&conversation.kind, &key.principal);
                 let reply_to = matches!(runnable.destination, Some(Destination::Reply))
                     .then_some(conversation);
@@ -255,12 +241,11 @@ impl PrivateGate {
                 }
                 result
             }
-            // 같은 전달이 아직 처리 중이거나 시작 여부가 정해지지 않았다: ACK하지 않고 다시 시도하게 한다.
+            // Still in progress or indeterminate: do not ACK so delivery retries.
             PrivatePermit::InProgress => {
                 *label = "in_progress";
                 Err(Error::Unavailable)
             }
-            // 이미 끝났거나 내구 보류다. 호출을 늘리지 않는다.
             PrivatePermit::Completed | PrivatePermit::Held => {
                 *label = "duplicate";
                 Ok(PrivateDecision::Consumed)
@@ -278,8 +263,7 @@ impl PrivateGate {
         }
     }
 
-    /// 리스를 쥔 접수 한 건을 실행한다. 시작 기록 전의 실패는 리스를 반납해 같은 입력의 재전달이 이어 가게 하고,
-    /// 시작한 뒤에는 결과 종류만 고정 어휘로 남긴다(도구가 돌려준 본문·오류·영수증은 버린다).
+    /// Executes a leased private intake call; pre-start failures release the lease for retry, while post-start outcomes persist fixed status codes only.
     async fn execute(&self, run: Exec) -> Result<PrivateDecision, Error> {
         let (ledger, profile) = (&self.parts.ledger, run.attempt.profile.clone());
         let release = |attempt: Attempt| async move {
@@ -291,7 +275,7 @@ impl PrivateGate {
             release(run.attempt).await;
             return Err(Error::Unavailable);
         };
-        // 판정에 쓴 판본이 아직 활성인지 전송 직전에 다시 본다. 저장소도 `start`에서 같은 잠금 안에서 대조한다.
+        // Re-check active revision immediately before `start` (the store re-verifies under the same lock).
         let still = self
             .parts
             .catalog
@@ -310,7 +294,7 @@ impl PrivateGate {
             })
             .await;
         if let Err(error) = started {
-            // 저장소가 시작을 커밋하지 않았다면 반납된다. 커밋했는데 응답을 잃었다면 반납은 거절되고 보류로 이어진다.
+            // Releases only if `start` never committed; if `start` committed and the reply was lost, release is rejected and it transitions to held.
             release(run.attempt).await;
             return Err(error);
         }
@@ -330,9 +314,8 @@ impl PrivateGate {
             ),
         };
         let outcome = match self.parts.runner.run(job).await {
-            // 도구가 오류로 끝났다고 알려도(`isError`) 일부 효과가 났을 수 있다: 성공으로 적지 않고 보류한다.
+            // `isError` may still have caused partial effects; hold rather than mark completed.
             Ok(Ran::Done(payload)) if reports_error(&payload.0) => PrivateOutcome::Held,
-            // 민감 DM 전용 도구가 «처리하지 않음» 표식을 돌려줬다: `private_pass: true`이고 유효한 빈 표식일 때만 일반 DM 대화로 넘긴다.
             Ok(Ran::Done(payload)) if crate::service::pass::carries_marker(&payload.0) => {
                 let (_, marker) = crate::service::pass::split(&payload);
                 if run.private_pass && marker.is_some_and(|m| m.valid) {
@@ -342,11 +325,9 @@ impl PrivateGate {
                 }
             }
             Ok(Ran::Done(_)) => PrivateOutcome::Completed,
-            // 서버가 실행 전에 확정적으로 거절했다(잘못된 요청·인자): 외부 효과가 없다.
             Ok(Ran::Rejected | Ran::Refused(_)) => PrivateOutcome::Rejected,
             Ok(Ran::NotSent) => PrivateOutcome::NotSent,
-            // 결과를 막았어도 도구는 이미 실행됐다(외부 효과가 불명이다): 거절로 단정하지 않고 보류한다.
-            // 보냈는지 모르거나 실행기가 실패했을 때도 보류하고 원문으로 다시 실행하지 않는다.
+            // Blocked or unknown outcomes mean the tool may already have executed; hold without retrying.
             Ok(Ran::Blocked(_) | Ran::Unknown(_)) | Err(_) => PrivateOutcome::Held,
         };
         let result = match outcome {
@@ -366,7 +347,7 @@ impl PrivateGate {
         result
     }
 
-    /// 계측: 분류만 남기고 원문·주체는 싣지 않는다. 모든 스팬에 private 표지를 붙인다.
+    /// Records classification-only telemetry tagged with `BOT_PRIVATE` and no payload or principal.
     fn span(
         &self,
         profile: &ProfileId,
@@ -391,7 +372,7 @@ impl PrivateGate {
     }
 }
 
-/// 도구 결과가 `isError: true`인가. 읽지 못하면 성공으로 보지 않는다.
+/// Treats malformed or missing `isError` payloads as errors rather than success.
 fn reports_error(payload: &str) -> bool {
     match crate::json::parse(payload) {
         Some(serde_json::Value::Object(map)) => {

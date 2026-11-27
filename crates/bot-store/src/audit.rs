@@ -1,6 +1,5 @@
-//! 감사 해시 체인. 호스트 전체에 순번이 1부터 하나로 이어지고 각 행은 이전 해시를 포함해 SHA-256으로 묶인다(프로필은 해시에 들어가는 표지다).
-//! 해시 입력: "bot-audit-v1" ‖ profile ‖ prev(32) ‖ seq(u64 BE) ‖ at_ms(i64 BE) ‖ actor ‖ action ‖ target ‖ args(0|1‖32) ‖ verdict.
-//! 문자열은 길이(u32 BE)를 앞에 붙인다. DB 전체를 다시 쓸 수 있는 관리자까지 검증하지는 못한다(security.md).
+//! Host-wide SHA-256 audit hash chain.
+//! Hash input: `"bot-audit-v1" || profile || prev(32) || seq(u64 BE) || at_ms(i64 BE) || actor || action || target || args(0|1||32) || verdict` (u32-BE length-prefixed strings).
 
 use crate::db::{R, Store, Tx};
 use bot_core::command::ChainReport;
@@ -31,7 +30,6 @@ impl<'a> Entry<'a> {
     }
 }
 
-/// 한 트랜잭션의 커밋 직전에 여러 감사 행을 한 번에 이어 붙일 때 모으는 소유 항목.
 pub(crate) struct OwnedEntry {
     pub profile: String,
     pub actor: String,
@@ -112,7 +110,7 @@ fn link(profile: &str, prev: &[u8], seq: i64, at_ms: i64, e: &Entry<'_>) -> [u8;
     h.finalize().into()
 }
 
-/// 같은 트랜잭션에서 head를 잠그고 한 줄을 잇는다. 상태 변경 뒤 **마지막에** 부른다(잠금을 짧게 쥐려고).
+/// Locks the audit head and appends one entry; call last in a transaction to keep head-lock duration short.
 pub(crate) async fn append(tx: &mut Tx<'_>, profile: &str, e: &Entry<'_>) -> R<i64> {
     sqlx::query("insert into bot_audit_head (singleton, seq, hash) values (true, 0, $1) on conflict do nothing")
         .bind(GENESIS.as_slice())
@@ -152,7 +150,7 @@ pub(crate) async fn append(tx: &mut Tx<'_>, profile: &str, e: &Entry<'_>) -> R<i
     Ok(seq)
 }
 
-/// 같은 트랜잭션에서 head를 한 번만 잠그고 여러 감사 행을 순서대로 잇는다. 상태 변경 뒤 커밋 직전에 부른다.
+/// Locks the audit head once and appends multiple entries; call just before commit.
 pub(crate) async fn append_many(tx: &mut Tx<'_>, entries: &[OwnedEntry]) -> R<()> {
     if entries.is_empty() {
         return Ok(());
@@ -223,17 +221,13 @@ pub(crate) async fn append_many(tx: &mut Tx<'_>, entries: &[OwnedEntry]) -> R<()
     Ok(())
 }
 
-/// 체인을 처음부터 다시 계산한다: 순번 공백·이전 해시 불일치·내용 변조·꼬리 삭제(head와 불일치)를 찾는다.
-///
-/// 행(쪽마다)과 head를 **한 스냅숏**에서 읽는다(`REPEATABLE READ`·읽기 전용 트랜잭션 하나). 읽는 동안 다른 트랜잭션이 항목을 이어 붙이면(행과 head는 같은 커밋으로
-/// 움직인다) 따로 읽은 head만 그 항목을 보고 «꼬리가 지워졌다»로 오인하기 때문이다. 스냅숏이 하나면 이어 붙는 중에도 변조 없는 체인은 늘 정상이다.
+/// Recomputes the chain and compares against `bot_audit_head` in one `REPEATABLE READ READ ONLY` snapshot so concurrent appends cannot look like tail truncation.
 pub(crate) async fn verify_chain(store: &Store) -> R<ChainReport> {
     let mut tx = store.pool.begin().await?;
     sqlx::query("set transaction isolation level repeatable read read only")
         .execute(&mut *tx)
         .await?;
     let report = scan_chain(&mut tx).await;
-    // 읽기뿐인 트랜잭션이다: 결과와 상관없이 끝낸다(오류면 롤백과 같다)
     tx.rollback().await?;
     report
 }

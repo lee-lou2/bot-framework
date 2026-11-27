@@ -1,4 +1,4 @@
-//! 속도 제한과 입력 에코(실제 리스너): 제한에 걸려도 같은 키로 이미 접수한 작업의 재조회는 막히지 않고, 오류 응답은 호출자의 필드 이름을 되풀이하지 않는다.
+//! Rate limiting and input-echo protection tests (real listener).
 use crate::openai_support::*;
 use serde_json::Value;
 use std::time::Duration;
@@ -42,7 +42,7 @@ async fn the_per_principal_rate_limit_answers_429_with_a_retry_after_and_keeps_t
     assert_eq!(
         limited.header("x-should-retry"),
         None,
-        "접수 전 거절이라 SDK가 다시 보내도 된다"
+        "pre-admission rejection stays SDK-retryable"
     );
     assert_eq!(rig.api.runs(), 2);
 }
@@ -55,11 +55,11 @@ async fn a_request_already_accepted_can_be_asked_again_with_the_same_key_even_wh
         ..Setup::default()
     })
     .await;
-    rig.api.start_as(answer("끝난 답"));
+    rig.api.start_as(answer("finished reply"));
     let body = ask("assistant", "q");
     let first = chat(&rig, BUILD_KEY, Some("again1"), &body).await;
     assert_eq!(first.status, 200, "{}", first.body);
-    // 분당 1건을 다 썼다: 새 키는 429지만 같은 키·같은 요청의 재조회는 같은 작업의 결과다(새 실행·새 접수 없음)
+    // After exhausting 1 req/min, new keys get 429 while replaying an accepted key still returns its result.
     let fresh = chat(&rig, BUILD_KEY, Some("again2"), &body).await;
     assert_eq!(fresh.status, 429, "{}", fresh.body);
     assert!(fresh.header("retry-after").is_some());
@@ -67,28 +67,26 @@ async fn a_request_already_accepted_can_be_asked_again_with_the_same_key_even_wh
     assert_eq!(again.status, 200, "{}", again.body);
     assert_eq!(again.json(), first.json());
     assert_eq!(rig.api.runs(), 1);
-    // 같은 키로 다른 요청이면 제한이 아니라 충돌이다
     let other = chat(
         &rig,
         BUILD_KEY,
         Some("again1"),
-        &ask("assistant", "다른 질문"),
+        &ask("assistant", "different question"),
     )
     .await;
     assert_eq!(
         (other.status, other.error().1.as_str()),
         (400, "idempotency_key_conflict")
     );
-    // 서버가 만든 키(키 없는 요청)는 이 요청이 처음이라 찾을 것이 없다: 찾아 보지도 않고 제한 그대로
+    // Keyless requests skip ledger lookup and fail with 429 immediately.
     let looked = rig.api.lookups();
     let keyless = chat(&rig, BUILD_KEY, None, &body).await;
     assert_eq!(keyless.status, 429, "{}", keyless.body);
     assert_eq!(
         rig.api.lookups(),
         looked,
-        "서버가 만든 키로는 원장을 조회하지 않아요"
+        "must not query ledger for server-generated key"
     );
-    // 접수한 적 없는 키는 제한 그대로
     assert_eq!(
         chat(&rig, BUILD_KEY, Some("never-seen"), &body)
             .await
@@ -114,18 +112,11 @@ async fn an_unfinished_request_asked_again_under_the_rate_limit_gets_the_progres
     assert_eq!(first.status, 200, "{}", first.body);
     let again = chat(&rig, BUILD_KEY, Some("wip1"), &body).await;
     assert_eq!(again.status, 200, "{}", again.body);
-    assert_eq!(
-        again.json()["choices"][0]["message"]["content"],
-        "작업을 처리 중입니다. 같은 Idempotency-Key와 같은 요청으로 다시 조회하세요."
-    );
-    // 진행 중인 일의 승인 대기도 같다
+    assert_eq!(again.json()["choices"][0]["message"]["content"], RUNNING);
     rig.api
         .set_state("wip1", bot_core::api::ApiState::NeedsHuman);
     let waiting = chat(&rig, BUILD_KEY, Some("wip1"), &body).await;
-    assert_eq!(
-        waiting.json()["choices"][0]["message"]["content"],
-        "승인 대기 중입니다. 같은 Idempotency-Key와 같은 요청으로 다시 조회하세요."
-    );
+    assert_eq!(waiting.json()["choices"][0]["message"]["content"], PENDING);
     assert_eq!(rig.api.runs(), 1);
 }
 
@@ -150,8 +141,7 @@ async fn the_entrance_limit_does_not_block_asking_again_either_and_replays_are_l
         chat(&rig, BUILD_KEY, Some("lim-b"), &body).await.status,
         429
     );
-    // 재조회도 무한하지는 않다: 상태 조회의 속도 제한(주체 한도의 10배 = 분당 10건)을 받는다. 한도를 넘으면 이 키로 이미 접수했는지 **확인할 수 없으므로**
-    // 다시 보내도 되는 429가 아니라 «확인 불가»(422 + 재전송 금지)다.
+    // Replay lookups have their own budget (10x principal limit = 10/min); exceeding it returns 422 unknown rather than retryable 429.
     let mut ok = 0;
     let mut unknown = 0;
     for _ in 0..14 {
@@ -167,8 +157,8 @@ async fn the_entrance_limit_does_not_block_asking_again_either_and_replays_are_l
             other => panic!("{other}: {}", reply.body),
         }
     }
-    // 앞서 새 키(`lim-b`)가 제한에 걸리며 한 번 찾아 봤으므로 그 몫을 뺀 9건이다
-    assert_eq!((ok, unknown), (9, 5), "재조회는 분당 10건까지");
+    // `lim-b` spent one lookup, leaving 9 successful replays out of 10/min.
+    assert_eq!((ok, unknown), (9, 5), "replays limited to 10/min");
     assert_eq!(rig.api.runs(), 1);
 }
 
@@ -199,7 +189,7 @@ async fn a_field_name_that_looks_like_a_secret_never_comes_back_in_the_response(
         );
         assert!(
             !reply.body.contains(secret),
-            "필드 이름이 응답에 되풀이됐어요: {}",
+            "field name echoed in response: {}",
             reply.body
         );
         assert!(
@@ -223,17 +213,17 @@ async fn a_ledger_that_cannot_answer_a_rate_limited_replay_is_an_unknown_outcome
         ..Setup::default()
     })
     .await;
-    rig.api.start_as(answer("끝난 답"));
+    rig.api.start_as(answer("finished reply"));
     let body = ask("assistant", "q");
     assert_eq!(
         chat(&rig, BUILD_KEY, Some("done1"), &body).await.status,
         200
     );
-    // 확실히 없음(원장이 «없음»): 접수 전의 제한이라 429(SDK가 다시 보내도 된다)
+    // Confirmed absent in ledger -> pre-admission 429 (retryable).
     let none = chat(&rig, BUILD_KEY, Some("fresh1"), &body).await;
     assert_eq!(none.status, 429, "{}", none.body);
     assert_eq!(none.header("x-should-retry"), None);
-    // 원장 오류: 이미 접수했을 수 있다 → 422 + 재전송 금지 + 적용한 키
+    // Ledger error -> outcome unknown (422, x-should-retry: false).
     rig.api.fail_lookups(true);
     let broken = chat(&rig, BUILD_KEY, Some("done1"), &body).await;
     assert_eq!(
@@ -245,7 +235,7 @@ async fn a_ledger_that_cannot_answer_a_rate_limited_replay_is_an_unknown_outcome
     assert_eq!(broken.header("x-should-retry"), Some("false"));
     assert_eq!(broken.header("idempotency-key"), Some("done1"));
     rig.api.fail_lookups(false);
-    // 시간 초과(조회가 멈춤): 기한 안에 422
+    // Lookup timeout -> 422 within deadline.
     rig.api.delay_lookups(Duration::from_secs(60));
     let started = std::time::Instant::now();
     let stuck = chat(&rig, BUILD_KEY, Some("done1"), &body).await;
@@ -261,5 +251,9 @@ async fn a_ledger_that_cannot_answer_a_rate_limited_replay_is_an_unknown_outcome
         "{:?}",
         started.elapsed()
     );
-    assert_eq!(rig.api.runs(), 1, "확인하지 못해도 새 실행은 없다");
+    assert_eq!(
+        rig.api.runs(),
+        1,
+        "must not start a new run when outcome is unknown"
+    );
 }

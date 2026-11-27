@@ -1,10 +1,4 @@
-//! Slack 회신 발송. 메시지 하나(본문 markdown 블록 + 승인 카드)는 `chat.postMessage` 한 번이고, 첨부는 외부 업로드
-//! 흐름(주소 받기 → 바이트 → 완료)이며 완료 호출만이 게시한다. 결과 분류:
-//! 실행 확정은 `Sent`, 요청 전 연결 실패·Slack의 429·봇 토큰 거절(`invalid_auth`·`token_revoked`·`token_expired`)은 `NotSent`,
-//! Slack가 이유를 밝힌 거절은 `Rejected`, 시간 초과·5xx 같은 불명은 `Held`다. 토큰 거절은 인증 단계에서 걸러져 아무것도 실행되지 않았고,
-//! 토큰을 바꾸는 동안 옛 토큰이 받는 오류라서 영구 거절이 아니다 — 기억한 토큰을 버려(`Credentials::call`) 다시 시도가 자격을 새로 읽게 한다.
-//! 블록 형식 거절(`invalid_blocks` 등)만 글자판으로 한 번 내려 다시 시도한다
-//! (Slack가 아무것도 올리지 않았다고 확정한 경우라서 중복이 생기지 않는다).
+//! Slack reply sender for markdown messages, approval cards, and external file uploads.
 use super::{
     api::{Body, Raw, SlackApi},
     blocks::{
@@ -26,13 +20,13 @@ use bot_core::{
 use serde_json::{Value, json};
 use std::{future::Future, pin::Pin, sync::Arc};
 
-/// Slack가 아무것도 올리지 않았다고 확정하는 형식 오류. 글자판으로 내려 다시 시도해도 된다.
+/// Block-format rejections where Slack guarantees nothing was posted, making plain-text fallback safe.
 const FORMAT_ERRORS: [&str; 3] = [
     "invalid_blocks",
     "invalid_blocks_format",
     "msg_blocks_too_long",
 ];
-/// `ok:false`여도 서버 쪽 사정이라 결과를 알 수 없는 코드
+/// Server-side `ok: false` codes with ambiguous execution outcome (`Held`).
 const UNKNOWN_ERRORS: [&str; 5] = [
     "internal_error",
     "fatal_error",
@@ -44,9 +38,7 @@ const UNKNOWN_ERRORS: [&str; 5] = [
 pub struct SlackSender {
     api: SlackApi,
     creds: Arc<Credentials>,
-    /// 확인된 게시를 «봇이 이 스레드에 참여했다»는 증거로 남기는 곳(Slack `thread_reply`용). 없으면 남기지 않는다.
     threads: Option<Arc<dyn BotThreads>>,
-    /// 진행 스트림 카드를 게시 직전에 치우는 제어기(없으면 생략)
     ux: Option<Arc<super::ux::SlackUx>>,
 }
 
@@ -72,8 +64,6 @@ impl SlackSender {
         self
     }
 
-    /// 채널에 확인된 게시(영수증)를 스레드 증거로 기록한다: 스레드 안의 회신이면 그 루트, 최상위 글이면 그 글 자신이 루트다(그 아래로 답글이 달린다).
-    /// 이미 보낸 뒤라 기록에 실패해도 발송 결과는 그대로이고, 그 스레드는 자기 봇 글 이벤트로 확인될 때까지 사람 답글을 받지 못한다.
     async fn note_thread(
         &self,
         snapshot: &Snapshot,
@@ -87,7 +77,7 @@ impl SlackSender {
         };
         let root = match thread {
             Some(thread) => thread.to_owned(),
-            // 영수증은 `채널:ts`다(첨부는 `채널:파일ID`라 글 ts를 알 수 없다)
+            // Message receipts are `channel:ts`; file upload receipts are `channel:file_id` and lack a post ts.
             None => match receipt.split_once(':') {
                 Some((_, ts)) if is_ts(ts) => ts.to_owned(),
                 _ => return,
@@ -115,7 +105,7 @@ impl SlackSender {
             .await;
         if noted.is_err() {
             tracing::warn!(
-                "봇이 참여한 스레드를 기록하지 못했어요 — 사람 답글은 자기 봇 글 이벤트로 확인될 때까지 받지 않아요"
+                "failed to record bot thread participation — human replies will be ignored until confirmed by own-post event"
             );
         }
     }
@@ -123,12 +113,10 @@ impl SlackSender {
 
 enum Step {
     Done(Delivery),
-    /// 형식 거절(글자판으로 내려 다시 시도할 수 있다)
     Format,
 }
 
-/// 성공 응답이 «메시지가 잘렸다»고 경고했는가(`response_metadata.warnings`). 이미 일부가 게시됐으니 확정도 거절도 아니다 — 자동으로 다시 보내지 않고
-/// 불명으로 둔다. 관련 없는 경고는 정상 완료를 막지 않는다.
+/// Treats Slack's `message_truncated` warning as `Held` because partial content was already posted.
 fn truncated(value: &Value) -> bool {
     value["response_metadata"]["warnings"]
         .as_array()
@@ -140,13 +128,11 @@ fn step(raw: Raw, done: impl FnOnce(&Value) -> Option<String>) -> Step {
         Raw::Ok(value) if truncated(&value) => Step::Done(Delivery::Held),
         Raw::Ok(value) => match done(&value) {
             Some(receipt) => Step::Done(Delivery::Sent { receipt }),
-            // 올라갔는지 영수증이 모자라면 불명이다
             None => Step::Done(Delivery::Held),
         },
         Raw::Error(code) if FORMAT_ERRORS.contains(&code.as_str()) => Step::Format,
         Raw::Error(code) if UNKNOWN_ERRORS.contains(&code.as_str()) => Step::Done(Delivery::Held),
         Raw::Error(_) => Step::Done(Delivery::Rejected),
-        // 요청을 쓰기 전의 연결 실패와, 인증 단계에서 걸러진 토큰 거절: 둘 다 아무것도 실행되지 않았다
         Raw::BeforeWrite | Raw::TokenRejected => Step::Done(Delivery::NotSent {
             reason: NotSentReason::BeforeWrite,
             retry_after: None,
@@ -159,7 +145,6 @@ fn step(raw: Raw, done: impl FnOnce(&Value) -> Option<String>) -> Step {
     }
 }
 
-/// 본문을 자르지 않고 보낼 수 있는 모양인가: 승인 카드는 첨부와 함께, 또 블록 한도를 넘는 본문과 함께 보내지 않고, 글자판 한도를 넘는 본문은 보낼 곳이 없다.
 fn sendable(body: &ReplyBody) -> bool {
     if body.approval.is_some() && !body.attachments.is_empty() {
         return false;
@@ -172,8 +157,7 @@ fn sendable(body: &ReplyBody) -> bool {
     }
 }
 
-/// 이 게시 응답으로 «올라갔다»를 확정할 수 있는가: **Slack의 응답이 말한** 채널이 보낸 곳과 같고 `ts`가 시각 모양이며 잘림 경고가 없을 때만 `(채널, ts)`다. 그렇지 않으면
-/// 올라간 곳을 확인할 수 없다(`None` → 불명). 운영 발송과 시험 도우미(가짜 Slack의 `Call::posted`)가 같은 판정을 쓴다.
+/// Confirms a post only when Slack echoes the target channel, a valid `ts`, and no truncation warning.
 #[doc(hidden)]
 pub fn confirms_post(channel: &str, reply: &Value) -> Option<(String, String)> {
     if truncated(reply) {
@@ -183,22 +167,17 @@ pub fn confirms_post(channel: &str, reply: &Value) -> Option<(String, String)> {
     (reply["channel"].as_str()? == channel).then(|| (channel.to_owned(), ts.to_owned()))
 }
 
-/// 게시 영수증(`채널:ts`)
 fn receipt_of(channel: &str, value: &Value) -> Option<String> {
     confirms_post(channel, value).map(|(channel, ts)| format!("{channel}:{ts}"))
 }
 
-/// 업로드 주소 응답에서 `(주소, 파일 ID)`: 둘 다 비어 있지 않은 문자열이어야 한다. 이 단계는 아무것도 게시하지 않으므로 응답이 이 모양이 아니면(누락·숫자·빈 값) 완료 요청을 보내기 전에
-/// 거절한다 — 불명(`Held`)이 아니다.
 fn upload_slot(value: &Value) -> Option<(String, String)> {
     let url = value["upload_url"].as_str().filter(|url| !url.is_empty())?;
     let id = value["file_id"].as_str().filter(|id| !id.is_empty())?;
     Some((url.to_owned(), id.to_owned()))
 }
 
-/// 업로드 완료 영수증: 올린 파일들의 ID가 비어 있지 않고 서로 달라야 하고, 응답의 **모든 항목**이 문자열 ID를 가져야 하며(하나라도 ID가 없거나 문자열이 아니면
-/// 확인할 수 없다 — 버리고 세지 않는다), 그 ID들(개수 포함)이 올린 것과 정확히 같아야 올라간 것을 확인한 것이다. 아니면 `None` → 불명.
-/// (올린 ID는 비어 있지 않으므로 응답의 빈 ID는 같을 수 없다.)
+/// Confirms upload completion only if the returned file IDs exactly match the unique requested IDs.
 fn files_receipt(channel: &str, value: &Value, requested: &[&str]) -> Option<String> {
     if !unique_ids(requested) {
         return None;
@@ -214,7 +193,6 @@ fn files_receipt(channel: &str, value: &Value, requested: &[&str]) -> Option<Str
     (returned == wanted).then(|| format!("{channel}:{}", requested.join(",")))
 }
 
-/// 비어 있지 않고 서로 다른 ID들인가
 fn unique_ids(ids: &[&str]) -> bool {
     let mut seen = std::collections::BTreeSet::new();
     ids.iter().all(|id| !id.is_empty() && seen.insert(*id))
@@ -238,7 +216,7 @@ impl SlackSender {
         body: &ReplyBody,
     ) -> Delivery {
         let card = body.approval.as_ref();
-        // 본문은 자르지 않는다: markdown 블록 하나에 다 들어가면 블록으로, 아니면 글자판 메시지 하나로 보낸다(카드와는 함께 못 보낸다 — 보내지 않는다)
+        // Never truncate message text: use plain text when it exceeds the markdown block limit.
         if body.text.as_deref().is_some_and(|text| !fits_block(text)) {
             return match (card, body.text.as_deref()) {
                 (None, Some(text)) => {
@@ -252,7 +230,7 @@ impl SlackSender {
         match card {
             Some(card) if card_fits(card) => blocks.extend(card_blocks(card)),
             Some(_) => {
-                // 잘라서 보여 줄 수 없는 카드는 보내지 않고 인증된 상세 화면으로 안내한다
+                // Cards that cannot fit intact never render buttons; direct the user to the admin UI.
                 let notice = self.notice();
                 blocks.push(
                     json!({"type": "section", "text": {"type": "plain_text", "text": notice}}),
@@ -271,9 +249,8 @@ impl SlackSender {
             .await;
         match step(raw, |v| receipt_of(channel, v)) {
             Step::Done(delivery) => delivery,
-            // 카드는 버튼 없이 의미가 없어 글자판으로 내리지 않는다
+            // Approval cards cannot fall back to plain text because they require interactive buttons.
             Step::Format if card.is_some() => Delivery::Rejected,
-            // 블록 형식 거절 뒤에는 **전체** 본문을 글자판으로 한 번 보낸다(잘라서 완료로 기록하지 않는다)
             Step::Format => match body.text.as_deref() {
                 Some(text) => {
                     self.post_plain(token, channel, thread, &neutralize(text))
@@ -284,7 +261,6 @@ impl SlackSender {
         }
     }
 
-    /// 글자판 메시지 한 개: 본문을 자르지 않는다. 한도(`PLAIN_LIMIT`)를 넘어 다 보낼 수 없으면 아무것도 보내지 않고 거절한다.
     async fn post_plain(
         &self,
         token: &str,
@@ -310,8 +286,7 @@ impl SlackSender {
         }
     }
 
-    /// 알림·화면 읽기 프로그램이 읽는 최상위 글: **본문 전체**와 승인 카드의 필수 내용(제목·줄, 카드를 담지 못하면 안내)을 모두 담는다. 블록을 못 보는 사람도 무엇을
-    /// 승인하는지 알 수 있어야 한다. 알림 멘션은 글자 그대로 바꾼다(최상위 글은 멘션을 해석한다).
+    /// Top-level fallback `text` for notifications/screen readers with broadcast mentions neutralized.
     fn summary(&self, body: &ReplyBody) -> String {
         let mut parts: Vec<String> = body.text.iter().map(|text| neutralize(text)).collect();
         match &body.approval {
@@ -324,12 +299,14 @@ impl SlackSender {
 
     fn notice(&self) -> String {
         match &self.creds.host().admin_url {
-            Some(url) => format!("승인이 필요한 요청이에요. 내용이 길어 여기서는 보여 줄 수 없어요 — 관리 화면에서 확인하고 승인해 주세요: {url}"),
-            None => "승인이 필요한 요청이에요. 내용이 길어 여기서는 보여 줄 수 없어요 — 관리 화면에서 확인하고 승인해 주세요.".to_owned(),
+            Some(url) => format!(
+                "Approval required. Content is too long to display here — review and approve in the admin UI: {url}"
+            ),
+            None => "Approval required. Content is too long to display here — review and approve in the admin UI.".to_owned(),
         }
     }
 
-    /// 첨부: 주소 받기 → 바이트 → 완료. 게시는 완료 호출 한 번뿐이라 그 앞의 단계는 아무것도 올리지 않는다.
+    /// Three-step external upload; only `files.completeUploadExternal` publishes to the channel.
     async fn upload(
         &self,
         token: &str,
@@ -350,7 +327,6 @@ impl SlackSender {
             let (url, id) = match slot {
                 Raw::Ok(value) => match upload_slot(&value) {
                     Some(slot) => slot,
-                    // 아직 아무것도 게시되지 않았다: 쓸 수 없는 주소·ID는 완료 요청 전에 거절한다
                     None => return Delivery::Rejected,
                 },
                 raw => match step(raw, |_| None) {
@@ -358,7 +334,6 @@ impl SlackSender {
                     Step::Done(other) => return other,
                 },
             };
-            // 파일마다 고유 ID여야 완료 응답을 맞춰 볼 수 있다(아직 아무것도 게시되지 않았다)
             if files.iter().any(|f| f["id"] == id.as_str()) {
                 return Delivery::Rejected;
             }
@@ -390,7 +365,6 @@ impl SlackSender {
             .await;
         match step(raw, |v| files_receipt(channel, v, &ids)) {
             Step::Done(delivery) => delivery,
-            // 완료 호출의 형식 거절은 아무것도 게시되지 않았다는 확정이다
             Step::Format => Delivery::Rejected,
         }
     }
@@ -401,8 +375,6 @@ impl Sender for SlackSender {
         DeliveryScope::all(PushTransportId::SLACK)
     }
 
-    /// 바인딩이 받을 수 있는 곳에만 보낸다: 채널 바인딩은 **지금 등록부의** 그 채널로(원래 대화의 채널 ID 또는 고정된 정규 경로
-    /// `팀ID/채널ID` — 팀과 채널이 모두 지금 등록부와 같아야 한다), DM 바인딩은 DM 채널로만. 스레드는 `ts` 모양이어야 한다.
     fn allows(&self, snapshot: &Snapshot, item: &Outgoing) -> bool {
         let Some(binding) = snapshot
             .bindings
@@ -442,20 +414,17 @@ impl Sender for SlackSender {
         body: &'a ReplyBody,
     ) -> Pin<Box<dyn Future<Output = Delivery> + Send + 'a>> {
         Box::pin(async move {
-            // 보내기 직전에 한 번 더: 등록부에 없거나 팀이 다르면 요청 자체를 만들지 않는다
             if !self.allows(snapshot, item) {
                 return Delivery::Rejected;
             }
             let Some(workspace) = self.workspace(snapshot, item) else {
                 return Delivery::Rejected;
             };
-            // 이 모양은 어떤 방법으로도 다 보낼 수 없다: 자격을 만지기 전에 보내지 않고 거절한다
             if !sendable(body) {
                 return Delivery::Rejected;
             }
             let (token, bot) = match self.creds.check_bot(&item.key.profile, workspace).await {
                 BotCheck::Verified(token, auth) => (token, auth.user_id),
-                // 자격을 읽지 못했거나 확인하지 못했다 — 아무것도 보내지 않았다
                 _ => {
                     return Delivery::NotSent {
                         reason: NotSentReason::BeforeWrite,
@@ -463,7 +432,7 @@ impl Sender for SlackSender {
                     };
                 }
             };
-            // Slack API에는 채널 ID만 간다(정규 경로의 팀은 위에서 대조를 마쳤다)
+            // Strip canonical `TEAM/CHANNEL` prefix after `allows` verified the team.
             let channel = split_route(&item.destination.id)
                 .map_or(item.destination.id.as_str(), |(_, channel)| channel);
             let thread = item.destination.thread.as_deref();
@@ -481,7 +450,6 @@ impl Sender for SlackSender {
             let delivery = match (body.attachments.is_empty(), &body.approval) {
                 (true, _) => self.post(&token, channel, thread, body).await,
                 (false, None) => self.upload(&token, channel, thread, body).await,
-                // 승인 카드와 첨부는 한 회신에 함께 보내지 않는다(`sendable`이 이미 걸렀다)
                 (false, Some(_)) => Delivery::Rejected,
             };
             if let (Delivery::Sent { receipt }, ConversationKind::Channel) =

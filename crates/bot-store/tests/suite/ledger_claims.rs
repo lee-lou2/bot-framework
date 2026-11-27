@@ -28,7 +28,7 @@ async fn a_resumed_run_rejects_the_previous_claim_even_with_the_same_generation(
     let new = runs(&db).claim().await.unwrap().unwrap();
     assert_resumed(&old.attempt, &new.attempt);
 
-    // 대기로 넘어갔다 돌아온 뒤에도 옛 attempt(같은 세대, 옛 토큰)는 모든 실행기 접근에서 거절된다
+    // After wait/resume, the old claim token is stale even though the generation is unchanged.
     let stale = |r: Result<(), Error>| matches!(r, Err(Error::Stale));
     let step = Step {
         key: "k".into(),
@@ -65,14 +65,14 @@ async fn a_resumed_run_rejects_the_previous_claim_even_with_the_same_generation(
     assert!(stale(
         calls(&db).start(start_call(&old.attempt, "c1", None)).await
     ));
-    // 토큰이 없는 attempt는 신원 확인용일 뿐이라 실행기 접근을 허가하지 못한다
+
     let anonymous = Attempt {
         claim: None,
         ..new.attempt.clone()
     };
     assert!(stale(runs(&db).renew(anonymous.clone()).await.map(|_| ())));
     assert!(stale(calls(&db).context(anonymous).await.map(|_| ())));
-    // 새 claim은 정상 동작한다
+
     runs(&db).renew(new.attempt.clone()).await.unwrap();
     calls(&db).context(new.attempt.clone()).await.unwrap();
 }
@@ -120,17 +120,15 @@ async fn approval_context_reads_a_parked_run_for_the_approver_without_a_token() 
         Err(Error::Missing)
     ));
 
-    // 승인 저장본도 토큰을 담지 않는다
     let stored = calls(&db).approval(ApprovalId("n1".into())).await.unwrap();
     assert_eq!(stored.approval.attempt.claim, None);
 
-    // 옛 세대·취소된 run의 버튼은 거절된다
     db.store
         .cancel(
             profile_id(),
             run.attempt.run.clone(),
             owner(),
-            "그만".into(),
+            "stop".into(),
         )
         .await
         .unwrap();

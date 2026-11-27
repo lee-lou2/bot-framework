@@ -1,5 +1,4 @@
-//! 프로필·호스트 파일의 트랜잭션 디스크 편집(`DiskTxn`)과 결정적 YAML·SKILL.md·host.json 직렬화.
-//! 실패 시 `Drop`이 수정·생성·삭제한 파일과 폴더를 원래 상태로 되돌린다.
+//! Transactional disk edits (`DiskTxn`) and deterministic YAML, SKILL.md, and host.json helpers.
 use bot_core::{canon::json_quote, id::is_name};
 use serde_json::{Map, Value};
 use std::{
@@ -8,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// 되돌림을 위해 기억하는 변경 전 상태.
 enum Undo {
     RestoreFile {
         path: PathBuf,
@@ -26,7 +24,7 @@ enum Undo {
     },
 }
 
-/// 디스크 변경 묶음. `commit()`을 부르지 않고 버리면 역순으로 되돌린다.
+/// Rolls back recorded filesystem mutations in reverse order if dropped without `commit()`.
 pub(super) struct DiskTxn {
     undo: Vec<Undo>,
     committed: bool,
@@ -44,17 +42,13 @@ impl DiskTxn {
         self.committed = true;
     }
 
-    /// 링크를 거절하고 부모 폴더를 만든 뒤 파일을 쓴다. 기존 파일이 있으면 원본 바이트를 백업한다.
     pub(super) fn write_file(&mut self, path: &Path, bytes: &[u8]) -> Result<(), String> {
         if let Ok(meta) = fs::symlink_metadata(path) {
             if meta.file_type().is_symlink() || !meta.is_file() {
-                return Err(format!(
-                    "일반 파일이 아니어서 쓸 수 없어요: {}",
-                    path.display()
-                ));
+                return Err(format!("cannot write non-regular file: {}", path.display()));
             }
             let prev = fs::read(path)
-                .map_err(|e| format!("기존 파일을 읽지 못했어요({}): {e}", path.display()))?;
+                .map_err(|e| format!("failed to read existing file ({}): {e}", path.display()))?;
             self.undo.push(Undo::RestoreFile {
                 path: path.to_path_buf(),
                 bytes: prev,
@@ -67,10 +61,10 @@ impl DiskTxn {
                 path: path.to_path_buf(),
             });
         }
-        fs::write(path, bytes).map_err(|e| format!("파일을 쓰지 못했어요({}): {e}", path.display()))
+        fs::write(path, bytes)
+            .map_err(|e| format!("failed to write file ({}): {e}", path.display()))
     }
 
-    /// 없는 폴더를 순서대로 만들고 새로 만든 폴더만 되돌림 목록에 적는다.
     pub(super) fn ensure_dir(&mut self, dir: &Path) -> Result<(), String> {
         let mut missing = Vec::new();
         let mut cur = dir;
@@ -84,31 +78,30 @@ impl DiskTxn {
         if let Ok(meta) = fs::symlink_metadata(cur)
             && (meta.file_type().is_symlink() || !meta.is_dir())
         {
-            return Err(format!("폴더가 아니어서 만들 수 없어요: {}", cur.display()));
+            return Err(format!("path is not a directory: {}", cur.display()));
         }
         missing.reverse();
         for part in missing {
             fs::create_dir(&part)
-                .map_err(|e| format!("폴더를 만들지 못했어요({}): {e}", part.display()))?;
+                .map_err(|e| format!("failed to create directory ({}): {e}", part.display()))?;
             self.undo.push(Undo::RemoveDir { path: part });
         }
         Ok(())
     }
 
-    /// 파일 하나를 지우고 원본 바이트를 백업한다.
     pub(super) fn remove_file(&mut self, path: &Path) -> Result<(), String> {
         let meta = fs::symlink_metadata(path)
-            .map_err(|e| format!("파일을 확인하지 못했어요({}): {e}", path.display()))?;
+            .map_err(|e| format!("failed to stat file ({}): {e}", path.display()))?;
         if meta.file_type().is_symlink() || !meta.is_file() {
             return Err(format!(
-                "일반 파일이 아니어서 지울 수 없어요: {}",
+                "cannot remove non-regular file: {}",
                 path.display()
             ));
         }
         let prev =
-            fs::read(path).map_err(|e| format!("파일을 읽지 못했어요({}): {e}", path.display()))?;
+            fs::read(path).map_err(|e| format!("failed to read file ({}): {e}", path.display()))?;
         fs::remove_file(path)
-            .map_err(|e| format!("파일을 지우지 못했어요({}): {e}", path.display()))?;
+            .map_err(|e| format!("failed to remove file ({}): {e}", path.display()))?;
         self.undo.push(Undo::RestoreFile {
             path: path.to_path_buf(),
             bytes: prev,
@@ -116,37 +109,36 @@ impl DiskTxn {
         Ok(())
     }
 
-    /// 스킬 폴더(하위 폴더 없음)를 통째로 지우고 파일들을 백업한다.
     pub(super) fn remove_skill_dir(&mut self, dir: &Path) -> Result<(), String> {
         let meta = fs::symlink_metadata(dir)
-            .map_err(|e| format!("스킬 폴더를 확인하지 못했어요({}): {e}", dir.display()))?;
+            .map_err(|e| format!("failed to stat skill directory ({}): {e}", dir.display()))?;
         if meta.file_type().is_symlink() || !meta.is_dir() {
-            return Err(format!("스킬 폴더가 올바르지 않아요: {}", dir.display()));
+            return Err(format!("invalid skill directory: {}", dir.display()));
         }
         let mut files = BTreeMap::new();
         for entry in fs::read_dir(dir)
-            .map_err(|e| format!("스킬 폴더를 읽지 못했어요({}): {e}", dir.display()))?
+            .map_err(|e| format!("failed to read skill directory ({}): {e}", dir.display()))?
         {
-            let entry = entry.map_err(|e| format!("항목을 읽지 못했어요: {e}"))?;
+            let entry = entry.map_err(|e| format!("failed to read directory entry: {e}"))?;
             let path = entry.path();
             let fmeta = fs::symlink_metadata(&path)
-                .map_err(|e| format!("항목을 확인하지 못했어요({}): {e}", path.display()))?;
+                .map_err(|e| format!("failed to stat entry ({}): {e}", path.display()))?;
             if fmeta.file_type().is_symlink() || !fmeta.is_file() {
                 return Err(format!(
-                    "스킬 폴더 안에 일반 파일이 아닌 항목이 있어요: {}",
+                    "skill directory contains non-regular entry: {}",
                     path.display()
                 ));
             }
             let bytes = fs::read(&path)
-                .map_err(|e| format!("파일을 읽지 못했어요({}): {e}", path.display()))?;
+                .map_err(|e| format!("failed to read file ({}): {e}", path.display()))?;
             files.insert(path, bytes);
         }
         for path in files.keys() {
             fs::remove_file(path)
-                .map_err(|e| format!("파일을 지우지 못했어요({}): {e}", path.display()))?;
+                .map_err(|e| format!("failed to remove file ({}): {e}", path.display()))?;
         }
         fs::remove_dir(dir)
-            .map_err(|e| format!("스킬 폴더를 지우지 못했어요({}): {e}", dir.display()))?;
+            .map_err(|e| format!("failed to remove skill directory ({}): {e}", dir.display()))?;
         self.undo.push(Undo::RestoreDir {
             path: dir.to_path_buf(),
             files,
@@ -185,7 +177,6 @@ impl Drop for DiskTxn {
     }
 }
 
-/// `agent` 경로(`main/developer` 또는 `None`)를 프로필 폴더 안의 상대 폴더 경로로 바꾼다.
 pub(super) fn agent_rel_dir(agent: Option<&str>) -> Result<PathBuf, String> {
     let Some(agent) = agent else {
         return Ok(PathBuf::new());
@@ -193,7 +184,7 @@ pub(super) fn agent_rel_dir(agent: Option<&str>) -> Result<PathBuf, String> {
     let mut out = PathBuf::new();
     for segment in agent.split('/') {
         if !is_name(segment) {
-            return Err(format!("에이전트 경로가 올바르지 않아요: {agent}"));
+            return Err(format!("invalid agent path: {agent}"));
         }
         out.push("agents");
         out.push(segment);
@@ -201,18 +192,15 @@ pub(super) fn agent_rel_dir(agent: Option<&str>) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-/// 프로필 폴더 기준 스킬 폴더 상대 경로(`skills/<name>` 또는 `agents/.../skills/<name>`).
 pub(super) fn skill_rel_dir(agent: Option<&str>, name: &str) -> Result<PathBuf, String> {
     if !is_name(name) {
         return Err(format!(
-            "스킬 이름은 소문자로 시작하는 소문자·숫자·하이픈(63자 이하)이어야 해요: {name}"
+            "skill name must start with a lowercase letter and use only lowercase letters, digits, and hyphens (max 63 chars): {name}"
         ));
     }
     Ok(agent_rel_dir(agent)?.join("skills").join(name))
 }
 
-/// `SKILL.md` 상대 경로에서 소유 에이전트 경로를 꺼낸다(`skills/foo/SKILL.md` → `None`,
-/// `agents/main/agents/dev/skills/foo/SKILL.md` → `Some("main/dev")`).
 pub(super) fn agent_of_skill_path(rel_path: &str) -> Option<String> {
     let prefix = rel_path.strip_suffix("/SKILL.md")?;
     let (head, _) = prefix.rsplit_once("/skills/")?;
@@ -230,7 +218,7 @@ pub(super) fn agent_of_skill_path(rel_path: &str) -> Option<String> {
     (!segments.is_empty()).then(|| segments.join("/"))
 }
 
-/// YAML 제어·구분 문자까지 안전하게 이스케이프한 큰따옴표 리터럴.
+/// Double-quoted YAML string escaping control and line-separator characters for strict YAML 1.2.
 pub(super) fn yaml_quote(text: &str) -> String {
     let raw = json_quote(text);
     let mut out = String::with_capacity(raw.len());
@@ -245,7 +233,6 @@ pub(super) fn yaml_quote(text: &str) -> String {
     out
 }
 
-/// 깔끔한 Agent Skills 형식의 `SKILL.md`를 만든다(front matter + 본문).
 pub(super) fn render_skill_md(name: &str, description: &str, body: &str) -> String {
     let body = body.trim();
     format!(
@@ -255,7 +242,6 @@ pub(super) fn render_skill_md(name: &str, description: &str, body: &str) -> Stri
     )
 }
 
-/// JSON 값을 `bot_profile::parse_yaml`이 그대로 되읽는 결정적 YAML 1.2 문자열로 직렬화한다.
 pub(super) fn render_yaml(value: &Value) -> String {
     let mut out = String::new();
     write_yaml(value, 0, &mut out);
@@ -407,7 +393,6 @@ fn remove_strings(arr: &mut Vec<Value>, drop_set: &BTreeSet<String>) {
     arr.retain(|v| !v.as_str().is_some_and(|s| drop_set.contains(s)));
 }
 
-/// `profile.yaml`에 새 도구 스코프와 비밀 이름을 추가한다.
 pub(super) fn profile_add_scopes_and_secrets(
     doc: &mut Value,
     roles: &[String],
@@ -418,15 +403,15 @@ pub(super) fn profile_add_scopes_and_secrets(
 ) -> Result<(), String> {
     let obj = doc
         .as_object_mut()
-        .ok_or_else(|| "profile.yaml이 객체가 아니에요".to_owned())?;
+        .ok_or_else(|| "profile.yaml must be a mapping".to_owned())?;
     if !scopes.is_empty() {
         let role_map = obj
             .get_mut("roles")
             .and_then(Value::as_object_mut)
-            .ok_or_else(|| "profile.yaml에 roles가 없어요".to_owned())?;
+            .ok_or_else(|| "profile.yaml is missing `roles`".to_owned())?;
         for role in roles {
             let Some(list) = role_map.get_mut(role).and_then(Value::as_array_mut) else {
-                return Err(format!("profile.yaml에 역할 `{role}`이(가) 없어요"));
+                return Err(format!("role `{role}` does not exist in profile.yaml"));
             };
             push_unique_strings(list, scopes);
         }
@@ -458,13 +443,12 @@ pub(super) fn profile_add_scopes_and_secrets(
             .entry("secrets")
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
-            .ok_or_else(|| "profile.yaml의 secrets가 배열이 아니에요".to_owned())?;
+            .ok_or_else(|| "`secrets` in profile.yaml must be an array".to_owned())?;
         push_unique_strings(list, secrets);
     }
     Ok(())
 }
 
-/// 제거된 스킬·MCP의 미사용 스코프와 미사용 비밀 이름을 `profile.yaml`에서 정리한다.
 pub(super) fn profile_prune(
     doc: &mut Value,
     drop_scopes: &BTreeSet<String>,
@@ -500,7 +484,6 @@ pub(super) fn profile_prune(
     }
 }
 
-/// `host.json`에 서버 항목을 추가하고, 해당 프로필에 `egress` 상한이 설정돼 있으면 `egress_target`도 더한다.
 pub(super) fn host_add_server(
     doc: &mut Value,
     alias: &str,
@@ -510,14 +493,14 @@ pub(super) fn host_add_server(
 ) -> Result<(), String> {
     let top = doc
         .as_object_mut()
-        .ok_or_else(|| "host.json이 JSON 객체가 아니에요".to_owned())?;
+        .ok_or_else(|| "host.json must be a JSON object".to_owned())?;
     let servers = top
         .entry("servers")
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
-        .ok_or_else(|| "host.json의 servers가 객체가 아니에요".to_owned())?;
+        .ok_or_else(|| "`servers` in host.json must be an object".to_owned())?;
     if servers.contains_key(alias) {
-        return Err(format!("호스트 설정에 서버 `{alias}`가 이미 있어요"));
+        return Err(format!("server `{alias}` already exists in host config"));
     }
     servers.insert(alias.to_owned(), entry);
     if !egress_targets.is_empty()
@@ -529,7 +512,6 @@ pub(super) fn host_add_server(
     Ok(())
 }
 
-/// `host.json`에서 서버 항목을 제거한다. 제거한 서버의 원격 bearer 비밀 이름이 있으면 돌려준다.
 pub(super) fn host_remove_server(doc: &mut Value, alias: &str) -> Option<String> {
     let servers = doc.as_object_mut()?.get_mut("servers")?.as_object_mut()?;
     let removed = servers.remove(alias)?;

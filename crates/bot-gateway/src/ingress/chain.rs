@@ -1,4 +1,4 @@
-//! 넘김(`bot/pass`) 후보 사슬을 만든다: 접수가 이 사건에 맞는 직접 도구 트리거를 order 순으로 고정하고, 마지막 후보까지 넘기면 갈 기본 대화를 정한다.
+//! Builds ordered `bot/pass` fallback chains for direct tool triggers on authenticated Slack events.
 use super::{Plan, plan_of};
 use crate::{
     inbound::{Event, Inbound},
@@ -13,10 +13,8 @@ use bot_core::{
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-/// 이 사건에 맞는 트리거를 order 순으로 보아 **직접 도구 호출**만 후보로 삼고, 처음 만나는 에이전트 지시 트리거는 기본 대화가 된다(그 뒤는 닿지 않는다).
-/// 지시 트리거가 없으면 기본 대화는 원래 바인딩의 에이전트가 받는 사건 입력이다: 멘션·답글은 사람이 쓴 글 그대로, 반응은 사건의 고정 필드만으로 만든 고정 형식이다(`reaction_event`).
-/// 기본 대화는 에이전트 실행이라 요청자가 `run` 스코프를 가져야 한다(접수는 첫 후보인 도구만 보고 이 스코프를 요구하지 않았다): 없으면 기본 대화 없이 후보만 남는다.
-/// 첫 후보가 이번 접수의 대상이 아니면(첫 일치가 에이전트 지시) 사슬은 없다. 입력 매핑이 틀린 후보는 건너뛴다.
+/// Collects matching direct-tool triggers in `order` up to the first instruction trigger (or private boundary).
+/// Default agent fallback requires `RUN_SCOPE`; without it, only tool candidates remain.
 pub(super) fn pass_chain(
     route: &Route<'_>,
     inbound: &Inbound,
@@ -64,7 +62,6 @@ pub(super) fn pass_chain(
     })
 }
 
-/// 지시 트리거가 없을 때 기본 에이전트가 받는 입력. 멘션·답글은 글 그대로, 반응은 고정 형식이다.
 fn default_input(inbound: &Inbound) -> Option<String> {
     match inbound.event {
         Event::Reaction => reaction_event(&inbound.body),
@@ -77,8 +74,7 @@ fn default_input(inbound: &Inbound) -> Option<String> {
     }
 }
 
-/// 반응 사건의 고정 형식 입력(`{"event":"reaction_added","item_ts":…,"reaction":…}`): 검증한 반응 이름과 대상 글의 ts만 담는다.
-/// 원글 본문·작성자·자유 문장은 싣지 않는다. 모양이 맞지 않으면 만들지 않는다(접수 앞단이 이미 같은 검사를 했지만 여기서도 본다).
+/// Fixed JSON payload for reaction fallback containing only validated `item_ts` and `reaction`.
 fn reaction_event(body: &Value) -> Option<String> {
     let reaction = body.get("reaction")?.as_str()?;
     let item_ts = body.get("item_ts")?.as_str()?;

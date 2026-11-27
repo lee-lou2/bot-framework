@@ -95,7 +95,7 @@ class Pinning(unittest.TestCase):
         self.assertEqual(problems(swap("      - run: echo ok\n", extra)), [])
         digest = f"      - uses: docker://ghcr.io/example/tool@{DIGEST} # v1.2.3\n"
         self.assertEqual(problems(swap("      - run: echo ok\n", digest)), [])
-        # 판본 주석은 다이제스트에도 필요하다
+        # A version comment is required for digest pins too.
         bare = f"      - uses: docker://ghcr.io/example/tool@{DIGEST}\n"
         self.assertTrue(any("comment naming" in p for p in problems(swap("      - run: echo ok\n", bare))))
         tagged = "      - uses: docker://ghcr.io/example/tool:1.2.3\n"
@@ -283,7 +283,7 @@ class ModuleHeaders(unittest.TestCase):
 
     def test_non_test_crate_sources_require_a_module_header_on_line_one(self):
         self.check({
-            "crates/bot-demo/src/lib.rs": "//! 책임\npub fn x() {}\n",
+            "crates/bot-demo/src/lib.rs": "//! Responsibility.\npub fn x() {}\n",
             "crates/bot-demo/src/tests.rs": "fn helper() {}\n",
             "crates/bot-demo/src/foo_tests.rs": "fn helper() {}\n",
             "crates/bot-demo/src/tests/sub.rs": "fn helper() {}\n",
@@ -551,18 +551,18 @@ class Examples(unittest.TestCase):
                 checker.check_examples()
 
     def test_valid_and_plain_skill_front_matter_pass(self):
-        self.check_skill("일정을 조회한다.\n")
-        self.check_skill("---\nname: agenda\ndescription: 일정 조회\nlicense: MIT\ncompatibility: local\nmetadata:\n  author: team\n---\n일정\n")
+        self.check_skill("List today's agenda.\n")
+        self.check_skill("---\nname: agenda\ndescription: List agenda\nlicense: MIT\ncompatibility: local\nmetadata:\n  author: team\n---\nAgenda\n")
         with contextlib.chdir(ROOT):
             checker.check_examples()
 
     def test_invalid_skill_front_matter_is_refused(self):
         for bad in (
-            "---\nname: agenda\nallowed-tools: Bash\n---\n일정\n",
-            "---\nname: other\n---\n일정\n",
-            "---\nname: agenda\n일정\n",
+            "---\nname: agenda\nallowed-tools: Bash\n---\nAgenda\n",
+            "---\nname: other\n---\nAgenda\n",
+            "---\nname: agenda\nAgenda\n",
             "---",
-            "---\nextra: 1\n---\n일정\n",
+            "---\nextra: 1\n---\nAgenda\n",
         ):
             with self.assertRaises(Exception, msg=bad):
                 self.check_skill(bad)

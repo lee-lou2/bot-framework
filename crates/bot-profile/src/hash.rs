@@ -1,4 +1,4 @@
-//! 해시와 정규 JSON. 키를 직접 정렬해, serde_json의 `preserve_order`가 켜져도 결과가 같다.
+//! SHA-256 hex hashing and deterministic canonical JSON with sorted object keys.
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
@@ -12,7 +12,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     out
 }
 
-/// 키를 정렬하고 공백 없이 쓴 JSON. 내부 해시(판본)용이며 RFC 8785와 같다고 보장하지 않는다.
+/// Key-sorted compact JSON for internal revision hashing (not guaranteed RFC 8785 compliant).
 pub fn canonical_json(value: &Value) -> String {
     let mut out = String::new();
     write_value(value, &mut out);

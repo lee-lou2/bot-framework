@@ -1,4 +1,5 @@
-//! 원격 MCP 요청마다 활성 판본을 다시 확인한다: 쓰기 승인 뒤 도구 목록을 기다리는 사이 목적지가 철회돼도 구판 워커는 옛 주소로 bearer와 `tools/call`을 보내지 않는다.
+//! Tests verifying `GuardedWire` re-checks the active revision before every remote MCP request.
+
 use super::*;
 use bot_broker::{
     mcp::remote::Remote,
@@ -95,7 +96,7 @@ async fn a_set_that_went_stale_while_the_list_was_awaited_never_gets_the_call_or
         let active = MemoryActive::new(Some("set-1"));
         let fake = server(era);
         let wire = Arc::new(FakeWire::new(fake.clone()));
-        // 서버가 도구 목록을 내준 직후(= 승인된 쓰기가 `tools/call`을 보내기 직전) 다른 프로세스가 목적지를 철회한 새 집합을 게시한다
+        // Publish a new active set right after `tools/list`, before `tools/call` can be sent.
         let flip = active.clone();
         *wire.after_request.lock().unwrap() = Some(Box::new(move |rpc| {
             if rpc == "tools/list" {
@@ -108,9 +109,8 @@ async fn a_set_that_went_stale_while_the_list_was_awaited_never_gets_the_call_or
         assert_eq!(
             fake.count("tools/call"),
             0,
-            "{era:?}: 철회된 목적지로 쓰기를 보냈어요"
+            "{era:?}: write call must not be sent to a revoked endpoint"
         );
-        // 목록 요청까지는 나갔고(그 직전 확인은 통과했다) 그 뒤로는 하나도 나가지 않았다: 구판의 세션 정리(`DELETE`)도 확인에 막힌다
         let seen: Vec<String> = fake.requests().iter().map(|r| r.rpc()).collect();
         assert_eq!(
             seen.last().map(String::as_str),
@@ -143,12 +143,8 @@ async fn an_unpublished_or_unreadable_set_sends_nothing_at_all() {
         ));
         let ran = runner(guarded).run(job(Risk::Irreversible)).await.unwrap();
         assert!(matches!(ran, Ran::NotSent), "{set:?}: {ran:?}");
-        assert!(
-            fake.requests().is_empty(),
-            "{set:?}: 아무것도 나가면 안 돼요"
-        );
+        assert!(fake.requests().is_empty(), "{set:?}: nothing may be sent");
     }
-    // 확인이 끝나지 않으면 기다리다 보내지 않는다
     let active = MemoryActive::new(Some("set-1"));
     active.delay(Duration::from_secs(30));
     let fake = server(Era::Modern);

@@ -1,7 +1,4 @@
-//! 예약 저장. cron 계산은 runtime이 하고 저장소는 구간·커서·중복 방지·beat 합치기를 맡는다.
-//! - `ActiveRevisions::replace`: 판본 활성화 때 트리거 정의를 구간으로 나눈다. 구간은 (from, until]이고 새 트리거의 커서는 효력 시각이다.
-//! - `snapshot`: DB 시각과 커서 이후에 걸친 구간만 돌려준다. 스케줄러 호스트의 시계는 쓰지 않는다.
-//! - `accept_occurrence`: 발생 기록·run 생성·커서 이동을 한 커밋으로. 같은 (profile, agent, trigger, 시각)은 기존 run으로 수렴한다.
+//! Static cron schedule storage: half-open `(from, until]` segments, cursors, occurrence deduplication, and beat coalescing.
 
 use crate::{
     accept::{check, insert_run},
@@ -29,7 +26,6 @@ fn spec_from(row: &PgRow) -> R<TriggerSpec> {
     })
 }
 
-/// 저장된 구간이 새 정의와 같은가(판본까지).
 fn same(row: &PgRow, revision: &Revision, spec: &TriggerSpec) -> R<bool> {
     Ok(row.get::<String, _>("revision") == revision.0 && spec_from(row)? == *spec)
 }
@@ -93,7 +89,7 @@ impl Store {
         })
     }
 
-    /// 발생 한 건을 접수한다. 커서·발생 기록·run이 한 커밋이다. beat는 이미 기다리는 run에 합쳐진다.
+    /// Atomically accepts a scheduled occurrence, advancing the cursor and coalescing beat triggers onto queued runs.
     pub(crate) async fn accept_occurrence_run(&self, occ: Occurrence, cmd: Accept) -> R<RunId> {
         let c = check(&cmd)?;
         let (profile, agent, trigger) = (&occ.profile.0, &occ.agent.0, &occ.trigger);
@@ -131,10 +127,10 @@ impl Store {
             .fetch_one(&mut *tx)
             .await?;
         if at > now {
-            return invalid(); // 아직 오지 않은 시각(스케줄러 호스트 시계가 빠르다)
+            return invalid(); // Future occurrence (scheduler clock ahead of DB).
         }
         if at <= cursor {
-            return Err(Error::Stale.into()); // 커서 뒤로는 되돌리지 않는다
+            return Err(Error::Stale.into()); // Never move the cursor backward.
         }
         let segment = sqlx::query(
             &format!("select {} from bot_schedule_segments where profile = $1 and agent = $2 and trigger = $3
@@ -147,7 +143,7 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(Error::Denied)?;
-        // 저장된 정의와 다른 명령은 받지 않는다(호출자가 정의를 바꿔 끼울 수 없다)
+        // Reject commands whose fields do not match the stored segment definition.
         let spec = spec_from(&segment)?;
         let stored_target = target_json(&spec.target)?;
         if segment.get::<String, _>("revision") != cmd.revision.0
@@ -158,8 +154,7 @@ impl Store {
         {
             return Err(Error::Denied.into());
         }
-        // 사전 승인: 이 트리거에 활성 승인이 있으면 정지 상태를 확인하고 새 run을 그 승인과 정지 세대에 묶는다.
-        // 정지 중이면 이 발생은 건너뛴다(커서만 앞으로 가고 run은 없다 — 재개 뒤 새 발생부터 받는다).
+        // Skip occurrences while a pre-approved trigger is paused (advance cursor only; resume starts from newer occurrences).
         let grant = crate::grants::binding_in(&mut tx, profile, agent, trigger, at).await?;
         if matches!(grant, crate::grants::Binding::Paused) {
             sqlx::query("update bot_schedule_cursors set cursor_ms = greatest(cursor_ms, $4) where profile = $1 and agent = $2 and trigger = $3")
@@ -249,7 +244,6 @@ impl Store {
     }
 }
 
-/// 판본 정의 한 벌의 모양을 검사한다(잠금 전).
 pub(crate) fn validate_set(set: &ScheduleSet) -> R<()> {
     ids_ok(&[&set.profile.0, &set.revision.0])?;
     let mut keys = BTreeSet::new();
@@ -262,8 +256,7 @@ pub(crate) fn validate_set(set: &ScheduleSet) -> R<()> {
     Ok(())
 }
 
-/// 한 프로필의 정적 예약 구간을 새 정의에 맞춘다(호출자가 트랜잭션을 쥔다). 감사는 쓰지 않는다 — 호출자가 감사 head 잠금 순서에 맞춰 쓴다.
-/// 새 구간은 이 게시 트랜잭션의 DB 시각부터 시작한다.
+/// Reconciles one profile's static schedule segments at `effective` DB ms inside the caller's transaction (caller writes audit).
 pub(crate) async fn sync_in(
     tx: &mut crate::db::Tx<'_>,
     set: &ScheduleSet,
@@ -274,7 +267,7 @@ pub(crate) async fn sync_in(
         .bind(profile)
         .execute(&mut **tx)
         .await?;
-    // 아직 시작하지 않은 예정 구간(효력 시각이 미래)은 없던 일로 하고 앞 구간을 다시 연다
+    // Drop future unstarted segments and reopen their predecessors.
     let pending = sqlx::query(
         "delete from bot_schedule_segments where profile = $1 and until_ms is null and from_ms > $2
          returning agent, trigger, from_ms",
@@ -357,7 +350,7 @@ async fn close(tx: &mut crate::db::Tx<'_>, profile: &str, row: &PgRow, at: i64) 
     if at < from {
         return Err(Error::Stale.into());
     }
-    // 같은 밀리초에 다시 게시하면 (from, at]은 비어 있다. 그 행을 남기면 새 구간의 시작 키와 충돌한다.
+    // Delete empty `(from, at]` segments on same-millisecond republish so the new segment's key does not collide.
     let sql = if at == from {
         "delete from bot_schedule_segments where profile = $1 and agent = $2 and trigger = $3 and from_ms = $4 and until_ms is null"
     } else {

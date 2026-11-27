@@ -1,24 +1,22 @@
-//! `bot add agent|skill`: 프로필 폴더에 AGENT.md·SKILL.md 뼈대를 새로 만든다. 이름 조각은 모두 `is_name`으로 검사하고,
-//! 도구(tools.yaml)와 profile.yaml은 만들지도 고치지도 않는다(권한 상한은 안내만 한다).
+//! `bot add agent|skill` scaffolding for AGENT.md and SKILL.md without modifying profile.yaml caps.
 use super::{files::Writer, templates};
 use bot_core::id::is_name;
 use bot_profile::Limits;
 use std::path::Path;
 
-pub(super) const NAME_RULE: &str = "소문자로 시작하는 소문자·숫자·하이픈, 63자 이하";
+pub(super) const NAME_RULE: &str =
+    "lowercase letters, digits, and hyphens starting with a lowercase letter, at most 63 chars";
 
-/// 에이전트 경로(`main/cs`)를 이름 조각으로 나눈다. 모든 조각이 이름 규칙을 지켜야 한다.
 pub(super) fn lineage(path: &str) -> Result<Vec<&str>, String> {
     let parts: Vec<&str> = path.split('/').collect();
     match parts.iter().find(|part| !is_name(part)) {
         Some(bad) => Err(format!(
-            "에이전트 경로 {path:?}의 조각 {bad:?}이(가) 이름 규칙({NAME_RULE})에 맞지 않아요 — 예: main/cs"
+            "agent path segment {bad:?} in {path:?} violates naming rules ({NAME_RULE}) — e.g. main/cs"
         )),
         None => Ok(parts),
     }
 }
 
-/// 계보 → 프로필 폴더 안의 경로 조각: `main/cs` → `agents/main/agents/cs`
 pub(super) fn agent_dir<'a>(lineage: &[&'a str]) -> Vec<&'a str> {
     lineage.iter().flat_map(|part| ["agents", *part]).collect()
 }
@@ -27,21 +25,20 @@ pub(super) fn open(dir: &Path) -> Result<Writer, String> {
     let writer = Writer::new(dir)?;
     if !writer.file_exists(&["profile.yaml"])? {
         return Err(format!(
-            "프로필 폴더가 아니에요(profile.yaml이 없어요): {} — 프로필 폴더 안에서 실행하거나 --dir <프로필 폴더>를 지정해 주세요",
+            "not a profile directory (missing profile.yaml): {} — run inside a profile directory or pass --dir <profile-dir>",
             dir.display()
         ));
     }
     Ok(writer)
 }
 
-/// 에이전트 폴더(AGENT.md가 있는 폴더)가 이미 있는가
 pub(super) fn has_agent(writer: &Writer, lineage: &[&str]) -> Result<bool, String> {
     let mut parts = agent_dir(lineage);
     parts.push("AGENT.md");
     writer.file_exists(&parts)
 }
 
-/// 파일 하나를 만든다. 실패하면 우리가 만든 빈 폴더만 지우고(파일은 이름으로 안전하게 지울 수 없어 남긴다) 남은 파일의 경로를 알린다.
+/// Writes one file; on failure removes only empty directories created by this call and reports any partial files.
 pub(super) fn finish(mut writer: Writer, rel: &str, text: &str) -> Result<(), String> {
     writer.write(rel, text).map_err(|error| {
         let left = writer.undo();
@@ -49,7 +46,7 @@ pub(super) fn finish(mut writer: Writer, rel: &str, text: &str) -> Result<(), St
             error
         } else {
             format!(
-                "{error}\n만들다 만 파일이 남았어요(확인해서 지워 주세요): {}",
+                "{error}\npartially created files remain (inspect and remove manually): {}",
                 left.join(", ")
             )
         }
@@ -61,18 +58,18 @@ pub fn agent(dir: &Path, path: &str) -> Result<String, String> {
     let max = Limits::default().max_agent_depth;
     if lineage.len() > max {
         return Err(format!(
-            "에이전트 계보는 {max}단계까지예요(지금 {}단계)",
+            "agent lineage depth cannot exceed {max} (got {})",
             lineage.len()
         ));
     }
     let writer = open(dir)?;
-    let (leaf, parents) = lineage.split_last().ok_or("에이전트 경로가 비었어요")?;
+    let (leaf, parents) = lineage.split_last().ok_or("agent path is empty")?;
     if parents.is_empty() {
-        // 루트 에이전트는 하나뿐이다: 다른 루트가 있으면 만들지 않는다(같은 이름이면 아래 require_absent가 거절한다)
+        // Only one root agent is allowed; duplicate of the same name is rejected by require_absent below.
         let roots = writer.child_dirs(&["agents"])?;
         if !roots.is_empty() && !roots.iter().any(|root| root == leaf) {
             return Err(format!(
-                "루트 에이전트는 하나뿐이에요(이미 있는 것: {}) — 하위 에이전트라면 {}/{leaf}처럼 경로로 적어 주세요",
+                "only one root agent is allowed (existing: {}) — for a sub-agent use a path like {}/{leaf}",
                 roots.join(", "),
                 roots[0]
             ));
@@ -80,7 +77,7 @@ pub fn agent(dir: &Path, path: &str) -> Result<String, String> {
     } else if !has_agent(&writer, parents)? {
         let parent = parents.join("/");
         return Err(format!(
-            "상위 에이전트 {parent}이(가) 없어요 — 먼저 `bot add agent {parent}`로 만들어 주세요"
+            "parent agent {parent} does not exist — run `bot add agent {parent}` first"
         ));
     }
     let target = agent_dir(&lineage);
@@ -88,20 +85,19 @@ pub fn agent(dir: &Path, path: &str) -> Result<String, String> {
     let rel = format!("{}/AGENT.md", target.join("/"));
     finish(writer, &rel, &templates::agent_md(leaf))?;
     let permission = if parents.is_empty() {
-        "루트 에이전트는 profile.yaml의 policy.scopes 상한을 따라요".to_owned()
+        "The root agent follows the `policy.scopes` cap in profile.yaml".to_owned()
     } else {
         format!(
-            "이 에이전트는 부모({})의 권한 상한을 이어받아요. 줄이려면 profile.yaml의 policy.agents에 `{path}: [run]`처럼 직접 적어 주세요",
+            "This agent inherits its parent ({}) permission cap; narrow it in profile.yaml `policy.agents` (e.g. `{path}: [run]`)",
             parents.join("/")
         )
     };
     Ok(format!(
-        "만들었어요: {rel}\n다음:\n  - AGENT.md의 description과 지침을 채워 주세요.\n  - 권한은 바꾸지 않았어요. {permission}.\n  - 부모 에이전트가 이 에이전트에게 맡길 일을 알도록 부모의 AGENT.md나 스킬에 적어 주세요.\n  - `bot validate`로 확인해 주세요."
+        "Created: {rel}\nNext:\n  - Fill in description and instructions in AGENT.md.\n  - Permissions were not changed. {permission}.\n  - Mention this agent in its parent's AGENT.md or skill so the parent knows when to delegate.\n  - Run `bot validate` to verify."
     ))
 }
 
-/// 같은 이름의 스킬이 보이는 범위에 이미 있으면 그 위치. 스킬은 만든 범위와 그 아래 모든 에이전트에게 보이므로, 같은 이름이
-/// 프로필 전체·조상·자손 어디에 있든 검증이 이름 충돌로 거절한다. 열어 둔 프로필 폴더(fd)로만 읽는다.
+/// Checks whether a skill with the same name is already visible at profile, ancestor, or descendant scope.
 fn skill_conflict(writer: &Writer, scope: &[&str], name: &str) -> Option<String> {
     let exists = |parts: &[&str]| writer.exists(parts).unwrap_or(false);
     if !scope.is_empty() && exists(&["skills", name]) {
@@ -118,7 +114,6 @@ fn skill_conflict(writer: &Writer, scope: &[&str], name: &str) -> Option<String>
     while let Some(lineage) = stack.pop() {
         budget = budget.checked_sub(1)?;
         let names: Vec<&str> = lineage.iter().map(String::as_str).collect();
-        // 한쪽 계보가 다른 쪽의 앞부분이면(조상·같은 곳·자손) 서로 보이는 사이다
         let common = names.len().min(scope.len());
         let here = agent_dir(&names);
         if names[..common] == scope[..common] {
@@ -145,14 +140,14 @@ fn skill_conflict(writer: &Writer, scope: &[&str], name: &str) -> Option<String>
 pub fn skill(dir: &Path, name: &str, agent: Option<&str>) -> Result<String, String> {
     if !is_name(name) {
         return Err(format!(
-            "스킬 이름 {name:?}은(는) 이름 규칙({NAME_RULE})에 맞지 않아요 — 예: triage"
+            "skill name {name:?} violates naming rules ({NAME_RULE}) — e.g. triage"
         ));
     }
     let scope = agent.map(lineage).transpose()?.unwrap_or_default();
     let writer = open(dir)?;
     if !scope.is_empty() && !has_agent(&writer, &scope)? {
         return Err(format!(
-            "에이전트 {}이(가) 없어요 — 먼저 `bot add agent {}`로 만들어 주세요",
+            "agent {} does not exist — run `bot add agent {}` first",
             scope.join("/"),
             scope.join("/")
         ));
@@ -162,17 +157,17 @@ pub fn skill(dir: &Path, name: &str, agent: Option<&str>) -> Result<String, Stri
     writer.require_absent(&target)?;
     if let Some(found) = skill_conflict(&writer, &scope, name) {
         return Err(format!(
-            "같은 이름의 스킬이 이미 보여요: {found} — 이름이 겹치면 검증이 거절해요. 다른 이름을 쓰거나 기존 스킬을 고쳐 주세요"
+            "a skill with the same name is already visible at {found} — validation rejects duplicate names; choose another name or edit the existing skill"
         ));
     }
     let rel = format!("{}/SKILL.md", target.join("/"));
     finish(writer, &rel, &templates::skill_md(name))?;
     if name == "skill-creator" {
         return Ok(format!(
-            "만들었어요: {rel}\n다음:\n  - 슈퍼 관리자 전용 런타임 스킬·MCP 관리 스킬을 채워 두었어요.\n  - profile.yaml의 `super_admins`에 슈퍼 관리자 신원을 적고, 해당 역할과 정책에 `skill.inspect`·`skill.create`·`skill.update`·`skill.delete`·`mcp.add`·`mcp.remove` 스코프를 허용해 주세요.\n  - `bot validate`로 확인해 주세요."
+            "Created: {rel}\nNext:\n  - Populated the super-admin live skill/MCP management skill.\n  - Add super-admin identities to `super_admins` in profile.yaml and allow scopes `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, and `mcp.remove` in roles and policy.\n  - Run `bot validate` to verify."
         ));
     }
     Ok(format!(
-        "만들었어요: {rel}\n다음:\n  - SKILL.md의 description과 순서를 채워 주세요(맨 위 `---` front matter는 메타데이터로 검증하고 모델 프롬프트에는 본문만 전달돼요).\n  - 도구(tools.yaml)와 권한은 만들지 않았어요. 도구가 필요하면 `bot add tool {name}.<도구>`로 tools.yaml에 항목을 더하고, 필요한 스코프는 profile.yaml의 roles·policy에 직접 허용해 주세요 — 권한 상한은 자동으로 바꾸지 않아요.\n  - `bot validate`로 확인해 주세요."
+        "Created: {rel}\nNext:\n  - Fill in description and instructions in SKILL.md (top `---` front matter is validated as metadata; only the body is sent to the model).\n  - No tools.yaml or permissions were changed. Use `bot add tool {name}.<tool>` to declare tools, then grant required scopes manually in profile.yaml roles and policy.\n  - Run `bot validate` to verify."
     ))
 }

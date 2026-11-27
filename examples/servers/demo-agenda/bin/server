@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""demo-agenda: README 5분 시작용 합성 일정 도구 서버(MCP, 표준 입출력). Python 표준 라이브러리만 쓴다.
+"""demo-agenda: simulated synthetic agenda MCP tool server over stdio (stdlib only).
 
-시뮬레이션이다. 설치본은 읽기 전용이고 호출마다 빈 작업 공간에서 새 프로세스로 돌기 때문에 아무것도 저장하지 못한다.
-- `list`는 내장된 합성 일정(산책 포함)을 돌려준다.
-- `delete`는 그 합성 일정 ID만 받고 **가상 삭제 영수증**을 돌려준다. 영구 삭제가 아니며 결과에도 그렇게 적힌다.
-외부 접속·자격·파일 쓰기가 없다. 같은 논리 호출이면 영수증도 같다(재시도·인계에 안전). 논리 호출은 `_meta`의
-`bot/profile-id`·`bot/run-id`·`bot/call-id` 셋을 함께 본다: call-id는 run 안의 위치라 다른 run의 첫 호출끼리 겹칠 수 있다.
-`bot/generation`은 재시도·인계 때 바뀌므로 넣지 않는다.
+Runs from a read-only install in an empty per-call workspace with no network, secrets, or disk writes:
+- `list` returns built-in synthetic events.
+- `delete` accepts only those IDs and returns a simulated receipt (not permanently deleted).
+Receipts are deterministic per logical call (`_meta` `bot/profile-id`, `bot/run-id`, `bot/call-id`);
+`bot/generation` is excluded so retries and handovers produce the same receipt.
 
-사용: bin/server --stdio   (줄 하나가 JSON-RPC 메시지 하나. initialize · ping · tools/list · tools/call)
+Usage: bin/server --stdio   (one JSON-RPC message per line: initialize, ping, tools/list, tools/call)
 """
 import hashlib
 import json
@@ -19,22 +18,22 @@ PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_LINE = 1 << 20
 
 EVENTS = (
-    {"id": "e-walk", "title": "산책", "start": "07:30"},
-    {"id": "e-meet", "title": "팀 회의", "start": "14:00"},
-    {"id": "e-read", "title": "독서", "start": "21:00"},
+    {"id": "e-walk", "title": "Walk", "start": "07:30"},
+    {"id": "e-meet", "title": "Team meeting", "start": "14:00"},
+    {"id": "e-read", "title": "Reading", "start": "21:00"},
 )
 KNOWN = {event["id"]: event for event in EVENTS}
 
-# 입력 스키마는 examples/profiles/personal/agents/main/skills/agenda/tools.yaml의 input과 같아야 한다(시험이 대조한다).
+# Input schemas must stay identical to examples/profiles/personal/agents/main/skills/agenda/tools.yaml.
 TOOLS = [
     {
         "name": "list",
-        "description": "오늘의 합성 일정을 조회한다(읽기 전용, 시뮬레이션).",
+        "description": "List today's synthetic events (read-only, simulated).",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "delete",
-        "description": "합성 일정 하나의 가상 삭제 영수증을 돌려준다. 시뮬레이션이라 영구 삭제가 아니다.",
+        "description": "Return a simulated delete receipt for one synthetic event (not permanently deleted).",
         "inputSchema": {
             "type": "object",
             "required": ["event"],
@@ -46,7 +45,7 @@ TOOLS = [
 
 
 def emit(stream, text):
-    """로캘과 무관하게 UTF-8 바이트로 쓴다(빈 환경에서도 한글이 깨지지 않는다)."""
+    """Write raw UTF-8 bytes so output stays valid regardless of locale (e.g. LC_ALL=C)."""
     stream.buffer.write(text.encode("utf-8"))
     stream.flush()
 
@@ -64,29 +63,29 @@ def outcome(payload, failed=False):
 
 
 def call_identity(meta):
-    """같은 논리 호출을 가리키는 [profile-id, run-id, call-id]. 없거나 문자열이 아닌 필드는 빈 문자열이다."""
+    """Logical call key [profile-id, run-id, call-id]; missing or non-string fields become ''."""
     meta = meta if isinstance(meta, dict) else {}
     return [meta[key] if isinstance(meta.get(key), str) else "" for key in ("bot/profile-id", "bot/run-id", "bot/call-id")]
 
 
 def list_events(arguments, _identity):
     if arguments:
-        return outcome({"error": "invalid-input", "message": "list는 인자가 없어요"}, failed=True)
+        return outcome({"error": "invalid-input", "message": "list takes no arguments"}, failed=True)
     return outcome({"simulated": True, "events": list(EVENTS)})
 
 
 def delete_event(arguments, identity):
     event = arguments.get("event")
     if set(arguments) != {"event"} or not isinstance(event, str):
-        return outcome({"error": "invalid-input", "message": "event(문자열) 하나만 받아요"}, failed=True)
+        return outcome({"error": "invalid-input", "message": "expected only string argument 'event'"}, failed=True)
     found = KNOWN.get(event)
     if found is None:
         shown = event[:64]
         return outcome(
-            {"error": "unknown-event", "message": f"합성 일정 ID가 아니에요: {shown}", "known": sorted(KNOWN)},
+            {"error": "unknown-event", "message": f"unknown synthetic event ID: {shown}", "known": sorted(KNOWN)},
             failed=True,
         )
-    keyed = json.dumps([*identity, event], ensure_ascii=False, separators=(",", ":"))  # JSON 배열이라 필드 경계가 모호하지 않다
+    keyed = json.dumps([*identity, event], ensure_ascii=False, separators=(",", ":"))  # JSON array avoids field-boundary ambiguity
     digest = hashlib.sha256(keyed.encode("utf-8")).hexdigest()[:12]
     return outcome(
         {
@@ -95,7 +94,7 @@ def delete_event(arguments, identity):
             "receipt": f"sim-{digest}",
             "event": found["id"],
             "title": found["title"],
-            "message": "가상 삭제 영수증이에요. 이 예시 서버는 읽기 전용 설치본과 빈 작업 공간에서 돌아 실제 일정은 지워지지 않아요(영구 삭제 아님).",
+            "message": "Simulated delete receipt. This example server runs from a read-only install in an empty workspace, so no real event is deleted (not permanently deleted).",
         }
     )
 
@@ -113,15 +112,14 @@ def initialize(params):
 
 
 def call_tool(params):
-    """(결과, None) 또는 (None, (코드, 메시지))"""
     if not isinstance(params, dict) or not isinstance(params.get("name"), str):
-        return None, (-32602, "name이 필요해요")
+        return None, (-32602, "missing 'name'")
     handler = HANDLERS.get(params["name"])
     if handler is None:
-        return None, (-32602, f"없는 도구예요: {params['name'][:64]}")
+        return None, (-32602, f"unknown tool: {params['name'][:64]}")
     arguments = params.get("arguments", {})
     if not isinstance(arguments, dict):
-        return outcome({"error": "invalid-input", "message": "arguments는 객체여야 해요"}, failed=True), None
+        return outcome({"error": "invalid-input", "message": "arguments must be an object"}, failed=True), None
     return handler(arguments, call_identity(params.get("_meta"))), None
 
 
@@ -129,12 +127,12 @@ def handle(line):
     try:
         message = json.loads(line)
     except ValueError:
-        return error(None, -32700, "JSON을 읽지 못했어요")
+        return error(None, -32700, "invalid JSON")
     if not isinstance(message, dict) or not isinstance(message.get("method"), str):
-        return error(message.get("id") if isinstance(message, dict) else None, -32600, "요청이 올바르지 않아요")
+        return error(message.get("id") if isinstance(message, dict) else None, -32600, "invalid request")
     method, message_id, params = message["method"], message.get("id"), message.get("params")
     if "id" not in message:
-        return  # 알림(notifications/initialized 등)에는 답하지 않는다
+        return  # Notifications (e.g. notifications/initialized) expect no response
     if method == "initialize":
         reply(message_id, result=initialize(params))
     elif method == "ping":
@@ -154,8 +152,8 @@ def handle(line):
 def serve():
     for raw in iter(lambda: sys.stdin.buffer.readline(MAX_LINE + 1), b""):
         if len(raw) > MAX_LINE:
-            error(None, -32600, "줄이 너무 길어요")
-            while not raw.endswith(b"\n") and raw:  # 남은 줄을 버린다
+            error(None, -32600, "line too long")
+            while not raw.endswith(b"\n") and raw:  # Drain remaining bytes of the overlong line
                 raw = sys.stdin.buffer.readline(MAX_LINE + 1)
             continue
         line = raw.decode("utf-8", errors="replace").strip()
@@ -167,7 +165,7 @@ def main(argv):
     if argv[1:] == ["--stdio"]:
         serve()
         return 0
-    emit(sys.stderr, "사용법: bin/server --stdio\n")
+    emit(sys.stderr, "usage: bin/server --stdio\n")
     return 0 if argv[1:] in (["-h"], ["--help"]) else 2
 
 

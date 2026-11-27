@@ -1,5 +1,5 @@
-//! 시험 DB 도구. BOT_TEST_DATABASE_URL(팀 시험 서버)이 없으면 시험을 건너뛴다(BOT_TEST_REQUIRE_DB=1이면 실패).
-//! 시험마다 `store_pg_<pid>_<번호>` 스키마를 만들고 끝나면(패닉 포함) 자기 것만 지운다.
+//! Test database helpers. Skips tests if `BOT_TEST_DATABASE_URL` is unset (fails when `BOT_TEST_REQUIRE_DB=1`).
+//! Each test creates an isolated `store_pg_<pid>_<n>` schema and drops it on `Drop` (including panics).
 #![allow(dead_code)]
 
 pub mod admin;
@@ -46,7 +46,7 @@ fn url() -> Option<String> {
 }
 
 impl TestDb {
-    /// 활성 판본 집합(personal·work = r1)이 이미 게시된 저장소. 새 외부 접수·시작·발송이 이 판본과 대조되기 때문이다.
+    /// Store with active revisions (`personal`, `work` at `r1`) already published.
     pub async fn new() -> Option<TestDb> {
         Self::with(Config::default()).await
     }
@@ -57,7 +57,7 @@ impl TestDb {
         Some(db)
     }
 
-    /// 아무것도 게시하지 않은 저장소(게시·교체를 직접 시험할 때).
+    /// Store with no active revisions published.
     pub async fn bare() -> Option<TestDb> {
         Self::bare_with(Config::default()).await
     }
@@ -85,7 +85,7 @@ impl TestDb {
     }
 
     async fn connect(url: &str, schema: &str, cfg: Config) -> Store {
-        // 연결에 시험 이름표를 붙여 두면 정리 때 이 시험의 연결만 끊을 수 있다
+        // Tag connections with the schema name so Drop terminates only this test's sessions.
         let options = PgConnectOptions::from_str(url)
             .unwrap()
             .options([("search_path", schema)])
@@ -98,14 +98,12 @@ impl TestDb {
         Store::from_pool(pool, cfg)
     }
 
-    /// 표 모양을 DDL로 바꾼 뒤(판본 올리기 시험) 연결 풀을 새로 연다: 풀의 연결들이 옛 모양으로 준비해 둔 문장(`select r.*` 같은 결과 모양이 바뀐 것)을
-    /// 다시 쓰면 PG가 `cached plan must not change result type`로 거절하는데, 어느 연결이 걸리는지는 그때그때 달라 시험이 가끔 실패한다.
+    /// Opens a fresh connection pool after DDL/migration changes to clear cached prepared plans.
     pub async fn reconnect(&mut self) {
         let cfg = self.store.config().clone();
         self.store = Self::connect(&self.url, &self.schema, cfg).await;
     }
 
-    /// 같은 스키마를 다른 소유자 이름·설정으로 여는 두 번째 저장소(두 워커·두 스케줄러 흉내).
     pub async fn peer(&self, worker: &str) -> Store {
         let cfg = Config {
             worker: worker.into(),
@@ -128,7 +126,6 @@ impl TestDb {
             .unwrap()
     }
 
-    /// 다른 연결이 지정한 PID의 실제 잠금 해제를 기다릴 때까지 관측한다.
     pub async fn waiter_blocked_by(&self, blocker: i32) -> i32 {
         tokio::time::timeout(std::time::Duration::from_secs(8), async {
             loop {
@@ -145,10 +142,9 @@ impl TestDb {
                 }
                 tokio::task::yield_now().await;
             }
-        }).await.expect("잠금을 기다리는 연결이 있어야 한다")
+        }).await.expect("expected a connection waiting on the lock")
     }
 
-    /// 리스를 이미 끝난 것으로 만든다(잠을 자지 않고 만료를 흉내 낸다).
     pub async fn expire_lease(&self, run: &RunId) {
         self.sql(&format!(
             "update bot_runs set lease_until_ms = bot_now_ms() - 1 where id = '{}'",
@@ -157,7 +153,6 @@ impl TestDb {
         .await;
     }
 
-    /// 재시도 대기를 풀어 바로 집을 수 있게 한다.
     pub async fn make_due(&self, run: &RunId) {
         self.sql(&format!(
             "update bot_runs set not_before_ms = 0 where id = '{}'",
@@ -168,7 +163,7 @@ impl TestDb {
 }
 
 impl Drop for TestDb {
-    /// 시험이 끝나면(패닉 포함) 이 시험의 연결만 끊고 자기 스키마를 지운다. 풀을 닫지 않는다(같은 런타임을 막지 않으려고).
+    /// Terminates this test's sessions and drops its schema on a separate thread without blocking the runtime.
     fn drop(&mut self) {
         let (url, schema) = (self.url.clone(), self.schema.clone());
         let cleanup = std::thread::spawn(move || {
@@ -189,8 +184,7 @@ impl Drop for TestDb {
     }
 }
 
-// Store는 여러 포트를 한 타입으로 구현해 같은 이름의 메서드(claim·begin·finish·status)가 겹친다.
-// 시험은 다른 크레이트처럼 트레이트 객체로 경계를 그대로 쓴다.
+// Disambiguate overlapping port trait methods on Store by using trait objects.
 pub fn runs(db: &TestDb) -> &dyn bot_core::port::RunStore {
     &db.store
 }
@@ -215,7 +209,6 @@ pub fn run_scopes() -> BTreeSet<String> {
     scopes(&["run", "calendar.read"])
 }
 
-/// CLI 대화의 접수 명령: 프로필 personal, 바인딩 desk, 요청자 local:owner, 대상 main.
 pub fn accept(profile: &str, request: &str, text: &str) -> Accept {
     accept_as(
         profile,
@@ -235,7 +228,6 @@ pub fn accept_as(
     conv: &str,
     text: &str,
 ) -> Accept {
-    // HTTP 대화는 인증된 어댑터의 경로 정보가 함께 온다
     let http = (kind == ConversationKind::Http).then(|| HttpRoute {
         method: "POST".into(),
         path: "/agenda".into(),
@@ -285,7 +277,6 @@ pub fn done(text: &str) -> Finish {
     }
 }
 
-/// 예약 발생용 접수 명령: 대화 종류 Scheduled, 요청자 service:morning.
 pub fn occurrence_accept(
     profile: &str,
     trigger: &str,
@@ -342,7 +333,7 @@ pub fn schedule_set(profile: &str, revision: &str, triggers: Vec<TriggerSpec>) -
 }
 
 impl TestDb {
-    /// 방금 등록한 트리거를 한 시간 전부터 있던 것처럼 되돌려, 과거 발생을 접수할 수 있게 한다.
+    /// Shifts schedule segments and cursors back one hour so past occurrences can be accepted.
     pub async fn backdate_schedule(&self) {
         self.sql("update bot_schedule_segments set from_ms = from_ms - 3600000")
             .await;
@@ -354,8 +345,6 @@ impl TestDb {
         self.scalar::<i64>("select bot_now_ms()").await
     }
 }
-
-// ---- 호출·승인 원장 시험 도구 ----
 
 pub fn profile_id() -> ProfileId {
     ProfileId("personal".into())
@@ -369,7 +358,6 @@ pub fn tool(id: &str) -> ToolId {
     ToolId(id.into())
 }
 
-/// 접수·claim을 거친 실행 중 run(CLI 대화, 요청자 local:owner, 승인자 미지정).
 pub async fn leased(db: &TestDb, request: &str) -> RunContext {
     db.publish().await;
     runs(db)
@@ -379,7 +367,6 @@ pub async fn leased(db: &TestDb, request: &str) -> RunContext {
     runs(db).claim().await.unwrap().unwrap()
 }
 
-/// 지정 대화 종류로 접수·claim한 실행 중 run.
 pub async fn leased_in(db: &TestDb, request: &str, kind: ConversationKind) -> RunContext {
     db.publish().await;
     runs(db)
@@ -416,7 +403,6 @@ pub fn start_call(at: &Attempt, id: &str, approval: Option<(Approval, Vec<String
     }
 }
 
-/// 승인 결합값(브로커가 지금 상태로 계산하는 값 모양). 만료는 DB 시각보다 한 시간 뒤다.
 pub fn binding(at: &Attempt, id: &str, nonce: &str) -> Approval {
     Approval {
         nonce: ApprovalId(nonce.into()),
@@ -434,13 +420,13 @@ pub fn binding(at: &Attempt, id: &str, nonce: &str) -> Approval {
 }
 
 pub fn open_approval(approval: Approval) -> OpenApproval {
-    // 예약 생성 카드는 봉인한 정규 인자를 `인자` 행에 싣고 그 SHA-256이 승인·호출 지문과 같아야 열린다: 지문에 맞는 카드는 `schedule::open_create`로 만든다
+    // schedule.create cards must carry sealed canonical args matching the approval digest.
     assert_ne!(
         approval.tool.0, "schedule.create",
-        "schedule.create 카드는 support::schedule::open_create로 만든다"
+        "build schedule.create cards with support::schedule::open_create"
     );
     let card = format!(
-        r#"{{"approval":{{"nonce":"{}","title":"삭제 승인","lines":["일정 1건"]}}}}"#,
+        r#"{{"approval":{{"nonce":"{}","title":"Delete approval","lines":["1 event"]}}}}"#,
         approval.nonce.0
     );
     OpenApproval {
@@ -460,7 +446,6 @@ pub async fn state_of_run(db: &TestDb, run: &RunId) -> String {
 }
 
 impl TestDb {
-    /// 이 시험의 정적 예약도 실제 활성 집합 게시 트랜잭션으로 설치한다.
     pub async fn publish_schedule(&self, set: ScheduleSet) -> Result<(), bot_core::port::Error> {
         use bot_core::profile::ActiveRevisions;
         use std::collections::BTreeMap;
@@ -481,7 +466,6 @@ impl TestDb {
             .await
     }
 
-    /// 시작·발송·새 접수 검사가 읽는 활성 판본 집합을 게시한다(personal·work = r1). 이미 게시됐으면 아무것도 하지 않는다.
     pub async fn publish(&self) {
         if self.scalar::<i64>("select count(*) from bot_active").await == 0 {
             let set = std::collections::BTreeMap::from([
@@ -501,7 +485,6 @@ impl TestDb {
         }
     }
 
-    /// 이 시험의 스키마에 붙는 별도 연결(교체·플래그 변경이 진행 중인 상황을 흉내 낼 때 트랜잭션을 직접 쥔다).
     pub async fn raw(&self) -> sqlx::PgConnection {
         let options = PgConnectOptions::from_str(&self.url)
             .unwrap()
@@ -510,23 +493,21 @@ impl TestDb {
         options.connect().await.unwrap()
     }
 
-    /// 리스를 끝내고 다른 소유자가 인계한다(세대가 오른다).
     pub async fn takeover(&self, run: &RunId) -> RunContext {
         self.expire_lease(run).await;
         runs(self).claim().await.unwrap().unwrap()
     }
 }
 
-/// 자발적 대기에서 정상 재개한 attempt: 같은 run·같은 세대이고 claim 토큰만 올라간다.
 pub fn assert_resumed(before: &Attempt, after: &Attempt) {
     assert_eq!(
         (&after.run, after.generation),
         (&before.run, before.generation),
-        "정상 재개는 같은 세대다"
+        "normal resume must keep the same generation"
     );
     assert!(
         after.claim.map(|c| c.0) > before.claim.map(|c| c.0),
-        "claim 토큰은 재개마다 오른다: {before:?} → {after:?}"
+        "claim token must advance on each resume: {before:?} -> {after:?}"
     );
 }
 
@@ -534,12 +515,9 @@ pub fn memories(db: &TestDb) -> &dyn bot_core::port::MemoryStore {
     &db.store
 }
 
-// ---- 기억 시험 공용 도구 ----
-
 pub const OWNER: &str = "local:owner";
 pub const GUEST: &str = "slack:home/U2";
 
-/// 접수·claim한 실행 중 run. 요청자와 대화 종류를 고른다.
 pub async fn run_in(
     db: &TestDb,
     request: &str,

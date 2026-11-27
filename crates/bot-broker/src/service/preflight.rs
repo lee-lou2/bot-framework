@@ -1,11 +1,8 @@
-//! 실행 전에 확정되는 거절의 사전 판정(CLI 프런트와 단계형 워커의 공통 거절 표식).
+//! Deterministic pre-execution refusal checks shared by the CLI front and stepped worker.
 //!
-//! 도구 선언과 기본 시간대는 실행이 고정한 프로필 판본에서 읽는다. 한 번 예약의 시각은 새 호출과 같은 범위로 확인한다.
-//! - 에이전트가 고정 판본에서 볼 수 있는 도구가 아니다 → `UnknownTool`.
-//! - 그 도구 선언의 입력 검사(봉인)가 `Invalid`로 실패한다 → `Invalid`.
-//!
-//! 판본을 확인할 수 없거나 저장소·세대 문제로 답하지 못하면 **오류**다(확정이 아니고 "거절 아님"도 아니다). 저장소 오류가 `Missing`·`Invalid`로
-//! 섞여 나오는 일반 `Broker::call`의 결과로는 구분할 수 없어서, 호출한 쪽이 이 판정을 따로 묻는다. 내장 도구의 입력 검사는 각 처리기와 공유한다.
+//! Distinguishes true `UnknownTool`/`Invalid` against the pinned revision from store errors
+//! that surface as `Missing`/`Invalid` through `Broker::call`. Returns `Err` when the revision
+//! or claim cannot be verified.
 
 use super::{
     BrokerService, schedule,
@@ -20,7 +17,7 @@ use bot_core::{
     port::{Error, Reply},
 };
 
-/// 모델이 부르는 내장 위임 도구의 이름(MCP에서 보이는 그대로). 카탈로그에 없고 프런트가 입력·인가를 직접 판정한다.
+/// Built-in delegation tool name exposed over MCP; validated directly by the front.
 pub use bot_core::builtin::DELEGATE_TOOL;
 
 pub(crate) fn expected(error: &Error) -> Option<CliRefusal> {
@@ -35,7 +32,7 @@ pub(crate) fn expected(error: &Error) -> Option<CliRefusal> {
     })
 }
 
-/// 이미 실행 중이거나 원장에 결론이 있으면 그 기록이 우선한다. 입력·도구 없음은 고정 판본의 사전 판정과 일치해야 한다.
+/// Ledger state takes precedence over preflight; `UnknownTool`/`Invalid` must match the pinned revision.
 pub(crate) async fn confirm(
     ledger: &dyn CallLedger,
     judge: Option<&dyn Preflight>,
@@ -58,7 +55,7 @@ pub(crate) async fn confirm(
 }
 
 pub trait Preflight: Send + Sync {
-    /// 이 호출이 실행 전에 확정적으로 거절되는가. 현재 claim을 쥔 시도만 묻는다(아니면 `Stale`).
+    /// Checks whether a call is deterministically refused before execution for the current claim.
     fn refusal(
         &self,
         attempt: Attempt,
@@ -76,21 +73,20 @@ impl Preflight for BrokerService {
     ) -> Reply<'_, Option<CliRefusal>> {
         Box::pin(async move {
             let ctx = self.parts.ledger.context(attempt.clone()).await?;
-            // 호스트 전용 ID는 모델이 부를 수 없다: 늘 `unknown_tool`이다(존재도 알리지 않는다).
+            // Host-reserved tool: always `UnknownTool` to models.
             if tool.0 == schedule::DELIVER_TOOL {
                 return Ok(Some(CliRefusal::UnknownTool));
             }
-            // 위임은 카탈로그에 없다: 프런트가 입력·인가를 직접 판정하므로 여기서는 확정하지 않는다.
+            // Delegation is validated directly by the front, not the catalog.
             if tool.0 == DELEGATE_TOOL {
                 return Ok(None);
             }
-            // 고정 판본을 확인할 수 없으면 확정하지 않는다.
             let pinned = self
                 .parts
                 .catalog
                 .lookup(&attempt.profile, &ctx.work.revision)
                 .ok_or(Error::Unavailable)?;
-            // 내장 도구는 카탈로그에 없다: 인자 검사(호출 기록 전의 같은 검사)만 확정할 수 있다.
+            // Built-in tools are outside the catalog; only argument validation is deterministic here.
             if tool.0 == SHARE_TOOL {
                 return Ok(share::judged(&args));
             }

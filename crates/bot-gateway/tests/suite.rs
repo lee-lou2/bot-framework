@@ -1,4 +1,4 @@
-//! 통합 시험 묶음(`bot-gateway`).
+//! Integration test suite for `bot-gateway`.
 
 mod delivery_support;
 mod http_support;

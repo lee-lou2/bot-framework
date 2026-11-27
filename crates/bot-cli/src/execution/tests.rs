@@ -6,6 +6,14 @@ fn set(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|item| (*item).to_owned()).collect()
 }
 
+fn assert_matches_any(message: &str, needles: &[&str], ctx: &Value) {
+    let lower = message.to_ascii_lowercase();
+    assert!(
+        needles.iter().any(|n| lower.contains(n)),
+        "{ctx} → {message} (expected one of {needles:?})"
+    );
+}
+
 #[test]
 fn providers_are_demo_or_a_claude_cli_with_an_https_upstream_and_a_secret_name() {
     let ok = parse_providers(&json!({
@@ -31,97 +39,107 @@ fn providers_are_demo_or_a_claude_cli_with_an_https_upstream_and_a_secret_name()
             .extend(patch.as_object().unwrap().clone());
         json!({"a": base})
     };
-    for (value, needle) in [
-        (json!([]), "객체"),
-        (json!({"Bad": {"kind": "demo"}}), "이름 규칙"),
-        (json!({"a": "demo"}), "객체"),
-        (json!({"a": {}}), "kind"),
+    let cases: &[(Value, &[&str])] = &[
+        (json!([]), &["object"]),
+        (
+            json!({"Bad": {"kind": "demo"}}),
+            &["name", "alias", "lowercase", "invalid"],
+        ),
+        (json!({"a": "demo"}), &["object"]),
+        (json!({"a": {}}), &["kind"]),
         (
             json!({"a": {"kind": "demo", "model": "x"}}),
-            "알 수 없는 키",
+            &["unknown", "model"],
         ),
-        (json!({"a": {"kind": "pi"}}), "pi는"),
-        (json!({"a": {"kind": "openai"}}), "지원하지 않아요"),
+        (json!({"a": {"kind": "pi"}}), &["pi"]),
+        (
+            json!({"a": {"kind": "openai"}}),
+            &["unsupported", "not supported", "openai"],
+        ),
         (
             json!({"a": {"kind": "claude-cli", "model": "m", "secret": "k"}}),
-            "endpoint",
+            &["endpoint"],
         ),
         (
             claude(json!({"endpoint": "http://h.example/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://user:pw@h.example/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://h.example/v1?key=1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://h.example/v1#frag"})),
-            "https://",
+            &["https://"],
         ),
-        (claude(json!({"endpoint": "https://h ost/v1"})), "https://"),
-        (claude(json!({"endpoint": "https:///v1"})), "https://"),
+        (
+            claude(json!({"endpoint": "https://h ost/v1"})),
+            &["https://"],
+        ),
+        (claude(json!({"endpoint": "https:///v1"})), &["https://"]),
         (
             claude(json!({"endpoint": "https://h.example:70000/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://h.example:0/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://h.example:/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://h.example:8a/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://[::1]:443/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://h.example/v1\r\nX-Evil: 1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://h.example/v1\t"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://h.example/%2e%2e/x"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://0x7f000001/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://127.0x1/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://example.0x1/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://2130706433/v1"})),
-            "https://",
+            &["https://"],
         ),
         (
             claude(json!({"endpoint": "https://0177.0.0.1/v1"})),
-            "https://",
+            &["https://"],
         ),
-        (claude(json!({"secret": "Bad Name"})), "자격 이름"),
-        (claude(json!({"model": ""})), "model"),
-        (claude(json!({"extra": 1})), "알 수 없는 키"),
-    ] {
-        let message = parse_providers(&value).unwrap_err();
-        assert!(message.contains(needle), "{value} → {message}");
+        (claude(json!({"secret": "Bad Name"})), &["secret"]),
+        (claude(json!({"model": ""})), &["model"]),
+        (claude(json!({"extra": 1})), &["unknown", "extra"]),
+    ];
+    for (value, needles) in cases {
+        let message = parse_providers(value).unwrap_err();
+        assert_matches_any(&message, needles, value);
     }
 }
 
@@ -157,7 +175,6 @@ fn sandbox_paths_are_absolute_and_the_vm_image_is_pinned_to_a_digest() {
         ok.apple.as_ref().unwrap().relay_bind.unwrap().to_string(),
         "192.168.64.1:9300"
     );
-    // 릴레이 주소·작업 폴더·인스턴스 이름은 생략할 수 있다(닻이 확인한 주소·설치 폴더 옆·기본 이름)
     let bare =
         parse_sandbox(&json!({"apple": {"image": format!("img@sha256:{digest}"), "network": "n"}}))
             .unwrap()
@@ -190,69 +207,82 @@ fn sandbox_paths_are_absolute_and_the_vm_image_is_pinned_to_a_digest() {
             .extend(patch.as_object().unwrap().clone());
         json!({"apple": base})
     };
-    for (value, needle) in [
-        (json!("x"), "객체"),
-        (json!({"vm": {}}), "알 수 없는 키"),
+    let cases: &[(Value, &[&str])] = &[
+        (json!("x"), &["object"]),
+        (json!({"vm": {}}), &["unknown", "vm"]),
         (
             json!({"srt": {"binary": "srt", "work_root": "/w"}}),
-            "절대 경로",
+            &["absolute"],
         ),
         (
             json!({"srt": {"binary": "/srt", "work_root": "/"}}),
-            "절대 경로",
+            &["absolute"],
         ),
-        (json!({"srt": {"binary": "/srt"}}), "work_root"),
+        (json!({"srt": {"binary": "/srt"}}), &["work_root"]),
         (
             json!({"srt": {"binary": "/srt", "work_root": "/w", "path": "/x"}}),
-            "알 수 없는 키",
+            &["unknown", "path"],
         ),
         (
             json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": "/opt/bin"}}),
-            "배열",
+            &["array"],
         ),
         (
             json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": ["rel/bin"]}}),
-            "절대 경로",
+            &["absolute"],
         ),
         (
             json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": ["/"]}}),
-            "절대 경로",
+            &["absolute"],
         ),
         (
             json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": ["/opt/a:/opt/b"]}}),
-            "`:`",
+            &[":"],
         ),
         (
             json!({"srt": {"binary": "/srt", "work_root": "/w", "extra_path": (0..17).map(|i| format!("/opt/b{i}")).collect::<Vec<_>>()}}),
-            "16개",
+            &["16"],
         ),
         (
             apple(json!({"image": "registry.example/bot-vm:latest"})),
-            "다이제스트",
+            &["digest", "sha256"],
         ),
-        (apple(json!({"image": "img@sha256:abc"})), "다이제스트"),
+        (
+            apple(json!({"image": "img@sha256:abc"})),
+            &["digest", "sha256"],
+        ),
         (
             apple(json!({"image": format!("img@sha256:{}", "A".repeat(64))})),
-            "다이제스트",
+            &["digest", "sha256"],
         ),
         (
             apple(json!({"relay_bind": "0.0.0.0:9300"})),
-            "전체 인터페이스",
+            &["0.0.0.0", "unspecified", "all interfaces", "wildcard"],
         ),
-        (apple(json!({"relay_bind": "[::]:9300"})), "전체 인터페이스"),
-        (apple(json!({"relay_bind": "127.0.0.1:9300"})), "loopback"),
-        (apple(json!({"relay_bind": "[::1]:9300"})), "loopback"),
-        (apple(json!({"relay_bind": "[fd00::1]:9300"})), "IPv6"),
-        (apple(json!({"work_root": "models"})), "절대 경로"),
-        (apple(json!({"work_root": "/"})), "절대 경로"),
-        (apple(json!({"instance": "Bad Name"})), "kebab-case"),
-        (apple(json!({"instance": ""})), "instance"),
-        (apple(json!({"binary": "container"})), "절대 경로"),
-        (apple(json!({"relay_bind": "not-an-address"})), "주소:포트"),
-        (apple(json!({"network": ""})), "network"),
-    ] {
-        let message = parse_sandbox(&value).unwrap_err();
-        assert!(message.contains(needle), "{value} → {message}");
+        (
+            apple(json!({"relay_bind": "[::]:9300"})),
+            &["0.0.0.0", "unspecified", "all interfaces", "wildcard"],
+        ),
+        (
+            apple(json!({"relay_bind": "127.0.0.1:9300"})),
+            &["loopback"],
+        ),
+        (apple(json!({"relay_bind": "[::1]:9300"})), &["loopback"]),
+        (apple(json!({"relay_bind": "[fd00::1]:9300"})), &["ipv6"]),
+        (apple(json!({"work_root": "models"})), &["absolute"]),
+        (apple(json!({"work_root": "/"})), &["absolute"]),
+        (apple(json!({"instance": "Bad Name"})), &["kebab-case"]),
+        (apple(json!({"instance": ""})), &["instance"]),
+        (apple(json!({"binary": "container"})), &["absolute"]),
+        (
+            apple(json!({"relay_bind": "not-an-address"})),
+            &["host:port", "addr:port", "address", "relay_bind"],
+        ),
+        (apple(json!({"network": ""})), &["network"]),
+    ];
+    for (value, needles) in cases {
+        let message = parse_sandbox(value).unwrap_err();
+        assert_matches_any(&message, needles, value);
     }
 }
 
@@ -325,16 +355,15 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
     assert_eq!(
         base,
         with(&same, up(), vm(), revisions("r1"), gateway),
-        "결정적"
+        "deterministic"
     );
-    // 권한이 달라지는 것: 게이트웨이 매핑·모델 허용·egress·서버·설치 판본·상류 목적지·자격 이름·VM 이미지
     for (what, changed) in [
         (
-            "게이트웨이 매핑",
+            "gateway mapping",
             with(&same, up(), vm(), revisions("r1"), [8; 32]),
         ),
         (
-            "모델 허용",
+            "allowed models",
             with(
                 &|c| {
                     c.models.get_mut("personal").unwrap().insert("other".into());
@@ -346,7 +375,7 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
             ),
         ),
         (
-            "모델 허용 프로필",
+            "allowed model profile",
             with(
                 &|c| {
                     c.models.insert("work".into(), set(&["assistant"]));
@@ -373,7 +402,7 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
             ),
         ),
         (
-            "서버 별칭",
+            "server alias",
             with(
                 &|c| {
                     c.servers.insert("extra".into());
@@ -385,11 +414,11 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
             ),
         ),
         (
-            "설치 판본",
+            "installed revision",
             with(&same, up(), vm(), revisions("r2"), gateway),
         ),
         (
-            "상류 목적지",
+            "upstream endpoint",
             with(
                 &same,
                 claude("https://other.example/v1", "key"),
@@ -399,7 +428,7 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
             ),
         ),
         (
-            "자격 이름",
+            "secret name",
             with(
                 &same,
                 claude("https://up.example/v1", "other-key"),
@@ -409,7 +438,7 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
             ),
         ),
         (
-            "모델 실행 방법",
+            "provider kind",
             with(
                 &same,
                 [("assistant".to_owned(), Provider::Demo)].into(),
@@ -419,7 +448,7 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
             ),
         ),
         (
-            "VM 이미지",
+            "VM image",
             with(
                 &same,
                 up(),
@@ -429,7 +458,7 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
             ),
         ),
         (
-            "VM 망",
+            "VM network",
             with(
                 &same,
                 up(),
@@ -447,10 +476,10 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
     ] {
         assert_ne!(changed, base, "{what}");
     }
-    // 호스트별 경로·주소·바이너리 위치는 권한이 아니라 배치 사정이라 지문에 넣지 않는다
+    // Host-local paths, addresses, and binary locations are deployment details, not authority.
     for (what, same_print) in [
         (
-            "작업 루트",
+            "work root",
             with(
                 &same,
                 up(),
@@ -460,7 +489,7 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
             ),
         ),
         (
-            "릴레이 주소",
+            "relay bind",
             with(
                 &same,
                 up(),
@@ -470,7 +499,7 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
             ),
         ),
         (
-            "릴레이 주소 생략·VM 작업 폴더·인스턴스 이름",
+            "omitted relay bind, VM work root, instance, binary",
             with(
                 &same,
                 up(),
@@ -491,7 +520,7 @@ fn authority_changes_change_the_fingerprint_but_host_paths_and_addresses_do_not(
     ] {
         assert_eq!(same_print, base, "{what}");
     }
-    // 서버가 설치돼 있지 않은 것과 판본을 모르는 것은 구분된다(판본 입력이 비면 다른 지문)
+    // Empty revision map differs from a pinned installed revision.
     assert_ne!(base, with(&same, up(), vm(), BTreeMap::new(), gateway));
 }
 

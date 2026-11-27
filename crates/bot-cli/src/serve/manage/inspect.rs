@@ -1,4 +1,4 @@
-//! `skill.inspect`: 슈퍼 관리자에게 현재 프로필의 에이전트 구조, 스킬 목록·용량, MCP 서버, 비밀 이름(값 제외)을 조회해 돌려준다.
+//! `skill.inspect` handler returning profile agents, skills, byte budgets, MCP servers, and secret names.
 use super::{LiveManager, yaml_edit::agent_of_skill_path};
 use bot_core::{
     command::JsonPayload,
@@ -13,7 +13,7 @@ impl LiveManager {
         let args: Value =
             serde_json::from_str(&call.args.0).map_err(|_| ManageError::Rejected {
                 code: "invalid_args",
-                message: "요청 인자를 읽지 못했어요".into(),
+                message: "failed to parse request arguments".into(),
             })?;
         let filter_skill = args.get("skill").and_then(Value::as_str);
         let filter_agent = args.get("agent").and_then(Value::as_str);
@@ -25,10 +25,10 @@ impl LiveManager {
             .cloned()
             .ok_or_else(|| ManageError::Rejected {
                 code: "unknown_profile",
-                message: "활성 프로필을 찾지 못했어요".into(),
+                message: "active profile not found".into(),
             })?;
 
-        // 스킬 중복 제거(상속으로 여러 에이전트에 보이는 스킬은 원본 경로 기준으로 한 번만 센다)
+        // Deduplicate inherited skills by source relative path so each skill is listed once.
         let mut unique_skills: BTreeMap<String, (&String, &bot_core::profile::Skill)> =
             BTreeMap::new();
         let mut server_skills: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();

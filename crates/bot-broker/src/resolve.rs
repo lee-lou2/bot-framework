@@ -1,4 +1,4 @@
-//! 도구 선언 해석. 호출이 가리키는 도구를 실행이 고정한 판본과 지금 활성 판본에서 찾아 합친다.
+//! Tool resolution merging pinned and active profile revisions under stricter-authority rules.
 
 use crate::egress::parse_target;
 use bot_core::{
@@ -15,17 +15,16 @@ pub struct HostPort {
 }
 
 impl HostPort {
-    /// `host:port` 선언을 나눈다. 정규화할 수 없으면 `None`.
     pub fn parse(text: &str) -> Option<Self> {
         parse_target(text).map(|(host, port)| Self { host, port })
     }
 }
 
-/// 실행에 쓰는 도구. `tool`은 고정 판본과 현재 판본을 합친 선언이다.
+/// Resolved tool ready for execution (`tool` merges pinned and current revisions).
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub id: ToolId,
-    /// 서버가 내세우는 MCP 도구 이름: tools.yaml `name`, 생략하면 도구 ID `skill.tool`의 `tool` 부분(tools[].id)이다.
+    /// Server-exposed MCP tool name (`tools.yaml` `name`, or the `<tool>` suffix of `skill.tool`).
     pub name: String,
     pub tool: Tool,
     pub egress: Vec<HostPort>,
@@ -51,13 +50,13 @@ impl Resolved {
     }
 }
 
-/// 승인에 묶이는 도구 판본에 설치한 서버 판본(이미지)을 덧붙인다. 승인 뒤 설치가 바뀌면 판본이 달라져 승인이 무효가 된다.
+/// Appends the installed server revision to the tool revision so server upgrades invalidate prior approvals.
 pub fn pinned_to_image(mut tool: Tool, image: &str) -> Tool {
     tool.revision = Revision(format!("{}@{image}", tool.revision.0));
     tool
 }
 
-/// 에이전트가 볼 수 있는 도구(조상에게서 물려받은 스킬 포함)를 찾는다.
+/// Looks up a tool visible to `agent` (including inherited skills).
 pub fn find_tool<'a>(snapshot: &'a Snapshot, agent: &AgentId, tool: &ToolId) -> Option<&'a Tool> {
     snapshot
         .agents
@@ -84,9 +83,8 @@ fn same_destination(a: &Option<Destination>, b: &Option<Destination>) -> bool {
     }
 }
 
-/// 도구가 고른 환경 이름(`Tool.env`)의 값을 호출하는 에이전트의 환경(`Agent.env`, 상속을 마친 값)에서 읽는다. 고정 판본과 현재 판본
-/// **둘 다**에 이름이 있고 값이 같을 때만 값을 준다(어느 쪽에 없거나 값이 다르면 `None`: 선택한 값의 변화는 승인한 대상의 변경이라
-/// 이전 실행의 도구 시작을 거절한다). 호스트 환경(`process.env`)으로는 채우지 않는다. 이름 순이다.
+/// Reads `tool.env` entries from `agent.env`, requiring identical values in both `pinned` and `current` snapshots.
+/// Never falls back to host `process.env`; returns `None` if any selected key is missing or changed.
 pub fn selected_env(
     tool: &Tool,
     agent: &AgentId,
@@ -105,9 +103,8 @@ pub fn selected_env(
     Some(out)
 }
 
-/// 실행이 고정한 판본(`pinned`)과 지금 활성인 판본(`current`)의 선언을 합친다.
-/// 권한 쪽 필드는 더 엄격한 쪽을 따르고(등급은 높은 쪽, 스코프는 합집합, egress·자격은 교집합),
-/// 실행 정의(서버·입력 스키마·목적지·콜백)가 다르면 거절한다. 그 실행은 새 판본으로 다시 시작해야 한다.
+/// Merges `pinned` and `current` tool declarations using the stricter authority (max risk, union scopes,
+/// OR external, intersect egress/secrets); returns `Conflict` if execution definitions differ.
 pub fn effective_tool(pinned: &Tool, current: &Tool) -> Result<Tool, Error> {
     if pinned.revision == current.revision {
         return Ok(pinned.clone());
@@ -155,7 +152,6 @@ mod tests {
         let resolved = Resolved::new(ToolId("weather.get-forecast".into()), named).unwrap();
         assert_eq!(resolved.name, "get_forecast");
         assert_eq!(resolved.id.0, "weather.get-forecast");
-        // 이름이 없으면 id의 도구 부분(옛 동작)
         let plain = Resolved::new(
             ToolId("weather.get-forecast".into()),
             tool(Risk::Read, &["a"]),
@@ -242,7 +238,6 @@ mod tests {
                 Err(Error::Conflict)
             ));
         }
-        // 목적지 경로가 달라져도 합치지 않는다
         let mut a = pinned.clone();
         a.destination = Some(Destination::Explicit {
             recipient: "args.to".into(),
@@ -266,7 +261,6 @@ mod tests {
         same.scopes = set(&["b"]);
         let merged = effective_tool(&pinned, &same).unwrap();
         assert_eq!(merged.definition, pinned.definition);
-        // 해시가 달라졌거나 없어졌거나 새로 생겼다
         for other in [Some("b".repeat(64)), None] {
             let mut current = same.clone();
             current.definition = other;

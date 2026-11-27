@@ -1,5 +1,4 @@
-//! `bot_core::port`의 트레이트 구현. 다른 크레이트는 이 경계로만 저장소를 쓴다.
-//! 내부 `Fail`은 여기서 `Error`로 바뀐다(DB 오류는 `Unavailable`).
+//! Implementations of `bot_core::port` traits for `Store`, converting internal `Fail` errors to `bot_core::port::Error`.
 
 use crate::{
     active::Extra,
@@ -40,7 +39,6 @@ use bot_core::{
 };
 use std::collections::BTreeMap;
 
-/// 내부 비동기 함수를 `Reply`로 감싼다.
 macro_rules! reply {
     ($body:expr) => {
         Box::pin(async move { $body.await.map_err(Fail::into_core) })

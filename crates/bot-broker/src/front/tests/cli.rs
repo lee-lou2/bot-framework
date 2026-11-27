@@ -1,4 +1,4 @@
-//! CLI 재개 규약: 저장된 모델 차례의 계획과 대조해야만 도구가 실행된다.
+//! Tests for planned CLI tool-call verification against checkpointed turn groups.
 
 use super::*;
 use crate::front::cli::PlannedCalls;
@@ -20,10 +20,9 @@ pub(super) fn call(id: &str, name: &str, args: &str) -> String {
     )
 }
 
-/// ②가 남기는 기록을 흉내 낸다: 한 모델 응답의 도구들(`(id, name, input)`)을 먼저 쓰고 그룹을 마지막에 쓴다.
+/// Simulates turn-observer checkpoints: writes `cli-use-*` entries followed by `cli-group-<turn>`.
 pub(super) fn record(r: &Rig, turn: u64, uses: &[(&str, &str, &str)]) {
     for (pos, (id, name, input)) in uses.iter().enumerate() {
-        // 제공자가 보는 이름은 릴레이 접두사가 붙는다
         let body = format!(
             r#"{{"seq":{turn},"turn":{turn},"pos":{pos},"name":"mcp__relay__{name}","input":{input}}}"#
         );
@@ -43,7 +42,6 @@ async fn a_planned_call_runs_once_under_its_logical_id_and_a_redelivery_reuses_i
     let reply = rpc(&r, &call("toolu_a", "echo_say", r#"{"text":"hi"}"#)).await;
     assert!(reply.body.contains("ok"), "{}", reply.body);
     assert_eq!(r.runner.jobs()[0].call.0, "cli-4-0");
-    // 같은 toolUseId를 다시 보내도(재전달·재개) 같은 호출이라 다시 실행하지 않는다
     rpc(&r, &call("toolu_a", "echo_say", r#"{"text":"hi"}"#)).await;
     assert_eq!(r.runner.jobs().len(), 1);
 }
@@ -63,9 +61,8 @@ async fn siblings_with_identical_tool_and_arguments_are_separate_calls_by_positi
     assert_eq!(
         ids,
         ["cli-7-1", "cli-7-0"],
-        "같은 인자라도 위치가 다르면 다른 호출이다"
+        "distinct positions must produce distinct logical call IDs"
     );
-    // 새 차례의 같은 도구·인자는 또 새 호출이다
     record(&r, 9, &[("toolu_z", "echo_say", same)]);
     rpc(&r, &call("toolu_z", "echo_say", same)).await;
     assert_eq!(r.runner.jobs().len(), 3);
@@ -75,10 +72,9 @@ async fn siblings_with_identical_tool_and_arguments_are_separate_calls_by_positi
 #[tokio::test]
 async fn without_a_complete_group_nothing_runs() {
     let r = rig_with(|_| {}, |_| {}, planned(120)).await;
-    // 계획이 아예 없다
     let reply = rpc(&r, &call("toolu_a", "echo_say", "{}")).await;
     assert!(reply.body.contains("unavailable"), "{}", reply.body);
-    // 한 묶음으로 커밋한 사용에 그룹이 없으면 손상된 기록이다.
+    // Use without a group is corrupt because both commit together.
     r.ledger.add_step(
         OWNER_RUN,
         "cli-use-toolu_b",
@@ -88,7 +84,6 @@ async fn without_a_complete_group_nothing_runs() {
     let invalid: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
     assert_eq!(invalid["result"]["isError"], true);
     assert_eq!(invalid["result"]["content"][0]["text"], "invalid");
-    // 그룹에는 있는데 `cli-use`가 없다
     r.ledger
         .add_step(OWNER_RUN, "cli-group-3", r#"{"seq":3,"uses":["toolu_c"]}"#);
     let reply = rpc(&r, &call("toolu_c", "echo_say", "{}")).await;
@@ -112,7 +107,7 @@ async fn a_group_that_shows_up_while_waiting_lets_the_call_through() {
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(
         r.runner.jobs().is_empty(),
-        "그룹이 보이기 전에는 실행하지 않는다"
+        "must not execute before the group is visible"
     );
     record(&r, 5, &[("toolu_a", "echo_say", r#"{"text":"late"}"#)]);
     let reply = waiting.await.unwrap();
@@ -124,7 +119,6 @@ async fn a_group_that_shows_up_while_waiting_lets_the_call_through() {
 async fn a_call_that_differs_from_the_plan_is_refused_before_it_runs() {
     let r = rig_with(|_| {}, |_| {}, planned(150)).await;
     record(&r, 4, &[("toolu_a", "echo_say", r#"{"text":"planned"}"#)]);
-    // 인자가 다르다 / 도구가 다르다
     for (name, args) in [
         ("echo_say", r#"{"text":"changed"}"#),
         ("echo_say", r#"{"text":"planned","extra":1}"#),
@@ -138,7 +132,7 @@ async fn a_call_that_differs_from_the_plan_is_refused_before_it_runs() {
         );
     }
     assert!(r.runner.jobs().is_empty());
-    // 키 순서·공백이 달라도 정규 JSON이 같으면 같은 인자다
+    // Equivalent canonical JSON matches regardless of key order or whitespace.
     record(&r, 6, &[("toolu_b", "echo_say", r#"{ "b": 1,  "a": 2 }"#)]);
     rpc(&r, &call("toolu_b", "echo_say", r#"{"a":2,"b":1}"#)).await;
     assert_eq!(r.runner.jobs()[0].call.0, "cli-6-0");
@@ -147,7 +141,6 @@ async fn a_call_that_differs_from_the_plan_is_refused_before_it_runs() {
 #[tokio::test]
 async fn a_plan_that_contradicts_itself_runs_nothing() {
     let r = rig_with(|_| {}, |_| {}, planned(150)).await;
-    // 그룹의 차례와 키가 다르다 / use의 위치가 그룹 안 순서와 다르다 / 같은 id가 두 그룹에 있다
     r.ledger
         .add_step(OWNER_RUN, "cli-group-1", r#"{"seq":2,"uses":["toolu_a"]}"#);
     r.ledger.add_step(
@@ -211,9 +204,8 @@ async fn revoking_while_the_plan_is_awaited_answers_at_once_and_runs_nothing() {
     assert!(reply.body.contains("stale"), "{}", reply.body);
     assert!(
         took < Duration::from_secs(2),
-        "기다리지 않고 바로 끝난다: {took:?}"
+        "must abort immediately on revocation: {took:?}"
     );
-    // 계획이 뒤늦게 나타나도 이미 회수된 세션으로는 아무것도 실행되지 않는다
     record(&r, 4, &[("toolu_a", "echo_say", "{}")]);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(r.runner.jobs().is_empty());
@@ -223,7 +215,6 @@ async fn revoking_while_the_plan_is_awaited_answers_at_once_and_runs_nothing() {
 #[tokio::test]
 async fn only_the_exact_relay_prefix_can_stand_for_the_mcp_name() {
     let r = rig_with(|_| {}, |_| {}, planned(150)).await;
-    // 다른 MCP 서버·내장 도구·접두사 없는 이름은 같은 도구 이름으로 대신할 수 없다
     for (i, planned_name) in [
         "mcp__other__echo_say",
         "echo_say",
@@ -274,7 +265,7 @@ async fn a_group_with_a_missing_repeated_or_misplaced_use_runs_nothing() {
             &format!(r#"{{"seq":{turn},"uses":[{ids}]}}"#),
         );
     };
-    // 그룹에는 둘인데 하나의 use가 없다: 다른 하나도 실행하지 않는다
+    // Missing sibling use blocks the entire group.
     put("toolu_a", 1, 0);
     group(1, r#""toolu_a","toolu_b""#);
     assert!(
@@ -283,7 +274,7 @@ async fn a_group_with_a_missing_repeated_or_misplaced_use_runs_nothing() {
             .body
             .contains("invalid")
     );
-    // 그룹 안에서 ID가 겹친다
+    // Duplicate ID within the group.
     put("toolu_c", 2, 0);
     group(2, r#""toolu_c","toolu_c""#);
     assert!(
@@ -292,7 +283,7 @@ async fn a_group_with_a_missing_repeated_or_misplaced_use_runs_nothing() {
             .body
             .contains("invalid")
     );
-    // 같은 그룹의 다른 use의 위치·차례가 어긋난다
+    // Mismatched pos or turn on a sibling use.
     put("toolu_d", 3, 0);
     put("toolu_e", 3, 5);
     group(3, r#""toolu_d","toolu_e""#);
@@ -312,7 +303,6 @@ async fn a_group_with_a_missing_repeated_or_misplaced_use_runs_nothing() {
             .contains("invalid")
     );
     assert!(r.runner.jobs().is_empty());
-    // 완전한 그룹은 그대로 통한다
     put("toolu_h", 6, 0);
     put("toolu_i", 6, 1);
     group(6, r#""toolu_h","toolu_i""#);
@@ -322,7 +312,6 @@ async fn a_group_with_a_missing_repeated_or_misplaced_use_runs_nothing() {
 
 #[tokio::test]
 async fn the_wait_and_the_ledger_reads_share_one_absolute_deadline() {
-    // 기다림은 10ms인데 원장이 한 번 읽는 데 200ms 걸린다: 읽기가 끝나기를 기다리지 않고 기한에 끊는다
     let r = rig_with(|_| {}, |_| {}, planned(10)).await;
     record(&r, 4, &[("toolu_a", "echo_say", "{}")]);
     r.ledger.set_context_delay(Duration::from_millis(200));
@@ -330,11 +319,13 @@ async fn the_wait_and_the_ledger_reads_share_one_absolute_deadline() {
     let reply = rpc(&r, &call("toolu_a", "echo_say", "{}")).await;
     let took = began.elapsed();
     assert!(reply.body.contains("unavailable"), "{}", reply.body);
-    assert!(took < Duration::from_millis(150), "기한을 넘겼다: {took:?}");
+    assert!(
+        took < Duration::from_millis(150),
+        "exceeded deadline: {took:?}"
+    );
     assert!(r.runner.jobs().is_empty());
 }
 
-/// 한도를 정해 만든 `PlannedCalls`와 그 손잡이(기억한 그룹 수를 보려고).
 async fn with_cache(limit: usize) -> (Rig, Arc<PlannedCalls>) {
     let slot: Arc<std::sync::Mutex<Option<Arc<PlannedCalls>>>> = Arc::default();
     let put = slot.clone();
@@ -359,7 +350,6 @@ async fn with_cache(limit: usize) -> (Rig, Arc<PlannedCalls>) {
 #[tokio::test]
 async fn the_memory_of_verified_groups_stays_bounded_and_forgetting_is_safe() {
     let (r, book) = with_cache(3).await;
-    // 그룹 열 개를 차례로 쓴다: 기억은 상한을 넘지 않는다
     for turn in 1..=10u64 {
         let id = format!("toolu_{turn}");
         record(&r, turn, &[(id.as_str(), "echo_say", "{}")]);
@@ -372,7 +362,6 @@ async fn the_memory_of_verified_groups_stays_bounded_and_forgetting_is_safe() {
     }
     assert_eq!(book.cached_groups(), 3);
     assert_eq!(r.runner.jobs().len(), 10);
-    // 잊은 그룹을 다시 쓰면 다시 읽어 대조하고 같은 호출 ID로 간다(새로 실행하지 않는다)
     rpc(&r, &call("toolu_1", "echo_say", "{}")).await;
     assert_eq!(r.runner.jobs().len(), 10);
     assert!(book.cached_groups() <= 3);
@@ -386,17 +375,16 @@ async fn a_forgotten_group_is_checked_again_in_full() {
         1,
         &[("toolu_a", "echo_say", "{}"), ("toolu_b", "echo_say", "{}")],
     );
-    rpc(&r, &call("toolu_a", "echo_say", "{}")).await; // 그룹 전체를 맞춰 보고 기억한다
+    rpc(&r, &call("toolu_a", "echo_say", "{}")).await;
     assert_eq!(book.cached_groups(), 1);
-    // 기억하는 동안은 다시 읽지 않는다(그룹 기록은 바뀌지 않는다고 본다: 여기서는 일부러 기록을 망가뜨려 캐시가 쓰이는지만 본다)
+    // Corrupting a cached group is not detected until eviction forces full re-verification.
     r.ledger.remove_step(OWNER_RUN, "cli-use-toolu_b");
     rpc(&r, &call("toolu_a", "echo_say", "{}")).await;
     assert_eq!(
         r.runner.jobs().len(),
         1,
-        "같은 호출이라 다시 실행하지 않는다"
+        "duplicate call ID must not re-execute"
     );
-    // 다른 그룹이 기억을 밀어내면(상한 1) 원래 그룹은 잊히고, 다시 쓰면 전체를 다시 대조해 망가진 기록을 잡는다
     record(&r, 2, &[("toolu_c", "echo_say", "{}")]);
     rpc(&r, &call("toolu_c", "echo_say", "{}")).await;
     assert_eq!(book.cached_groups(), 1);

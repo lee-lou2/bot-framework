@@ -1,4 +1,4 @@
-//! 가짜 프로필 목록: 개인 비서 예시(personal)와 비밀·외부 전송·HTTP 트리거를 쓰는 합성 프로필(work).
+//! Fake profile catalog providing synthetic `personal` and `work` snapshots for tests and demos.
 
 use bot_core::{command::JsonPayload, id::*, profile::*, state::Risk};
 use std::{
@@ -21,7 +21,6 @@ impl ProfileCatalog for StaticCatalog {
     }
 }
 
-/// personal + work.
 pub fn demo_catalog() -> StaticCatalog {
     let all = [personal(), work()];
     StaticCatalog(
@@ -180,7 +179,8 @@ pub fn personal() -> Snapshot {
         )],
     );
     if let Some(main) = s.agents.get_mut(&AgentId("main".into())) {
-        main.description = "오늘 일정을 조회하고 변경 전에는 정확한 일정을 확인한다.".into();
+        main.description =
+            "Look up today's schedule and verify the exact event before changing it.".into();
         main.builtin = BTreeSet::from([Builtin::Read, Builtin::Grep]);
     }
     s.roles = BTreeMap::from([
@@ -209,7 +209,7 @@ pub fn work() -> Snapshot {
     send.egress = set(["mail.example:443"]);
     send.secrets = BTreeMap::from([(
         "MAIL_TOKEN".to_owned(),
-        SecretName::parse("mail-sender").expect("이름"),
+        SecretName::parse("mail-sender").expect("secret name"),
     )]);
     send.destination = Some(Destination::Explicit {
         recipient: "args.to".into(),
@@ -275,6 +275,6 @@ pub fn work() -> Snapshot {
     s.members = BTreeMap::from([(PrincipalId("local:owner".into()), set(["owner"]))]);
     s.policy.scopes = set(["run", "mail.send"]);
     s.policy.approve = set(["mail.send"]);
-    s.secrets = vec![SecretName::parse("mail-sender").expect("이름")];
+    s.secrets = vec![SecretName::parse("mail-sender").expect("secret name")];
     s
 }

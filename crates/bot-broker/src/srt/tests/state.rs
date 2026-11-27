@@ -1,5 +1,4 @@
-//! 호출 간 상태 볼륨을 요구하는 서버(`state: required`): srt 어댑터는 영속 볼륨을 지원하지 않으므로 자격·설정·프로세스를 만들기 전에
-//! 명시적으로 거절한다. 기본(`Ephemeral`)은 그대로 돈다.
+//! Servers requiring persistent state (`state: required`) are refused by `srt` before resolving secrets or spawning.
 
 use super::*;
 use bot_core::install::ServerState;
@@ -20,12 +19,12 @@ async fn open_required(dir: &Path) -> SrtSandbox {
 async fn a_server_that_needs_a_state_volume_is_refused_before_any_credential_or_process() {
     let dir = tempfile::tempdir().unwrap();
     let sandbox = open_required(dir.path()).await;
-    // 미리 묻는 길: 자격을 풀기 전에 거절한다
+    // Pre-check refuses before resolving secrets.
     assert!(matches!(
         sandbox.admit("demo-agenda", "img1"),
         Err(Error::Denied)
     ));
-    // 곧바로 띄우려 해도(자격이 든 명세로) 거절하고, 설정·pid 기록·작업 폴더·프로세스를 만들지 않는다
+    // Direct spawn also refuses without creating config, pid, work dir, or process.
     let result = sandbox.spawn(spec("r1.1.c1", false)).await;
     assert!(matches!(result, Err(Error::Denied)));
     assert!(
@@ -34,14 +33,14 @@ async fn a_server_that_needs_a_state_volume_is_refused_before_any_credential_or_
                 .unwrap()
                 .count()
                 == 0,
-        "거절 전에 아무것도 만들지 않는다"
+        "must create nothing before refusal"
     );
     let work: Vec<_> = std::fs::read_dir(dir.path().join("work"))
         .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();
     assert!(
         work.iter().all(|name| name == ".srt"),
-        "호출별 작업 폴더도 없다: {work:?}"
+        "must not create per-call work dir: {work:?}"
     );
 }
 
@@ -50,7 +49,7 @@ async fn the_default_state_is_ephemeral_and_still_runs_and_unknown_servers_stay_
     let dir = tempfile::tempdir().unwrap();
     let sandbox = open(dir.path()).await;
     assert!(sandbox.admit("demo-agenda", "img1").is_ok());
-    // 설치하지 않은 서버·승인과 다른 판본은 기존처럼 거절한다
+    // Unknown servers and mismatched revisions remain refused.
     assert!(matches!(sandbox.admit("other", "img1"), Err(Error::Denied)));
     assert!(matches!(
         sandbox.admit("demo-agenda", "img2"),
@@ -60,7 +59,7 @@ async fn the_default_state_is_ephemeral_and_still_runs_and_unknown_servers_stay_
     process.handle.terminate().await.unwrap();
 }
 
-/// 호출마다의 `admit`과 시작 전 점검이 쓰는 `supports_state`는 같은 답을 낸다(규칙이 한 곳이라 어긋날 수 없다).
+/// `admit` and `supports_state` share the same predicate.
 #[tokio::test]
 async fn the_per_call_admission_and_the_pre_start_predicate_give_the_same_answer() {
     assert!(supports_state(ServerState::Ephemeral));

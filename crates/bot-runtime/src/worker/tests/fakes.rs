@@ -1,4 +1,5 @@
-//! 워커 시험용 가짜 포트와 고정 입력.
+//! Fake ports, scripted model runners, and fixtures shared across worker unit tests.
+
 use super::{fake_ledger::FakeLedger, fake_runs::FakeRuns};
 use crate::{
     host::{Deps, Models, NoRelays, Relays, SingleModel, WorkerConfig},
@@ -32,7 +33,7 @@ fn agent(parent: Option<&str>, skills: bool) -> Agent {
         description: String::new(),
         parent: parent.map(|p| AgentId(p.into())),
         model: "assistant".into(),
-        instructions: "한국어로 짧게 답한다.".into(),
+        instructions: "Reply concisely.".into(),
         env: BTreeMap::new(),
         scopes: scopes(&["run", "calendar.read", "calendar.delete"]),
         builtin: BTreeSet::new(),
@@ -48,7 +49,7 @@ fn agent(parent: Option<&str>, skills: bool) -> Agent {
                 description: None,
                 instructions: Document {
                     relative_path: "skills/agenda/SKILL.md".into(),
-                    text: "일정을 다룬다.".into(),
+                    text: "Handles schedule operations.".into(),
                 },
                 tools: BTreeMap::from([(
                     ToolId("agenda.list".into()),
@@ -73,7 +74,6 @@ pub(super) fn snapshot() -> Snapshot {
             (AgentId("main/research".into()), agent(Some("main"), false)),
         ]),
         bindings: BTreeMap::new(),
-        // 위임은 요청자가 지금도 멤버이고 자식 에이전트에서 `run`을 쓸 수 있을 때만 한다
         roles: BTreeMap::from([(
             "owner".to_owned(),
             scopes(&["run", "calendar.read", "calendar.delete"]),
@@ -115,7 +115,7 @@ fn base(run: &str, generation: u64, target: Target, kind: ConversationKind) -> R
         work: Work {
             revision: Revision("r1".into()),
             target,
-            input: JsonPayload(json!({"text": "오늘 일정 알려줘"}).to_string()),
+            input: JsonPayload(json!({"text": "Show today's agenda"}).to_string()),
             attachments: vec![],
             steps: vec![],
             pass_pos: None,
@@ -126,14 +126,13 @@ fn base(run: &str, generation: u64, target: Target, kind: ConversationKind) -> R
     }
 }
 
-/// 에이전트 대상 run(CLI 대화).
 pub(super) fn agent_run(run: &str) -> RunContext {
     base(
         run,
         1,
         Target::Agent {
             agent: AgentId("main".into()),
-            instruction: "오늘 일정 알려줘".into(),
+            instruction: "Show today's agenda".into(),
         },
         ConversationKind::Cli,
     )
@@ -161,8 +160,6 @@ pub(super) fn generation(mut ctx: RunContext, generation: u64) -> RunContext {
     ctx.attempt.generation = Generation(generation);
     ctx
 }
-
-// ---- 브로커·위임·기억·게이트웨이 ----
 
 pub(super) struct FakeBroker {
     pub script: Mutex<VecDeque<Result<CallResult, Error>>>,
@@ -208,9 +205,7 @@ impl Broker for FakeBroker {
 pub(super) struct FakeDelegation {
     pub requests: Mutex<Vec<Delegate>>,
     pub error: Mutex<Option<Error>>,
-    /// 단계 키 → 저장소가 대조해 읽어 줄 자식 결과(`{"state":…}`). 없으면 아직 끝나지 않았다.
     pub results: Mutex<BTreeMap<String, JsonPayload>>,
-    /// 결과를 읽을 때 받은 명령
     pub reads: Mutex<Vec<Delegate>>,
     pub read_error: Mutex<Option<Error>>,
 }
@@ -272,7 +267,6 @@ impl Gateway for FakeGateway {
     }
 }
 
-/// 실행이 고정한 판본(`pinned`)과 지금 활성인 판본(`current`)이 다를 수 있는 카탈로그. 기본은 둘이 같다.
 pub(super) struct FakeCatalog {
     pub pinned: Arc<Snapshot>,
     pub current: Mutex<Arc<Snapshot>>,
@@ -308,11 +302,8 @@ impl Tracer for Spans {
     }
 }
 
-// ---- 모델 ----
-
 type Script = VecDeque<Result<ModelStep, ModelError>>;
 
-/// 정해 둔 차례를 순서대로 내는 Step 방식 실행기. 받은 요청을 모두 기록한다.
 pub(super) struct ScriptedModel {
     pub script: Mutex<Script>,
     pub requests: Mutex<Vec<ModelRequest>>,
@@ -346,7 +337,6 @@ impl ModelRunner for ScriptedModel {
     }
 }
 
-/// 취소 신호가 올 때까지 기다리는 실행기(Loop 방식: CLI처럼 한 번 불리고 오래 걸린다).
 pub(super) struct BlockingModel;
 
 impl ModelRunner for BlockingModel {
@@ -392,8 +382,6 @@ pub(super) fn calls(text: &str, items: &[(&str, &str, &str)]) -> Result<ModelSte
         state: None,
     })
 }
-
-// ---- 조립 ----
 
 pub(super) struct Rig {
     pub worker: Worker,

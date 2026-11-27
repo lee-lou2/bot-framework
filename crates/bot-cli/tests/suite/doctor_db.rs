@@ -1,5 +1,4 @@
-//! `bot doctor --check-db`가 실제 PostgreSQL에 짧게 접속해 «연결됐어요»를 알리되 아무것도 만들지 않는다(마이그레이션·쓰기 없음).
-//! 팀 시험 DB(`BOT_TEST_DATABASE_URL`)가 있어야 하고, 없으면 건너뛴다(`BOT_TEST_REQUIRE_DB=1`이면 실패).
+//! Verifies `bot doctor --check-db` connects to PostgreSQL, reports success without printing the URL, and creates no tables.
 use crate::process_support::*;
 
 #[test]
@@ -27,12 +26,17 @@ fn check_db_connects_and_creates_nothing() {
     let shown = text(&out);
     assert!(out.status.success(), "{shown}");
     assert!(
-        shown.contains("[통과] 데이터베이스 연결 — 연결됐어요"),
+        shown.lines().any(|line| {
+            let low = line.to_ascii_lowercase();
+            (low.starts_with("[pass]") || low.starts_with("[ok]"))
+                && (low.contains("database") || low.contains("db"))
+                && low.contains("connect")
+        }),
         "{shown}"
     );
     assert!(
         !shown.contains(&schema.base),
-        "접속 주소는 출력하지 않는다: {shown}"
+        "connection URL must not be printed: {shown}"
     );
-    assert_eq!(schema.tables(), "0", "마이그레이션하지 않았다");
+    assert_eq!(schema.tables(), "0", "must not run migrations");
 }

@@ -15,7 +15,7 @@ fn rev(value: &str) -> Revision {
     Revision(value.into())
 }
 
-/// 프로필 파일은 그대로 두고 호스트의 신원 매핑만 교체한다.
+/// Replaces only host identity mappings while keeping profile revisions unchanged.
 async fn remap(db: &TestDb) {
     let profiles = BTreeMap::from([
         (profile_id(), rev("r1")),

@@ -94,12 +94,12 @@ fn delta(text: &str) -> String {
 async fn events_are_relayed_whole_even_when_chunks_cut_them_anywhere() {
     let r = rig(|_| {});
     let events = [
-        delta("안녕"),
-        delta("하세요"),
+        delta("café"),
+        delta("€100"),
         "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_owned(),
     ];
     let all = events.concat().into_bytes();
-    // 바이트 하나씩 잘라 보내도(한글 중간 포함) 이벤트가 온전히 나온다
+    // Single-byte chunks split inside multi-byte UTF-8 characters.
     let chunks: Vec<&[u8]> = all.chunks(1).collect();
     r.upstream.respond_chunks(200, &chunks, End::Eof);
     let mut stream = r
@@ -109,7 +109,6 @@ async fn events_are_relayed_whole_even_when_chunks_cut_them_anywhere() {
         .unwrap();
     assert_eq!(stream.status(), 200);
     assert_eq!(collect(&mut stream).await, events);
-    // CRLF 구분도 같은 이벤트로 본다
     r.upstream.respond_chunks(
         200,
         &[b"data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\r\n\r\nevent: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n"],
@@ -182,7 +181,6 @@ async fn a_streaming_request_must_say_so_and_a_plain_one_must_not() {
 
 #[tokio::test]
 async fn a_key_cut_by_chunk_boundaries_never_leaves_the_proxy() {
-    // 키 바이트가 조각 경계에 걸쳐 흘러도(이벤트 안에서도, 이벤트 사이에서도) 어느 조각도 내보내기 전에 잡는다
     let data = format!("data: {{\"text\":\"{KEY}\"}}\n\n").into_bytes();
     for cut in 1..data.len() {
         let r = rig(|_| {});
@@ -226,7 +224,6 @@ async fn an_escaped_key_is_caught_after_decoding() {
         !all.contains("rovider-key") && all.contains("blocked"),
         "{all}"
     );
-    // 키 이름에 숨겨도 막는다
     r.upstream.respond_chunks(
         200,
         &[format!("data: {{\"{escaped}\":1}}\n\n").as_bytes()],
@@ -243,14 +240,13 @@ async fn an_escaped_key_is_caught_after_decoding() {
 #[tokio::test]
 async fn a_key_split_across_delta_events_is_caught_before_it_completes() {
     let r = rig(|_| {});
-    // 같은 JSON 경로(delta.text)의 값 여러 개에 나눠 담아 흘린다. 다른 경로의 값이 사이에 끼어도 소용없다.
     let (head, tail) = KEY.split_at(10);
     let events = [
-        delta("앞부분"),
+        delta("prefix"),
         delta(head),
         "event: ping\ndata: {\"type\":\"ping\"}\n\n".to_owned(),
         delta(tail),
-        delta("뒷부분"),
+        delta("suffix"),
     ];
     let chunks: Vec<&[u8]> = events.iter().map(|e| e.as_bytes()).collect();
     r.upstream.respond_chunks(200, &chunks, End::Eof);
@@ -263,13 +259,13 @@ async fn a_key_split_across_delta_events_is_caught_before_it_completes() {
     let all = relayed.concat();
     assert!(
         !all.contains(KEY) && !all.contains(tail),
-        "키가 완성되는 이벤트는 나가지 않는다: {all}"
+        "event completing the key must be withheld: {all}"
     );
     assert!(
         relayed.last().unwrap().contains("blocked"),
-        "오류 이벤트로 끝난다"
+        "stream must terminate with a blocked error event"
     );
-    assert!(!all.contains("뒷부분"), "막은 뒤 스트림은 끝난다");
+    assert!(!all.contains("suffix"), "stream must stop once blocked");
 }
 
 #[tokio::test]
@@ -298,7 +294,6 @@ async fn non_json_data_and_other_event_lines_are_scanned_too() {
         .await
         .unwrap();
     assert!(!collect(&mut stream).await.concat().contains(KEY));
-    // 문자열이 아닌 UTF-8 깨진 이벤트는 내보내지 않는다
     r.upstream
         .respond_chunks(200, &[b"data: \xff\xfe\n\n"], End::Eof);
     let mut stream = r
@@ -315,14 +310,13 @@ async fn failures_end_the_stream_with_one_fixed_error_event() {
         c.stream_idle = std::time::Duration::from_millis(80);
         c.max_event = 64;
         c.max_stream = 400;
-        // 앞서 연 스트림을 이 시험이 쥐고 있으므로 동시성 자리를 넉넉히 둔다.
+        // Keep concurrency generous because earlier streams remain open in this test.
         c.rate = RateConfig {
             per_minute: 6000,
             burst: 100,
             concurrent: 100,
         };
     });
-    // 상류가 중간에 끊겼다
     r.upstream
         .respond_chunks(200, &[b"data: {}\n\n"], End::Fail);
     let mut stream = r
@@ -335,9 +329,8 @@ async fn failures_end_the_stream_with_one_fixed_error_event() {
     assert!(got[1].contains("\"message\":\"unavailable\""));
     assert!(
         stream.next().await.is_none(),
-        "오류 뒤에는 더 나오지 않는다"
+        "no events may follow the error event"
     );
-    // 이벤트가 마무리되지 않은 채 끝났다
     r.upstream
         .respond_chunks(200, &[b"data: {\"cut\":"], End::Eof);
     let mut stream = r
@@ -346,7 +339,6 @@ async fn failures_end_the_stream_with_one_fixed_error_event() {
         .await
         .unwrap();
     assert!(collect(&mut stream).await.concat().contains("truncated"));
-    // 조각 사이가 너무 오래 비었다
     r.upstream
         .respond_chunks(200, &[b"data: {}\n\n"], End::Hang);
     let mut stream = r
@@ -355,7 +347,6 @@ async fn failures_end_the_stream_with_one_fixed_error_event() {
         .await
         .unwrap();
     assert!(collect(&mut stream).await.concat().contains("timeout"));
-    // 이벤트 하나가 너무 크다 / 전체가 너무 크다
     r.upstream.respond_chunks(200, &[&[b'a'; 200]], End::Eof);
     let mut stream = r
         .proxy
@@ -409,7 +400,6 @@ async fn an_upstream_error_status_becomes_a_fixed_body_without_the_upstream_text
         .unwrap();
     assert_eq!(stream.status(), 429);
     assert_eq!(collect(&mut stream).await, [r#"{"error":{"status":429}}"#]);
-    // 상류에 닿지 못하면 스트림이 아니라 오류다
     r.upstream.fail();
     assert!(matches!(
         r.proxy.forward_stream(request(STREAM_BODY, &[])).await,
@@ -472,7 +462,7 @@ async fn only_operator_allowed_client_headers_pass_and_values_are_vetted() {
     assert_eq!(
         sent.iter().filter(|(k, _)| k == "x-api-key").count(),
         1,
-        "키 머리는 우리 것 하나뿐이다"
+        "provider key header must appear once"
     );
     assert!(sent.iter().all(|(k, v)| !v.contains("session-token")
         && !v.contains("nope")
@@ -482,11 +472,10 @@ async fn only_operator_allowed_client_headers_pass_and_values_are_vetted() {
     assert_eq!(
         sent.iter().filter(|(k, _)| k == "x-fixed").count(),
         1,
-        "고정 머리는 덮어쓰지 못한다"
+        "fixed provider header must not be overwritten"
     );
-    // 값에 제어 문자·너무 긴 값이 있으면 버린다
     let long = "a".repeat(600);
-    for bad in ["bad\r\nx-evil: 1", "tab\tvalue", &long, "한글"] {
+    for bad in ["bad\r\nx-evil: 1", "tab\tvalue", &long, "café"] {
         r.upstream.respond_chunks(200, &[b"data: {}\n\n"], End::Eof);
         collect(
             &mut r

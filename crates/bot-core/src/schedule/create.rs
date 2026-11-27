@@ -1,23 +1,22 @@
-//! `schedule.create` 승인 카드에 묶는 인자의 정규 표현과 SHA-256(`CreateSeal`).
+//! Canonical argument serialization and SHA-256 sealing (`CreateSeal`) for `schedule.create` approval cards.
 
 use super::{MAX_INSTRUCTION_BYTES, ScheduleSpec, Timing, utc};
 use crate::{canon, port::Error};
 use serde_json::{Value, json};
 
-/// 카드에 표시할 schedule.create 인자와 그 UTF-8 바이트의 SHA-256.
 pub struct CreateSeal {
     pub canonical: String,
     pub sha256: [u8; 32],
 }
 
-/// IANA 시간대 정식 이름 여부(프로필 검증·승인 봉인·저장소가 같은 목록을 쓰도록 단일화).
+/// Validates canonical IANA timezone names (shared by profile validation, sealing, and the store).
 pub fn valid_iana_timezone(name: &str) -> bool {
     jiff_tzdb::get(name).is_some_and(|(canon, _)| canon == name)
 }
 
 impl ScheduleSpec {
-    /// 현재 시각을 읽지 않는다. 완료 호출의 재전달에서도 같은 지문을 만든다.
-    /// 호출자는 생략된 시간대를 요청이 고정한 프로필 판본의 값으로 먼저 채운다.
+    /// Deterministic (never reads wall clock) so redeliveries produce the same digest;
+    /// callers must fill omitted timezones from the pinned profile first.
     pub fn seal_create(&self) -> Result<CreateSeal, Error> {
         let Self {
             timing,

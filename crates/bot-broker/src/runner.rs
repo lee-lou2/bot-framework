@@ -1,11 +1,9 @@
-//! 도구 실행기: 승인까지 끝난 호출 하나를 별도 샌드박스의 MCP 서버로 실행한다(`ToolRunner` 구현).
+//! Sandboxed and remote MCP tool runner implementing `ToolRunner`.
 //!
-//! 호출마다 새로 만든다: 선언한 자격만 이 프로필의 이름공간에서 풀어 환경에 넣고(형제 도구의 자격은 없다),
-//! 선언한 호스트로만 가는 egress 프록시를 열고, 샌드박스를 띄워 MCP를 협상하고, 입력 스키마를 선언과 대조한 뒤
-//! 도구 하나만 `_meta` 호출 ID와 함께 부른다. 결과는 형식·크기·자격 노출을 검사하고 프로세스를 끝낸다.
-//!
-//! 실패 분류가 복구를 정한다: `tools/call`을 보내기 전 실패는 `NotSent`(미실행 입증), 보낸 뒤 결과를 모르면
-//! `Unknown`, 실행은 끝났지만 결과를 막았으면 `Blocked`다.
+//! Each call spawns an isolated MCP server with only its declared profile secrets and an egress
+//! proxy limited to declared hosts intersected with operator caps. Pre-send failures return
+//! `NotSent`, uncertain post-send failures return `Unknown`, and vetted outputs violating shape,
+//! size, or credential checks return `Blocked`.
 
 use crate::{
     canon::canonicalize,
@@ -39,16 +37,13 @@ use std::{
 };
 use tokio::{sync::watch, time::timeout};
 
-/// 호스트(운영자)가 등록한 것: 설치한 서버 판본과 프로필별 egress 상한.
+/// Operator-registered server revisions, egress caps, private route overrides, and remote endpoints.
 #[derive(Clone, Debug, Default)]
 pub struct HostRegistry {
-    /// 서버 별칭 → 고정한 실행 파일·이미지 판본.
     pub servers: BTreeMap<String, String>,
-    /// 프로필 → 운영자가 정한 egress 상한. 없으면 도구가 선언한 호스트만 허용한다.
     pub egress_caps: BTreeMap<ProfileId, Vec<HostPort>>,
-    /// 프로필 → 운영자가 명시한 사설/로컬 고정 목적지 `(host, port) -> SocketAddr`.
     pub private_egress: BTreeMap<ProfileId, BTreeMap<(String, u16), std::net::SocketAddr>>,
-    /// 원격(Streamable HTTP) 서버 별칭 → 접속 대상. 이 별칭은 `servers`에도 있다(판본은 `Remote::revision`). 원격 서버는 샌드박스를 거치지 않고 브로커가 직접 연결한다.
+    /// Remote Streamable HTTP servers (also listed in `servers` under `Remote::revision`); called directly without a sandbox.
     pub remote: BTreeMap<String, Remote>,
 }
 
@@ -65,7 +60,6 @@ pub struct McpRunner {
     deps: Deps,
     host: std::sync::RwLock<HostRegistry>,
     cfg: RunnerConfig,
-    /// 원격 서버로 나가는 전송. 없으면 원격 서버로 가는 호출은 실행하지 않는다.
     wire: Option<Arc<dyn RemoteWire>>,
 }
 
@@ -85,7 +79,7 @@ fn kind_name(kind: &ConversationKind) -> &'static str {
     }
 }
 
-/// `tools/call`의 `params._meta`. 호스트가 넣으며 모델이 지정할 수 없다.
+/// Host-supplied `params._meta` injected into `tools/call`; models cannot override these keys.
 fn meta(job: &ToolJob) -> String {
     let mut out = format!("{{\"bot/call-id\":{}", json_quote(&job.call.0));
     if let Some(to) = &job.reply_to {
@@ -99,8 +93,7 @@ fn meta(job: &ToolJob) -> String {
             json_quote(kind_name(&to.kind)),
         ));
     }
-    // 외부 멱등키는 [profile-id, run-id, call-id](다단계면 step도)다. 호출 ID는 run 안의 위치라 서로 다른 run의 첫 호출이
-    // 같을 수 있으므로 셋을 함께 넣는다. generation·claim은 인계해도 같은 논리 호출이어야 하므로 키에 쓰지 않는다.
+    // External idempotency keys use [profile-id, run-id, call-id] (excluding generation/claim so handovers preserve logical identity).
     out.push_str(&format!(
         ",\"bot/generation\":{},\"bot/principal\":{},\"bot/profile-id\":{},\"bot/run-id\":{},\"bot/trigger\":{}}}",
         job.attempt.generation.0,
@@ -112,10 +105,8 @@ fn meta(job: &ToolJob) -> String {
     out
 }
 
-/// 환경 변수 값 하나의 최대 길이(바이트). 프로필 검증이 더 좁게 막지만 시작 직전에도 한도를 둔다.
 const MAX_ENV_VALUE: usize = 8 << 10;
 
-/// 단계 원장 콜백을 프록시의 전용 주소로 받는 처리기.
 struct EffectLocal(EffectChannel);
 
 impl LocalService for EffectLocal {
@@ -124,11 +115,10 @@ impl LocalService for EffectLocal {
     }
 }
 
-/// 전용 주소로 단계 원장을 받는 샌드박스에 알려 줄 주소.
 const EFFECT_URL: &str = "http://bot-effects.invalid/effect";
 
-/// 서버가 내세우는 도구 정의(`entry`)가 선언과 맞는가. 정의 해시가 고정된 도구(`tools.lock.yaml`)는 서버의 이름·설명·입력 스키마가 해시와 같아야 한다
-/// (설명만 바뀐 것도 막는다: 도구 오염). 다르거나 사라졌으면 호출하기 전에 `Refused`다. 그 밖에는 입력 스키마가 선언과 같아야 한다(아니면 `NotSent`).
+/// Verifies the server's advertised tool definition against a pinned `tools.lock.yaml` hash
+/// (guarding against description poisoning) and canonical `inputSchema`.
 fn check_definition(tool: &Tool, entry: Option<&Value>, declared: &str) -> Result<(), Ran> {
     if let Some(pin) = &tool.definition {
         match entry {
@@ -149,11 +139,10 @@ fn check_definition(tool: &Tool, entry: Option<&Value>, declared: &str) -> Resul
     }
 }
 
-/// 구조화 결과의 모든 키와 디코딩한 문자열 값을 검사한다(직렬화한 글만 보면 이스케이프가 필요한 문자가 든 자격을 놓친다).
+/// Scans decoded keys, string values, and numeric tokens so JSON escapes cannot conceal credentials.
 fn structured_blocked(value: &Value, credentials: &[Vec<u8>]) -> bool {
     match value {
         Value::String(text) => blocks_output(text, credentials),
-        // 숫자 토큰도 글이다(숫자로만 된 자격이 숫자로 오는 경우)
         Value::Number(number) => blocks_output(&number.to_string(), credentials),
         Value::Array(items) => items
             .iter()
@@ -175,13 +164,11 @@ impl McpRunner {
         }
     }
 
-    /// 원격 서버로 나가는 전송(조립하는 곳이 이름 풀이 검사·TLS를 맡는다, `mcp::wire`).
     pub fn with_wire(mut self, wire: Arc<dyn RemoteWire>) -> Self {
         self.wire = Some(wire);
         self
     }
 
-    /// 실행 중 MCP 서버 추가·제거 뒤 호스트 등록부를 원자적으로 교체한다.
     pub fn update_host(&self, next: HostRegistry) {
         *self.host.write().unwrap_or_else(|e| e.into_inner()) = next;
     }
@@ -193,12 +180,10 @@ impl McpRunner {
     async fn execute(&self, job: ToolJob) -> Ran {
         let started = tokio::time::Instant::now();
         let tool = &job.tool.tool;
-        // 이 도구의 시간 예산. 실효 호출 한도(선언 또는 기본 60초)가 지금 호스트 천장을 넘으면(천장을 내렸거나 복원한 옛 선언) 아무것도 시작하지 않고 거절한다.
         let budget = match self.cfg.budget(tool) {
             Ok(budget) => budget,
             Err(why) => return Ran::Refused(why),
         };
-        // 승인이 묶은 설치 판본이 지금 등록부와 같아야 한다.
         let (image, remote, egress_cap, private_routes) = {
             let host = self.host();
             let Some(image) = host.servers.get(&tool.server).cloned() else {
@@ -218,15 +203,12 @@ impl McpRunner {
         {
             return Ran::NotSent;
         }
-        // 원격 서버는 샌드박스 없이 브로커가 직접 연결한다
         if let Some(remote) = remote {
             return self.execute_remote(&job, &remote, budget).await;
         }
-        // 샌드박스가 이 서버를 실행할 수 있어야 한다(상태 볼륨을 요구하는데 지원하지 않으면 자격을 풀기 전에 시작하지 않는다).
         if self.deps.sandbox.admit(&tool.server, &image).is_err() {
             return Ran::NotSent;
         }
-        // 선언한 자격만, 이 프로필의 이름공간에서 푼다.
         let (mut env, mut credentials) = (Vec::new(), Vec::new());
         if !tool.secrets.is_empty() {
             let Ok(store) = self
@@ -238,7 +220,6 @@ impl McpRunner {
                 return Ran::NotSent;
             };
             for (var, name) in &tool.secrets {
-                // 로더·셸·프록시·호스트 예약 이름과 호스트 전용 자격(비공개 접수의 지문 키)은 자격을 풀기 전에 거절한다.
                 if bot_core::profile::forbidden_env_name(var)
                     || crate::private::reserved_secret(name)
                 {
@@ -257,9 +238,7 @@ impl McpRunner {
                 env.push((var.clone(), text));
             }
         }
-        // 도구가 고른 비밀 아닌 환경 변수: 이름이 로더·셸·프록시·호스트 예약이면 안 되고, 선언한 비밀의 변수 이름과 겹치면 안 된다
-        // (스키마 검증을 이미 거쳤더라도 시작 직전에 한 번 더 본다). 값은 결과 검사용 자격에 넣지 않는다(비밀이 아니다).
-        // 값은 도구가 선언한 이름에 대해서만, 선언한 이름마다 정확히 하나씩 온다(호스트가 고른 값이 선언과 어긋나면 시작하지 않는다).
+        // Require an exact 1:1 match with `tool.env` and block reserved or secret-shadowing names.
         let given: BTreeSet<&String> = job.env.iter().map(|(name, _)| name).collect();
         if given.len() != job.env.len()
             || given.len() != tool.env.len()
@@ -278,9 +257,7 @@ impl McpRunner {
             }
             env.push((name.clone(), value.clone()));
         }
-        // 샌드박스가 FD를 줄 수 없으면 단계 원장은 프록시의 전용 주소로 받는다.
         let via_proxy = tool.effects && self.deps.sandbox.effects_via_proxy();
-        // 선언한 호스트 ∩ 운영자 상한으로만 나가는 프록시. 허용할 곳이 없으면 네트워크는 0이다.
         let policy = EgressPolicy::new(&job.tool.egress, egress_cap.as_deref());
         let (mut proxy, mut endpoint, mut host_env) = (None, None, Vec::new());
         let mut hosts: Vec<String> = policy
@@ -299,7 +276,7 @@ impl McpRunner {
             if let Some(routes) = private_routes {
                 proxy_cfg.private_routes = routes;
             }
-            // 프록시 암호도 이 호출이 쓰는 자격이다(결과와 단계 보고 검사에 함께 쓴다)
+            // Include the per-call proxy password in output and effect-report credential screening.
             credentials.push(password.clone().into_bytes());
             if via_proxy {
                 let chan = EffectChannel::new(
@@ -351,8 +328,7 @@ impl McpRunner {
             effects: tool.effects && effect_channel.is_none(),
             limits: Limits { wall: budget.wall },
         };
-        // 시작부터 쓰기·응답까지 절대 기한 하나로 묶는다. 어느 단계에서 막혀도(쓰기가 막혀 타이머에 못 닿는 경우 포함) 기한이 끝나면
-        // 프로세스 그룹과 프록시를 닫고 "호출을 보냈는가"로 정산한다.
+        // Bound spawn, handshake, call, and response under one wall-clock budget.
         let ran = match timeout(budget.wall, self.deps.sandbox.spawn(spec)).await {
             Ok(Ok(process)) => {
                 let Process {
@@ -372,22 +348,20 @@ impl McpRunner {
                     Err(_) if sent.load(Ordering::SeqCst) => Ran::Unknown("wall_timeout"),
                     Err(_) => Ran::NotSent,
                 };
-                // 결과를 얻었으면 프로세스 그룹 전체를 끝내고 확인한다.
                 let confirmed = matches!(
                     timeout(self.cfg.terminate_timeout, handle.terminate()).await,
                     Ok(Ok(()))
                 );
                 match ran {
-                    // 띄운 프로세스가 끝났는지 모르면 "보내지 않았다"를 입증할 수 없다(남은 프로세스가 보낼 수 있다).
+                    // Non-execution cannot be proven if the spawned process group is not confirmed gone.
                     Ran::NotSent | Ran::Rejected if !confirmed => {
                         Ran::Unknown("terminate_unconfirmed")
                     }
                     other => other,
                 }
             }
-            // 프로세스를 띄우지 못했다.
             Ok(Err(_)) => Ran::NotSent,
-            // 띄우는 도중 기한이 지났다: 만들어진 프로세스가 남아 있을 수 있으니 소유자 기준으로 끝내고 확인한다.
+            // Spawn timed out: a child may still exist, so reap by owner before claiming `NotSent`.
             Err(_) => match timeout(
                 self.cfg.terminate_timeout,
                 self.deps.sandbox.reap(&job.owner),
@@ -418,7 +392,6 @@ impl McpRunner {
         if session.initialize(limit).await.is_err() {
             return Ran::NotSent;
         }
-        // 일치하는 도구 하나만 부른다: 서버가 내세우는 정의가 선언과 같아야 한다.
         let Some(declared) = parse(&job.tool.tool.input.0).and_then(|v| canonicalize(&v)) else {
             return Ran::NotSent;
         };
@@ -429,7 +402,6 @@ impl McpRunner {
         if let Err(ran) = check_definition(&job.tool.tool, entry.as_ref(), &declared) {
             return ran;
         }
-        // 파이프 채널은 `effects: true`이고 샌드박스가 FD를 줄 수 있을 때만 있다(프록시 경유 샌드박스는 파이프가 없다).
         let channel = match (job.tool.tool.effects, effects) {
             (true, Some(pipe)) => {
                 let (stop, signal) = watch::channel(false);
@@ -457,13 +429,12 @@ impl McpRunner {
             Err(_) => Err(McpError::Io),
         };
         if let Some((stop, task)) = channel {
-            // 처리 중이던 콜백 프레임은 마치고 닫는다.
             let _ = stop.send(true);
             let _ = timeout(Duration::from_secs(5), task).await;
         }
         match result {
             Ok(value) => self.vet(&value, credentials),
-            // 잘못된 요청·없는 메서드·잘못된 인자는 서버가 실행 전에 거절한 것이다. 그 밖의 서버 오류는 효과를 알 수 없다.
+            // JSON-RPC invalid request / method not found / invalid params prove pre-execution rejection.
             Err(McpError::Server(-32602..=-32600)) => Ran::Rejected,
             Err(McpError::Server(_)) => Ran::Unknown("server_error"),
             Err(McpError::Timeout) => Ran::Unknown("timeout"),
@@ -473,7 +444,6 @@ impl McpRunner {
         }
     }
 
-    /// 결과의 형식·크기·알려진 자격 노출을 검사한 뒤 고정 형식으로 다시 만든다.
     fn vet(&self, value: &Value, credentials: &[Vec<u8>]) -> Ran {
         let output = match mcp::parse_result(value) {
             Ok(output) => output,
@@ -495,7 +465,7 @@ impl McpRunner {
                 return Ran::Blocked("result_credential");
             }
         }
-        // 후속 확인 요청도 모델에게 가는 글을 담을 수 있으니 같은 검사(크기·자격 노출·정규화)를 받는다.
+        // Wake and pass markers can carry model-visible text, so vet them identically.
         for marker in [&output.wake, &output.pass].into_iter().flatten() {
             let Some(text) = canonicalize(marker) else {
                 return Ran::Blocked("result_shape");
@@ -548,12 +518,10 @@ impl ToolRunner for McpRunner {
             .collect()
     }
 
-    /// 원격 서버는 연결을 닫아도 원격 실행이 계속될 수 있다: `reap` 성공이 끝남의 증명이 아니다.
     fn reap_proves_end(&self, server: &str) -> bool {
         !self.host().remote.contains_key(server)
     }
 
-    /// 이 프로필의 보관소에 선언한 자격 이름이 모두 있는가(없으면 `Missing`). 값은 읽어도 곧바로 버리고 쓰거나 남기지 않는다.
     fn admit_secrets(&self, profile: &ProfileId, names: &[SecretName]) -> Reply<'_, ()> {
         let (profile, names) = (profile.clone(), names.to_vec());
         Box::pin(async move {

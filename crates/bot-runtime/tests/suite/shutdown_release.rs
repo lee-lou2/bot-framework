@@ -1,5 +1,5 @@
-//! 종료 반납(실제 PG): 같은 활성 집합·시도 한도 1의 워커가 일하는 중에 종료 신호를 받아 유예(`grace`)를 넘기면 모델을 멈추고 정리를 확인한 뒤
-//! run이 ready·시도 0으로 돌아가고 다른 워커가 이어서 성공한다. 정리를 확인하지 못하면 반납하지 않는다. 옛 claim의 반납은 새 소유자의 행을 바꾸지 못한다.
+//! PostgreSQL tests for graceful shutdown release: after `grace` expires, the worker stops the model, confirms quiesce, and releases the run to `ready` with zero attempts spent.
+//! Unconfirmed quiesce withholds release so lease expiry handles takeover; stale claims cannot release runs already taken over.
 
 use crate::support::*;
 use bot_broker::ports::ToolRunner;
@@ -30,7 +30,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 마지막 시도 한도(1)로 활성 집합 `set`에 묶인 저장소 핸들. 인계(리스 만료)가 시도를 쓰면 곧바로 dead letter다.
+/// Store handle bound to activation `set` with `max_attempts = 1` so any attempt-consuming expiry dead-letters the run.
 fn handle(w: &World, worker: &str, set: &str) -> Arc<Store> {
     Arc::new(
         Store::from_pool(
@@ -53,7 +53,6 @@ fn cfg() -> WorkerConfig {
     }
 }
 
-/// 사건을 순서대로 적는 공유 기록
 #[derive(Default, Clone)]
 struct Log(Arc<Mutex<Vec<String>>>);
 
@@ -69,7 +68,6 @@ impl Log {
     }
 }
 
-/// 중단 신호가 올 때까지 도는 CLI 모양 실행기(정리 전에 멈췄는지 보려고 순서를 남긴다).
 struct Hanging(Log);
 
 impl ModelRunner for Hanging {
@@ -90,7 +88,6 @@ impl ModelRunner for Hanging {
     }
 }
 
-/// 정리 확인 입구: 부른 시도를 적고 `result`를 낸다. `gate`가 있으면 시험이 허락할 때까지 기다린다(그 사이 소유권을 바꾸려고).
 struct Quiet {
     log: Log,
     attempts: Mutex<Vec<Attempt>>,
@@ -140,7 +137,7 @@ async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("기다리던 일이 일어나지 않았다: {what}"));
+    .unwrap_or_else(|_| panic!("timed out waiting for: {what}"));
 }
 
 async fn attempts(w: &World, run: &RunId) -> i32 {
@@ -165,7 +162,7 @@ async fn a_worker_that_gets_the_stop_signal_mid_run_returns_it_after_the_grace_a
     let Some(w) = world().await else {
         return;
     };
-    let run = w.accept("req-1", "오래 걸리는 일").await;
+    let run = w.accept("req-1", "Long-running task").await;
     let log = Log::default();
     let quiet = Quiet::new(&log, None, None);
     let old = handle(&w, "old-worker", "set-1");
@@ -177,27 +174,23 @@ async fn a_worker_that_gets_the_stop_signal_mid_run_returns_it_after_the_grace_a
         let worker = worker.clone();
         tokio::spawn(async move { worker.run(shutdown).await })
     };
-    wait_for("모델이 시작됨", || {
-        log.position("model_started").is_some()
-    })
-    .await;
+    wait_for("model started", || log.position("model_started").is_some()).await;
     let held = generation(&w, &run).await;
     w.pg.assert_state(&run, "leased").await;
 
-    // 종료 신호: 유예(300ms) 안에 끝나지 않으니 정리하고 돌려준다
     stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(10), serving)
         .await
-        .expect("워커가 끝난다")
+        .expect("worker must exit")
         .unwrap();
 
     w.pg.assert_state(&run, "ready").await;
-    assert_eq!(attempts(&w, &run).await, 0, "시도를 쓰지 않았다");
-    assert_eq!(generation(&w, &run).await, held + 1, "세대를 한 번 올렸다");
+    assert_eq!(attempts(&w, &run).await, 0);
+    assert_eq!(generation(&w, &run).await, held + 1);
     let order = (log.position("model_stopped"), log.position("quiesce"));
     assert!(
         matches!(order, (Some(stopped), Some(confirmed)) if stopped < confirmed),
-        "모델을 멈춘 뒤에 정리를 확인했다: {:?}",
+        "quiesce must run after model stops: {:?}",
         log.all()
     );
     assert_eq!(lock(&quiet.attempts).len(), 1);
@@ -207,7 +200,6 @@ async fn a_worker_that_gets_the_stop_signal_mid_run_returns_it_after_the_grace_a
         1
     );
 
-    // 다른 워커가 이어받아 끝낸다: 세대는 또 오르지 않고 시도는 여전히 0이다
     let next = handle(&w, "new-worker", "set-1");
     let resumed = w.worker(&next, demo(), cfg());
     assert_eq!(resumed.run_once().await, Some(Outcome::Succeeded));
@@ -221,7 +213,7 @@ async fn an_unconfirmed_cleanup_leaves_the_lease_to_expire_and_the_handover_spen
     let Some(w) = world().await else {
         return;
     };
-    let run = w.accept("req-1", "오래 걸리는 일").await;
+    let run = w.accept("req-1", "Long-running task").await;
     let log = Log::default();
     let old = handle(&w, "old-worker", "set-1");
     let worker = w
@@ -232,17 +224,13 @@ async fn an_unconfirmed_cleanup_leaves_the_lease_to_expire_and_the_handover_spen
         let worker = worker.clone();
         tokio::spawn(async move { worker.run(shutdown).await })
     };
-    wait_for("모델이 시작됨", || {
-        log.position("model_started").is_some()
-    })
-    .await;
+    wait_for("model started", || log.position("model_started").is_some()).await;
     stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(10), serving)
         .await
-        .expect("워커가 끝난다")
+        .expect("worker must exit")
         .unwrap();
 
-    // 확인하지 못했으니 반납하지 않는다: run은 leased로 남고 리스 만료가 인계한다
     w.pg.assert_state(&run, "leased").await;
     assert_eq!(
         w.pg.scalar::<i64>("select count(*) from bot_audit where action = 'run.release'")
@@ -257,7 +245,7 @@ async fn an_unconfirmed_cleanup_leaves_the_lease_to_expire_and_the_handover_spen
     let next = handle(&w, "new-worker", "set-1");
     assert!(
         next.claim().await.unwrap().is_none(),
-        "같은 집합의 만료라 시도를 쓰고 한도 1이라 dead letter다(인계 규칙 그대로)"
+        "same-activation expiry consumes the sole attempt and dead-letters the run"
     );
     w.pg.assert_state(&run, "dead").await;
 }
@@ -267,7 +255,7 @@ async fn a_claim_taken_over_during_the_cleanup_is_not_touched_by_the_late_releas
     let Some(w) = world().await else {
         return;
     };
-    let run = w.accept("req-1", "오래 걸리는 일").await;
+    let run = w.accept("req-1", "Long-running task").await;
     let log = Log::default();
     let gate = Arc::new(Notify::new());
     let quiet = Quiet::new(&log, None, Some(gate.clone()));
@@ -280,15 +268,11 @@ async fn a_claim_taken_over_during_the_cleanup_is_not_touched_by_the_late_releas
         let worker = worker.clone();
         tokio::spawn(async move { worker.run(shutdown).await })
     };
-    wait_for("모델이 시작됨", || {
-        log.position("model_started").is_some()
-    })
-    .await;
+    wait_for("model started", || log.position("model_started").is_some()).await;
     stop.send(true).unwrap();
-    // 정리 확인이 진행 중인 동안(허락 전) 리스가 끝나 다른 워커가 인계한다(한도를 넉넉히 둔 핸들이라 시도를 써도 살아 있다)
     tokio::time::timeout(Duration::from_secs(10), quiet.called.notified())
         .await
-        .expect("정리 확인이 불리지 않았다");
+        .expect("quiesce must be called");
     w.pg.sql(&format!(
         "update bot_runs set lease_until_ms = bot_now_ms() - 1 where id = '{}'",
         run.0
@@ -307,14 +291,13 @@ async fn a_claim_taken_over_during_the_cleanup_is_not_touched_by_the_late_releas
     let taken = RunStore::claim(&*other)
         .await
         .unwrap()
-        .expect("다른 워커가 인계한다");
+        .expect("other worker takeover");
     assert_eq!(taken.attempt.run, run);
 
-    // 이제 늦은 정리가 끝나 옛 시도가 반납을 시도한다: 소유자가 아니니 아무것도 바꾸지 못한다
     gate.notify_one();
     tokio::time::timeout(Duration::from_secs(10), serving)
         .await
-        .expect("워커가 끝난다")
+        .expect("worker must exit")
         .unwrap();
     w.pg.assert_state(&run, "leased").await;
     assert_eq!(
@@ -327,18 +310,20 @@ async fn a_claim_taken_over_during_the_cleanup_is_not_touched_by_the_late_releas
             run.0
         ))
         .await as u64,
-        taken.attempt.claim.unwrap().0,
-        "새 소유자의 행을 건드리지 않았다"
+        taken.attempt.claim.unwrap().0
     );
     assert_eq!(
         w.pg.scalar::<i64>("select count(*) from bot_audit where action = 'run.release'")
             .await,
         0
     );
-    // 새 소유자는 그대로 일을 끝낼 수 있다
-    RunStore::finish(&*other, taken.attempt.clone(), done_text("이어서 마쳤어요"))
-        .await
-        .unwrap();
+    RunStore::finish(
+        &*other,
+        taken.attempt.clone(),
+        done_text("finished after takeover"),
+    )
+    .await
+    .unwrap();
     w.pg.assert_state(&run, "succeeded").await;
 }
 
@@ -350,7 +335,6 @@ fn done_text(text: &str) -> bot_core::command::Finish {
     }
 }
 
-/// 첫 차례에 읽기 도구 하나를 부르고, 결과를 받은 다음 차례에 마무리 글을 내는 Step 실행기.
 struct OneCall;
 
 impl ModelRunner for OneCall {
@@ -361,7 +345,7 @@ impl ModelRunner for OneCall {
         Box::pin(async move {
             if request.exchanges.is_empty() {
                 Ok(ModelStep::Calls {
-                    text: "목록을 볼게요".into(),
+                    text: "Listing events".into(),
                     calls: vec![PendingCall {
                         call: call_id(&request.attempt.run, 0, 0),
                         tool: ToolId("agenda.list".into()),
@@ -373,7 +357,7 @@ impl ModelRunner for OneCall {
                 })
             } else {
                 Ok(ModelStep::Final {
-                    text: "마쳤어요".into(),
+                    text: "Done".into(),
                     usage: Usage::default(),
                     outcome: Default::default(),
                 })
@@ -382,7 +366,6 @@ impl ModelRunner for OneCall {
     }
 }
 
-/// 운영 호스트의 도구 쪽 정리와 같은 일을 가짜 실행기로 한다: 이 시도가 시작해 둔 호출의 소유 표지를 저장소에서 읽어 `reap`한다.
 struct ReapTools {
     store: Arc<Store>,
     runner: Arc<bot_broker::testing::FakeRunner>,
@@ -399,10 +382,9 @@ impl Quiesce for ReapTools {
     }
 }
 
-/// 읽기 도구를 시작했지만 끝나지 않은 채 종료 신호를 받은 worker가 정리 뒤 run을 돌려준 상태까지 만든다. 돌려주는 값은 (run, 시작한 세대).
 async fn stopped_with_a_started_tool(w: &World) -> (RunId, i64) {
-    let run = w.accept("req-1", "일정 알려줘").await;
-    let _gate = w.runner.hold_next(); // 첫 도구 실행은 끝나지 않는다
+    let run = w.accept("req-1", "Show today's agenda").await;
+    let _gate = w.runner.hold_next();
     let old = handle(w, "old-worker", "set-1");
     let worker = w
         .worker(&old, Arc::new(SingleModel(Arc::new(OneCall))), cfg())
@@ -415,12 +397,12 @@ async fn stopped_with_a_started_tool(w: &World) -> (RunId, i64) {
         let worker = worker.clone();
         tokio::spawn(async move { worker.run(shutdown).await })
     };
-    wait_for("도구가 시작됨", || w.runner.jobs().len() == 1).await;
+    wait_for("tool started", || w.runner.jobs().len() == 1).await;
     let held = generation(w, &run).await;
     stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(10), serving)
         .await
-        .expect("워커가 끝난다")
+        .expect("worker must exit")
         .unwrap();
     (run, held)
 }
@@ -437,20 +419,17 @@ async fn a_tool_in_flight_at_the_stop_signal_is_reaped_before_the_release_and_re
     assert_eq!(generation(&w, &run).await, held + 1);
     assert_eq!(
         w.runner.reaped(),
-        [format!("{}.{}.{}", run.0, held, call_id(&run, 0, 0).0)],
-        "반납 전에 시작해 둔 호출의 프로세스를 끝내고 확인했다"
+        [format!("{}.{}.{}", run.0, held, call_id(&run, 0, 0).0)]
     );
     assert_eq!(
         w.pg.scalar::<String>("select state from bot_calls").await,
-        "started",
-        "호출은 시작한 채로 남는다 — 다음 점유의 복구가 판정한다"
+        "started"
     );
 
-    // 다음 점유: 옛 프로세스 종료를 증명할 수 있으니 같은 호출을 한 번 더 실행해 끝낸다(읽기 도구)
     let next = handle(&w, "new-worker", "set-1");
     let resumed = w.worker(&next, Arc::new(SingleModel(Arc::new(OneCall))), cfg());
     assert_eq!(resumed.run_once().await, Some(Outcome::Succeeded));
-    assert_eq!(w.runner.jobs().len(), 2, "증명한 뒤에 한 번 더 실행했다");
+    assert_eq!(w.runner.jobs().len(), 2);
     w.pg.assert_state(&run, "succeeded").await;
 }
 
@@ -462,12 +441,11 @@ async fn the_next_claim_does_not_rerun_a_started_tool_when_it_cannot_prove_the_o
     let (run, _) = stopped_with_a_started_tool(&w).await;
     w.pg.assert_state(&run, "ready").await;
 
-    // 다음 호스트는 옛 프로세스의 종료를 확인하지 못한다: 결과를 모르는 호출을 다시 실행하지 않고 보류한다
     w.runner.set_reap_ok(false);
     let next = handle(&w, "new-worker", "set-1");
     let resumed = w.worker(&next, Arc::new(SingleModel(Arc::new(OneCall))), cfg());
     assert_eq!(resumed.run_once().await, Some(Outcome::Parked));
-    assert_eq!(w.runner.jobs().len(), 1, "다시 실행하지 않았다");
+    assert_eq!(w.runner.jobs().len(), 1);
     assert_eq!(
         w.pg.scalar::<String>("select state from bot_calls").await,
         "held"

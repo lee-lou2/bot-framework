@@ -1,5 +1,3 @@
-//! 제공자 종류별 사실(`impl Provider`): 서비스 키 자격 이름·모델 VM 필요 여부·운영자용 한 줄 설명. 새 종류를 더하면 이 표에도 한 줄을 더한다.
-
 use super::*;
 use serde_json::json;
 
@@ -29,7 +27,6 @@ fn each_kind_names_the_credential_it_needs_and_whether_it_runs_in_the_model_vm()
             Some("o-key"),
             false,
         ),
-        // 키 없이 쓸 수 있는 것은 loopback 로컬 서버뿐이다
         (
             json!({"kind": "openai-api", "model": "m", "endpoint": "http://127.0.0.1:11434/v1"}),
             None,
@@ -45,26 +42,29 @@ fn each_kind_names_the_credential_it_needs_and_whether_it_runs_in_the_model_vm()
 #[test]
 fn the_description_shows_names_and_hosts_but_neither_paths_nor_values() {
     for (entry, expected) in [
-        (json!({"kind": "demo"}), "a: demo(외부 호출 없는 데모 모델)"),
+        (
+            json!({"kind": "demo"}),
+            "a: demo (local demo model, no external calls)",
+        ),
         (
             claude(),
-            "a: claude-cli · 모델 m · 상류 h.example · 자격 이름 claude-key",
+            "a: claude-cli · model m · upstream h.example · secret claude-key",
         ),
         (
             json!({"kind": "claude-cli", "model": "m", "endpoint": "https://h.example/v1/private-path", "secret": "claude-key", "effort": "high"}),
-            "a: claude-cli · 모델 m · 상류 h.example · 자격 이름 claude-key · 사고 수준 high",
+            "a: claude-cli · model m · upstream h.example · secret claude-key · effort high",
         ),
         (
             json!({"kind": "anthropic-api", "model": "m", "endpoint": "https://h.example/v1", "secret": "a-key", "max_tokens": 100, "effort": "medium"}),
-            "a: anthropic-api · 모델 m · 상류 h.example · 자격 이름 a-key · 최대 토큰 100 · 사고 수준 medium",
+            "a: anthropic-api · model m · upstream h.example · secret a-key · max tokens 100 · effort medium",
         ),
         (
             json!({"kind": "openai-api", "model": "m", "endpoint": "https://h.example:8443/v1", "secret": "o-key", "max_completion_tokens": 7, "effort": "low"}),
-            "a: openai-api · 모델 m · 상류 h.example:8443 · 자격 이름 o-key · 최대 토큰 7(max_completion_tokens) · 사고 수준 low",
+            "a: openai-api · model m · upstream h.example:8443 · secret o-key · max tokens 7 (max_completion_tokens) · effort low",
         ),
         (
             json!({"kind": "openai-api", "model": "m", "endpoint": "http://127.0.0.1:11434/v1"}),
-            "a: openai-api · 모델 m · 상류 127.0.0.1:11434 · 서비스 키 없음(loopback 전용)",
+            "a: openai-api · model m · upstream 127.0.0.1:11434 · no service key (loopback only)",
         ),
     ] {
         assert_eq!(provider(entry).describe("a"), expected);

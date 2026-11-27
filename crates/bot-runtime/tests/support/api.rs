@@ -1,4 +1,4 @@
-//! API 직접 호출 실행기 시험의 공통 도구: 서비스 키 보관소·판본 확인 가짜, 두 형식의 상류 응답 만들기, 실행기 조립.
+//! Shared fixtures for direct API model runner tests: secret store and active-check fakes, dual-dialect reply builders, and runner assembly.
 #![allow(dead_code)]
 
 use super::upstream::{FakeApi, Reply, Seen};
@@ -17,10 +17,8 @@ use std::{
     },
 };
 
-/// 시험용 서비스 키(8바이트 이상의 보이는 ASCII)
 pub const KEY: &str = "sk-test-0123456789abcdef";
 
-/// 프로필 자격 이름 → 값. 값을 읽은 횟수를 센다(구판이 키를 읽지 않았는지 보려고).
 pub struct Keys {
     values: BTreeMap<String, Vec<u8>>,
     unavailable: bool,
@@ -87,7 +85,7 @@ impl ProfileSecrets for Handle {
     }
 }
 
-/// 이 스레드에서 나온 우리 크레이트(`bot_*`)의 `tracing` 이벤트 필드를 글로 모은다(로그에 키·본문이 없는지 보려고. 드라이버·시험 도구의 로그는 거른다). 현재 스레드 런타임(`#[tokio::test]` 기본)에서는 생성한 작업의 이벤트도 같은 스레드다.
+/// Captures `bot_*` tracing event fields on the current thread to verify keys and payloads never leak to logs.
 #[derive(Clone, Default)]
 pub struct Logs(Arc<std::sync::Mutex<Vec<String>>>);
 
@@ -121,7 +119,6 @@ impl tracing::Subscriber for Logs {
 }
 
 impl Logs {
-    /// 모인 이벤트 전체(줄마다 한 이벤트)
     pub fn text(&self) -> String {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).join("\n")
     }
@@ -131,7 +128,6 @@ impl Logs {
     }
 }
 
-/// 판본 확인 가짜
 #[derive(Clone, Copy)]
 pub enum Gate {
     Open,
@@ -150,7 +146,7 @@ impl ActiveCheck for Gate {
     }
 }
 
-/// 키를 읽는 사이에 활성 판본이 바뀌는 확인: 키를 읽기 전에는 같은 판본이고 읽은 뒤에는 구판이다.
+/// Returns `Ok` before the key is read and `Stale` afterward to simulate activation change mid-flight.
 pub struct RevokedByKeyRead(pub Arc<Keys>);
 
 impl ActiveCheck for RevokedByKeyRead {
@@ -164,16 +160,14 @@ impl ActiveCheck for RevokedByKeyRead {
     }
 }
 
-/// 이 상류의 기준 주소(Anthropic은 경로 없음, OpenAI 호환은 `/v1`까지)
 pub fn endpoint(kind: ApiKind, api: &FakeApi) -> ApiEndpoint {
     let text = match kind {
         ApiKind::Anthropic => api.url(),
         ApiKind::OpenAi => format!("{}/v1", api.url()),
     };
-    ApiEndpoint::parse(&text).expect("loopback 주소")
+    ApiEndpoint::parse(&text).expect("loopback endpoint")
 }
 
-/// 요청 경로
 pub fn path(kind: ApiKind) -> &'static str {
     match kind {
         ApiKind::Anthropic => "/v1/messages",
@@ -193,26 +187,22 @@ pub fn settings(kind: ApiKind, api: &FakeApi, secret: Option<&str>) -> ApiSettin
     }
 }
 
-/// 키 `KEY`를 `model-key`로 가진 실행기
 pub fn api_runner(kind: ApiKind, api: &FakeApi) -> ApiRunner {
     ApiRunner::new(
         settings(kind, api, Some("model-key")),
         Keys::with("model-key", KEY.as_bytes()),
         Arc::new(Gate::Open),
     )
-    .expect("실행기")
+    .expect("api runner")
 }
 
 pub const KINDS: [ApiKind; 2] = [ApiKind::Anthropic, ApiKind::OpenAi];
 
-/// 응답 하나에서 모델이 부르는 도구
 #[derive(Clone)]
 pub struct Call {
     pub tool: &'static str,
     pub args: String,
-    /// 상류가 준 호출 ID
     pub id: &'static str,
-    /// 사고 서명(Gemini 호환)
     pub signature: Option<&'static str>,
 }
 
@@ -237,7 +227,6 @@ fn usage_json(kind: ApiKind, usage: Option<(u64, u64)>) -> Value {
     }
 }
 
-/// 최종 글 응답
 pub fn text(kind: ApiKind, text: &str, usage: Option<(u64, u64)>) -> Reply {
     let body = match kind {
         ApiKind::Anthropic => json!({
@@ -254,7 +243,6 @@ pub fn text(kind: ApiKind, text: &str, usage: Option<(u64, u64)>) -> Reply {
     Reply::Json(200, body.to_string())
 }
 
-/// 도구 호출 응답. 도구 이름은 요청이 보인 별칭으로 쓴다(요청에서 읽는다).
 pub fn calls(kind: ApiKind, text: &str, calls: Vec<Call>, usage: Option<(u64, u64)>) -> Reply {
     let text = text.to_owned();
     Reply::With(Arc::new(move |seen: &Seen| {
@@ -299,7 +287,6 @@ pub fn calls(kind: ApiKind, text: &str, calls: Vec<Call>, usage: Option<(u64, u6
     }))
 }
 
-/// 출력 한도에서 끊긴 응답(`with_call`이면 잘린 호출이 든다)
 pub fn cut(kind: ApiKind, with_call: bool) -> Reply {
     Reply::With(Arc::new(move |seen: &Seen| {
         let body = match kind {
@@ -307,7 +294,7 @@ pub fn cut(kind: ApiKind, with_call: bool) -> Reply {
                 let content = if with_call {
                     json!([{"type": "tool_use", "id": "t", "name": seen.alias("agenda.delete"), "input": {"event": "e"}}])
                 } else {
-                    json!([{"type": "text", "text": "부분 답"}])
+                    json!([{"type": "text", "text": "partial answer"}])
                 };
                 json!({"type": "message", "content": content, "stop_reason": "max_tokens", "usage": {"input_tokens": 5, "output_tokens": 4096}})
             }
@@ -315,7 +302,7 @@ pub fn cut(kind: ApiKind, with_call: bool) -> Reply {
                 let message = if with_call {
                     json!({"content": null, "tool_calls": [{"id": "t", "type": "function", "function": {"name": seen.alias("agenda.delete"), "arguments": "{\"event\":\"e"}}]})
                 } else {
-                    json!({"content": "부분 답"})
+                    json!({"content": "partial answer"})
                 };
                 json!({"choices": [{"message": message, "finish_reason": "length"}], "usage": {"prompt_tokens": 5, "completion_tokens": 4096}})
             }

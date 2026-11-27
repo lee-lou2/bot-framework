@@ -1,4 +1,4 @@
-//! 통합 시험 묶음(`bot-runtime`, 비카나리).
+//! Non-canary integration test suite for `bot-runtime`.
 
 mod support;
 

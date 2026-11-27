@@ -1,187 +1,192 @@
-# 관리 화면은 본인에게 맞는 범위만 보여 주고, 판정은 인증을 거쳐 브로커와 저장소에 맡긴다.
+# Admin UI and Observability
 
-`bot serve --role admin`이 axum API와 내장 화면을 연다. 관리 크레이트는 DB를 모른다. 조회·판정은 `bot_core::admin`의 포트(`AdminRead`·`AdminAct`)와 `Broker::decide`로만 하고, 감사 행은 상태 변경과 같은 커밋에 저장소가 쓴다. 화면과 API는 같은 인증 길을 지난다.
+English | [한국어](ko/admin.md)
 
-## 누가 무엇을 보나
+`bot serve --role admin` exposes the axum Admin API and embedded UI. `bot-admin` never accesses PostgreSQL directly: reads and mutations go strictly through `bot_core::admin` ports (`AdminRead`, `AdminAct`) and `Broker::decide`, with audit entries committed atomically alongside state changes. The UI and API share one authentication pipeline.
 
-로그인은 비밀 하나로 한다. 브라우저는 Basic(사용자 이름은 무시), 도구는 Bearer를 쓴다. 비밀은 신원 `Viewer{principal, operator}`에 묶인다. 신원이 하나도 없으면 라우트를 만들지 않는다(닫힌 채 시작). 루프백이 아닌 주소는 운영자가 명시해야 열린다.
+## Access Scope
 
-- **운영자**(한 호스트 한 운영자): 모든 프로필의 구조·실행·보류·감사·상태를 보고 보류를 판정한다.
-- **그 밖의 주체**: 자기 요청의 실행과 자기가 요청했거나 지정된 승인만 본다. 남의 실행은 존재 여부도 알리지 않는다(404).
+Authentication uses a single secret—HTTP Basic in browsers (username ignored) or `Authorization: Bearer` in tools—bound to `Viewer{principal, operator}`. If no credentials are configured, no routes are mounted (closed by default). Non-loopback bind addresses require explicit `remote: true`.
 
-## 인증 길
+- **Operator** (one per host): views structure, runs, holds, pre-approvals, audit logs, and status across all profiles; resolves holds; resumes/cancels runs; pauses/resumes pre-approvals.
+- **Other principals**: view only their own runs and approvals they requested or are designated to approve. Other principals' runs return `404` (existence hidden).
 
-관리 API는 호스트와 접속 출처를 확인한 뒤 신원을 인증한다. 변경 요청에는 CSRF 검사가 추가된다.
+## Authentication Pipeline
 
-1. `Host`가 허용 목록(바인드 주소·루프백 이름·운영자가 더한 이름)에 없으면 421. DNS 리바인딩을 막는다.
-2. 접속 출처(피어 IP)마다 실패 5회/60초를 넘으면 60초간 429. 다른 출처의 운영자는 영향이 없다. 출처는 연결의 **실제 피어 주소**만 쓴다: `X-Forwarded-For`·`Forwarded` 같은 머리글은 읽지 않으므로 위조해도 한도를 피할 수 없고(운영 소스에 그런 머리글 이름이 없음을 시험이 잠근다), 프록시 뒤에서는 프록시 주소가 한 출처가 된다. 자격 헤더가 아예 없는 요청(브라우저의 첫 요청)은 추측이 아니므로 세지 않고, 맞지 않거나 읽을 수 없는 자격만 센다.
-3. 비밀을 해시해 모든 항목과 상수 시간으로 견준다. 실패는 401.
-4. 바꾸는 요청(POST)은 추가로 CSRF 방어를 지난다: 서버가 신원에 묶어 발급한 `X-Bot-Csrf`(인증된 `GET /v1/admin/me`로 받음), `application/json`, 교차 출처 거절(`Origin`·`Sec-Fetch-Site`). 실패는 403.
+Every request passes host, rate-limit, and credential checks; `POST` mutations also pass CSRF validation:
 
-오류 본문은 고정 낱말 하나(`invalid`·`denied`·`stale`·`changed`·`csrf`·`not_found`·`conflict`·`unavailable` 등)뿐이고 입력 원문은 되돌려 주지 않는다. 응답 상한은 512 KiB이며, 조립하는 쪽이 알려진 비밀 값을 넘기면(`leak_values`) 디코딩한 JSON의 키와 문자열 원값에 그 값이 섞인 응답은 내보내지 않는다(따옴표·역슬래시·줄바꿈이 든 값도 잡는다).
+1. **`Host` check**: rejects `Host` headers outside the allowlist (bind address, loopback names, configured `hosts`) with `421` to block DNS rebinding.
+2. **Per-IP failure limit**: exceeding `max_failures` (default `5`) failed attempts in 60s blocks that peer IP for 60s (`429`) without affecting other clients. Uses only the socket peer address—never reads `X-Forwarded-For` or `Forwarded` (locked by tests; behind a proxy, the proxy IP shares one bucket). Requests without credentials (initial browser prompt) are not counted; only invalid or malformed credentials count.
+3. **Secret match**: hashes the secret and compares in constant time across all entries (`401` on failure).
+4. **CSRF protection (`POST`)**: requires viewer-bound `X-Bot-Csrf` (issued by authenticated `GET /v1/admin/me`), `Content-Type: application/json`, and same-origin headers (`Origin` / `Sec-Fetch-Site`), returning `403` on failure.
 
-## API
+Error bodies contain a single fixed vocabulary word (`invalid`, `denied`, `stale`, `changed`, `csrf`, `not_found`, `conflict`, `unavailable`, `no_body`, etc.) and never echo input. Responses are capped at 512 KiB. When `leak_values` / `leak_redactor` is configured, decoded JSON keys and string values are scanned before emission so responses containing known secrets—even with quotes, backslashes, or newlines—are blocked.
 
-| 경로 | 권한 | 내용 |
+## Admin API
+
+| Route | Access | Behavior |
 |---|---|---|
-| `GET /v1/admin/me` | 모두 | 신원과 CSRF 토큰 |
-| `GET /v1/admin/runs` | 모두(범위 한정) | 실행 목록(프로필·상태·루트 필터, 쪽 넘김) |
-| `GET /v1/admin/runs/{profile}/{run}` | 모두(범위 한정) | 계보(루트부터)·자식·도구 호출(끝나지 못한 이유는 고정 낱말 `denied`·`timeout`·`invalid_result`·`outcome_unknown`·`execution_failed`, 원문 없음)·효과, 시도별 추적 ID·링크 |
-| `POST /v1/admin/runs/{profile}/{run}/resume` | 운영자 | `dead`인 일반 루트 실행을 같은 run ID로 재개 |
-| `POST /v1/admin/runs/{profile}/{run}/cancel` | 운영자 | 종결되지 않은 일반 루트와 하위 실행에 취소 요청 |
-| `GET /v1/admin/approvals` | 모두(범위 한정) | 승인 목록(`?state=pending`(기본)·`decided`·`all`). 브로커가 렌더링한 대상·변경과 인자 해시 |
-| `POST /v1/admin/approvals/{nonce}/decide` | 지정 승인자 | 승인·거절 |
-| `GET /v1/admin/holds` | 운영자 | 보류된 호출과 단계(원래 영수증 포함) |
-| `POST /v1/admin/holds/{profile}/{run}/{call}/resolve` | 운영자 | 보류 판정(본문에 `hold_id` 필수) |
-| `GET /v1/admin/preapprovals` | 운영자 | 사전 승인 목록 `{"items":[{profile, agent, trigger, grant_id, epoch, paused, used_today, max_per_day}]}`(쿼리 없음, 프로필 선택은 화면) |
-| `POST /v1/admin/preapprovals/{profile}/{agent}/{trigger}/pause` | 운영자 | 트리거 긴급 정지. 본문은 정확히 `{"grant_id","epoch"}` |
-| `POST /v1/admin/preapprovals/{profile}/{agent}/{trigger}/resume` | 운영자 | 정지된 트리거 재개. 본문은 정확히 `{"grant_id","epoch"}` |
-| `GET /v1/admin/audit` | 운영자 | 감사 체인(최신순, 한 건 더 읽어 다음 쪽이 있을 때만 `next`, 저장소는 최대 201건을 받는다) |
-| `GET /v1/admin/audit/verify` | 운영자 | 감사 체인을 처음부터 다시 계산한 검증 |
-| `GET /v1/admin/status` | 운영자 | 프로필별 실행 수·대기 시간·승인 대기·보류·추적 내보내기 상태 |
-| `GET /v1/admin/map` | 운영자 | 구조 지도와 권한 정보 |
-| `GET /ui` | 모두 | 내장 화면(같은 출처 스크립트·스타일만, 인라인 없음) |
+| `GET /v1/admin/me` | All | Current `principal`, `operator` flag, and `csrf` token. |
+| `GET /v1/admin/runs` | All (scoped) | Paginated run list (`profile`, `state`, `root`, `limit`, `after`). |
+| `GET /v1/admin/runs/{profile}/{run}` | All (scoped) | Lineage (root to current), children, tool calls (error codes: `denied`, `timeout`, `invalid_result`, `outcome_unknown`, `execution_failed`; no raw payloads), effects, per-attempt trace ID and link. |
+| `POST /v1/admin/runs/{profile}/{run}/resume` | Operator | Resumes a `dead` standard root run under the same run ID. |
+| `POST /v1/admin/runs/{profile}/{run}/cancel` | Operator | Requests cancellation of a non-terminal standard root run and its child tree. |
+| `GET /v1/admin/approvals` | All (scoped) | Approvals (`?state=pending` default, `decided`, `all`), broker-rendered target/changes, and `args_sha256`. |
+| `POST /v1/admin/approvals/{nonce}/decide` | Designated approver | Approves or denies a pending card. |
+| `GET /v1/admin/holds` | Operator | Held calls and steps (with preserved receipts). |
+| `POST /v1/admin/holds/{profile}/{run}/{call}/resolve` | Operator | Resolves a hold (`hold_id` required in body). |
+| `GET /v1/admin/preapprovals` | Operator | Active pre-approvals `{"items":[{profile, agent, trigger, grant_id, epoch, paused, used_today, max_per_day}]}` (no query params; UI filters by profile). |
+| `POST /v1/admin/preapprovals/{profile}/{agent}/{trigger}/pause` | Operator | Emergency pause for a pre-approved trigger; exact body `{"grant_id","epoch"}`. |
+| `POST /v1/admin/preapprovals/{profile}/{agent}/{trigger}/resume` | Operator | Resumes a paused trigger; exact body `{"grant_id","epoch"}`. |
+| `GET /v1/admin/audit` | Operator | Hash-chained audit log (newest first; reads one extra row so `next` is set only when another page exists; store max 201 rows). |
+| `GET /v1/admin/audit/verify` | Operator | Recomputes the full audit hash chain from genesis. |
+| `GET /v1/admin/status` | Operator | Per-profile run counts, queue age, pending approvals, holds, and trace/log/issue exporter status. |
+| `GET /v1/admin/map` | Operator | Structure map and access summary. |
+| `GET /ui` | All | Embedded UI (same-origin scripts/styles only; no inline code). |
 
-### 실행 재개와 취소
+### Run Resume and Cancel
 
-운영자가 일반 루트의 상세를 조회하면 `run.state`와 `run.generation` 옆에 `control` 객체가 온다. `control.claim_epoch`는 같은 세대에서 다시 점유해도 증가한다. `control.held`는 하위 트리에 미판정 보류가 있음을, `control.cancel_requested`는 이미 취소 요청이 들어갔음을 나타낸다. `control.cancel_requested`가 참이면 진행 중 실행의 취소는 막지만 `dead` 실행은 재개할 수 있고 재개 커밋에서 `cancel_requested`를 비운다.
+Operator run-detail responses for standard root runs include `control` alongside `run.state` and `run.generation`: `claim_epoch` (increments on re-claim even within the same generation), `held` (unresolved hold in subtree), and `cancel_requested`. When `cancel_requested` is `true`, active-run cancellation is blocked, while a `dead` run may still be resumed (clearing `cancel_requested` on commit).
 
-두 변경 경로는 인증·CSRF·동일 출처·활성 집합 검사를 거친다. 본문은 `{"command_id":"<새 ID>","state":"dead","generation":2,"claim_epoch":4}`처럼 화면에서 본 값과 명령 ID 하나를 담는다. 성공은 `200 {"ok":true}`다. 응답을 받지 못했다면 같은 본문으로 재전송할 수 있다. 같은 명령이 이미 커밋됐으면 이후 세대가 진행됐어도 같은 응답을 받는다. 감사에는 인증된 운영자, 대상, 명령 지문과 고정 사유 `operator_requested`가 한 건 남는다.
+Both endpoints enforce auth, CSRF, same-origin, and the active-set fence. Send observed fields plus a fresh `command_id` (e.g., `{"command_id":"<id>","state":"dead","generation":2,"claim_epoch":4}`). Success returns `200 {"ok":true}`. Retrying the identical body after a lost response still returns `200 {"ok":true}` even after later generations. Each committed action writes one audit row with operator, target, command digest, and fixed reason `operator_requested`.
 
-아래 오류는 고정 낱말을 담는다.
+- `400 invalid`: malformed body or identifier.
+- `403 denied` / `403 csrf`: non-operator or CSRF/origin failure.
+- `404 not_found`: missing run or private run.
+- `409 stale`: observed `state`, `generation`, or `claim_epoch` changed.
+- `409 conflict`: `command_id` reused with a different payload, or invalid state transition.
+- `409 held`: unresolved hold in subtree (resolve under **Approvals & Holds** first).
+- `503 unavailable`: store or active-set check failed.
 
-- `400 invalid`는 잘못된 본문이나 식별자, `403 denied`는 운영자 권한 부족, `403 csrf`는 변경 요청 보안 검사 실패다.
-- `404 not_found`는 대상이 없거나 민감 실행일 때다. 화면에서 본 조건이 달라졌으면 `409 stale`, 같은 명령 ID의 다른 본문이거나 대상 상태에서 요청한 동작을 할 수 없으면 `409 conflict`다.
-- `409 held`이면 승인·보류에서 열린 발생을 판정한다. `503 unavailable`은 저장소나 활성 집합을 확인하지 못했을 때다.
+### Pre-Approval Management
 
-## 사전 승인 관리
+`GET /v1/admin/preapprovals` returns one row per active pre-approval (`epoch`, `used_today`, `max_per_day` JSON integers; `paused` boolean; `used_today` is current UTC day). `pause` and `resume` enforce auth, operator scope, JSON, `X-Bot-Csrf`, same-origin, active-set fence, and `{grant_id, epoch}` match, returning `200` with the unwrapped updated row.
 
-`GET /v1/admin/preapprovals`는 활성 사전 승인마다 한 행(`epoch`·`used_today`·`max_per_day`는 JSON 정수, `paused`는 불리언)을 준다. 사용량은 응답 시점의 UTC 오늘 값이다. 정지·재개는 기존 인증·프로필 범위·JSON·`X-Bot-Csrf`·동일 출처 검증을 거치고 본문 `{grant_id, epoch}`를 현재와 대조한다. 성공은 200과 래핑 없는 새 행이다. 같은 승인·같은 세대에서 이미 그 상태이거나 직전 성공 명령을 응답 유실로 다시 보낸 경우(그 사이 전환이 없을 때)도 200이고 감사·세대 증가는 0이다. 정지→재개→정지 뒤 첫 정지의 재전달과 승인 교체는 상태가 같아도 `409 stale`이다. `main/developer` 같은 에이전트 ID는 경로에 `main%2Fdeveloper`로 한 조각 인코딩해 보낸다(서버는 라우팅 뒤 한 번만 푼다). 오류는 `400 invalid`·`403 denied`·`404 not_found`·`409 stale`·`503 unavailable`이다.
+- Re-sending the same command when already in that state on the same `(grant_id, epoch)`—or retrying after a lost response with no intervening transition—returns `200` with zero new audit rows or epoch increments.
+- Replaying an earlier pause after `pause → resume → pause` or after grant replacement returns `409 stale`.
+- Agent IDs containing `/` (e.g., `main/developer`) must be single-segment percent-encoded (`main%2Fdeveloper`); the server decodes once after routing.
+- Errors: `400 invalid`, `403 denied`, `404 not_found`, `409 stale`, `503 unavailable`.
 
-정지 커밋 뒤에는 새 접수·호출 시작·새 쓰기 허가가 없다. 정지·재개 시각보다 앞서 예정된 발생은 재개 뒤에도 접수하지 않는다(건너뛴 발생마다 감사 한 줄, 재개 뒤에 예정된 발생부터 받는다). 먼저 허가한 쓰기의 결과 기록과 불명 보류 복구는 계속 받는다. 화면은 정지를 한 번에 요청하고 재개만 한 번 더 확인하며, 서버 응답 뒤에만 상태를 바꾼다.
+After a pause commits, no new occurrences, tool starts, or write grants execute. Occurrences scheduled before resume are skipped rather than replayed (each skipped occurrence records an audit entry; execution resumes from the next occurrence after resume). Result recording and hold recovery for already-authorized writes continue normally.
 
-## 같은 집합 확인(옛 활성화 막기)
+## Active-Set Fence
 
-`AdminConfig::fence(훅)`을 주면 `/v1/admin/*` 응답을 내보내기 **직전에** 훅을 부른다. 훅은 «이 프로세스가 활성화한 프로필 집합이 저장소의 활성 판본과 같은가»를 참·거짓으로 답한다(bot-cli가 저장소의 활성 판본 대조를 꽂는다). 거짓이거나 `fence_timeout`(기본 3초) 안에 답하지 않으면 핸들러가 만든 응답을 버리고 업무 데이터 대신 `503 {"error":"unavailable"}`을 낸다. 옛 매핑으로 지도·카드·실행 같은 조회 결과를 내주지 않기 위해서다.
+When `AdminConfig::fence(hook)` is configured (`bot-cli` compares this process's active set against the store's published revision), every `/v1/admin/*` response runs the hook **immediately before returning**. If the set drifted or the check exceeds `fence_timeout` (default 3s), the handler response is discarded and replaced with `503 {"error":"unavailable"}` so stale processes never serve outdated maps, cards, or runs.
 
-- 승인·보류 판정(변경 요청)은 핸들러 **전에도** 확인한다: 옛 집합에서는 브로커·저장소까지 가지 않는다. 응답 직전 확인에서 닫혔다면 판정은 이미 커밋됐을 수 있으므로 같은 판정을 다시 보내면 기존 결과(`repeated`)가 나온다(두 번 적용되지 않는다). 쓰기 커밋 자체는 저장소가 따로 지킨다.
-- 인증(Host·실패 한도·비밀·CSRF)이 먼저다: 통과하지 못한 요청은 훅까지 가지 않고 평소 응답(401·403·421·429)이다. 정적 화면 자산(`/ui`)은 데이터가 없어 확인하지 않는다(화면이 열려야 «사용할 수 없음»을 보인다).
-- 훅이 없으면 이 층은 아무 일도 하지 않는다. 읽기는 훅을 한 번, 변경은 두 번 부른다.
+- Mutating endpoints also run the fence **before** the handler so stale processes never reach the broker or store. If the post-handler fence fails, the commit may already have succeeded; retrying the identical decision returns `repeated: true` without double-applying (store commits enforce their own fence).
+- Authentication (`Host`, failure limit, secret, CSRF) runs first—rejected requests return normal `401`/`403`/`421`/`429` without invoking the hook. Static UI assets (`/ui`) skip the fence. Without a hook, the layer is a no-op. Reads invoke the hook once; mutations twice.
 
-## 승인 목록의 필터와 정렬
+## Approvals
 
-필터는 쪽 나누기 전에 적용하고 커서도 같은 정렬 키를 쓴다(행 번호가 아니다: 쪽 사이에 행이 처리돼 순서가 바뀌어도 이미 본 행이 겹치거나 뒤의 행이 빠지지 않는다). 실행 목록도 같은 방식이다.
+Approval and run listings apply filters before cursor pagination and paginate by the sort key (never row offsets), preventing duplicates or skips when rows change between pages.
 
-| `state` | 뜻 | 정렬 |
+| `state` | Scope | Sort Order |
 |---|---|---|
-| `pending`(기본) | 대기 | 만료 임박순, 같으면 nonce 오름차순 |
-| `decided` | 대기를 벗어난 모두(자동 만료·대체 포함) | 처리 시각 내림차순(시각 없는 행은 뒤), 같으면 nonce 오름차순 |
-| `all` | 모두 | 처리된 행을 `decided`의 순서로, 대기 행을 맨 뒤에 |
+| `pending` (default) | Awaiting decision | Soonest expiry ascending, then `nonce` ascending. |
+| `decided` | All non-pending (including expired/superseded) | Decided timestamp descending (nulls last), then `nonce` ascending. |
+| `all` | All approvals | `decided` rows first in `decided` order, then `pending` rows. |
 
-## 승인
+To decide via API, send `POST /v1/admin/approvals/{nonce}/decide` with `{"allow":true,"seen":"<args_sha256>"}` (`allow: false` to deny), `Content-Type: application/json`, and `X-Bot-Csrf` from `GET /v1/admin/me`:
 
-화면은 브로커가 검증된 인자로 렌더링한 대상과 변경 내용을 그대로 보여 준다. 누르면 화면이 본 인자 해시(`seen`)를 함께 보낸다.
+- Expired or superseded cards return `409 stale`; `seen` digest mismatches return `409 changed`.
+- Only the designated approver may decide (`403` otherwise—operators cannot approve on another user's behalf; models and service principals are rejected by the broker).
+- Repeating the same verdict with the same `seen` by the same approver returns `200` with `repeated: true` without re-invoking the broker; flipping the verdict returns `409`.
+- Recording a decision wakes the worker; the broker re-verifies current permissions and the store atomically consumes the approval and starts the call (or enqueues outbox rows for scheduled delivery).
 
-API에서는 `POST /v1/admin/approvals/{nonce}/decide`에 `{"allow":true,"seen":"<args_sha256>"}`를 보낸다. `seen`은 방금 확인한 카드의 해시다. 거절할 때는 `allow`를 `false`로 바꾼다. 요청에 `Content-Type: application/json`과 인증된 `GET /v1/admin/me`가 반환한 `csrf` 값의 `X-Bot-Csrf` 헤더를 넣는다.
+## Owner-Only Approval Cards
 
-- 만료됐거나 새 조건으로 대체된 카드에는 409 `stale`, 확인한 인자 해시가 다르면 409 `changed`가 돌아온다.
-- 클릭한 사람이 지정된 승인자가 아니면 403이다. 운영자도 대신 누를 수 없다. 모델과 서비스 주체는 브로커가 거절한다.
-- 같은 승인자가 같은 해시로 같은 판정을 다시 보내면 기존 결과(`repeated: true`)를 돌려주고 브로커를 다시 부르지 않는다. 반대 판정은 계속 409다.
-- 클릭은 승인 결정을 기록한다. 워커가 작업을 재개하면 브로커가 현재 권한을 다시 확인하고, 저장소는 승인 소비와 호출 시작(예약 전송은 outbox 등록)을 한 커밋에 기록한다.
+Default `bot serve` signs into Admin UI as the local operator. In v2.0, Slack owners approve channel-origin schedules via their Slack 1:1 DM; Admin UI does not support Slack login ([Reliability](reliability.md)).
 
-## 소유자 전용 카드의 본문(기억 공유·예약 전송)
+Memory share cards (`memory.share`) contain private memory text, and scheduled delivery cards (`schedule.deliver`) contain full outbound drafts. Their body is visible **only when viewer == requester == designated approver** (including operators). All other viewers receive metadata with `render: []` and `render_hidden: true`. Run details, audit, status, and map never include card bodies.
 
-기본 `bot serve`는 로컬 운영자 신원으로 로그인한다. v2.0에서 Slack 소유자가 채널에서 시작한 예약을 승인하는 입구는 본인의 Slack DM이다. 관리 화면에서 Slack으로 로그인하는 기능은 제공하지 않는다. [예약 승인 DM의 전달·실패 처리](reliability.md#slack-소유자에게-승인-카드를-전달할-때)
+- **Memory share (`memory.share`)**: requires exact single `Memory ID` and `Body` rows (continuation lines joined; raw text or JSON string; other rows like title/scope are free). Approval (`allow: true`) is permitted only when the body is visible and `memory_share_hash(memory_id, sha256(body))` matches `args_sha256`. Missing, hidden, truncated, or mismatched content sets `approve_blocked: "no_body"`, disables **Approve** in the UI, and returns `403 no_body` on `allow: true` before reaching the broker or audit. **Denial (`allow: false`) is always allowed** (non-designated viewers are rejected first as unauthorized).
+- **Scheduled delivery (`schedule.deliver`, `bot_core::schedule::DELIVERY_CARD_LABEL`, risk `irreversible`)**: requires exactly one `Delivery draft` row whose joined value is the exact canonical JSON from `DeliveryDraft::approval_json()` (raw document, never JSON-string-wrapped) and whose SHA-256 equals `args_sha256` (`DeliveryDraft::sha256()`). Any truncation, edit, or mismatch yields `approve_blocked: "no_body"` and `403 no_body` on `allow: true` (denial remains allowed). The UI displays this row verbatim without modifying its text.
 
-기억 공유 카드(`memory.share`)에는 비공개 기억 본문이, 예약 전송 카드(`schedule.deliver`)에는 다른 수신자에게 보낼 초안 전체가 들어 있다. **조회자·요청자·지정 승인자가 모두 같은 사람일 때만** 본문을 볼 수 있다. 운영자에게도 같은 조건을 적용한다. 다른 조회자에게는 메타데이터와 `render: []`, `render_hidden: true`를 반환한다. 실행 상세·감사·상태·지도에는 본문을 싣지 않는다.
+## Holds and Audit
 
-**기억 공유 승인.** 이 카드는 승인하는 사람이 **승인 지문과 일치하는 기억 ID·본문 전체**를 실제로 볼 수 있을 때만 승인할 수 있다. 지문은 `memory_share_hash(기억 ID, 본문 원문의 SHA-256)`(브로커·저장소와 같은 공통 함수)이고 카드의 `args_sha256`과 같아야 한다. 카드에 제목·공유 범위만 남았거나 본문 일부가 빠졌거나 본문·ID가 지문과 다르면 소유자라도 승인할 수 없다. 응답의 `approve_blocked: "no_body"`가 그 경우를 알리고, 화면은 승인 버튼을 끄고 이유를 보이며, 판정 API는 승인(`allow: true`)을 `403 no_body`로 거절한다(브로커까지 가지 않고 감사 기록도 만들지 않는다). 요청자와 지정 승인자가 달라 본문이 가려진 카드도 마찬가지다. **거절은 늘 허용한다.** 지정 승인자가 아닌 사람은 본문 때문이 아니라 먼저 «지정된 승인자만»으로 거절된다.
+Holds occur when an external write's outcome cannot be confirmed. Multi-step tools preserve receipts for confirmed steps and hold only unresolved steps. During rolling `0025` upgrades, older admin processes roll back whole-call `not_executed` on calls with confirmed or unresolved steps; resolve per-step and final call receipts on the updated Admin UI.
 
-**예약 전송 카드의 `render` 형식**(`bot_core::schedule`의 `DELIVER_TOOL`·`DELIVERY_CARD_LABEL`, 위험 등급 `irreversible`): `전송 초안` 행이 정확히 하나여야 하고(없거나 둘 이상이면 모호하므로 승인할 수 없다) 값은 이어진 조각을 모두 이은 **승인 문서 원문**(`DeliveryDraft::approval_json()`, 정규 JSON)이다. 원문 그대로여야 하며 JSON 문자열로 감싼 값은 받지 않는다. 그 원문의 SHA-256이 카드의 `args_sha256`(`DeliveryDraft::sha256()`)과 같을 때만 «표시된 내용 그대로» 승인할 수 있다. 일부만 보이거나 글자가 바뀌었거나 다른 초안의 지문이면 소유자라도 `403 no_body`다(거절은 늘 허용). 화면은 그 행을 고치지 않고 줄만 접은 원문으로 보인다.
+- **Verdicts**: `confirmed` (destination `receipt` required) or `not_executed` (`evidence` required)—each a single line of 1–512 non-control characters.
+- **Multi-step calls and final outcome**: resolve each open step individually. If every step resolves `not_executed`, the call resumes through current permissions and approval. If any step is `confirmed` without a final call response, resolving the last open step opens a **Final call outcome** card (individual step receipts remain visible). After confirming the old tool and child processes have exited, enter the destination-verified overall call receipt; the broker returns it on next claim. Sending `verdict: "not_executed"` for a call with confirmed steps returns `400 invalid`. Cancelling a run closes its open tool holds atomically (`run.cancelled` audit + closed timestamp); operator verdicts emit `hold.resolve`. Steps marked not executed display `Marked not executed` (`resolution: "not_executed"`, unselectable) until restarted (`null`).
+- **Post-`not_executed` behavior by `HoldView.kind`** (set by the store from the backing row; API never inspects tool names or call IDs):
+  - `tool`: requires verifying **both** prior process exit and non-execution at the destination. Waits if open steps remain, opens **Final call outcome** if confirmed steps exist, or resumes under the same call ID.
+  - `reply`: resends the reply from scratch. Exception: legacy/unconfigured `missing_transport` replies reject `not_executed` with `409 conflict` (UI hides the resend form). Either populate `bot_outbox.transport` in DB before marking `not_executed`, or deliver `bot_outbox.body` manually and close as `confirmed`.
+  - `private`: message body is never stored, so retry is impossible—closes as not executed and requires a new user request (`confirmed` closes as completed).
+- **`hold_id` pinning**: the store mints a new `hold_id` on every hold entry (`HoldView.hold_id` for whole-call/final/reply/private; `EffectView.hold_id` for open steps, while call-level `hold_id` is empty). `hold_id` is mandatory in the resolve payload (`400` if absent/malformed) and matched atomically with `(profile, run, call, effect)`: unknown → `404`, wrong target → `409`, identical replay on a closed `hold_id` by the same operator with the same verdict and receipt/evidence → `200 repeated: true` (no extra audit or span, even if a later hold opened), differing operator/values → `409`. Targets missing a `hold_id` disable resolution buttons (and Enter submission) and prompt **Reload**.
+- **Kind and profile isolation**: the UI keys cards and forms by `(profile, run, call, kind)` (`crates/bot-admin/ui/holdpin.js` `keyOf`), keeping legacy dual `tool` + `reply` holds on the same call ID separate. The store keys all holds, steps, approvals, and runs by `(profile, run, call[, effect])` (`crates/bot-admin/tests/suite/hold_pairs.rs`, `crates/bot-admin/tests/suite/hold_profiles.rs`, `crates/bot-admin/tests/browser/hold_pair.mjs`). Test doubles store verdict + digest only, matching production.
+- **Two-step UI pinning**: irreversible hold verdicts require two presses (`crates/bot-admin/ui/holdpin.js`). The first press pins target step, `hold_id`, verdict, and input; the second sends strictly the pinned values. Concurrent list updates, `404`/`409` responses, or step selector changes clear both confirmation and input (`crates/bot-admin/tests/js/holdpin.test.mjs`, `crates/bot-admin/tests/browser/hold_pin.mjs`, `crates/bot-admin/tests/browser/hold_stale_click.mjs`).
+- **Audit chain**: links sequence number, previous hash, principal, action, target, args hash, and verdict. `GET /v1/admin/audit/verify` recomputes from genesis and identifies the first broken sequence (does not protect against full-DB rewrites).
 
-**기억 공유 카드의 `render` 형식**(저장소가 맞춘다): `기억 ID` 행과 `본문` 행이 각각 정확히 하나여야 한다(없거나 둘 이상이면 모호하므로 승인할 수 없다). `본문` 행은 브로커 카드에서 이어진 줄을 모두 이은 한 행이고, 원문 그대로이거나 JSON 문자열(따옴표 포함)이어도 된다. 제목·공유 범위 같은 다른 행은 자유다. 보이는 `본문`을 풀어 낸 원문이 지문과 맞는지가 기준이다.
+## Embedded UI
 
-## 보류와 감사
+`/ui` serves buildless static HTML/CSS/JS embedded at compile time from `crates/bot-admin/ui/` via `build.rs` (manifest locked by `crates/bot-admin/tests/suite/assets.rs`). Strict same-origin CSP—tests forbid external URLs, HTML injection, and inline scripts/styles.
 
-보류는 외부 쓰기의 결과를 모를 때 생긴다. 다단계 도구는 확정된 단계의 원래 영수증을 보존하고 불명인 단계만 보류로 보인다.
-
-`0025` 적용 중 구판 관리 프로세스는 확정되거나 미결인 단계가 남은 호출을 전체 미실행으로 판정할 때 트랜잭션이 롤백된다. 신판 관리 화면에서 단계 판정과 호출 전체 영수증 판정을 이어 간다.
-
-- 판정은 두 가지다. 수신처 영수증을 확인했다(`confirmed`, 영수증 필수), 옛 도구 종료와 수신처의 미실행 증거를 확인했다(`not_executed`, 증거 필수). 둘 다 한 줄 1~512자다.
-- 다단계 호출은 미결 단계마다 판정한다. 모든 단계가 미실행으로 판정되면 현재 권한·승인을 거쳐 다시 실행할 수 있다. 확정 단계가 하나라도 있고 호출의 최종 응답이 없으면, 마지막 미결 단계 판정 뒤 «호출 최종 결과» 카드가 열린다. 개별 단계 영수증은 그대로 보인다. 옛 도구와 자식의 종료를 확인한 뒤 수신처에서 확인한 **호출 전체 영수증**을 입력해야 한다. 브로커는 다음 점유 때 그 영수증을 반환한다. 확정 단계가 있는 호출 전체에 `verdict: "not_executed"`를 보내면 API는 `400 invalid`로 거절한다. 전체 영수증이 없으면 실행은 계속 기다린다. 실행을 취소하면 그 실행의 열린 도구 보류가 같은 커밋에서 닫힌다. 실행의 `run.cancelled` 감사와 보류 행의 닫힌 시각으로 이 종료를 확인한다. `hold.resolve` 감사는 운영자 판정을 기록할 때 생긴다. 관리 화면은 미실행 판정이 남은 단계에 «미실행으로 판정됨»을 표시하고 선택을 막는다. 단계 조회에서 이 표지는 `resolution: "not_executed"`이며 다시 시작하면 `null`이 된다.
-- **미실행 판정 뒤의 동작은 보류의 종류와 남은 단계에 따라 달라진다.** `kind`가 `tool`이면 옛 도구 종료와 수신처의 미실행 증거를 **둘 다** 확인해야 한다. 판정한 뒤 남은 단계가 있으면 기다린다. 모든 단계가 끝나면 확정된 단계가 있을 때 호출 전체 영수증 카드를 열고, 모두 미실행이면 같은 호출 ID로 다시 이어 간다. `reply`(게이트웨이 회신)는 같은 회신을 처음부터 다시 보낸다. 단 `transport`가 빈 구판·`missing_transport` 회신은 자동 점유할 수 없어 `not_executed`가 `409 conflict`로 거절되며, 화면도 `missing_transport` 카드에는 다시 보내기 폼을 열지 않는다. 이런 회신은 DB에서 `bot_outbox.transport`에 발송 키를 채운 뒤 «미실행»으로 판정해 다시 보내거나, `bot_outbox.body`를 확인해 직접 전달한 뒤 «처리됨»으로 닫는다. `private`(민감 DM)는 본문을 보관하지 않아 다시 실행할 수 없으므로 «미실행으로 종료 · 새 요청 필요»다(처리됨이면 완료로 닫는다). 저장소는 보류가 발생한 행(도구 보류 행·회신 행·민감 접수 행)에 따라 `HoldView.kind`를 채우고, 관리 API는 이 값만 화면에 전달한다. 도구 이름이나 호출 ID의 모양은 보지 않는다(시험으로 잠금).
-- **판정은 «첫 확인에서 본 바로 그 보류»에만 적용된다(보류 식별자 `hold_id`).** 저장소는 새 보류에 들어갈 때마다 식별자를 새로 발급한다(같은 보류를 다시 조회하거나 유지할 때는 그대로). 도구 호출 전체(최종 결과 포함)·회신·민감 DM은 `HoldView.hold_id`를 쓴다. 미결 단계는 각 단계의 `EffectView.hold_id`를 쓰고, 그동안 호출 단위 ID는 비어 있다. 판정 본문에는 `hold_id`가 필수이고(없거나 모양이 틀리면 400), 저장소가 식별자와 프로필·run·호출·단계를 함께 대조해 한 번만 적용한다: 열린 보류에 없는 식별자는 404, 대상이 다르면 409, **끝난 같은 식별자에 같은 운영자·같은 판정(종류와 영수증/증거)이면 새 보류가 생겼어도 200 `repeated: true`**(판정·감사·추적 스팬을 더하지 않는다), 값이나 운영자가 다르면 409다. 응답을 잃고 다시 보내거나(예: 커밋 뒤 503) 같은 대상이 다시 보류돼도 옛 판정이 새 보류에 닿지 않는다. 화면은 첫 확인에서 이 식별자까지 고정하고, 목록이 새 식별자로 바뀌면 확인과 입력을 거둔다. **식별자가 없는 대상은 판정할 수 없다:** 화면은 판정 단추를 끄고 «목록을 다시 불러온 뒤 판정하세요»와 «다시 불러오기»를 보이며, Enter 키로도 확인·전송하지 않는다.
-- **같은 호출 ID를 쓰는 보류는 서로 섞이지 않는다.** 구판 데이터는 같은 프로필·run·호출 ID 아래 도구와 회신을 **따로** 보류할 수 있다(`kind`가 `tool`·`reply`로 다른 두 보류, 식별자도 각자). 화면의 카드·폼 상태 키는 프로필·run·호출·**종류**이고(`ui/holdpin.js`의 `keyOf`) 목록 숫자와 카드 수가 같다. 한쪽을 판정해도 다른 쪽은 열려 있고 자기 식별자로 판정된다. 저장소·가짜 저장소 모두 열림 여부와 단계를 식별자 또는 (프로필, run, 호출, 종류)로만 찾는다: 단계는 도구 보류만 가지고, 다른 run이 같은 호출 ID를 써도 서로의 보류·단계·승인 호출을 건드리지 않는다. **키는 프로필+run+호출(+단계)이다:** 두 프로필이 같은 run·호출·효과 ID를 써도 보류·단계·승인 호출·run 상태가 섞이지 않는다(가짜 저장소의 호출·효과는 `OwnedCall`·`OwnedEffect`로 프로필을 가진다. 실제 저장소 행이 프로필을 키에 갖는 것과 같다. `tests/hold_pairs.rs`, 교차 프로필은 `tests/hold_profiles.rs`, 브라우저 점검 `tests/browser/hold_pair.mjs`는 `DEMO_PAIR=1` 데모를 쓴다). 가짜 저장소는 판정한 영수증·증거의 원문을 남기지 않고 종류와 지문만 보관한다(실제 저장소와 같다).
-- **판정은 첫 확인에 고정된다.** 되돌릴 수 없어 두 번 눌러야 기록되는데, 첫 확인에서 대상 단계·판정 종류·입력값을 고정하고 둘째 누름은 그 값만 보낸다. 그 사이 다른 운영자가 그 단계를 먼저 처리해 목록이 바뀌면 확인과 입력을 모두 거두고 다시 확인하게 한다(같은 영수증이 남은 다른 단계에 기록되지 않는다). 둘째 누름이 목록 갱신보다 먼저 가서 서버가 «이미 판정됨(409)»·«없음(404)»으로 답한 경우, 고른 단계가 바뀐 경우, 단계 선택을 바꾼 경우에도 이전 단계용으로 적은 영수증·근거를 모두 지운다. 규칙은 `ui/holdpin.js`의 순수 함수이고 `tests/js`가 노드로 시험한다. 두 화면의 경합은 `tests/browser/hold_pin.mjs`(목록이 먼저 갱신되는 경우)와 `hold_stale_click.mjs`(둘째 누름이 먼저 가서 409를 받는 경우)로 수동 확인한다.
-- 감사 체인은 순번·이전 해시·주체·대상·인자 해시·판정을 담고, 검증은 체인을 처음부터 다시 계산해 처음 어긋난 순번을 알려 준다. DB 전체를 다시 쓸 수 있는 관리자까지 검증하지는 않는다.
-
-## 화면
-
-`/ui`는 빌드 단계 없는 정적 HTML·CSS·JS이고 바이너리에 내장된다(`ui/` 폴더가 곧 자산 표이며 `build.rs`가 만든다). 서빙하는 파일 이름 목록은 `tests/assets.rs`가 고정한다. 외부 주소·HTML 문자열 삽입·인라인 스크립트·스타일은 시험으로 막는다(CSP는 같은 출처만).
-
-| 탭 | 대상 | 내용 |
+| Tab | Audience | Contents |
 |---|---|---|
-| 구조 | 운영자 | 카드 지도(끌어서 이동·확대·검색·종류 필터), 선택하면 연결과 공통 자원(스코프·비밀)으로 이어지는 «필요» 선 |
-| 실행 | 모두 | 실행 목록과 상세(계보·자식·도구 호출·효과·추적 링크), 운영자 재개·취소 |
-| 승인·보류 | 모두(보류는 운영자) | 승인/거절 카드(지정 승인자만, 화면이 본 해시로 확인), 보류 단계와 판정 폼(두 번 눌러야 기록) |
-| 사전 승인 | 운영자 | 미리 허가한 정적 트리거마다 상태·오늘 사용량과 긴급 정지·재개 단추([아래](#사전-승인-화면정지재개)) |
-| 권한 | 운영자 | 역할·멤버·정책, 도구별 위험 등급·승인 요건·스코프·비밀 이름, 외부 전송 도구 |
-| 감사 | 운영자 | 해시로 이어진 기록과 «체인 검증»(어긋난 순번을 알려 준다) |
-| 상태 | 운영자 | 프로필별 실행 수·대기 시간·승인 대기·보류·추적 내보내기 |
+| Structure | Operator | Interactive card map (pan, zoom, search, kind filter) with dependency and shared-resource (`needs`) edges. |
+| Runs | All | Scoped run list and detail pane (lineage, children, tool calls, effects, trace links), plus operator resume/cancel. |
+| Approvals & Holds | All (holds: operator) | Approval cards (designated approver only, verified by `seen` hash) and two-step hold resolution forms. |
+| Pre-approvals | Operator | Status, UTC daily usage meter, and emergency pause/resume controls ([Pre-Approvals UI](#pre-approvals-ui)). |
+| Access | Operator | Roles, members, policy caps, tool risk/approval/scopes/secret names, and external-egress tools. |
+| Audit | Operator | Hash-chained log and **Verify chain** action. |
+| Status | Operator | Per-profile run counts, queue wait age, pending approvals, holds, and observability exporter health. |
 
-라이트/다크와 «동작 줄이기»를 따르고, 5초 자동 새로고침은 입력 중이나 확인 중에는 건너뛴다. 비운영자에게는 운영자 탭이 화면에서 빠지고 서버도 같은 API를 403으로 막는다. 사유 코드·상태·위험 등급의 한국어 문구는 `ui/labels.js`가 정하고 모르는 값은 «기타»로 보인다.
+Respects light/dark mode and `prefers-reduced-motion`; 5s auto-refresh pauses during typing or armed confirmations. Operator tabs are hidden from non-operators (and blocked server-side with `403`). Vocabulary labels live in `crates/bot-admin/ui/labels.js` (unknown codes display as `Other`).
 
-실행 상세에서 운영자는 dead letter인 일반 루트의 «재개»를 두 번 눌러 요청한다. 첫 누름이 명령 조건을 고정하고 12초 안에 두 번째로 확인한다. 종결되지 않은 일반 루트는 취소 확인 한 번으로 요청한다. 하위 트리에 미판정 보류가 있으면 «승인·보류에서 보기»로 이동한다. 응답이 유실되면 자동 새로고침을 잠시 멈춘다. «같은 명령 다시 보내기»로 결과를 확인하거나 «최신 상태 불러오기»로 돌아갈 수 있다.
+In **Runs** detail, **Resume** on a `dead` root run requires two presses within 12s (600ms guard) pinning observed state; **Cancel run** uses one confirmation prompt. Subtree holds show **View in Approvals & Holds**. Lost responses pause auto-refresh and offer **Resend same command** or **Reload latest state**.
 
-## 구조 지도
+### Structure Map
 
-활성 프로필 스냅숏(`ProfileCatalog`)에서 카드 8종(프로필·에이전트·스킬·도구·트리거·입구·스코프·비밀)과 연결 6종(위임·사용·소유·처리·깨움·필요)을 만든다. 같은 구조는 같은 버전(`rev`)이다. 지침·지식 본문·환경 값·비밀 값은 읽지 않고 이름·분류·개수만 싣는다. 상속한 스킬은 정의한 에이전트에 카드 하나만 두고 자식은 그것을 가리킨다. 에이전트 카드의 요약은 에이전트가 스스로 밝힌 설명의 첫 줄(140자까지, 없으면 모델)이고, 에이전트가 `AGENT.md`에 선언한 읽기 전용 내장 도구(스키마상 `read`·`grep`·`glob`, 실제 모델 VM `claude-cli`는 `read`만 지원)를 사실로 보인다(상속하지 않는다).
+Built from the active `ProfileCatalog` with 8 card kinds (profile, agent, skill, tool, trigger, binding, scope, secret) and 6 edge kinds (delegates, uses, owns, handles, wakes, needs) under a deterministic revision (`rev`). Exposes names, classifications, and counts only—never instructions, knowledge bodies, env vars, or secret values. Inherited skills appear once on the defining agent. Agent summaries show the first line of description (≤ 140 chars, fallback to model) and non-inherited `builtin` read-only tools (schema allows `read`/`grep`/`glob`; `claude-cli` VM supports `read` only).
 
-## 사전 승인 화면(정지·재개)
+### Pre-Approvals UI
 
-운영자 전용 탭 «사전 승인»은 운영자가 미리 허가한 정적 트리거(`triggers.yaml`의 `preapproved`)마다 현재 상태(동작 중·정지됨), 오늘(UTC) 새로 허가한 외부 쓰기 횟수와 하루 상한, 승인 ID(앞 12자)·정지 세대를 보이고 **긴급 정지**·**재개** 단추를 둔다. 프로필 선택은 화면 필터다(목록 요청에는 쿼리가 없다). 화면이 쓰는 API는 `GET /v1/admin/preapprovals`(`{"items":[행]}`)와 `POST /v1/admin/preapprovals/{profile}/{agent}/{trigger}/pause|resume`(본문 `{grant_id, epoch}`, 성공은 래핑 없는 새 행 200, 낡은 상태 409 `stale`)이다. 식별자마다 한 번만 인코딩한다(agent `main/developer`는 `main%2Fdeveloper` 한 조각).
+The operator-only **Pre-approvals** tab lists each active `preapproved` static trigger with status (`Active`/`Paused`), UTC daily write usage (`used_today / max_per_day`), grant ID prefix (12 chars), pause `epoch`, and **Emergency pause** / **Resume** buttons (profile selector filters client-side).
 
-- **정지는 한 번, 재개만 두 번.** 멈추는 쪽은 빨라야 하므로 정지 단추는 누르면 곧바로 요청한다. 재개는 사람의 카드 없이 외부 쓰기를 다시 여는 쪽이라 두 번 눌러야 한다: 첫 누름이 대상·승인 ID·정지 세대를 고정하고 무엇을 여는지 알리며, 12초 안에 두 번째를 눌러야 하고, 첫 누름 직후 0.6초 안의 누름(더블클릭·키 반복)은 무시한다. 두 번째 누름은 **첫 누름이 고정한 값**만 보낸다(그 사이 목록이 바뀌었어도 새 값을 보내지 않는다). 확인 중에 목록이 새로 와서 승인이 교체됐거나 세대·상태가 바뀌었거나 행이 사라졌으면 확인을 거두고 이유를 알린다. Esc·취소·탭 이동·시간 초과도 확인을 거둔다.
-- **서버 응답 뒤에만 상태가 바뀐다.** 눌렀다고 미리 바꾸지 않는다. 한 행에는 요청을 동시에 하나만 보내고(응답 전의 두 번째 누름은 막는다), 15초 안에 응답이 없으면 기다리기를 멈추고 «적용됐는지 확인하지 못했습니다»라고 알린다. 성공 응답은 같은 대상·같은 승인이고 요청한 동작의 결과 상태일 때만 받아들인다. 성공이든 409·응답 유실·시간 초과·저장소 오류든 끝나면 목록을 다시 읽어 서버의 현재 상태를 보인다.
-- **버튼이 없는 행.** 필수 필드(문자열 4개·정수 3개·불리언 1개) 가운데 하나라도 모양이 틀린 행과, 같은 (프로필, 에이전트, 트리거)가 둘인 행(어느 쪽이 현재인지 알 수 없다)은 버튼 없이 건너뛰고 건너뛴 수만 알린다. 모양이 틀린 목록 응답은 읽지 않고, 읽지 못했다는 경고와 함께 이전 행을 그대로 둔다.
-- **경계는 서버다.** 탭은 운영자에게만 만들어지지만 그것은 편의다. 같은 API를 서버가 운영자 범위·CSRF·같은 출처·활성 집합·`{grant_id, epoch}` 대조로 막는다(일반 주체는 403).
-- **시험.** 순수 규칙 `tests/js/preapproval.test.mjs`, 실제 화면 코드(`dom.js`·`api.js`·`preapproval.js`·`preapprovals.js`)를 작은 DOM 모조품 위에서 눌러 보는 `tests/js/preapprovals.view.test.mjs`(계약 규칙 가짜 서버 `tests/js/support/contract.mjs`)는 `cargo test`가 노드로 돌린다. 실제 브라우저 점검(수동, 공개 CI 제외)은 `tests/browser/preapproval_stub.mjs`(계약 대역 서버)와 `tests/browser/preapproval_stop.mjs`다.
+- **One-click pause, two-click resume**: **Emergency pause** fires immediately. **Resume** pins target, `grant_id`, and `epoch` on first press, requires confirmation within 12s (ignoring presses within 600ms), sends strictly pinned values, and disarms on list drift, Esc, Cancel, tab switch, or timeout.
+- **Server-authoritative state**: never mutates optimistically; allows one in-flight request per row (15s timeout); accepts only responses matching target, `grant_id`, and expected `paused` state; always reloads the list afterward.
+- **Malformed/duplicate rows**: rows failing required-field checks (4 strings, 3 integers, 1 boolean) or duplicating `(profile, agent, trigger)` are skipped without buttons and counted in a warning; malformed list responses preserve prior rows with a warning.
+- **Boundary and tests**: server enforces operator role, CSRF, same-origin, active-set fence, and `{grant_id, epoch}` match. Tested by `crates/bot-admin/tests/js/preapproval.test.mjs`, `crates/bot-admin/tests/js/preapprovals.view.test.mjs` (`crates/bot-admin/tests/js/support/contract.mjs`), and manual browser scripts `crates/bot-admin/tests/browser/preapproval_stub.mjs` and `crates/bot-admin/tests/browser/preapproval_stop.mjs`.
 
-## 추적(OTLP)
+## Observability
 
-워커·브로커·게이트웨이는 끝난 스팬을 `bot_core::trace::Tracer`에 넘긴다. 호출은 동기·무대기·무실패다.
+### OTLP Tracing (`admin.trace`)
 
-- **ID**: 추적 ID는 시도(프로필, run, 세대)에서 결정적으로 계산한다. 분리 배치의 다른 프로세스도 같은 값을 계산하므로 IPC에 문맥을 싣지 않아도 한 시도의 스팬이 한 추적에 모인다. 세대가 바뀌면 새 추적이다. 같은 run·세대라도 프로필이 다르면 추적이 다르다.
-- **키**: `gen_ai.*`·`bot.*`·`user.id`·`session.id` 고정 어휘만 나간다. 승인 nonce·인자·영수증·민감 DM 원문 키는 어휘에 없다. 모델 스팬(`worker.model`, `Client`)은 `gen_ai.provider.name`·`gen_ai.request.model`·`gen_ai.response.model`과 보고된 토큰 사용량을 싣고, 루트 실행 스팬(`worker.run`)은 `user.id`·`session.id`·`gen_ai.conversation.id`(기본 가명 처리)를 싣는다. 요청이 보낸 HTTP method·경로는 싣지 않는다 — 접수 스팬의 `http.request.method`·`http.route`는 요청과 맞은 **등록된 트리거 정의**의 값이고, 맞지 않은 요청은 고정 값(`_OTHER`·`unmatched`)이다(호출자가 경로에 실은 식별자·비밀이 `content`·`ids` 설정과 무관하게 나가지 않도록).
-- **정책**(내보내기 경계에서 한 번 더 건다): 어휘 밖의 키는 버린다. 프롬프트·인자·결과 같은 내용 키는 프로필별 opt-in이며 기본 꺼짐이다. 켜면 그 프로필이 지정한 수집기로만 가고, 알려진 비밀 값과 토큰 모양을 가리고 8 KiB로 자른다. **알려진 비밀 값은 시작 때 읽은 목록에 묶이지 않는다:** 이 프로세스가 비밀 보관소에서 읽어 쓰는 모든 값(모델 서비스 키·도구 자격·수집기 헤더·이슈 트래커 키)은 쓰이기 **전에** 같은 가림 목록에 들어가므로, 키를 교체해도 새 값이 내보내는 글·로그·이슈와 관리 응답 검사에서 바로 가려진다. 교체 전 값도 이 프로세스가 사는 동안 계속 가려진다. 본문은 **헤더·인증 자격을 읽은 뒤** 그 시점의 목록으로 만든다 — 그 읽기가 새로 알게 된 값(교체된 수집기 자격)도 같은 배치의 본문에서 가려진다. **스스로 읽지 않는 값도 따라잡는다:** 역할을 나눠 띄우면 관리 프로세스는 모델 키·도구 자격을 읽는 쪽이 아니라서 다른 프로세스가 읽는 새 값을 모른다. 그래서 이 프로세스는 선언된 비밀 이름 전체(호스트 관측 자격 포함)를 시작 때 읽고 이후 주기적으로(`BOT_SECRETS_REREAD_SECS`, 기본 60초, 0이면 끈다) 다시 읽어 같은 목록에 더한다 — 값은 가림에만 쓰고 쥐지도 기록하지도 않는다. 읽기마다 5초만 기다리고 이름 사이에 쉼을 두며, 응답 없는 보관소(잠긴 키체인)가 있던 바퀴 뒤에는 주기를 두 배씩(최대 10배) 늘린다. 다른 역할에서만 쓰는 새 값은 관리 프로세스가 그 값을 성공적으로 읽은 뒤 가려진다. 보관소 지연·재시도와 SOPS의 30초 캐시가 반영 시점을 늦출 수 있다. 민감 DM 경로의 스팬에 `bot.private=true`를 붙이면 내용을 켠 프로필에서도 내용이 나가지 않는다(표지는 내보내지 않는다). 사람·대화 식별자는 프로필별 가명으로 바꾼다(`Ids::Plain`으로 끌 수 있다).
-- **철회**: 추적(`admin.trace`)·로그(`admin.logs`)·이슈(`admin.issues`) 설정은 모두 **활성화 지문에 들어간다.** 수집을 거두거나 바꾸면 명시 활성화(`--activate`)가 필요한 활성화 사건이고, 옛 설정으로 남은 프로세스는 구판이 된다. 구판의 내보내기 문은 닫혀 있어, 큐에 남은 스팬·로그·이슈까지 옛 허락(목적지·내용·식별자 표기)으로 더 보내지 않고 버린다(`dropped`, 마지막 오류 분류 `stale`). 저장소를 확인하지 못하는 동안(장애·3초 시간 초과)도 닫힌 것으로 본다 — 거둔 것을 확인할 수 없는 동안 옛 허락으로 내보내지 않는다. **문은 배치마다 두 번 본다:** 배치를 집을 때(구판은 수집 자격조차 읽지 않는다)와 **전송 직전**(자격을 읽고 본문을 만든 뒤)이다. 보관소가 느려 자격을 읽는 동안 수집이 거두어져도 옛 목적지로 가지 않는다. **이미 보내기 시작한 요청은 거둘 수 없다:** 그 배치는 `dropped`가 아니라 `sent`(네트워크 실패면 `failed`)로 세고, 그다음 배치부터 문이 막는다. 관측을 쓰지 않는 호스트의 활성 판본은 달라지지 않는다. 백엔드 이름과 화면 링크 틀은 내보내는 것을 바꾸지 않아 지문에 넣지 않는다. 이미 수집기에 도착한 항목은 거둘 수 없다.
-- **격리**: 프로필마다 한정 큐·작업·차단기·목적지를 둔다. 한 프로필의 스팬은 그 프로필의 목적지로만 가고, 미등록·목적지 없는 프로필은 어디로도 가지 않는다. 헤더 비밀은 프로필마다 자기 SecretStore 이름으로 보낼 때마다 받는다. 받지 못하면 인증 없이 보내지 않는다.
-- **장애**: 스팬 하나가 256 KiB를 넘으면 큐에 넣지 않고 버린다. 큐가 차면 버리고, 수집기가 응답하지 않거나 거절하면 차단기가 열려 배치를 버린다(1초부터 60초까지 지수 백오프). 모든 스팬은 보냄·실패·버림 중 하나로 센다. 실행과 원장은 영향이 없다. `Exporter`를 모두 놓으면 작업은 남은 큐를 보낸 뒤 끝나고 SecretStore 참조를 놓는다.
-- **샘플링**: 추적 ID 값으로 정하므로 모든 프로세스가 같은 결론이다.
-- **전송**: OTLP/HTTP protobuf(`application/x-protobuf`)를 `https://`와 `http://`로 모두 보낸다.
-  - **`https://`(Langfuse·LangSmith·원격 OTLP 수집기)**: OS 루트 인증서 기반 TLS로 직접 전송하며 `remote: true`가 필요 없다. 리다이렉트·재시도·연결 재사용을 끄고, 모든 커스텀 헤더는 `sensitive`로 다루며, `localhost`·`*.localhost`는 이름 해석기를 거치지 않고 루프백(`127.0.0.1`·`::1`)으로 고정한다.
-  - **평문 `http://`**: 헤더 비밀과 내용이 그대로 나가므로 루프백(`127.0.0.0/8`·`::1`), 사설(`10/8`·`172.16/12`·`192.168/16`·`fc00::/7`), 링크 로컬(`169.254/16`·`fe80::/10`) IP 리터럴과 `localhost`·`*.localhost`만 명시 없이 받는다. 그 밖의 평문 주소(DNS 이름 포함)는 시작 전에 거절하며, 정말 평문으로 사설망 밖에 보내려면 각 절에 `remote: true`를 명시한다. `localhost`·`*.localhost`는 시스템 이름 해석기를 거치지 않고 루프백으로 직접 접속한다(`Host` 헤더에는 원래 이름이 실린다).
+Worker, broker, and gateway submit completed spans to `bot_core::trace::Tracer` synchronously, without blocking or failing.
 
-## 로그(OTLP)와 이슈 트래커(Sentry 호환)
+- **Deterministic Trace IDs**: derived from `(profile, run, generation)` so split roles correlate without IPC propagation; new generations or different profiles produce distinct traces.
+- **Fixed vocabulary**: exports only `gen_ai.*`, `bot.*`, `user.id`, and `session.id` (never nonces, raw args, receipts, or private DM text). `worker.model` (`Client`) records `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, and token counts; `worker.run` records `user.id`, `session.id`, and `gen_ai.conversation.id` (pseudonymized by default). HTTP intake spans record matched **registered trigger** `http.request.method` / `http.route` (unmatched → `_OTHER` / `unmatched`), never caller-supplied paths.
+- **Redaction and content policy**: unknown keys drop at export. Content attributes are per-profile opt-in (`content: false` default), routed only to that profile's collector, redacted for known secrets/token patterns, and capped at 8 KiB. The live `Redactor` records every secret read from `SecretStore` before use and refreshes all declared secret names (including host observability secrets) every `BOT_SECRETS_REREAD_SECS` (default 60s, `0` disables; 5s per-read timeout, paced with up to 10x backoff on unresponsive stores). Rotated secrets—and secrets used only by other roles once read—are redacted across traces, logs, issues, and Admin API responses; prior values stay redacted for process lifetime, and batch bodies serialize *after* reading exporter auth headers. `bot.private=true` suppresses content even when `content: true` (the flag is not exported). Identifiers default to per-profile hashes (`ids: "hash"`; set `ids: "plain"` to opt out).
+- **Revocation and activation fence**: `admin.trace`, `admin.logs`, and `admin.issues` enter the activation fingerprint (disabled sections are omitted so unused hosts keep unchanged fingerprints; display `name` and `link` are excluded). Changing or revoking observability requires `--activate`. Stale processes drop queued items (`dropped`, `last_error: stale`); store outages/3s timeouts fail closed. The fence is checked twice per batch—before reading exporter credentials and right before HTTP send (in-flight requests already transmitted cannot be recalled).
+- **Isolation, resilience, and sampling**: each profile has its own bounded queue, worker, circuit breaker (1s–60s exponential backoff), and destination. Spans > 256 KiB or full queues drop cleanly without affecting runs. Header secrets are read per send from that profile's `SecretStore` (never sent unauthenticated on error). Dropping all `Exporter` handles flushes queued spans and releases store refs. Deterministic sampling on trace ID ensures split roles agree.
+- **Transport**: OTLP/HTTP protobuf (`application/x-protobuf`).
+  - `https://` (Langfuse, LangSmith, remote OTLP): uses OS root certificates without `remote: true`, disables redirects/retries/connection reuse, marks custom headers sensitive, and pins `localhost`/`*.localhost` to loopback without DNS.
+  - Plaintext `http://`: allowed without `remote: true` only for loopback (`127.0.0.0/8`, `::1`), private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local (`169.254/16`, `fe80::/10`), and `localhost`/`*.localhost` (pinned to loopback with original `Host`). Any other plaintext host or DNS name requires explicit `remote: true`.
 
-추적과 같은 전송·회로 차단기·활성화 문·가림 장치(`Redactor`) 위에 호스트 단위 OTLP 로그 내보내기(`admin.logs`)와 이슈 트래커(`admin.issues`)를 둘 수 있다.
+### OTLP Logs (`admin.logs`) and Issue Tracking (`admin.issues`)
 
-- **구조화 로그(stderr)와 OTLP 로그(`admin.logs`)**:
-  - `BOT_LOG_FORMAT=json`으로 stderr에 줄 단위 JSON(`ts_ms`·`level`·`target`·`message`·`fields`)을 낼 수 있다(기본 `text`). `BOT_LOG` 필터(자체 크레이트만 수준 적용, 외부 라이브러리 최대 `warn`, `sqlx` 끔)는 두 형식에 똑같이 적용된다.
-  - `admin.logs`를 켜면 OTLP/HTTP(S) protobuf(`ExportLogsServiceRequest`, 기본 경로 `/v1/logs`)로 같은 로그 이벤트를 수집기에 배치 전송한다. `level`(`debug`·`info`·`warn`·`error`, 기본 `warn`)은 `BOT_LOG` 상한 안에서 내보낼 최소 수준을 고른다.
-  - 모든 본문과 필드는 내보내기 직전 `Redactor`로 가리고 길이·개수 상한(본문 2 KiB, 필드 값 256자, 최대 32개)을 둔다.
-- **이슈 트래커(`admin.issues`, `kind: "sentry"`)**:
-  - `bot_core::issue::IssueReporter` 포트의 Sentry Envelope v7 구현(`POST <endpoint>`, `Content-Type: application/x-sentry-envelope`, `X-Sentry-Auth`)으로 Sentry·GlitchTip·Bugsink 등 Sentry 호환 백엔드와 바로 연동한다.
-  - 자동 보고 대상: ① `tracing::error!` 이벤트, ② 예상치 못한 패닉(`fatal`), ③ 비정상 실패 스팬(`cancelled`·`denied`·`invalid`·`rate_limited`·`forbidden`·`unregistered`·`no_route`·`too_large`·`parked`·`lost` 등 정상 거절·취소 제외). 실패 스팬은 `contexts.trace.trace_id`로 추적과 이어지고, `bot.private` 스팬의 부가 태그는 싣지 않는다.
-  - 재귀·폭주 방지: 내보내기 실패는 카운터·`last_error`만 갱신하고 `tracing` 로그를 남기지 않으며, 관측·HTTP 전송 타깃 로그는 싱크에서 건너뛰고, 같은 `(kind, target)` 조합은 기본 5초 쿨다운으로 중복 폭주를 막는다.
-- **호스트 단위 자격 참조**: `admin.logs.headers`의 객체 값과 `admin.issues.key`는 `{"secret": "<이름>"}`(기본 `bot/host/<이름>` 이름 공간) 또는 `{"profile": "<프로필>", "secret": "<이름>"}`로 SecretStore를 가리킨다. `bot validate`·`bot doctor`가 시작 전에 존재 여부를 확인하고 `bot serve`가 가림 목록에 미리 올린다. `admin.issues.key`는 루프백 평문 `http://` 목 서버에서만 생략할 수 있다.
-- **상태 조회**: `GET /v1/admin/status`의 `process.logs`·`process.issues`에 같은 통계 형식(`enabled`·`queued`·`sent`·`dropped`·`failed`·`circuit`·`last_error`·`backends`)이 실린다(경로·헤더·키는 싣지 않고 `origin`만 보인다).
+Both share the same transport, circuit breaker, activation fence, and `Redactor`:
 
-## 조립(bot-cli)
+- **Structured stderr and OTLP logs (`admin.logs`)**: `BOT_LOG_FORMAT=json` writes line-delimited `{ts_ms, level, target, message, fields}` to stderr (default `text`), filtered by `BOT_LOG` (workspace crates only; external crates capped at `warn`; `sqlx` off). Enabling `admin.logs` batches the same events over OTLP/HTTP(S) protobuf (`ExportLogsServiceRequest`, default path `/v1/logs`) at minimum `level` (`debug`, `info`, `warn` default, `error`, bounded by `BOT_LOG`). Bodies and fields are redacted and capped (2 KiB body, 256-char values, 32 fields).
+- **Issue tracker (`admin.issues`, `kind: "sentry"`)**: implements `bot_core::issue::IssueReporter` via Sentry Envelope v7 (`POST <endpoint>`, `Content-Type: application/x-sentry-envelope`, `X-Sentry-Auth`) for Sentry, GlitchTip, Bugsink, and compatible backends. Auto-reports: (1) `tracing::error!`, (2) panics (`fatal`), and (3) abnormal failed spans (excluding expected rejections/cancellations: `cancelled`, `denied`, `invalid`, `rate_limited`, `forbidden`, `unregistered`, `no_route`, `too_large`, `parked`, `lost`). Links failed spans via `contexts.trace.trace_id` and omits extra tags on `bot.private` spans. Loop/flood guards: exporter failures update counters/`last_error` without logging, observability/HTTP transport targets are skipped, and `(kind, target)` deduplicates with a 5s cooldown.
+- **Host-scoped secret refs**: `admin.logs.headers` secret objects and `admin.issues.key` accept `{"secret": "<name>"}` (resolves under `bot/host/<name>`) or `{"profile": "<profile>", "secret": "<name>"}` (checked by `bot validate`/`bot doctor` and preloaded into the redactor by `bot serve`). `admin.issues.key` may be omitted only for loopback plaintext `http://` mocks.
+- **Status**: `GET /v1/admin/status` exposes `process.logs` and `process.issues` with `{enabled, queued, sent, dropped, failed, circuit, last_error, backends}` (shows `origin` only—never paths, headers, or keys).
 
-### 호스트 설정(`admin` 절)
+## Host Configuration (`admin` Section)
 
-`BOT_HOST_CONFIG` JSON의 `admin` 객체를 `AdminSettings::from_json`에 넘긴다. 모르는 키·잘못된 값은 시작 전에 거절하고, 키를 모두 생략해도(`{}`) 로컬 기본값으로 동작한다. 비밀 값은 담지 않는다(헤더 비밀은 SecretStore 이름만).
+`BOT_HOST_CONFIG` passes its `admin` object to `AdminSettings::from_json`. Unknown keys and invalid values fail before startup; `{}` uses local defaults; never include secret values.
+
+| Key | Default | Contract |
+|---|---|---|
+| `bind` | `127.0.0.1:8787` | Admin listener `host:port`. Non-loopback requires `remote: true`. |
+| `remote` | `false` | Explicit operator opt-in for non-loopback `bind` (and under `trace`/`logs`/`issues`, opt-in for non-private plaintext `http://` export; unnecessary for `https://`). |
+| `hosts` | `[]` | Additional allowed `Host` values (`host:port`) behind a reverse proxy. |
+| `max_failures` | `5` | Per-peer-IP auth failures allowed in 60s before a 60s block (range `1..=100`). |
+| `trace.<profile>` | off | Per-profile OTLP trace exporter (`null` disables): required `endpoint`, optional `name` (default `default`), `link` (`http(s)` template with `{trace_id}`), `headers` (string or `{"secret": "<name>"}` from that profile's `SecretStore`), `content` (`false`), `ids` (`hash` or `plain`), `sample` (`0.0..=1.0`, default `1.0`), `remote` (`false`). |
+| `logs` | off | Host-wide OTLP log exporter: `endpoint`, `name`, `headers` (string or `{"secret": "<name>"}` / `{"profile": "<p>", "secret": "<name>"}`), `level` (`warn`), `remote` (`false`). |
+| `issues` | off | Host-wide issue tracker: `kind` (`sentry`), `name`, `endpoint`, `key` (`{"secret": "<name>"}` or with `profile`; optional on loopback `http://` only), `environment`, `release`, `sample` (`1.0`), `remote` (`false`). |
+
+Example local collector config (`admin` object in `host.json`):
 
 ```json
 {
@@ -203,22 +208,7 @@ API에서는 `POST /v1/admin/approvals/{nonce}/decide`에 `{"allow":true,"seen":
 }
 ```
 
-| 키 | 기본값 | 뜻 |
-|---|---|---|
-| `bind` | `127.0.0.1:8787` | 관리 화면 주소. 루프백이 아니면 `remote: true`가 필요하다. |
-| `remote` | `false` | 루프백 밖 주소를 열어도 된다는 운영자의 명시. |
-| `hosts` | `[]` | 프록시 뒤에서 쓰는 추가 `Host`(`이름:포트`). |
-| `max_failures` | `5` | 접속 출처별 실패 한도(60초 창, 초과 시 60초 차단). |
-| `trace.<프로필>` | 없음(내보내지 않음) | 그 프로필의 수집기. `null`이면 꺼짐. |
-| `endpoint` | 필수 | `https://` 또는 `http://` 끝점. `https://`는 명시 없이 받고, 평문 `http://`는 루프백·사설 주소·`localhost`만 명시 없이 받는다(아래 `remote`). |
-| `remote` | `false` | 사설망 밖일 수 있는 수집기로 **평문 `http://`** 전송을 해도 된다는 운영자의 명시(`https://`에는 필요 없다). |
-| `name`·`link` | `default`·없음 | 표시 이름, 화면 링크 틀(`{trace_id}` 포함, http(s)). |
-| `headers` | 없음 | 글은 평문 값, `{"secret": 이름}`은 그 프로필의 SecretStore 이름(보낼 때마다 받는다). 이름은 프로필이 선언한 자격과 같이 `bot validate`·`bot doctor`가 보관소에 있는지 보고 `bot serve`가 시작 때 읽어 가림 목록에 넣는다. |
-| `content`·`ids`·`sample` | `false`·`hash`·`1.0` | 내용 기록 opt-in, 식별자 표기(`hash`·`plain`), 표본 비율. |
-| `logs` | 없음(꺼짐) | 호스트 단위 OTLP 로그 내보내기(`endpoint`·`name`·`headers`·`level`·`remote`). `headers`의 비밀 객체는 `{"secret": 이름}`(기본 `host` 이름 공간) 또는 `{"profile": 프로필, "secret": 이름}`이다. |
-| `issues` | 없음(꺼짐) | 호스트 단위 이슈 트래커(`kind` 기본 `sentry`, `name`·`endpoint`·`key`·`environment`·`release`·`sample`·`remote`). `key`는 `{"secret": 이름}`(또는 `profile` 포함)이며 루프백 `http://`에서만 생략할 수 있다. |
-
-Langfuse·LangSmith(공통 OTLP/HTTP protobuf + `gen_ai.*` 규격), OTLP 로그 수집기, Sentry 호환 이슈 트래커를 함께 연동하는 예시는 다음과 같다.
+Example combining Langfuse, LangSmith, OTLP logs, and Sentry:
 
 ```json
 {
@@ -263,12 +253,12 @@ Langfuse·LangSmith(공통 OTLP/HTTP protobuf + `gen_ai.*` 규격), OTLP 로그 
 }
 ```
 
-### 시작 순서
+## Startup Sequence
 
-1. `bot serve --role admin`으로 시작한다. 운영자 신원은 현재 OS 사용자에 등록된 CLI 계정에서 정한다. 해당 계정이 여러 개면 이름순 첫 계정을 사용한다.
-2. 표시된 `/ui` 주소를 열고 사용자 이름 칸에 임의의 이름, 비밀번호 칸에 이번 기동의 운영자 비밀을 넣는다. 호스트는 비밀을 터미널에 한 번 표시한다. 터미널 없이 시작할 때는 `BOT_ADMIN_TOKEN_FILE`에 절대 경로를 지정한다. 상위 폴더는 다른 사용자가 쓸 수 없어야 한다. 비밀은 권한 0600인 파일로 전달하며 정상 종료하면 지운다.
-3. 로그인 뒤 `/v1/admin/me`에서 현재 신원과 권한을 확인할 수 있다. 승인 버튼은 그 신원이 지정된 승인자일 때만 동작한다.
+1. Start `bot serve --role admin`. The operator identity is resolved from the CLI account mapped to the current OS user (alphabetically first if multiple exist).
+2. Startup prints `Admin UI: http://<addr>/ui` and displays the one-time operator secret once on the terminal. Open `/ui` and enter any username with that secret in the HTTP Basic prompt. For headless starts, set `BOT_ADMIN_TOKEN_FILE` to an absolute path inside a directory not writable by other users; the secret is written with mode `0600` and removed on clean shutdown.
+3. Verify identity and role at `GET /v1/admin/me`. Approval buttons act only when the signed-in principal is the designated approver.
 
-파일 방식에서는 경로별 잠금을 잡고 복구 기록을 쓴 다음 비밀을 발행한다. 활성 집합 확정이 실패하면 발행 전 상태로 되돌린다. 강제 종료 뒤에는 다음 기동이 기록과 파일의 식별자를 대조하며 복구한다. 운영자가 파일을 바꿔 이전 상태를 확인할 수 없으면 파일을 보존하고 기동을 중단한다.
+Token-file publication acquires a per-path lock, writes a recovery record, and then publishes the secret. If active-set publication fails, the file rolls back to its prior state. After an unclean exit, the next startup reconciles the recovery record against the file identity; if an operator replaced the file and prior state cannot be verified, startup preserves the file and aborts.
 
-다른 호스트에 관리 UI를 내장할 때는 `bot_admin::bind`, `router`, `serve`를 사용한다. `serve`가 피어 주소를 요청에 전달해야 로그인 실패 횟수를 접속 출처별로 제한할 수 있다.
+To embed the Admin UI in another host binary, use `bot_admin::bind`, `router`, and `serve` (`serve` attaches peer `ConnectInfo` required for per-IP login rate limiting).

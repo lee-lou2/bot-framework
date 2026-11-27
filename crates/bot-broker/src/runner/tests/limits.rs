@@ -1,4 +1,4 @@
-//! 실행 한도와 결과 검사: 절대 기한, 종료 확인, 결과 차단·검사, 서버 오류의 구분.
+//! Tests for runner deadlines, termination checks, result filtering, and server error classification.
 
 use super::*;
 
@@ -32,7 +32,6 @@ async fn results_that_leak_a_credential_or_have_an_odd_shape_are_blocked() {
     }
 }
 
-/// 실행기의 결과 파서를 거치면 표식과 함께 온 다른 `_meta` 항목은 내용 없이 표지(`bot/extra`)만 남는다: 브로커가 `invalid_pass`로 닫을 수 있다.
 #[tokio::test]
 async fn a_pass_marker_with_other_meta_reaches_the_broker_flagged_and_without_the_other_meta() {
     let reply = |meta: Value| {
@@ -42,7 +41,7 @@ async fn a_pass_marker_with_other_meta_reaches_the_broker_flagged_and_without_th
         rig(server, |_| {}, |_| {})
     };
     let ran = run(
-        &reply(json!({"bot/pass": true, "other": {"note": "무시되는 항목"}})),
+        &reply(json!({"bot/pass": true, "other": {"note": "ignored entry"}})),
         job(decl(&[], &[], false), r#"{"event":"a"}"#),
     )
     .await;
@@ -51,8 +50,10 @@ async fn a_pass_marker_with_other_meta_reaches_the_broker_flagged_and_without_th
         text,
         r#"{"_meta":{"bot/extra":true,"bot/pass":true},"content":[],"isError":false}"#
     );
-    assert!(!text.contains("무시되는"), "다른 항목의 내용은 가지 않는다");
-    // 표식만 오면 표지 없이 그대로다
+    assert!(
+        !text.contains("ignored"),
+        "other meta values must not pass through"
+    );
     let ran = run(
         &reply(json!({"bot/pass": true})),
         job(decl(&[], &[], false), r#"{"event":"a"}"#),
@@ -75,7 +76,6 @@ async fn an_oversized_result_is_blocked_and_a_tool_that_leaks_the_proxy_url_is_c
         blocked(&run(&r, job(decl(&[], &[], false), r#"{"event":"a"}"#)).await),
         "result_size"
     );
-    // 도구가 환경의 프록시 주소(호출 전용 비밀번호 포함)를 결과로 흘리면 막는다
     let leaky = Server::new(&[("delete", schema())]).answering(|ctx| {
         let url = ctx
             .env
@@ -120,7 +120,6 @@ async fn a_result_lost_after_sending_is_unknown_and_the_process_is_still_ended()
 
 #[tokio::test]
 async fn a_protocol_level_refusal_is_definite_and_any_other_server_error_has_an_unknown_effect() {
-    // 잘못된 요청·없는 메서드·잘못된 인자: 서버가 실행 전에 거절했다
     for code in [-32600, -32601, -32602] {
         let r = rig(
             Server::new(&[("delete", schema())]).replying(move || Answer::Error(code)),
@@ -130,7 +129,6 @@ async fn a_protocol_level_refusal_is_definite_and_any_other_server_error_has_an_
         let ran = run(&r, job(decl(&[], &[], false), r#"{"event":"a"}"#)).await;
         assert!(matches!(ran, Ran::Rejected), "{code}: {ran:?}");
     }
-    // 내부 오류·서버 정의 오류: 일부 효과가 났을 수 있다
     for code in [-32603, -32000, -32099, 7] {
         let r = rig(
             Server::new(&[("delete", schema())]).replying(move || Answer::Error(code)),
@@ -148,7 +146,6 @@ async fn a_protocol_level_refusal_is_definite_and_any_other_server_error_has_an_
 #[tokio::test]
 async fn nothing_was_sent_is_only_claimed_when_the_started_process_is_confirmed_gone() {
     use crate::testing::Terminate;
-    // 서버가 선언과 달라 호출 전에 멈췄다(미전송). 프로세스 종료가 확인되면 NotSent다.
     let wrong = || Server::new(&[("other", schema())]);
     let r = rig(
         wrong(),
@@ -159,7 +156,6 @@ async fn nothing_was_sent_is_only_claimed_when_the_started_process_is_confirmed_
         run(&r, job(decl(&[], &[], false), r#"{"event":"a"}"#)).await,
         Ran::NotSent
     ));
-    // 종료가 실패하거나 시간 안에 확인되지 않으면 미전송을 입증할 수 없다
     for mode in [Terminate::Fails, Terminate::Hangs] {
         let r = rig(
             wrong(),
@@ -174,14 +170,13 @@ async fn nothing_was_sent_is_only_claimed_when_the_started_process_is_confirmed_
         );
         assert!(!r.sandbox.methods().contains(&"tools/call".to_string()));
     }
-    // 이미 받은 결과는 종료가 확인되지 않아도 버리지 않는다
+    // Keep an already-received result even if teardown fails.
     let r = plain();
     r.sandbox.set_terminate(Terminate::Fails);
     assert!(matches!(
         run(&r, job(decl(&[], &[], false), r#"{"event":"a"}"#)).await,
         Ran::Done(_)
     ));
-    // 프로세스를 띄우지 못했으면 만들어진 프로세스가 없으니 미전송이다
     let r = plain();
     r.sandbox.fail_spawn(true);
     r.sandbox.set_terminate(Terminate::Fails);
@@ -194,7 +189,6 @@ async fn nothing_was_sent_is_only_claimed_when_the_started_process_is_confirmed_
 #[tokio::test]
 async fn the_wall_clock_limit_covers_a_write_that_blocks_and_settles_by_whether_the_call_was_sent()
 {
-    // 서버가 tools/list에 답한 뒤 입력을 읽지 않는다: 큰 인자를 쓰다 막혀 call 타이머에 닿지 못한다
     let r = rig(
         Server::new(&[("delete", schema())]).stalling_after_list(),
         |c| {
@@ -209,10 +203,9 @@ async fn the_wall_clock_limit_covers_a_write_that_blocks_and_settles_by_whether_
     assert!(matches!(ran, Ran::Unknown("wall_timeout")), "{ran:?}");
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "기한을 넘겨 오래 막혔다"
+        "blocked past wall deadline"
     );
-    assert_eq!(r.sandbox.terminated().len(), 1, "프로세스 그룹은 끝낸다");
-    // 호출을 보내기 전에 막히면(핸드셰이크가 멈춤) 미전송이다
+    assert_eq!(r.sandbox.terminated().len(), 1, "process group terminated");
     let r = rig(
         Server::new(&[("delete", schema())]).stalling_before_initialize(),
         |c| {
@@ -231,7 +224,7 @@ async fn the_wall_clock_limit_covers_a_write_that_blocks_and_settles_by_whether_
 #[tokio::test]
 async fn structured_results_are_checked_after_decoding_and_credentials_with_special_characters_are_caught()
  {
-    // 따옴표·역슬래시·개행이 든 자격은 직렬화한 글에서는 이스케이프돼 바이트가 달라진다
+    // Escaped quotes, backslashes, and newlines differ in serialized bytes from decoded values.
     let secret = "pa\"ss\\word\n-9";
     let r = rig(
         Server::new(&[("delete", schema())]).replying(|| {
@@ -266,7 +259,6 @@ async fn structured_results_are_checked_after_decoding_and_credentials_with_spec
     )
     .await;
     assert_eq!(blocked(&ran), "result_credential", "{ran:?}");
-    // 키 이름에 숨겨도 막는다
     let r2 = rig(
         Server::new(&[("delete", schema())]).replying(|| {
             Answer::Result(json!({"content": [], "structuredContent": {"value-personal-1": 1}}))

@@ -1,4 +1,4 @@
-//! 판본: 검증한 바이트 묶음(bundle)과 SHA-256. 같은 바이트면 언제 어디서 만들어도 같은 판본이다.
+//! Canonical profile bundle encoding/decoding and SHA-256 content and policy revisions.
 use crate::{
     build,
     hash::{canonical_json, sha256_hex},
@@ -17,9 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAGIC_V1: &[u8] = b"BOTPROFILE1\n";
 const MAGIC_V2: &[u8] = b"BOTPROFILE2\n";
 
-/// 묶음 판본(해석 규칙 세대).
-/// - `V1`(`BOTPROFILE1\n`): 구판이 보관한 묶음 또는 `SKILL.md` front matter를 쓰지 않는 프로필. 복원 시 구판의 `SKILL.md` 규칙을 쓴다.
-/// - `V2`(`BOTPROFILE2\n`): `SKILL.md` front matter를 해석·제거하고 에이전트별 64 KiB 상한을 적용한 묶음.
+/// Bundle format generation controlling which `SKILL.md` parsing rules apply on restore:
+/// `V1` (`BOTPROFILE1\n`) uses legacy rules; `V2` (`BOTPROFILE2\n`) strips front matter and enforces the 64 KiB cap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BundleFormat {
     V1,
@@ -35,7 +34,7 @@ impl BundleFormat {
     }
 }
 
-/// 파일을 경로순으로 `u32 경로길이 | 경로 | u64 길이 | 바이트`로 이은 정규 바이트.
+/// Encodes files sorted by path as `u32 path_len | path | u64 len | bytes`.
 pub fn encode_with(tree: &Tree, format: BundleFormat) -> Vec<u8> {
     let mut out = format.magic().to_vec();
     out.extend_from_slice(
@@ -94,32 +93,32 @@ fn path_ok(path: &str) -> bool {
             .all(|s| s != "." && s != ".." && crate::text::name_is_clean(s))
 }
 
-/// 정규 형태만 받는다(경로 오름차순·중복 없음·꼬리 바이트 없음). 한도는 스캔과 같다.
+/// Decodes strictly canonical bundles (ascending unique paths, no trailing bytes) under scan limits.
 pub fn decode(bundle: &[u8], limits: &Limits) -> Result<(BundleFormat, Tree), Issue> {
     let (format, rest) = if let Some(rest) = bundle.strip_prefix(MAGIC_V2) {
         (BundleFormat::V2, rest)
     } else if let Some(rest) = bundle.strip_prefix(MAGIC_V1) {
         (BundleFormat::V1, rest)
     } else {
-        return Err(bad("프로필 묶음이 아니에요"));
+        return Err(bad("not a valid profile bundle"));
     };
     let mut cur = Cursor {
         bytes: rest,
         pos: 0,
     };
-    let count = cur.u32().ok_or_else(|| bad("잘렸어요"))?;
+    let count = cur.u32().ok_or_else(|| bad("truncated bundle"))?;
     if count > limits.max_files {
-        return Err(bad("파일이 너무 많아요"));
+        return Err(bad("too many files in bundle"));
     }
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     let (mut total, mut last): (u64, Option<String>) = (0, None);
     for _ in 0..count {
-        let path_len = cur.u32().ok_or_else(|| bad("잘렸어요"))?;
-        let path = std::str::from_utf8(cur.take(path_len).ok_or_else(|| bad("잘렸어요"))?)
-            .map_err(|_| bad("경로가 UTF-8이 아니에요"))?
+        let path_len = cur.u32().ok_or_else(|| bad("truncated bundle"))?;
+        let path = std::str::from_utf8(cur.take(path_len).ok_or_else(|| bad("truncated bundle"))?)
+            .map_err(|_| bad("bundle path is not valid UTF-8"))?
             .to_owned();
-        let len = cur.u64().ok_or_else(|| bad("잘렸어요"))?;
+        let len = cur.u64().ok_or_else(|| bad("truncated bundle"))?;
         let limit = if path.ends_with(".yaml") {
             limits.max_yaml_bytes
         } else {
@@ -127,35 +126,34 @@ pub fn decode(bundle: &[u8], limits: &Limits) -> Result<(BundleFormat, Tree), Is
         };
         total = total.saturating_add(len);
         if !path_ok(&path) || len > limit || total > limits.max_profile_bytes {
-            return Err(bad(&format!("허용하지 않는 항목이에요: {path}")));
+            return Err(bad(&format!("disallowed bundle entry: {path}")));
         }
-        // 스캔과 같은 깊이·폴더 수 한도를 트리를 만들기 전에 적용한다
+        // Enforce depth and directory count limits before constructing the tree.
         if path.split('/').count() > limits.max_depth {
-            return Err(bad(&format!("경로가 너무 깊어요: {path}")));
+            return Err(bad(&format!("bundle path exceeds max depth: {path}")));
         }
         for (at, _) in path.match_indices('/') {
             dirs.insert(path[..at].to_owned());
             if dirs.len() > limits.max_dirs {
-                return Err(bad("폴더가 너무 많아요"));
+                return Err(bad("too many directories in bundle"));
             }
         }
         if last.as_ref().is_some_and(|prev| *prev >= path) {
-            return Err(bad("경로가 오름차순이 아니에요"));
+            return Err(bad("bundle paths are not in strictly ascending order"));
         }
         let data = cur
-            .take(usize::try_from(len).map_err(|_| bad("너무 커요"))?)
-            .ok_or_else(|| bad("잘렸어요"))?;
+            .take(usize::try_from(len).map_err(|_| bad("bundle entry size overflows usize"))?)
+            .ok_or_else(|| bad("truncated bundle"))?;
         last = Some(path.clone());
         files.insert(path, data.to_vec());
     }
     if cur.pos != rest.len() {
-        return Err(bad("꼬리에 남는 바이트가 있어요"));
+        return Err(bad("trailing bytes after bundle payload"));
     }
     Ok((format, Tree { files, dirs }))
 }
 
-/// 승인에 묶는 정책 판본: roles·members·policy와 트리거 주체·승인자 매핑, OpenAI 모델 바인딩의 모델→에이전트·승인 경로 매핑.
-/// OpenAI 모델 바인딩이 없는 프로필은 문서에 `openai` 키를 넣지 않는다 — 웹훅 전용 프로필의 판본 바이트가 그대로여야 한다.
+/// Policy revision bound to approvals; omits `openai` and `super_admins` keys when empty to preserve legacy hashes.
 pub fn policy_revision(built: &Built) -> Revision {
     let parts = &built.parts;
     let mut triggers = Map::new();
@@ -201,7 +199,6 @@ pub fn policy_revision(built: &Built) -> Revision {
     Revision(sha256_hex(canonical_json(&doc).as_bytes()))
 }
 
-/// `<별칭>/<모델>` → 바인딩 id·에이전트·승인 경로(HTTP 주체 → 사람과 전달 바인딩). 매핑이 바뀌면 옛 승인으로 새 매핑을 열 수 없다.
 fn openai_mapping(built: &Built) -> Map<String, Value> {
     built
         .parts
@@ -236,25 +233,24 @@ fn openai_mapping(built: &Built) -> Map<String, Value> {
         .collect()
 }
 
-/// 저장해 둔 묶음에서 판본을 다시 만든다. 구조·참조 검증을 다시 하고, 해시가 `revision`과 같은지,
-/// profile.yaml의 id가 `profile`과 같은지 확인한다. 호스트 등록부(서버·모델·입구 별칭)는 보지 않는다 —
-/// 진행 중이던 옛 판본의 재개용이며, 호출·승인·게시 직전의 현재 권한 검사를 대신하지 않는다.
+/// Rebuilds and re-validates a snapshot from stored bundle bytes without checking the host catalog
+/// (live authorization still runs before every call, approval, and delivery).
 pub fn from_bundle(
     bundle: &[u8],
     profile: &ProfileId,
     revision: &Revision,
     limits: &Limits,
 ) -> Result<Snapshot, Vec<Issue>> {
-    // 해시부터 본다: 기록한 판본과 다른 바이트는 경로를 해석하기 전에 거절한다
+    // Check size and hash before decoding paths.
     let room = limits.max_profile_bytes + limits.max_files as u64 * 4096 + 4096;
     if bundle.len() as u64 > room {
-        return Err(vec![bad("묶음이 너무 커요")]);
+        return Err(vec![bad("bundle exceeds maximum allowed size")]);
     }
     if revision_of(bundle) != *revision {
         return Err(vec![Issue::error(
             "revision-mismatch",
             "",
-            "묶음의 해시가 기록한 판본과 달라요",
+            "bundle hash does not match recorded revision",
         )]);
     }
     let (format, tree) = decode(bundle, limits).map_err(|i| vec![i])?;
@@ -264,7 +260,7 @@ pub fn from_bundle(
         None => {
             let mut found = issues.into_vec();
             if found.is_empty() {
-                found.push(Issue::error("invalid", "", "검증에 실패했어요"));
+                found.push(Issue::error("invalid", "", "bundle validation failed"));
             }
             Err(found)
         }
@@ -292,7 +288,7 @@ mod tests {
         assert_ne!(
             revision_of(&encode_with(&tree(), BundleFormat::V1)),
             revision_of(&encode_with(&tree(), BundleFormat::V2)),
-            "같은 파일 트리라도 묶음 판본(매직)이 다르면 판본 해시가 다르다"
+            "same tree with different bundle format magic must yield a different revision"
         );
     }
 
@@ -323,7 +319,7 @@ mod tests {
         let limits = Limits::default();
         let good = encode(&Tree::from_files([
             ("profile.yaml", b"version: 1\n".to_vec()),
-            ("agents/main/AGENT.md", "지침\n".as_bytes().to_vec()),
+            ("agents/main/AGENT.md", b"instructions\n".to_vec()),
         ]));
         let mut rng = Rng::new(0xabad_1dea);
         for _ in 0..20_000 {
@@ -346,11 +342,10 @@ mod tests {
             }
             let outcome =
                 std::panic::catch_unwind(|| decode(&bytes, &limits).map(|(_, t)| t.files.len()));
-            assert!(outcome.is_ok(), "패닉: {bytes:?}");
+            assert!(outcome.is_ok(), "panic on mutated bundle: {bytes:?}");
         }
     }
 
-    /// `(경로, 내용)`을 정규 순서 그대로 이어 붙인다(검증 없이).
     fn raw(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut out = MAGIC_V1.to_vec();
         out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
@@ -377,9 +372,15 @@ mod tests {
         };
         assert!(decode(&raw(&[("a/b/x.md", b"x")]), &few).is_ok());
         let many = raw(&[("a/b/c/x.md", b"x")]);
-        assert!(decode(&many, &few).is_err(), "부모 폴더가 셋이면 거절");
+        assert!(
+            decode(&many, &few).is_err(),
+            "three parent directories should exceed max_dirs=2"
+        );
         let wide = raw(&[("a/x.md", b"x"), ("b/x.md", b"x"), ("c/x.md", b"x")]);
-        assert!(decode(&wide, &few).is_err(), "서로 다른 폴더 수도 센다");
+        assert!(
+            decode(&wide, &few).is_err(),
+            "distinct top-level directories should count toward max_dirs"
+        );
     }
 
     #[test]
@@ -409,7 +410,7 @@ mod tests {
             codes(from_bundle(&big, &id, &revision_of(&big), &tiny)),
             ["bundle-invalid"]
         );
-        // 너무 큰 묶음은 해시를 계산하기 전에 거절한다(해시가 달라도 크기 오류가 먼저 나온다)
+        // Oversized bundles are rejected before hashing.
         assert_eq!(
             codes(from_bundle(&big, &id, &wrong, &tiny)),
             ["bundle-invalid"]

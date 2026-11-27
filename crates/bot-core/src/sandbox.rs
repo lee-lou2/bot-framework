@@ -1,22 +1,17 @@
-//! 모델 샌드박스(VM) 포트. 구현은 `bot-runtime`의 `ContainerSandbox` 하나다.
-//! 도구 서버(srt)의 샌드박스는 이름만 같은 별개 트레이트 `bot_broker::sandbox::Sandbox`이고, 둘을 묶는 공통 포트는 없다(`docs/glossary.md`).
+//! Model VM sandbox port (`ContainerSandbox` in `bot-runtime`), distinct from tool `srt` sandboxes.
 use crate::{id::Attempt, port::Reply};
 use std::{future::Future, path::PathBuf, pin::Pin, time::Duration};
 
-/// 신뢰 구역에 맞는 어댑터가 구현한다. 구현이 지킬 것(docs/security.md):
-/// - 호스트 환경을 상속하지 않고 `env`로 준 값만 보이게 한다.
-/// - 비밀 0, 네트워크 0, 현재 claim의 브로커 채널 외 소켓 없음.
-/// - `readonly_mounts`는 읽기 전용, `scratch`는 이 호출 전용 쓰기 공간.
-/// - `kill`은 자식 프로세스까지 끝낸다.
-/// - 설정에 실패하면 시작을 거절한다(샌드박스 없이 실행하는 대체 경로를 두지 않는다). OS 격리를 설정할 수 없으면 `spawn`은 실패한다.
-/// - `timeout`을 넘기면 스스로도 끝낸다(실행기의 시간 감시가 먼저 막지만 마지막 방어선이다).
+/// Security boundary for isolated model execution (`docs/security.md`):
+/// - Do not inherit host env; expose only `env` (zero secrets, zero network, only the claim's broker relay socket).
+/// - Mount `readonly_mounts` read-only and isolate `scratch` to this call; fail closed if OS isolation cannot be established.
+/// - `kill` terminates descendant processes; `timeout` provides a final self-termination backstop.
 pub trait Sandbox<Spec>: Send + Sync {
     type Process: Send;
 
-    /// 프로세스를 띄운다. 이 future를 버리면(호출자가 취소했다) 시작을 취소한 것이고 아무것도 남기지 않아야 한다: 이미 만든 것이 있다면 반환하기 전에
-    /// 그 자리에서 거두거나, 만든 뒤에는 기다리지 않고 곧바로 `Process`로 돌려준다(그러면 호출자가 `kill`한다).
+    /// Must be cancel-safe: dropping the future cleans up started resources, or returns `Process` immediately so the caller can `kill` it.
     fn spawn(&self, spec: Spec) -> Reply<'_, Self::Process>;
-    /// 지정한 소유자의 자손 프로세스까지 종료를 확인해야 성공한다.
+    /// Succeeds only after all descendant processes owned by `owner` have exited.
     fn reap(&self, owner: &str) -> Reply<'_, ()>;
 }
 
@@ -26,14 +21,13 @@ pub struct Mount {
     pub guest: String,
 }
 
-/// 호스트가 조립한 모델 CLI 요청. 어댑터는 현재 claim의 브로커 프런트(릴레이 HTTP) 한 곳에만 닿게 한다.
-/// 입력은 읽기 전용이고 scratch만 쓰기 가능하다. 경로 매핑을 보장할 수 없으면 실행을 거절한다.
+/// Host-assembled model CLI request restricted to the claim's broker relay, read-only inputs, and `scratch`.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ModelSpec {
     pub attempt: Attempt,
     pub program: String,
     pub args: Vec<String>,
-    /// 비밀 없는 CLI 설정. 호스트 환경은 상속하지 않는다.
+    /// Secret-free CLI environment; host environment is never inherited.
     pub env: Vec<(String, String)>,
     pub cwd: String,
     pub readonly_mounts: Vec<Mount>,
@@ -46,7 +40,7 @@ pub struct ModelSpec {
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct Exit {
     pub code: Option<i32>,
-    /// 호스트 내부 오류 분류에만 사용하는 길이 제한 진단이다.
+    /// Length-capped diagnostics for internal host error classification only.
     pub stderr_tail: String,
 }
 
@@ -60,5 +54,5 @@ pub trait ModelProcess: Send {
     fn wait(&mut self) -> ExitFuture<'_>;
 }
 
-/// 워커에 주입하는 모델용 포트. 도구 명세나 외부 접속 설정을 받지 않는다.
+/// Worker-injected model sandbox port; never receives tool specs or external network settings.
 pub type ModelSandbox = dyn Sandbox<ModelSpec, Process = Box<dyn ModelProcess>>;

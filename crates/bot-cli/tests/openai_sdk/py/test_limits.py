@@ -1,4 +1,4 @@
-"""본문 한도(이 시험의 입구는 `gateway.limits.body_bytes` 4096): 한도를 넘으면 413 `request_too_large`(선언 길이·실제 누적 모두), 접수도 실행도 없고 SDK가 다시 보내지 않는다."""
+"""Request body limit tests (tight profile `body_bytes=4096`): 413 request_too_large for declared and chunked sizes with zero runs and no SDK retry."""
 import http.client
 import json
 import unittest
@@ -13,7 +13,7 @@ LIMIT = 4096
 
 def body_of(size):
     padding = size - len(json.dumps(chat_body(messages=[{"role": "user", "content": ""}])))
-    return chat_body(messages=[{"role": "user", "content": "가" * 0 + "x" * padding}])
+    return chat_body(messages=[{"role": "user", "content": "x" * padding}])
 
 
 class Limits(Wired):

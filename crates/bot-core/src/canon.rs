@@ -1,17 +1,11 @@
-//! RFC 8785(JSON Canonicalization Scheme) 정규화와 승인에 묶는 SHA-256.
-//!
-//! - 객체 키는 UTF-16 코드 유닛 순서로 정렬한다(단순 바이트·코드포인트 정렬이 아니다).
-//! - 수는 ECMAScript `Number::toString`과 같은 최단 표기다.
-//! - 문자열은 `"`·`\`·U+0000~U+001F만 이스케이프한다(`json_quote`).
-//! - 안전 범위(|정수| < 2^53)를 넘는 수는 거절한다. 다른 수와 같은 값으로 뭉개져 승인한 값과 모호해지기 때문이다.
+//! RFC 8785 (JSON Canonicalization Scheme) canonicalization and approval-binding SHA-256.
 
 pub use crate::json::parse;
 use serde_json::{Number, Value};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 
-/// JSON 문자열 리터럴로 만든다. `"`와 `\`, U+0000~U+001F만 이스케이프하고 나머지는 그대로 둔다
-/// (`/`·DEL·비ASCII는 이스케이프하지 않는다). 승인 화면과 정규화 JSON이 같은 규칙을 쓴다.
+/// Escapes only `"`, `\`, and U+0000..=U+001F (leaving `/`, DEL, and non-ASCII verbatim), shared by JCS and approval rendering.
 pub fn json_quote(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
@@ -32,10 +26,10 @@ pub fn json_quote(text: &str) -> String {
     out
 }
 
-/// 안전 정수 상한(2^53). 이 값 이상은 정확히 표현한다고 말할 수 없다.
+/// Exclusive IEEE-754 safe integer bound (2^53); integers at or above this lose exactness and are rejected to prevent approval ambiguity.
 const LIMIT: f64 = 9_007_199_254_740_992.0;
 
-/// 정규화한 문자열. 안전 범위를 넘는 수가 있으면 `None`이다.
+/// Returns `None` if any number falls outside the exact safe range or is non-finite.
 pub fn canonicalize(value: &Value) -> Option<String> {
     let mut out = String::new();
     write(value, &mut out)?;
@@ -81,7 +75,7 @@ fn write(value: &Value, out: &mut String) -> Option<()> {
     Some(())
 }
 
-/// UTF-16 코드 유닛 사전식 순서.
+/// RFC 8785 requires UTF-16 code unit ordering, not UTF-8 byte or Unicode scalar order.
 pub fn cmp_utf16(a: &str, b: &str) -> Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
 }
@@ -100,7 +94,7 @@ fn number(n: &Number) -> Option<String> {
     Some(es_number(x))
 }
 
-/// ECMAScript `Number::toString`(RFC 8785 §3.2.2.3). 유한한 수만 받는다.
+/// ECMAScript `Number::toString` (RFC 8785 §3.2.2.3) for finite numbers.
 pub fn es_number(x: f64) -> String {
     if x == 0.0 {
         return "0".into();
@@ -126,14 +120,14 @@ pub fn es_number(x: f64) -> String {
     if x < 0.0 { format!("-{body}") } else { body }
 }
 
-/// 최단 왕복 십진 표기(숫자열, 첫 자리의 10의 지수).
-/// Rust는 최단 표기가 둘일 때(정확히 중간) 올림하지만 ECMAScript는 끝자리가 짝수인 쪽을 고른다.
+/// Shortest round-trip decimal digits and base-10 exponent.
+/// Rust breaks exact midpoint ties away from zero, whereas ECMAScript breaks ties to an even last digit.
 fn shortest(x: f64) -> (String, i32) {
-    let sci = format!("{x:e}"); // "1.2345e-7"
+    let sci = format!("{x:e}");
     let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
     let exp: i32 = exp.parse().unwrap_or(0);
     let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-    // 중간값은 표기가 반올림 간격을 거의 채울 때(15자리 이상)만 생긴다.
+    // Midpoint ties only occur at 15+ significant digits where formatting fills the rounding interval.
     if digits.len() >= 15
         && let Some(even) = tie_even(x, &digits, exp)
     {
@@ -142,10 +136,10 @@ fn shortest(x: f64) -> (String, i32) {
     (digits, exp)
 }
 
-/// `x`가 `digits` 길이의 두 십진 표기 정확히 중간이면 끝자리가 짝수이고 `x`로 되돌아오는 쪽.
+/// When `x` lies at an exact midpoint between two `digits`-length decimals, returns the even-ending candidate that round-trips to `x`.
 fn tie_even(x: f64, digits: &str, exp: i32) -> Option<String> {
     let k = digits.len();
-    let exact = format!("{x:.800e}"); // 정확한 십진 전개(f64는 767자리 이내)
+    let exact = format!("{x:.800e}"); // Exact decimal expansion (f64 terminates within 767 digits).
     let (mantissa, _) = exact.split_once('e')?;
     let all: String = mantissa.chars().filter(|c| *c != '.').collect();
     let expansion = all.trim_end_matches('0');
@@ -161,7 +155,7 @@ fn tie_even(x: f64, digits: &str, exp: i32) -> Option<String> {
     })
 }
 
-/// 십진 숫자열에 1을 더한다(올림으로 길어지면 호출한 쪽이 거른다).
+/// Increments decimal digits by 1; carry overflow returns `None` (filtered by caller).
 fn increment(digits: &str) -> Option<String> {
     let mut bytes = digits.as_bytes().to_vec();
     for byte in bytes.iter_mut().rev() {
@@ -179,7 +173,7 @@ fn increment(digits: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Node(`String(Number)`)로 만든 참조값. RFC 8785 부록 B의 표본을 포함한다.
+    /// Reference values from Node `String(Number)`, including RFC 8785 Appendix B samples.
     const NUMBERS: [(u64, &str); 37] = [
         (0x0000000000000000, "0"),
         (0x8000000000000000, "0"),
@@ -212,7 +206,7 @@ mod tests {
         (0x3e45798ee2308c3a, "1e-8"),
         (0x4415af1d78b58c40, "100000000000000000000"),
         (0x44b52d02c7e14af6, "1e+23"),
-        // 끝자리가 짝수인 쪽을 고르는 중간값 표본(Node 참조)
+        // Midpoint tie-to-even samples (Node reference)
         (0x43294c4bc3f430fd, "3560381355792510.5"),
         (0xc316eb95be23d629, "-1612869465077130.2"),
         (0xc3137215c50c744a, "-1368365595827474.5"),
@@ -236,7 +230,7 @@ mod tests {
              \"\\u00f6\":\"Latin Small Letter O With Diaeresis\"}",
         )
         .unwrap();
-        // 이모지(U+1F600, 서로게이트 D83D)는 U+FB33보다 앞이다. 코드포인트 순서였다면 뒤다.
+        // U+1F600 (surrogate pair starting with D83D) sorts before U+FB33 in UTF-16, unlike scalar order.
         let expected = "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u{80}\":\"Control\",\
             \"\u{f6}\":\"Latin Small Letter O With Diaeresis\",\"\u{20ac}\":\"Euro Sign\",\
             \"\u{1f600}\":\"Emoji: Grinning Face\",\"\u{fb33}\":\"Hebrew Letter Dalet With Dagesh\"}";
@@ -245,7 +239,7 @@ mod tests {
 
     #[test]
     fn the_rfc_8785_sample_document_canonicalizes_as_published_except_unsafe_numbers() {
-        // RFC의 표본에서 1E30만 뺐다: 2^53 이상의 정수값 수는 승인한 값이 모호해지므로 거절한다.
+        // Omits 1E30 from the RFC sample: integers >= 2^53 are rejected to avoid approval ambiguity.
         let doc = parse(
             r##"{"numbers":[333333333.33333329,4.50,2e-3,0.000000000000000000000000001],
                 "string":"\u20ac$\u000F\u000aA'\u0042\u0022\u005c\\\"\/","literals":[null,true,false]}"##,

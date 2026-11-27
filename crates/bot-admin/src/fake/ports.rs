@@ -1,4 +1,4 @@
-//! 가짜 저장소의 포트 구현: 조회 범위 규칙, 보류 판정, 브로커 승인.
+//! Port implementations (`AdminRead`, `AdminAct`, `Broker`) for the in-memory `Fake` store.
 
 use super::{
     Data, Decision, Fake, Resolution, Settled, entry_hash, hold_key, ms_key, operator, paged,
@@ -16,7 +16,6 @@ use std::time::SystemTime;
 impl AdminRead for Fake {
     fn runs(&self, viewer: &Viewer, query: RunQuery) -> Reply<'_, Listing<RunView>> {
         let d = self.lock();
-        // 최근 갱신순(내림차순), 같으면 프로필·run 순.
         let rows: Vec<(String, RunView)> = d
             .runs
             .iter()
@@ -85,12 +84,10 @@ impl AdminRead for Fake {
         Box::pin(async move { out })
     }
 
-    /// 정렬은 설계 계약을 따른다. 대기: 만료 임박순·nonce 오름차순. 처리됨: `decided_at` 내림차순(없으면 뒤)·nonce 오름차순.
-    /// 전체: 처리된 행을 처리됨 순서로, 대기 행을 맨 뒤에. 필터는 쪽 나누기 전에 적용한다.
+    /// Orders decided rows (`decided_at` desc, then missing `decided_at`) ahead of pending rows (soonest expiry first), tie-broken by nonce.
     fn approvals(&self, viewer: &Viewer, query: ApprovalQuery) -> Reply<'_, Listing<ApprovalView>> {
         let d = self.lock();
         let pending = |a: &ApprovalView| a.state == ApprovalState::Pending;
-        // 정렬 키: 처리 시각이 있는 처리된 행(최근순) → 처리 시각 없는 처리된 행 → 대기 행(만료 임박순). 같으면 nonce 순.
         let key = |a: &ApprovalView| match (pending(a), a.decided_at) {
             (false, Some(at)) => format!("0:{:020}:{}", u64::MAX - ms_key(at), a.nonce.0),
             (false, None) => format!("1:{:020}:{}", 0, a.nonce.0),
@@ -223,7 +220,6 @@ impl AdminRead for Fake {
         Box::pin(async move { out })
     }
 
-    /// 운영자 전용. 실제 저장소처럼 승인마다 정지 세대·정지 여부·오늘 사용량을 한 행으로 준다.
     fn preapprovals(&self, viewer: &Viewer) -> Reply<'_, Vec<bot_core::grant::PreapprovalRow>> {
         let out = if viewer.operator {
             Ok(self
@@ -244,7 +240,6 @@ impl AdminAct for Fake {
         Box::pin(async { Err(Error::Unavailable) })
     }
 
-    /// 정지·재개: 승인 ID·정지 세대를 현재와 대조하는 규칙은 `bot_core::grant::decide_pause`로 저장소와 같다.
     fn set_pause(
         &self,
         actor: PrincipalId,
@@ -310,11 +305,6 @@ impl AdminAct for Fake {
         Box::pin(async move { out })
     }
 
-    /// 판정은 보류 식별자와 대상(프로필·run·호출·단계)을 함께 대조한 뒤 한 번만 적용한다.
-    /// - 끝난 같은 식별자: 같은 운영자·같은 판정(종류와 영수증/증거)·같은 대상이면 `Repeated`(새 보류가 생겼어도), 다르면 `Conflict`.
-    /// - 열린 보류에 없는 식별자는 `Missing`, 대상이 식별자의 것과 다르면 `Conflict`.
-    /// - 대상은 식별자로 찾는다: 같은 호출 ID 아래 도구·회신 보류가 함께 있거나 다른 run이 같은 호출 ID를 써도 서로 건드리지 않는다.
-    /// - 보류 단계가 모두 판정된 뒤에만 run을 재개한다(민감 DM은 종료·새 요청 필요).
     fn resolve_hold(
         &self,
         actor: PrincipalId,
@@ -328,6 +318,8 @@ impl AdminAct for Fake {
 }
 
 impl Fake {
+    /// Resolves a hold occurrence once after verifying `hold_id` matches `(profile, run, call, effect)`.
+    /// Identical replays of a settled `hold_id` return `Repeated`; mismatches return `Conflict`.
     fn decide_hold(
         d: &mut Data,
         actor: PrincipalId,
@@ -335,7 +327,6 @@ impl Fake {
         verdict: HoldVerdict,
     ) -> Result<HoldDecision, Error> {
         let print = verdict_print(&verdict);
-        // 1) 이미 끝난 식별자.
         if let Some(done) = d.settled.iter().find(|s| s.hold_id == hold.hold_id) {
             let same = done.actor == actor
                 && done.verdict == print
@@ -347,7 +338,6 @@ impl Fake {
                 Err(Error::Conflict)
             };
         }
-        // 2) 열린 보류 중에서 이 식별자를 가진 것: 호출 전체의 식별자 또는 판정할 수 있는 단계의 식별자.
         let open: Vec<HoldView> = d.holds.iter().filter(|h| d.hold_open(h)).cloned().collect();
         let found = open.iter().find_map(|h| {
             if h.hold_id.as_ref() == Some(&hold.hold_id) {
@@ -361,7 +351,6 @@ impl Fake {
         let Some((h, step)) = found else {
             return Err(Error::Missing);
         };
-        // 단계 발생의 식별자는 해당 단계를 지정한 판정에서만 쓴다.
         if step.is_some() && hold.effect.is_none() {
             return Err(Error::Invalid);
         }
@@ -370,7 +359,6 @@ impl Fake {
         {
             return Err(Error::Conflict);
         }
-        // 3) 적용: 단계는 확정(영수증) 또는 «시작함+미실행 판정 표지», 호출 전체 보류는 판정 표시.
         let key = hold_key(&h);
         match &step {
             None => {
@@ -397,7 +385,7 @@ impl Fake {
                         EffectState::Started
                     };
                     e.resolution = receipt.is_none().then_some(EffectResolution::NotExecuted);
-                    (e.receipt, e.reason, e.hold_id) = (receipt, None, None); // 판정한 단계는 더 판정할 수 없다
+                    (e.receipt, e.reason, e.hold_id) = (receipt, None, None);
                 }
             }
         }
@@ -411,7 +399,7 @@ impl Fake {
                 .holds
                 .iter_mut()
                 .find(|v| hold_key(v) == key)
-                .expect("열린 보류");
+                .expect("open hold");
             target.hold_id = Some(id);
         } else if !d.hold_open(&h)
             && let Some(r) = d.runs.iter_mut().find(|r| {
@@ -421,8 +409,7 @@ impl Fake {
             })
         {
             r.waiting = None;
-            // 민감 DM은 본문이 없어 다시 실행하지 못한다: 처리됨이면 완료, 미실행이면 거절로 끝내고 새 요청이 필요하다.
-            // 그 밖의 호출은 같은 호출로 다시 이어 간다.
+            // Private DMs lack stored input bodies and cannot replay: `NotExecuted` terminates as `Dead`.
             r.state = match (h.kind, &verdict) {
                 (HoldKind::Tool | HoldKind::Reply, _) => RunState::Ready,
                 (HoldKind::Private, HoldVerdict::Confirmed { .. }) => RunState::Succeeded,

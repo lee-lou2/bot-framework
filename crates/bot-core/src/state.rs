@@ -1,5 +1,4 @@
-//! 저장소와 브로커가 같은 뜻으로 쓰는 상태 어휘: run·효과·위험도·가시성의 상태 값, 대화(`Conversation`)와 출처(`RunOrigin`), 실행 맥락(`RunContext`), 승인(`Approval`).
-//! 고정 어휘이므로 변종을 더하면 이 값을 가르는 모든 `match`가 컴파일 오류로 알려 준다(`ConversationKind`처럼 SQL 제약에도 있는 값은 마이그레이션도 함께 바꾼다).
+//! Shared state enums, conversation/origin metadata, `RunContext`, and `Approval` vocabulary.
 
 use crate::{command::Work, id::*};
 
@@ -22,7 +21,7 @@ pub enum EffectState {
     Held,
 }
 
-/// 운영자가 보류 단계의 미실행을 확인했다. 다음 점유가 성공하면 이 판정은 소비된다.
+/// Operator confirmed a held step did not execute; consumed on the next successful claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectResolution {
     NotExecuted,
@@ -41,6 +40,7 @@ pub enum Visibility {
     Profile,
 }
 
+/// Persisted in SQL constraints; adding a variant requires a matching migration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationKind {
     Direct,
@@ -50,7 +50,7 @@ pub enum ConversationKind {
     Scheduled,
 }
 
-/// 인증된 루트 접수나 예약 발화가 정한 출처. 회신 대화와 별도로 저장한다.
+/// Origin recorded at authenticated root intake or schedule fire, stored separately from reply conversation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunOrigin {
     Message,
@@ -61,7 +61,7 @@ pub enum RunOrigin {
 }
 
 impl RunOrigin {
-    /// 인증한 게이트웨이나 민감 DM 입구에서만 사용한다. 예약은 생성 경로가 직접 구분한다.
+    /// For authenticated gateways and private DM ingress only; scheduled runs set origin directly.
     pub fn from_ingress(kind: &ConversationKind, principal: &PrincipalId) -> Self {
         use crate::identity::{IdentityKind, identity_kind};
         match (kind, identity_kind(&principal.0)) {
@@ -74,7 +74,7 @@ impl RunOrigin {
         }
     }
 
-    /// MCP 메타데이터와 원장이 공유하는 고정 값.
+    /// Fixed wire value shared by MCP metadata and the ledger.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Message => "message",
@@ -103,32 +103,32 @@ pub struct Conversation {
     pub thread: Option<String>,
 }
 
-/// 예약을 만든 프로필 안에서 트리거 ID는 소유 에이전트별로 유일하다.
+/// Trigger IDs are unique per owning agent within a profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TriggerRef {
     pub agent: AgentId,
     pub id: String,
 }
 
-/// 공유 범위는 원래 요청의 프로필·요청자·대화에 고정된다.
+/// Share scope is bound to the original request's profile, principal, and conversation.
 #[derive(Clone, Debug)]
 pub struct RunContext {
     pub attempt: Attempt,
     pub root: RunId,
-    /// 위임과 재개에도 유지되는 루트의 출처.
+    /// Root origin, preserved across delegation and resume.
     pub origin: RunOrigin,
     pub principal: PrincipalId,
     pub agent: AgentId,
     pub conversation: Conversation,
-    /// 접수 때 고정한 바인딩. 위임 자식은 부모의 것을 물려받는다(루트의 정확한 원래 바인딩).
+    /// Root intake binding, inherited unchanged by delegated children.
     pub binding: BindingId,
-    /// 루트가 인증된 OpenAI 호환 입구로 접수됐다면 그 접수 원장의 출처(위임 자식도 같다). 아니면 None이다.
+    /// OpenAI-compatible intake origin when root entered via HTTP API (inherited by children).
     pub api: Option<crate::api::ApiOrigin>,
     pub scopes: std::collections::BTreeSet<String>,
     pub private_memory_read: bool,
     pub work: Work,
     pub approver: Option<PrincipalId>,
-    /// 예약 실행과 그 자식은 루트의 출처를 공유한다. 일반 요청은 None이다.
+    /// Shared by a scheduled run and its children; `None` for normal requests.
     pub trigger: Option<TriggerRef>,
 }
 

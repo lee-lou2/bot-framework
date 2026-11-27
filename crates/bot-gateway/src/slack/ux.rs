@@ -1,8 +1,8 @@
-//! Slack 진행 표시(👀/✅ 반응 · `chat.startStream` task_update 카드)와 스레드 중단(Agent 중단 버튼 · "중단해줘" 멘션 · 확인 카드).
+//! Slack progress indicators (reactions and `chat.startStream` task cards) and thread stop controls.
 //!
-//! - 모든 상태 표시·반응은 장식이라 실패해도 본 실행이나 회신 전달을 막지 않는다.
-//! - 진행 카드에는 고정 문구·역할명·도구명만 싣고, 사용자 원문·비밀·도구 인자·모델 초안은 싣지 않는다.
-//! - 중단은 `RunAdmin::cancel`로 저장소·자식 run 트리를 취소하고 감사에 남긴다. 요청한 본인이나 `admin`/`owner` 역할만 중단할 수 있다.
+//! - Progress/reaction calls are best-effort and never block execution or reply delivery.
+//! - Progress cards expose only fixed copy, role names, and tool names (never prompts, secrets, args, or drafts).
+//! - Stop cancels the run tree via `RunAdmin::cancel` (audited) and is restricted to the requester or `admin`/`owner`.
 mod cards;
 mod stop;
 
@@ -35,7 +35,6 @@ const POLL_EVERY: Duration = Duration::from_millis(750);
 const WATCH_LIMIT: Duration = Duration::from_secs(30 * 60);
 const MAX_SEEN_RUNS: usize = 2048;
 
-/// 추적할 Slack 요청 한 건의 정보.
 pub struct TrackedRun {
     pub profile: ProfileId,
     pub workspace: String,
@@ -71,7 +70,6 @@ struct SeenRuns {
 }
 
 impl SeenRuns {
-    /// 처음 보는 run이면 기록하고 `true`, 이미 추적했거나 진행 중인 run이면 `false`.
     fn claim(&mut self, run: RunId) -> bool {
         if !self.set.insert(run.clone()) {
             return false;
@@ -88,35 +86,31 @@ impl SeenRuns {
 
 #[derive(Default)]
 struct ActiveTable {
-    /// `RunId` → 현재 추적 중인 run (같은 스레드에 둘 이상 겹쳐도 덮어쓰지 않는다)
+    // Keyed by RunId so overlapping runs in the same thread do not overwrite each other.
     by_run: HashMap<RunId, Arc<ActiveRun>>,
-    /// `(channel, thread_ts)` → 스레드별 추적 중인 run 순서(가장 최근 것이 뒤)
+    // Ordered oldest-to-newest per thread so stop targets the most recent run.
     by_thread: HashMap<ThreadKey, Vec<RunId>>,
 }
 
 #[derive(Default)]
 struct ThreadStream {
-    /// 현재 열려 있는 진행 스트림 `(run, ts)`
     open: Option<(RunId, String)>,
-    /// 최종 회신이 시작되었거나 끝난 run 집합 — 뒤늦은 폴링이 답글 뒤에 카드를 다시 열지 못하게 막는다.
+    // Runs whose final reply has started or finished; blocks late polls from reopening a card after the reply.
     closed: HashSet<RunId>,
 }
 
 type ThreadKey = (String, String);
 type StreamSlot = Arc<tokio::sync::Mutex<ThreadStream>>;
 
-/// Slack 진행 상태(`chat.startStream` · 👀/✅)와 스레드 중단 제어기.
 pub struct SlackUx {
     pub(super) creds: Arc<Credentials>,
     runs: Arc<dyn RunStore>,
     pub(super) admin: Arc<dyn RunAdmin>,
     poll_every: Duration,
     watch_limit: Duration,
-    /// 같은 run(`app_mention` + `message.channels` 중복 수신 등)이 두 번 추적되지 않게 막는 집합
+    // Deduplicates duplicate events for the same run (e.g. app_mention + message.channels).
     seen: Mutex<SeenRuns>,
-    /// 실행별·스레드별 현재 추적 중인 run
     active: Mutex<ActiveTable>,
-    /// `(channel, thread_ts)` → 스레드별 직렬화된 진행 스트림 상태
     streams: Mutex<HashMap<ThreadKey, StreamSlot>>,
 }
 
@@ -134,7 +128,7 @@ impl SlackUx {
         }
     }
 
-    /// 시험 전용: 상태 폴링 간격과 감시 상한을 줄인다.
+    /// Test-only: overrides the progress poll interval and watch deadline.
     #[doc(hidden)]
     #[must_use]
     pub fn with_watch_timing(mut self, poll_every: Duration, watch_limit: Duration) -> Self {
@@ -214,8 +208,8 @@ impl SlackUx {
             .cloned()
     }
 
-    /// 접수된 Slack 요청의 진행 추적 시작(비동기 백그라운드 작업으로 돌려 ack를 늦추지 않는다).
-    /// 같은 `run`에 대한 중복 호출(`app_mention`과 `message.channels` 동시 수신 등)은 무시하고 `false`를 돌려준다.
+    /// Starts background progress tracking (non-blocking for Slack ack).
+    /// Returns `false` on duplicate `run` calls (e.g. `app_mention` + `message.channels`).
     pub fn track(self: &Arc<Self>, info: TrackedRun, stop: CancellationToken) -> bool {
         {
             let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
@@ -228,7 +222,7 @@ impl SlackUx {
             started: Instant::now(),
             st: Mutex::new(RunUxState {
                 step: 0,
-                doing: "순서를 기다리는 중".into(),
+                doing: "Waiting in queue".into(),
                 stop_asked: false,
                 stop_in_flight: false,
                 stop_confirmed: false,
@@ -252,7 +246,7 @@ impl SlackUx {
 
     async fn watch_run(self: Arc<Self>, active: Arc<ActiveRun>, stop: CancellationToken) {
         let info = &active.info;
-        // 재시작 뒤 이미 끝난 run의 재전달이면 반응·상태 카드를 띄우지 않는다.
+        // Skip reactions and status cards for redelivered events of runs already in a terminal state.
         if let Ok(Some(progress)) = self
             .runs
             .progress(info.profile.clone(), info.run.clone())
@@ -331,7 +325,7 @@ impl SlackUx {
             }
         }
 
-        // 정리: 활성 목록에서 먼저 빼고, 이 run의 진행 카드·닫힘 표시만 치운 뒤, 확정된 종결 상태일 때만 결과 반응을 남긴다.
+        // Deregister before clearing this run's stream, and only set a terminal reaction on confirmed completion.
         self.remove_active(info);
         self.clear_stream_for_run(
             &info.profile,
@@ -397,7 +391,7 @@ impl SlackUx {
                 )
                 .await;
             }
-            // 감시 기한 만료나 정상 종료: 아직 진행 중일 수 있는 작업에 `:x:`를 달지 않는다.
+            // Watch deadline or graceful shutdown: run may still be active, so do not react with :x:.
             None | Some(_) => {}
         }
     }
@@ -424,9 +418,8 @@ impl SlackUx {
             .await;
     }
 
-    /// 회신 게시 직전(`SlackSender`)에 **이 `run`이 연** 진행 스트림 카드만 닫고 지운다.
-    /// 같은 스레드에 겹쳐 돌고 있는 다른 run의 카드는 건드리지 않는다.
-    /// `mark_closed`가 참이면(최종 회신) 아직 감시 중인 이 run이 답글 뒤에 새 카드를 다시 열지 못하게 잠근다.
+    /// Closes and deletes the progress stream opened by `run` without touching other runs in the thread.
+    /// When `mark_closed` is true (final reply), blocks late polls from reopening a card after the reply.
     pub async fn clear_stream(
         &self,
         profile: &ProfileId,
@@ -515,7 +508,7 @@ impl SlackUx {
         if guard.closed.contains(run) {
             return;
         }
-        // 같은 스레드에 이전 run의 열린 카드가 남아 있으면 먼저 지운다.
+        // Close any lingering stream card from an earlier run in the same thread first.
         if guard.open.as_ref().is_some_and(|(r, _)| r != run)
             && let Some((_, old_ts)) = guard.open.take()
         {

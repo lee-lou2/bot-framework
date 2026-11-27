@@ -1,4 +1,4 @@
-//! 사용자 예약의 발화(PG): 확인할 예약 읽기, 발생 접수(원래 대화·신원 복원), 커서·유일키 수렴, 취소와의 직렬화, 조용한 완료.
+//! User-created schedule firing: due scanning, origin restoration, occurrence deduplication, cancel serialization, and quiet completion.
 
 use crate::support::{schedule::*, *};
 use bot_core::{command::*, id::*, ledger::StartCall, port::*, schedule::*, state::*};
@@ -33,7 +33,6 @@ fn advance(
     }
 }
 
-/// 소유자의 DM에서 만든 한 번짜리 예약을 이미 지난 시각으로 옮겨 둔다. (예약, 예정 시각, 커서)
 async fn due_at(
     db: &TestDb,
     run: &RunContext,
@@ -55,10 +54,10 @@ async fn firing_makes_one_run_in_the_original_conversation_and_closes_a_one_shot
         return;
     };
     let origin = run_in(&db, "r1", OWNER, ConversationKind::Direct).await;
-    // 원 요청 트리는 private 기억을 읽었고 Slack과 다른 입구에서 들어왔다.
     db.sql("update bot_runs set private_memory_read = true, reply_transport = 'fixture-push'")
         .await;
     let spec = spec_in(&db, 3_600_000).await;
+    let expected_instruction = spec.instruction.clone();
     begin_tool(&db, &origin, "c1", "schedule.create", sealed(&spec)).await;
     let recall = StartCall {
         private_recall: true,
@@ -89,8 +88,7 @@ async fn firing_makes_one_run_in_the_original_conversation_and_closes_a_one_shot
         ))
         .await
         .unwrap()
-        .expect("접수한 run");
-    // 같은 발생을 다른 스케줄러가 다시 접수해도 같은 run이다
+        .expect("accepted run");
     let again = users(&db)
         .advance(advance(
             &id,
@@ -112,7 +110,6 @@ async fn firing_makes_one_run_in_the_original_conversation_and_closes_a_one_shot
         1
     );
 
-    // 원래 대화로 돌아가 원래 신원으로 돈다
     let got = runs(&db).claim().await.unwrap().unwrap();
     assert_eq!(got.attempt.run, run);
     assert_eq!(got.principal.0, OWNER);
@@ -128,14 +125,14 @@ async fn firing_makes_one_run_in_the_original_conversation_and_closes_a_one_shot
     assert_eq!(
         got.scopes,
         all(&["run"]),
-        "발화 시점의 권한(상한의 부분집합)"
+        "fired run scopes must be a subset of the ceiling"
     );
     assert_eq!(
         got.trigger.as_ref().map(|t| t.id.clone()),
         Some(format!("user:{}", id.0))
     );
     assert!(
-        matches!(&got.work.target, Target::Agent { instruction, .. } if instruction == "일정을 확인해 줘")
+        matches!(&got.work.target, Target::Agent { instruction, .. } if instruction == &expected_instruction)
     );
     assert!(
         db.scalar::<bool>(&format!(
@@ -143,9 +140,8 @@ async fn firing_makes_one_run_in_the_original_conversation_and_closes_a_one_shot
             run.0
         ))
         .await,
-        "원 요청의 private 표지를 이어 받는다"
+        "fired run must inherit origin private_memory_read taint"
     );
-    // 한 번짜리는 마지막 발생으로 닫힌다
     assert_eq!(column::<String>(&db, &id, "state").await, "closed");
     assert_eq!(column::<String>(&db, &id, "close_reason").await, "finished");
     assert!(users(&db).due(None, 10).await.unwrap().schedules.is_empty());
@@ -166,7 +162,6 @@ async fn an_advance_from_a_stale_view_a_fast_clock_or_a_wider_scope_is_refused()
     let now = db.now_ms().await;
     let attempt = |next| advance(&id, cursor, Some("r1"), next);
     let users = users(&db);
-    // 아직 오지 않은 시각·커서 뒤로 가는 시각·한 번짜리의 다른 시각·다음 발생·상한을 넘는 권한은 받지 않는다
     for next in [
         fire(now + 3_600_000, None, &["run"]),
         fire(cursor, None, &["run"]),
@@ -179,7 +174,6 @@ async fn an_advance_from_a_stale_view_a_fast_clock_or_a_wider_scope_is_refused()
             Err(Error::Invalid)
         ));
     }
-    // 낡은 판본·판본 없는 발화
     assert!(matches!(
         users
             .advance(advance(
@@ -197,7 +191,6 @@ async fn an_advance_from_a_stale_view_a_fast_clock_or_a_wider_scope_is_refused()
             .await,
         Err(Error::Invalid)
     ));
-    // 다른 스케줄러가 커서를 먼저 옮긴 뒤 같은 발생이 아닌 입력은 낡았다
     assert!(matches!(
         users
             .advance(advance(
@@ -237,7 +230,6 @@ async fn a_cron_schedule_waits_for_its_first_occurrence_then_fires_and_moves_on(
         .await
         .unwrap();
     let cursor = column::<i64>(&db, &id, "cursor_ms").await;
-    // 만든 직후 곧바로 확인 대상이다. 첫 발생이 미래면 커서를 넘기지 않고 그 시각까지 기다린다
     assert_eq!(users(&db).due(None, 10).await.unwrap().schedules.len(), 1);
     let now = db.now_ms().await;
     let first = now + 3_600_000;
@@ -254,7 +246,7 @@ async fn a_cron_schedule_waits_for_its_first_occurrence_then_fires_and_moves_on(
     assert_eq!(
         column::<i64>(&db, &id, "cursor_ms").await,
         cursor,
-        "발생을 버리지 않는다"
+        "WaitUntil must not advance cursor past an unfired occurrence"
     );
     assert!(matches!(
         users(&db)
@@ -267,7 +259,6 @@ async fn a_cron_schedule_waits_for_its_first_occurrence_then_fires_and_moves_on(
             .await,
         Err(Error::Invalid)
     ));
-    // 시간이 흘러 발생 시각이 되면 접수하고 다음 확인 시각으로 간다(반복은 닫히지 않는다)
     db.sql("update bot_user_schedules set cursor_ms = cursor_ms - 7200000, next_ms = bot_now_ms() - 1000")
         .await;
     let cursor = cursor - 7_200_000;
@@ -285,7 +276,6 @@ async fn a_cron_schedule_waits_for_its_first_occurrence_then_fires_and_moves_on(
     assert_eq!(column::<i64>(&db, &id, "cursor_ms").await, hit);
     assert_eq!(column::<String>(&db, &id, "state").await, "active");
     assert!(users(&db).due(None, 10).await.unwrap().schedules.is_empty());
-    // 앞선 입력(옛 커서)의 다른 발생은 낡았다
     assert!(matches!(
         users(&db)
             .advance(advance(
@@ -307,7 +297,6 @@ async fn cancelling_and_firing_serialize_and_close_is_idempotent() {
     let origin = run_in(&db, "r1", OWNER, ConversationKind::Direct).await;
     let (id, at_ms, cursor) = due_at(&db, &origin, "c1", false).await;
     cancel_with(&db, &origin, "k1", &id).await.unwrap();
-    // 취소한 뒤에는 발화하지 않는다
     assert!(matches!(
         users(&db)
             .advance(advance(
@@ -335,7 +324,6 @@ async fn cancelling_and_firing_serialize_and_close_is_idempotent() {
             .await,
         0
     );
-    // 닫기는 이미 이뤄진 일이다
     assert_eq!(
         users(&db)
             .advance(advance(
@@ -348,7 +336,6 @@ async fn cancelling_and_firing_serialize_and_close_is_idempotent() {
             .unwrap(),
         None
     );
-    // 이미 접수한 발생은 취소해도 그 run으로 추적된다
     let origin2 = run_in(&db, "r2", OWNER, ConversationKind::Direct).await;
     let (id2, at2, cursor2) = due_at(&db, &origin2, "c2", false).await;
     let run = users(&db)
@@ -430,10 +417,10 @@ async fn a_quiet_completion_sends_no_reply_but_anything_else_still_does() {
     db.sql("update bot_runs set state = 'succeeded', lease_until_ms = null, lease_owner = null, finished_ms = bot_now_ms()")
         .await;
     for (n, (quiet, text, replies)) in [
-        (true, " <조용히>\n", 0),
-        (true, "변경 없음", 1),
-        (true, "확인 필요 <조용히>", 1),
-        (false, "<조용히>", 1),
+        (true, " <quiet>\n", 0),
+        (true, "no changes", 1),
+        (true, "check needed <quiet>", 1),
+        (false, "<quiet>", 1),
     ]
     .into_iter()
     .enumerate()
@@ -466,7 +453,7 @@ async fn a_quiet_completion_sends_no_reply_but_anything_else_still_does() {
     }
 }
 
-/// `due_at`과 같지만 원래 run이 이미 끝난 상태에서 호출을 여는 시험용(호출은 끝난 run에서 못 연다): 예약만 직접 넣는다.
+/// Inserts a due schedule directly when the origin run has already finished (calls cannot open on finished runs).
 async fn due_at_ok(
     db: &TestDb,
     origin: &RunContext,
@@ -479,7 +466,7 @@ async fn due_at_ok(
         "insert into bot_user_schedules (profile, id, owner, agent, origin_run, origin_call, origin_binding, origin_kind, origin_id,
                 ceiling, at_ms, instruction, quiet, cursor_ms, next_ms)
          values ('personal', '{id}', '{OWNER}', 'main', '{}', '{call_id}', 'desk', 'direct', 'c1',
-                 '{{run,calendar.read}}', {}, '확인', {quiet}, {}, {})",
+                 '{{run,calendar.read}}', {}, 'check', {quiet}, {}, {})",
         origin.attempt.run.0,
         now - 5_000,
         now - 65_000,
@@ -509,7 +496,7 @@ async fn a_quiet_marker_that_carries_an_attachment_is_still_sent() {
         .unwrap();
     let got = runs(&db).claim().await.unwrap().unwrap();
     let answer = serde_json::json!({
-        "text": "<조용히>",
+        "text": "<quiet>",
         "attachments": [{"name": "a.txt", "type": "text/plain", "data": "aGk="}]
     })
     .to_string();
@@ -517,7 +504,7 @@ async fn a_quiet_marker_that_carries_an_attachment_is_still_sent() {
         .finish(
             got.attempt.clone(),
             Finish {
-                result: JsonPayload(serde_json::json!({"text": "<조용히>"}).to_string()),
+                result: JsonPayload(serde_json::json!({"text": "<quiet>"}).to_string()),
                 answers: vec![JsonPayload(answer)],
             },
         )

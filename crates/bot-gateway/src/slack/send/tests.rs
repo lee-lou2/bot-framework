@@ -16,7 +16,6 @@ fn outcomes_follow_the_documented_classification() {
             receipt: "C1:1.5".into()
         }
     );
-    // ok인데 영수증을 확인할 수 없으면 올라갔는지 알 수 없다: ts가 없거나 모양이 아니거나, 응답의 채널이 없거나 보낸 곳과 다르다
     assert_eq!(delivery(Raw::Ok(json!({}))), Delivery::Held);
     for reply in [
         json!({"channel": "C1", "ts": ""}),
@@ -42,7 +41,7 @@ fn outcomes_follow_the_documented_classification() {
         Delivery::Held
     );
     assert_eq!(delivery(Raw::Unknown), Delivery::Held);
-    // 토큰을 Slack가 거절했다: 아무것도 실행되지 않았다 — 영구 거절이 아니라 다시 시도할 수 있는 미실행이다
+    // Token rejection happens pre-execution and is retryable after credential refresh.
     assert_eq!(
         delivery(Raw::TokenRejected),
         Delivery::NotSent {
@@ -113,7 +112,6 @@ fn an_upload_receipt_needs_exactly_the_files_we_sent_with_nonempty_unique_ids() 
             vec!["F1", "F2"],
         ),
         (json!({"files": [{"title": "no id"}]}), vec!["F1"]),
-        // 올린 것 외의 항목·ID 없는 항목·빈 ID·문자열이 아닌 ID·중복은 하나라도 있으면 확인할 수 없다
         (
             json!({"files": [{"id": "F1"}, {"id": "F2"}, {"id": "F3"}]}),
             vec!["F1", "F2"],

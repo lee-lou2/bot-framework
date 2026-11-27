@@ -1,4 +1,4 @@
-//! 완료한 모델 응답의 도구 목록을 받는 가짜(`TurnSink`)와, 체크포인트만 되는 가짜 `RunStore`.
+//! Test doubles for `TurnSink`, checkpoint-only `RunStore`, `DelegationStore`, and `Park`.
 
 use super::lock;
 #[cfg(test)]
@@ -15,27 +15,19 @@ use bot_core::{
 };
 use std::sync::{Arc, Mutex};
 
-/// 받은 응답을 기록한다. `fail_with`로 쓰기 실패를 흉내 낸다.
 #[cfg(test)]
 #[derive(Default)]
 pub struct RecordingTurns {
     seen: Mutex<Vec<(Attempt, Observed)>>,
     fail: Mutex<Option<Error>>,
-    /// 저장이 이만큼 걸린다(느린 저장소).
     delay: Mutex<std::time::Duration>,
-    /// 저장에 들어설 때마다 알린다(시험이 시간 추정 없이 그 순간에 맞춰 움직이게).
     entered: tokio::sync::Notify,
-    /// 다음 저장을 이 문이 열릴 때까지 붙잡아 둔다.
     gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
-    /// 남긴 확정 거절 표식(시도·호출 ID·종류).
     refusals: Mutex<Vec<(Attempt, CallId, CliRefusal)>>,
-    /// 표식 쓰기가 이 오류로 실패한다.
     refusal_failure: Mutex<Option<Error>>,
-    /// 표식을 실제 체크포인트처럼 이 원장의 run 체크포인트(`cli-refusal-<호출 ID>`)에도 쓴다(`CallBook::marked`가 읽는 곳).
+    /// Optional ledger mirror writing `cli-refusal-<call>` checkpoints as `CheckpointSink` does.
     mirror: Mutex<Option<Arc<super::MemLedger>>>,
-    /// 다음 표식 쓰기를 이 문이 열릴 때까지 붙잡아 둔다(동시 재전달 시험이 그 순간에 맞춰 움직이게).
     refusal_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
-    /// 표식 쓰기에 들어설 때마다 알린다.
     refusal_entered: tokio::sync::Notify,
 }
 
@@ -44,21 +36,17 @@ impl RecordingTurns {
     pub fn new() -> Self {
         Self::default()
     }
-    /// 이후 알림이 이 오류로 실패한다(`None`이면 다시 성공).
     pub fn fail_with(&self, error: Option<Error>) {
         *lock(&self.fail) = error;
     }
-    /// 저장에 들어설 때까지 기다린다(이미 들어섰다면 바로 돌아온다).
     pub async fn entered(&self) {
         self.entered.notified().await;
     }
-    /// 다음 저장을 붙잡아 둔다. 돌려준 문에 `add_permits(1)`을 하면 풀린다.
     pub fn hold_next(&self) -> Arc<tokio::sync::Semaphore> {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         *lock(&self.gate) = Some(gate.clone());
         gate
     }
-    /// 이후 저장이 `delay`만큼 걸린다.
     pub fn set_delay(&self, delay: std::time::Duration) {
         *lock(&self.delay) = delay;
     }
@@ -68,28 +56,23 @@ impl RecordingTurns {
     pub fn attempts(&self) -> Vec<Attempt> {
         lock(&self.seen).iter().map(|(a, _)| a.clone()).collect()
     }
-    /// 남긴 확정 거절 표식(호출 ID와 종류).
     pub fn refusals(&self) -> Vec<(CallId, CliRefusal)> {
         lock(&self.refusals)
             .iter()
             .map(|(_, call, refusal)| (call.clone(), *refusal))
             .collect()
     }
-    /// 이후 표식 쓰기가 이 오류로 실패한다(`None`이면 다시 성공).
     pub fn fail_refusals_with(&self, error: Option<Error>) {
         *lock(&self.refusal_failure) = error;
     }
-    /// 표식을 이 원장의 체크포인트에도 쓴다(실제 `CheckpointSink`처럼: 같은 키에 다른 내용은 `Conflict`, claim을 잃으면 `Stale`).
     pub fn mirror_into(&self, ledger: Arc<super::MemLedger>) {
         *lock(&self.mirror) = Some(ledger);
     }
-    /// 다음 표식 쓰기를 붙잡아 둔다. 돌려준 문에 `add_permits(1)`을 하면 풀린다.
     pub fn hold_next_refusal(&self) -> Arc<tokio::sync::Semaphore> {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         *lock(&self.refusal_gate) = Some(gate.clone());
         gate
     }
-    /// 표식 쓰기에 들어설 때까지 기다린다.
     pub async fn refusal_entered(&self) {
         self.refusal_entered.notified().await;
     }
@@ -141,7 +124,6 @@ impl TurnSink for RecordingTurns {
                 return Err(error);
             }
             if let Some(ledger) = mirror {
-                // 체크포인트는 원장의 `step`/`add_step`으로 흉내 낸다(실제 `CheckpointSink`는 `RunStore::checkpoint`)
                 let key = CliRefusal::key(&call);
                 let body = serde_json::to_string(&refusal).map_err(|_| Error::Invalid)?;
                 let stored =
@@ -159,7 +141,7 @@ impl TurnSink for RecordingTurns {
     }
 }
 
-/// `checkpoint`만 되는 `RunStore`: 쓴 칸을 기록한다. 나머지는 쓰지 않는다.
+/// Checkpoint-only `RunStore` double recording written steps.
 #[derive(Default)]
 pub struct FakeRuns {
     steps: Mutex<Vec<(Attempt, Step)>>,
@@ -195,7 +177,7 @@ impl RunStore for FakeRuns {
     }
     fn checkpoint_batch(&self, attempt: Attempt, steps: Vec<Step>) -> Reply<'_, ()> {
         let mut stored = lock(&self.steps);
-        // 하나라도 기존 키와 내용이 다르면 전체를 받지 않는다(저장소와 같다). 같은 내용의 재전송은 멱등이다.
+        // Reject the whole batch on any key/body conflict; identical rewrites are idempotent.
         let clash = steps.iter().any(|new| {
             stored
                 .iter()
@@ -224,21 +206,17 @@ impl RunStore for FakeRuns {
     }
 }
 
-/// 같은 단계인가: 운영 저장소처럼 (프로필, 부모 run, 단계)가 같아야 한다.
 fn same_step(old: &Delegate, new: &Delegate) -> bool {
     old.parent.profile == new.parent.profile
         && old.parent.run == new.parent.run
         && old.step == new.step
 }
 
-/// 위임 저장소 가짜: 받은 명령을 기록한다. (부모 run, 단계)로 유일하며, 같은 대상·지시의 재요청은 같은 자식이고 다르면 `Conflict`다.
 #[derive(Default)]
 pub struct FakeDelegation {
     commands: Mutex<Vec<(RunId, Delegate)>>,
     fail: Mutex<Option<Error>>,
-    /// 끝난 자식의 결과(프로필, 부모 run, 단계) → 본문. 운영 저장소처럼 프로필까지 키다.
     finished: Mutex<Vec<(ProfileId, RunId, String, JsonPayload)>>,
-    /// 저장소가 활성으로 보는 판본(`None`이면 대조하지 않는다).
     active: Mutex<Option<Revision>>,
 }
 
@@ -252,8 +230,6 @@ impl FakeDelegation {
             .map(|(_, d)| d.clone())
             .collect()
     }
-    /// 이 (부모 run, 단계)의 자식이 끝났다고 기록한다. 본문은 체크포인트와 같은 모양
-    /// (`{"state":"succeeded","result":…}` · `{"state":"dead"|"cancelled","error":코드}`)이다.
     pub fn finish_child(&self, profile: &str, parent_run: &str, step: &str, body: &str) {
         lock(&self.finished).push((
             ProfileId(profile.into()),
@@ -262,11 +238,9 @@ impl FakeDelegation {
             JsonPayload(body.into()),
         ));
     }
-    /// 저장소가 이 판본을 활성으로 본다고 한다(`result`가 `checked_revision`과 다르면 `Stale`).
     pub fn set_active(&self, revision: &str) {
         *lock(&self.active) = Some(Revision(revision.into()));
     }
-    /// 이후 위임이 이 오류로 실패한다(`None`이면 다시 성공).
     pub fn fail_with(&self, error: Option<Error>) {
         *lock(&self.fail) = error;
     }
@@ -282,9 +256,8 @@ impl DelegationStore for FakeDelegation {
             }
             let commands = lock(&self.commands);
             let Some((_, old)) = commands.iter().find(|(_, d)| same_step(d, &command)) else {
-                return Ok(None); // 자식이 없다
+                return Ok(None);
             };
-            // 대상·지시가 처음 위임과 같아야 하고, 처음 넘긴 범위가 지금 계산한 범위 안에 있어야 한다.
             if old.child != command.child || old.instruction != command.instruction {
                 return Err(Error::Conflict);
             }
@@ -331,7 +304,6 @@ impl DelegationStore for FakeDelegation {
     }
 }
 
-/// 대기에 들어간 시도를 기록하는 `Park`.
 #[derive(Default)]
 pub struct RecordingPark {
     seen: Mutex<Vec<(Attempt, ParkReason)>>,
@@ -352,9 +324,7 @@ impl Park for RecordingPark {
     }
 }
 
-/// ②의 세션 대조를 흉내 내는 `RunStore`: `cli-resp-<id>` 체크포인트가 오면 `MemLedger`의 이 run 체크포인트에 그대로 쓰고, 그 응답의
-/// 도구마다 `cli-use-<id>`와 응답 전체의 `cli-group-<turn>`을 같은 묶음으로 더한다(`turn`은 run 안에서 1부터 이어지는 번호이고,
-/// 도구의 `seq`는 `turn + 위치`다). 실제 CLI 시험이 `PlannedCalls`와 `CheckpointSink`를 그대로 쓰게 한다.
+/// `RunStore` double that expands `cli-resp-*` checkpoints into `cli-use-*` and `cli-group-*` steps in `MemLedger`.
 pub struct PlanningRuns {
     ledger: Arc<super::MemLedger>,
     next_turn: Mutex<std::collections::HashMap<RunId, u64>>,

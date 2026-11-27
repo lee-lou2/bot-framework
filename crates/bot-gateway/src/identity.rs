@@ -1,8 +1,7 @@
-//! 어댑터가 인증한 사실로 만드는 주체 문자열. 본문·헤더의 글로는 만들 수 없고, 구분자를 넣어 다른 주체인 척할 수 없다.
+//! Validated principal ID builders derived solely from adapter-authenticated facts.
 //!
-//! - `local:<account>` — 호스트가 OS 사용자에 연결한 별칭
-//! - `slack:<workspace 별칭>/<Slack 사용자 ID>`
-//! - `http:<endpoint 별칭>/<검증한 토큰의 sub>`
+//! Formats: `local:<account>`, `slack:<workspace>/<user_id>`, and `http:<endpoint>/<sub>`.
+//! Rejects delimiter injection, whitespace, and control characters.
 use bot_core::id::PrincipalId;
 
 pub use bot_core::id::is_name as is_alias;
@@ -15,12 +14,10 @@ pub fn local(account: &str) -> Option<PrincipalId> {
     validated(format!("local:{account}"))
 }
 
-/// Slack 사용자 ID는 대문자·숫자만이다(`U…`, `W…`).
 pub fn slack(workspace: &str, user: &str) -> Option<PrincipalId> {
     validated(format!("slack:{workspace}/{user}"))
 }
 
-/// 토큰의 sub는 구분자(`:` `/`)·공백·제어 문자를 허용하지 않는다.
 pub fn http(endpoint: &str, subject: &str) -> Option<PrincipalId> {
     validated(format!("http:{endpoint}/{subject}"))
 }

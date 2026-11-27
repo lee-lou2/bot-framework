@@ -1,4 +1,4 @@
-//! `EffectJournal` 가짜(메모리). 호출 ID + 단계 키로 한 번만 `send=true`를 준다.
+//! In-memory `EffectJournal` test double issuing `send=true` once per `(run, call, step)`.
 
 use bot_core::{
     command::*,
@@ -13,18 +13,18 @@ struct Step {
     args: String,
     state: EffectState,
     receipt: Option<String>,
-    /// 운영자가 미실행을 입증한 보류 단계(다음 점유가 성공하면 소비된다).
+    /// Operator verdict proving non-execution; consumed on the next successful claim.
     resolution: Option<EffectResolution>,
 }
 
 #[derive(Default)]
 struct State {
     generations: HashMap<RunId, Generation>,
-    /// 호출을 연 도구(정한 호출만 조회가 도구를 대조한다).
+    /// Tool bound to a call; when set, `lookup` checks it matches.
     tools: HashMap<(RunId, CallId), ToolId>,
-    /// 켜면 조회가 원장을 읽지 못한다(`Unavailable`).
+    /// When set, `lookup` returns `Error::Unavailable`.
     lookup_down: bool,
-    /// 켜면 조회가 규약을 어긴 답을 낸다(어느 상태에나 판정·영수증을 싣는다). 브로커가 그대로 옮기지 않는지 본다.
+    /// When set, `lookup` injects bogus resolution/receipt fields to test broker filtering.
     lying: bool,
     steps: HashMap<(RunId, CallId, String), Step>,
     counter: u32,
@@ -49,14 +49,14 @@ impl MemJournal {
         Self::default()
     }
 
-    /// 이 run의 현재 세대를 정한다. 정하지 않은 run은 세대 검사를 하지 않는다.
+    /// Sets the current generation for `run` (unset runs skip generation fencing).
     pub fn set_generation(&self, run: &str, generation: u64) {
         lock(&self.inner)
             .generations
             .insert(RunId(run.into()), Generation(generation));
     }
 
-    /// 운영자가 이 보류 단계의 미실행을 입증했다(보류가 아닌 단계는 받지 않는다: `false`).
+    /// Marks a held step as `NotExecuted`; returns `false` if not held.
     pub fn resolve_not_executed(&self, run: &str, call: &str, step: &str) -> bool {
         let mut state = lock(&self.inner);
         let key = (RunId(run.into()), CallId(call.into()), step.to_owned());
@@ -69,7 +69,7 @@ impl MemJournal {
         }
     }
 
-    /// 이 호출을 연 도구를 정한다. 정한 호출의 조회는 도구가 다르면 `Denied`다(정하지 않은 호출은 대조하지 않는다).
+    /// Binds `tool` to `(run, call)` so `lookup` denies mismatches.
     pub fn bind_call(&self, run: &str, call: &str, tool: &str) {
         lock(&self.inner).tools.insert(
             (RunId(run.into()), CallId(call.into())),
@@ -77,17 +77,17 @@ impl MemJournal {
         );
     }
 
-    /// 켜면 이후 조회가 원장을 읽지 못한다.
-    /// 조회가 규약을 어긴 답을 내게 한다(어느 상태에나 판정과 영수증을 싣는다).
+    /// Injects protocol-violating resolution and receipt fields into `lookup` responses.
     pub fn lying(&self, on: bool) {
         lock(&self.inner).lying = on;
     }
 
+    /// Forces `lookup` to return `Error::Unavailable`.
     pub fn lookup_down(&self, down: bool) {
         lock(&self.inner).lookup_down = down;
     }
 
-    /// 지금까지 만든 단계 수(조회가 단계를 만들지 않는지 보려고).
+    /// Total recorded steps (verifies lookups do not create steps).
     pub fn step_count(&self) -> usize {
         lock(&self.inner).steps.len()
     }
@@ -127,7 +127,7 @@ impl EffectJournal for MemJournal {
                 if step.args != request.args.0 {
                     return Err(Error::Conflict);
                 }
-                // 운영자가 미실행을 입증한 보류 단계는 같은 단계를 다시 점유한다: 한 번만 `send=true`이고 판정은 소비된다
+                // Operator-resolved held step may be claimed once (`send=true`), consuming the verdict.
                 if step.state == EffectState::Held
                     && step.resolution == Some(EffectResolution::NotExecuted)
                 {
@@ -139,7 +139,7 @@ impl EffectJournal for MemJournal {
                         send: true,
                     });
                 }
-                // 확정·거절은 그대로, 전송 여부가 불명인 시작은 보류다. 둘 다 다시 보내지 않는다.
+                // Started steps transition to Held on re-request; never re-send.
                 if matches!(step.state, EffectState::Started) {
                     step.state = EffectState::Held;
                     step.receipt = Some("response_unknown".into());
@@ -167,7 +167,7 @@ impl EffectJournal for MemJournal {
         Box::pin(async move { result })
     }
 
-    /// 조회 전용: 이 호출의 그 단계만, 같은 정규 인자 지문으로 읽는다. 아무것도 쓰지 않고(시작만 한 단계도 보류로 바꾸지 않는다) 전송을 허가하지 않는다.
+    /// Read-only lookup by `(run, call, step, args)`; never mutates state or grants `send`.
     fn lookup(&self, request: EffectRequest, tool: ToolId) -> Reply<'_, Option<EffectStatus>> {
         let result = (|| {
             let state = lock(&self.inner);
@@ -237,7 +237,7 @@ impl EffectJournal for MemJournal {
         let result = (|| {
             let mut state = lock(&self.inner);
             fence(&state, &attempt)?;
-            // 판정은 운영자만 정한다: 기록 경로로는 어떤 판정도 받지 않는다
+            // Resolution is operator-only; tool record frames cannot set it.
             if status.resolution.is_some() {
                 return Err(Error::Invalid);
             }

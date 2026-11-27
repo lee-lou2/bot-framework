@@ -1,4 +1,4 @@
-//! 호스트 설정만 바뀐 새 판본(`--activate`)과 그 worker·gateway를 다루는 장치: 모델 상류 목적지가 옮겨 간 뒤 구판·신판이 어떻게 다루는지 본다.
+//! Helpers for activating a host-config-only revision change (moved upstream endpoint) and spawning a worker/gateway on it.
 use super::{
     ClaudeParts, Gate, Launch, LocalSandbox, MOVED_ENDPOINT, Overrides, Rig, Role, Server,
     Settings, bot, env_for, host_config, model_key_store, refs, start_roles,
@@ -8,8 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 impl Rig {
-    /// 같은 프로필 폴더로 **모델 상류 목적지만** 바꾼 호스트 설정을 `--activate`로 게시한다(gateway 역할만 띄운 두 번째 프로세스).
-    /// 프로필 판본은 그대로이고 활성화 판본만 바뀐다. 바뀔 때까지 기다리고, 돌려준 프로세스를 버리면 죽는다.
+    /// Activates a new revision with only the upstream model endpoint changed (profile revision stays identical).
     pub async fn move_upstream(&mut self) -> Server {
         let before = self.schema.active();
         let host = self.dir.path().join("host-moved.json");
@@ -26,22 +25,19 @@ impl Rig {
             &[("BOT_HOST_CONFIG", host.to_str().unwrap())],
         );
         let server = start_roles(&refs(&env), "gateway", &["--activate"], &socket);
-        self.until(
-            "호스트 설정을 바꾼 활성화가 게시되지 않았어요",
-            30,
-            |rig| rig.schema.active() != before,
-        )
+        self.until("host-config activation did not publish", 30, |rig| {
+            rig.schema.active() != before
+        })
         .await;
         server
     }
 
-    /// `move_upstream`이 게시한 새 판본(호스트 설정만 바뀐 같은 프로필)의 worker를 같은 프로세스 안에서 하나 더 띄운다. 모델 상류 목적지는 옮긴
-    /// 쪽이고 가짜 상류·자격 보관소는 그대로다. 돌려준 값을 버리면 멈춘다.
+    /// Launches a second in-process worker targeting the moved host config published by `move_upstream`.
     pub fn start_worker_on_moved_host(&self) -> MovedWorker {
         let host = self.dir.path().join("host-moved.json");
         assert!(
             host.exists(),
-            "먼저 move_upstream으로 새 판본을 게시해야 해요"
+            "move_upstream must publish the new revision first"
         );
         let env = env_for(
             &self.dir.path().join("profiles"),
@@ -83,7 +79,6 @@ impl Rig {
         }
     }
 
-    /// `move_upstream`이 띄운 새 판본 gateway에 붙는 `bot chat`(같은 요청 ID로 다시 붙으면 기존 결과를 받는다)
     pub async fn chat_on_moved_gateway(
         &self,
         request_id: &str,
@@ -110,22 +105,20 @@ impl Rig {
     }
 }
 
-/// 새 판본에서 도는 worker(같은 프로세스 안의 두 번째 `serve`). 버리면 멈춘다.
 pub struct MovedWorker {
     stop: CancellationToken,
     task: Option<JoinHandle<Result<(), String>>>,
 }
 
 impl MovedWorker {
-    /// 멈추고 오류 없이 끝났는지 본다.
     pub async fn stop(mut self) {
         self.stop.cancel();
-        let task = self.task.take().expect("이미 끝났어요");
+        let task = self.task.take().expect("already stopped");
         let ended = tokio::time::timeout(Duration::from_secs(30), task)
             .await
-            .expect("새 worker가 멈추지 않았어요")
+            .expect("moved worker did not stop")
             .unwrap();
-        assert_eq!(ended, Ok(()), "새 worker가 오류로 끝났어요");
+        assert_eq!(ended, Ok(()), "moved worker exited with error");
     }
 }
 

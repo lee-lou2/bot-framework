@@ -91,10 +91,10 @@ class Audit(unittest.TestCase):
     def test_the_report_groups_by_crate_and_says_how_many(self):
         with Tree() as tree:
             text = audit_module.report(audit_module.audit(tree.root, "slack", "discord"), "slack", "discord")
-        self.assertIn("빠진 곳 후보 5개", text)
+        self.assertIn("5 missing candidate(s)", text)
         self.assertIn("  crates/bot-gateway (1)\n    crates/bot-gateway/src/slack/send.rs", text)
         self.assertIn("  docs (1)", text)
-        self.assertIn("`discord`만 있는 파일 1개", text)
+        self.assertIn("1 file(s) mentioning `discord` only", text)
 
 
 class Command(unittest.TestCase):
@@ -111,7 +111,7 @@ class Command(unittest.TestCase):
         with Tree() as tree:
             code, text = self.run_main("slack", "discord", "--root", str(tree.root))
             self.assertEqual(code, 0)
-            self.assertIn("빠진 곳 후보", text)
+            self.assertIn("missing candidate(s)", text)
             self.assertEqual(self.run_main("slack", "discord", "--root", str(tree.root), "--strict")[0], 1)
 
     def test_strict_passes_when_nothing_is_missing(self):

@@ -1,5 +1,4 @@
-//! `bot` — 프로필 폴더를 연결하면 같은 봇으로 대화하고 작업을 예약한다.
-//! 종료 코드: 0 성공 · 1 실패 · 2 사용·설정 오류 · 3 다시 시도할 수 있는 실패(`bot chat`).
+//! `bot` binary entry point (exit codes: 0 ok, 1 error, 2 config/usage, 3 retryable chat error).
 use bot_cli::{
     chat,
     cli::{AddArgs, AddKind, BundleAction, Cli, Command, McpAction},
@@ -24,7 +23,7 @@ fn report(result: Result<(), String>) -> ExitCode {
 async fn main() -> ExitCode {
     bot_cli::logging::init();
     let cli = Cli::parse();
-    // 새 파일을 만드는 명령은 환경 설정을 읽지 않는다(잘못된 BOT_ 변수가 있어도 시작할 수 있다)
+    // Scaffolding commands bypass env settings so invalid `BOT_*` vars do not block bootstrapping.
     match &cli.command {
         Command::Init(args) => return report(init(args)),
         Command::Add(args) => return report(add(args)),
@@ -46,7 +45,7 @@ async fn main() -> ExitCode {
             BundleAction::Put { dir } => report(profile_bundle::put(&settings, &dir).await),
         },
         Command::Doctor(args) => report(doctor::run(&settings, &args).await),
-        Command::Init(_) | Command::Add(_) => unreachable!("위에서 처리했다"),
+        Command::Init(_) | Command::Add(_) => unreachable!("handled above"),
         Command::Mcp(args) => match args.action {
             McpAction::Sync { dir } => report(mcp_sync::run(&settings, &dir).await),
         },
@@ -55,7 +54,7 @@ async fn main() -> ExitCode {
 
 fn init(args: &bot_cli::cli::InitArgs) -> Result<(), String> {
     let uid = bot_gateway::cli::socket::current_uid()
-        .map_err(|_| "OS 사용자 번호(id -u)를 확인하지 못했어요".to_owned())?;
+        .map_err(|_| "failed to determine OS user ID (id -u)".to_owned())?;
     let text = scaffold::init(&args.name, args.template, &args.dir, uid)?;
     println!("{text}");
     Ok(())

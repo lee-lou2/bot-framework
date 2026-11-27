@@ -1,11 +1,11 @@
-# 예약 알림
+# Reminders
 
-반복하거나 나중에 할 일은 대화에서 `schedule.create`로 예약한다. 지시문과 `at`(UTC RFC 3339) 또는 `cron`(5필드, 프로필 시간대 Asia/Seoul) 중 하나를 보낸다.
+Schedule recurring or deferred tasks in chat with `schedule.create`. Provide an instruction plus either `at` (UTC RFC 3339) or `cron` (5 fields, evaluated in the profile timezone `Asia/Seoul`).
 
-- 한 번: `{"at": "2030-01-01T01:00:00Z", "instruction": "목요일 릴리스 점검표 확인"}`
-- 반복: `{"cron": "0 17 * * 5", "instruction": "주간 회고 준비물 알림"}`
-- 확인은 `schedule.list`, 취소는 `schedule.cancel`(`{"id": "<예약 ID>"}`).
+- One-off: `{"at": "2030-01-01T01:00:00Z", "instruction": "Check the Thursday release checklist"}`
+- Recurring: `{"cron": "0 17 * * 5", "instruction": "Remind the team to prepare weekly retro items"}`
+- List schedules with `schedule.list`; cancel with `schedule.cancel` (`{"id": "<schedule-id>"}`).
 
-예약은 만든 사람의 원래 대화로 돌아온다. CLI에서는 다른 수신자를 고를 수 없다. 지시문은 나중에 읽어도 알 수 있게 무엇을·왜·누구를 위해 하는지 적는다.
+Scheduled messages return to the creator's original conversation. On CLI, you cannot target another recipient. Write self-contained instructions stating what to do, why, and for whom.
 
-프로필에 미리 정해 두는 반복 실행은 이 스킬이 아니라 `agents/main/triggers.yaml`의 cron 트리거(`standup`)다. 사람이 대화로 만드는 예약과 운영자가 선언하는 트리거는 따로 동작한다.
+Pre-configured profile cron runs belong in `agents/main/triggers.yaml` (e.g., `standup`), not this skill. Chat schedules created by users and operator-declared triggers operate independently.

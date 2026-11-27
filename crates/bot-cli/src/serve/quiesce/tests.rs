@@ -1,4 +1,4 @@
-//! 종료 정리 확인: 세션 회수 → 모델 샌드박스 `reap` → 시작해 둔 도구 호출마다 `reap`. 하나라도 확인하지 못하면 오류, 새 호출이 계속 생기면 확인하지 못한 것이다.
+//! Tests for shutdown quiescing: revoke session, reap model sandbox, then reap every started tool call.
 
 use super::*;
 use bot_broker::{
@@ -26,7 +26,6 @@ fn attempt() -> Attempt {
 
 type Log = Arc<Mutex<Vec<String>>>;
 
-/// 훑을 때마다 정해 둔 소유 표지 목록을 낸다(다 쓰면 빈 목록).
 struct Passes(Mutex<VecDeque<Vec<String>>>);
 
 impl StartedCalls for Passes {
@@ -45,7 +44,6 @@ fn passes(lists: &[&[&str]]) -> Arc<Passes> {
     )))
 }
 
-/// `reap`한 소유 표지를 적고, `refuse`에 든 것은 확인하지 못한다.
 struct Tools {
     log: Log,
     refuse: Vec<&'static str>,
@@ -128,7 +126,7 @@ async fn the_model_vm_is_reaped_first_and_then_every_started_tool_call() {
             "tool:r1.2.c1".to_owned(),
             "tool:r1.2.c2".to_owned()
         ],
-        "모델 VM(소유 표지는 어댑터의 것) → 도구 호출 순서"
+        "must reap model VM before tool calls"
     );
 }
 
@@ -166,13 +164,12 @@ async fn an_unconfirmed_tool_process_is_an_error() {
     assert_eq!(
         *lock(&log),
         ["tool:r1.2.c1".to_owned()],
-        "확인하지 못한 곳에서 멈춘다"
+        "must stop at the first unconfirmed tool"
     );
 }
 
 #[tokio::test]
 async fn a_call_that_started_after_the_first_look_is_reaped_on_the_next_pass() {
-    // 첫 훑기에서 c1만 보였고, 세션을 거둔 뒤에도 이미 들어와 있던 요청이 c2를 시작했다
     let (q, log) = quiescer(
         passes(&[
             &["r1.2.c1"],
@@ -186,7 +183,7 @@ async fn a_call_that_started_after_the_first_look_is_reaped_on_the_next_pass() {
     assert_eq!(
         *lock(&log),
         ["tool:r1.2.c1".to_owned(), "tool:r1.2.c2".to_owned()],
-        "이미 끝낸 표지는 다시 reap하지 않는다"
+        "already-reaped owners must not be reaped again"
     );
 }
 
@@ -199,6 +196,6 @@ async fn calls_that_keep_appearing_are_never_confirmed() {
     );
     assert!(
         matches!(q.quiesce(attempt()).await, Err(Error::Unavailable)),
-        "세 번 훑고도 새 호출이 생기면 확인하지 못한 것이다"
+        "calls still appearing after three passes must fail confirmation"
     );
 }

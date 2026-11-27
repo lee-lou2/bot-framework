@@ -1,5 +1,4 @@
-//! 시험용 가짜 모음. 다른 크레이트의 시험이 쓰는 대역은 `testing` 기능으로 내보내고,
-//! 크레이트 내부 전용 대역은 `cfg(test)`에만 둔다(운영 빌드에는 넣지 않는다).
+//! Test doubles exported under the `testing` feature and crate-local `cfg(test)` helpers.
 
 #[cfg(test)]
 mod exec;
@@ -66,7 +65,7 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 메모리 포트만 기다리는 미래를 끝까지 돌린다(I/O가 필요한 시험은 런타임을 쓴다).
+/// Polls an in-memory future to completion without a Tokio runtime.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = Box::pin(future);
     let mut cx = TaskContext::from_waker(Waker::noop());
@@ -76,10 +75,9 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         }
         std::thread::yield_now();
     }
-    panic!("미래가 끝나지 않는다: 메모리 포트가 아닌 것을 기다리고 있다");
+    panic!("future did not complete: waiting on non-memory port");
 }
 
-/// 손으로 돌리는 시계. 초 단위 에포크로 시작한다.
 pub struct ManualClock(Mutex<SystemTime>);
 
 impl ManualClock {
@@ -102,7 +100,7 @@ impl Clock for ManualClock {
     }
 }
 
-/// 호출마다 다른 값을 내는 결정적 난수(첫 호출 `01…`, 다음 `02…`).
+/// Deterministic entropy yielding `01...`, `02...`, etc. on successive calls.
 #[derive(Default)]
 pub struct CountingEntropy(Mutex<u8>);
 
@@ -115,8 +113,7 @@ impl Entropy for CountingEntropy {
     }
 }
 
-/// 인자 글을 그대로 정규화 결과로 쓰고, 해시는 글에서 결정적으로 만든 값이다(암호용이 아니다).
-/// 명시적 목적지가 있는 도구는 인자 글을 `수신자|내용`으로 읽는다. 실제 검증기는 `JcsSealer`다.
+/// Non-cryptographic test sealer; splits explicit-destination args on `recipient|body`.
 pub struct FakeSealer;
 
 impl Sealer for FakeSealer {

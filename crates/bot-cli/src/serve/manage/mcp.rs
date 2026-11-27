@@ -1,5 +1,5 @@
-//! `mcp.add` 진입과 원격 Streamable HTTP MCP 서버 추가·동기화·즉시 활성화.
-//! 로컬 stdio 서버 추가는 `mcp_stdio`, 제거는 `mcp_remove`가 맡는다.
+//! `mcp.add` entry point and remote Streamable HTTP MCP registration, tool sync, and live activation.
+
 use super::{
     LiveManager,
     yaml_edit::{
@@ -39,7 +39,6 @@ pub(super) fn reject(code: &'static str, message: impl Into<String>) -> ManageEr
     }
 }
 
-/// MCP 서버 도구 이름을 `bot-framework`의 kebab-case 도구 ID로 정규화한다.
 pub(super) fn sanitize_tool_id(raw: &str, used: &mut BTreeSet<String>) -> String {
     let mut base = String::new();
     let mut prev_dash = false;
@@ -87,7 +86,7 @@ pub(super) fn auto_mcp_skill_md(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("{alias} MCP 서버의 도구를 사용해 요청을 처리한다"));
+        .unwrap_or_else(|| format!("Handle requests using tools from the {alias} MCP server"));
     let body = instructions
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -97,10 +96,10 @@ pub(super) fn auto_mcp_skill_md(
                 format!("# {skill}"),
                 String::new(),
                 format!(
-                    "`{alias}` MCP 서버와 연결된 스킬이다. 필요한 도구만 최소 인자로 호출하고 결과를 요약한다."
+                    "Connected to the `{alias}` MCP server. Call only the required tools with minimal arguments and summarize the results."
                 ),
                 String::new(),
-                "## 도구".to_owned(),
+                "## Tools".to_owned(),
             ];
             for (id, note) in tools {
                 if note.is_empty() {
@@ -133,7 +132,7 @@ fn target_roles(
             .map(str::to_owned)
             .collect();
         if roles.is_empty() {
-            return Err(reject("invalid_args", "roles가 비어 있어요"));
+            return Err(reject("invalid_args", "roles must not be empty"));
         }
         return Ok(roles);
     }
@@ -145,13 +144,12 @@ fn target_roles(
     if requester_roles.is_empty() {
         return Err(reject(
             "no_roles",
-            "도구 권한을 부여할 역할을 찾지 못했어요 — roles를 지정해 주세요",
+            "no roles found to grant tool scopes — specify roles explicitly",
         ));
     }
     Ok(requester_roles)
 }
 
-/// `mcp.add` 공통 컨텍스트(원격·로컬 구현이 공유한다).
 pub(super) struct AddCtx<'a> {
     pub call: &'a ManageCall,
     pub args: &'a Value,
@@ -171,12 +169,12 @@ impl LiveManager {
         self.host_path.clone().ok_or_else(|| {
             reject(
                 "host_config_required",
-                "MCP 서버를 추가·제거하려면 BOT_HOST_CONFIG 파일(host.json)이 설정돼 있어야 해요",
+                "BOT_HOST_CONFIG (host.json) must be configured to add or remove MCP servers",
             )
         })
     }
 
-    /// SOPS/키체인에 비밀 값을 안전하게 저장한다. 먼저 가림 장치(`Watched`)에 등록해 로그·오류 노출을 막는다.
+    /// Registers `value` with the leak redactor before storing so failures cannot expose it.
     pub(super) async fn store_secret_value(
         &self,
         profile: &ProfileId,
@@ -187,7 +185,7 @@ impl LiveManager {
         if bot_broker::private::reserved_secret(name) {
             return Err(reject(
                 "secret_reserved",
-                "호스트 전용 비밀 이름은 도구 자격으로 쓸 수 없어요",
+                "host-reserved secret names cannot be used as tool credentials",
             ));
         }
         self.watched.register(value);
@@ -215,19 +213,19 @@ impl LiveManager {
     pub(super) async fn add_mcp(&self, call: &ManageCall) -> Result<ManageOutcome, ManageError> {
         let host_path = self.require_host_path()?;
         let args: Value = serde_json::from_str(&call.args.0)
-            .map_err(|_| reject("invalid_args", "요청 인자를 읽지 못했어요"))?;
+            .map_err(|_| reject("invalid_args", "failed to parse request arguments"))?;
         let alias = args
             .get("alias")
             .and_then(Value::as_str)
             .filter(|s| is_name(s))
-            .ok_or_else(|| reject("invalid_args", "올바른 alias가 필요해요"))?;
+            .ok_or_else(|| reject("invalid_args", "valid alias is required"))?;
         let transport = args
             .get("transport")
             .and_then(Value::as_str)
-            .ok_or_else(|| reject("invalid_args", "transport(`http` 또는 `stdio`)가 필요해요"))?;
+            .ok_or_else(|| reject("invalid_args", "transport (`http` or `stdio`) is required"))?;
         let skill = args.get("skill").and_then(Value::as_str).unwrap_or(alias);
         if !is_name(skill) {
-            return Err(reject("invalid_name", "skill 이름이 규칙에 맞지 않아요"));
+            return Err(reject("invalid_name", "invalid skill name"));
         }
         let agent = args.get("agent").and_then(Value::as_str);
         let desc = args.get("description").and_then(Value::as_str);
@@ -237,7 +235,7 @@ impl LiveManager {
         {
             return Err(reject(
                 "secret_in_skill",
-                "스킬 설명이나 본문에 비밀 값이 섞여 있어 저장하지 않아요",
+                "skill description or instructions appear to contain a secret value",
             ));
         }
 
@@ -248,7 +246,7 @@ impl LiveManager {
         {
             return Err(reject(
                 "unknown_agent",
-                format!("에이전트 `{target}`가 없어요"),
+                format!("agent `{target}` not found"),
             ));
         }
         let roles = target_roles(&args, &snapshot, call)?;
@@ -258,14 +256,14 @@ impl LiveManager {
             return Err(reject(
                 "skill_has_tools",
                 format!(
-                    "스킬 `{skill}`에 이미 tools.yaml이 있어요 — 새 스킬 이름을 지정하거나 기존 MCP를 먼저 제거하세요"
+                    "skill `{skill}` already has tools.yaml — choose a new skill name or remove the existing MCP server first"
                 ),
             ));
         }
         let host_text = fs::read_to_string(&host_path)
-            .map_err(|_| reject("io_error", "host.json을 읽지 못했어요"))?;
+            .map_err(|_| reject("io_error", "failed to read host.json"))?;
         let mut host_doc: Value = serde_json::from_str(&host_text)
-            .map_err(|_| reject("invalid_host", "host.json이 올바른 JSON이 아니에요"))?;
+            .map_err(|_| reject("invalid_host", "host.json is not valid JSON"))?;
         if host_doc
             .get("servers")
             .and_then(Value::as_object)
@@ -273,7 +271,7 @@ impl LiveManager {
         {
             return Err(reject(
                 "server_exists",
-                format!("MCP 서버 `{alias}`가 이미 host.json에 등록돼 있어요"),
+                format!("MCP server `{alias}` is already registered in host.json"),
             ));
         }
 
@@ -302,7 +300,7 @@ impl LiveManager {
             }
             _ => Err(reject(
                 "invalid_args",
-                "transport는 `http` 또는 `stdio`여야 해요",
+                "transport must be `http` or `stdio`",
             )),
         };
         if outcome.is_err() {
@@ -321,14 +319,12 @@ impl LiveManager {
             .args
             .get("url")
             .and_then(Value::as_str)
-            .ok_or_else(|| reject("invalid_args", "원격 HTTP MCP에는 url이 필요해요"))?;
+            .ok_or_else(|| reject("invalid_args", "url is required for remote HTTP MCP"))?;
         let auth_secret = match ctx.args.get("auth_secret").and_then(Value::as_str) {
             Some(raw) => Some(
                 SecretName::parse(raw)
                     .filter(|n| !bot_broker::private::reserved_secret(n))
-                    .ok_or_else(|| {
-                        reject("invalid_secret", "auth_secret 이름이 올바르지 않아요")
-                    })?,
+                    .ok_or_else(|| reject("invalid_secret", "invalid auth_secret name"))?,
             ),
             None => None,
         };
@@ -336,14 +332,14 @@ impl LiveManager {
             let Some(name) = &auth_secret else {
                 return Err(reject(
                     "invalid_args",
-                    "secret_value를 저장하려면 auth_secret 이름도 함께 지정해야 해요",
+                    "auth_secret must be set when supplying secret_value",
                 ));
             };
             self.store_secret_value(&ctx.call.profile, name, secret_val, created_secrets)
                 .await?;
         }
         let remote = Remote::parse(url, auth_secret.clone())
-            .map_err(|why| reject("invalid_url", format!("url이 올바르지 않아요: {why}")))?;
+            .map_err(|why| reject("invalid_url", format!("invalid url: {why}")))?;
 
         let (mut credentials, mut bearer) = (Vec::new(), None);
         if let Some(name) = &auth_secret {
@@ -352,12 +348,12 @@ impl LiveManager {
                 .watched
                 .for_profile(ctx.call.profile.clone())
                 .await
-                .map_err(|_| reject("secret_unavailable", "비밀 보관소를 열지 못했어요"))?;
+                .map_err(|_| reject("secret_unavailable", "failed to open secret store"))?;
             let value = handle.resolve(name.clone()).await.map_err(|_| {
                 reject(
                     "secret_missing",
                     format!(
-                        "자격 `{}`이(가) 프로필 `{}`의 보관소({})에 없어요 — 암호화 파일에 값을 넣거나 `secret_value`로 저장해 주세요",
+                        "secret `{}` is missing for profile `{}` in store ({}) — store it first or pass `secret_value`",
                         name.as_str(),
                         ctx.call.profile.0,
                         self.secrets_admin.backend_name()
@@ -368,7 +364,10 @@ impl LiveManager {
                 .ok()
                 .filter(|t| !t.is_empty() && !t.contains(['\0', '\r', '\n']))
                 .ok_or_else(|| {
-                    reject("secret_invalid", "자격 값이 bearer로 쓸 수 없는 형식이에요")
+                    reject(
+                        "secret_invalid",
+                        "secret value is not valid for a bearer header",
+                    )
                 })?;
             credentials.push(value.0);
             bearer = Some(text);
@@ -388,7 +387,7 @@ impl LiveManager {
             reject(
                 "mcp_unreachable",
                 format!(
-                    "원격 MCP 서버에서 도구 목록을 받지 못했어요: {}",
+                    "failed to list tools from remote MCP server: {}",
                     mcp_sync::describe(&e)
                 ),
             )
@@ -431,14 +430,14 @@ impl LiveManager {
         if wanted.is_empty() {
             return Err(reject(
                 "no_tools_found",
-                "서버가 제공하는 도구 중 선택된 도구가 하나도 없어요",
+                "no matching tools were returned by the server",
             ));
         }
 
         let entries = mcp_sync::entries_of(&wanted, &listed, &credentials)
             .map_err(|problems| reject("mcp_tools_invalid", problems.join("\n")))?;
         let lock_text = lock::render(ctx.alias, &entries)
-            .ok_or_else(|| reject("mcp_lock_failed", "tools.lock.yaml을 만들지 못했어요"))?;
+            .ok_or_else(|| reject("mcp_lock_failed", "failed to render tools.lock.yaml"))?;
 
         let target_egress = remote.target_text();
         let mut tools_list = Vec::new();
@@ -485,7 +484,7 @@ impl LiveManager {
         let profile_dir = self.profile_dir(&ctx.call.profile);
         let profile_yaml_path = profile_dir.join("profile.yaml");
         let profile_text = fs::read_to_string(&profile_yaml_path)
-            .map_err(|_| reject("io_error", "profile.yaml을 읽지 못했어요"))?;
+            .map_err(|_| reject("io_error", "failed to read profile.yaml"))?;
         let mut profile_doc =
             bot_profile::parse_yaml("profile.yaml", &profile_text, &Limits::default())
                 .map_err(|e| reject("invalid_profile", e.to_string()))?;
@@ -519,7 +518,7 @@ impl LiveManager {
         txn.write_file(&profile_yaml_path, render_yaml(&profile_doc).as_bytes())
             .map_err(|m| reject("io_error", m))?;
         let host_rendered = serde_json::to_string_pretty(host_doc)
-            .map_err(|_| reject("invalid_host", "host.json을 직렬화하지 못했어요"))?;
+            .map_err(|_| reject("invalid_host", "failed to serialize host.json"))?;
         txn.write_file(ctx.host_path, format!("{host_rendered}\n").as_bytes())
             .map_err(|m| reject("io_error", m))?;
 

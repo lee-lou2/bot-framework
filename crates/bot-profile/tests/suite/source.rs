@@ -1,4 +1,4 @@
-//! `ProfileSource` 포트: root=BOT_PROFILES 전체 집합의 판본을 돌려준다.
+//! Tests for the `ProfileSource` port implementation (`FsProfiles`).
 
 use crate::support::{Temp, base, edit, host, write_profile};
 use bot_core::port::{Error, ProfileSource};
@@ -9,12 +9,11 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-/// 파일 읽기뿐이라 한 번 폴링하면 끝난다.
 fn block_on<F: Future>(fut: F) -> F::Output {
     let mut fut = pin!(fut);
     match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(value) => value,
-        Poll::Pending => panic!("이 포트는 기다리지 않는다"),
+        Poll::Pending => panic!("FsProfiles::validate must complete immediately"),
     }
 }
 
@@ -33,11 +32,10 @@ fn validate_returns_the_set_revision() {
     let loaded = load(root.path(), &host(), &Limits::default()).unwrap();
     assert_eq!(&revision, loaded.revision());
     assert_eq!(revision.0.len(), 64);
-    // 한 바이트만 바뀌어도 집합 판본이 바뀐다
     write_profile(
         root.path(),
         "personal",
-        &edit(base(), "rules.md", "한국어로", "영어로"),
+        &edit(base(), "rules.md", "English", "French"),
     );
     assert_ne!(block_on(source().validate(root.path())).unwrap(), revision);
 }

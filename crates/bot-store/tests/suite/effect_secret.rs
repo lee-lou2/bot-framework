@@ -1,12 +1,12 @@
-//! 도구가 보고하는 영수증·보류 사유에 알려진 자격이 섞이면 PG의 단계 원장과 감사 체인에 그 값이 한 글자도 남지 않는다: 실제 `EffectChannel`(자격을 아는 채널)이
-//! 실제 PG 위에서 원문을 저장하지 않고 고정 사유(`receipt_credential`·`reason_credential`)로 보류한다. 관리자 보류 목록도 고정 사유만 본다.
+//! Credential scrubbing on `EffectChannel` over PG: secrets in tool receipts, hold reasons,
+//! or step names never reach `bot_effects`, `bot_audit`, tool replies, or admin hold views.
 
 use crate::support::{admin::*, *};
 use bot_broker::testing::EffectChannel;
 use bot_core::{admin::*, id::*, ledger::*, port::*, state::*};
 use std::sync::Arc;
 
-/// 합성 비밀: 선언한 자격 값 둘(하나는 소문자·숫자라 보류 사유로도 들어올 수 있다)과 토큰 모양(소스에 리터럴이 남지 않게 이어 붙인다).
+// Synthetic secrets: lowercase alphanumeric PASSWORD can also pass reason syntax; token is split to avoid literal matches.
 const PASSWORD: &str = "synthsecret0x7";
 const API_KEY: &str = "Synth-API-Key-ABC123";
 
@@ -55,7 +55,6 @@ fn effect_of(reply: &str) -> String {
         .to_owned()
 }
 
-/// 값이 들어 있는 곳이 하나도 없다: 단계 원장 전체와 감사 체인의 모든 열.
 async fn nowhere(db: &TestDb, secret: &str) {
     let like = format!("%{secret}%");
     let effects: i64 =
@@ -104,11 +103,10 @@ async fn a_receipt_that_carries_a_secret_is_held_with_a_fixed_reason_and_the_val
         );
         assert!(
             !reply.contains(&secret),
-            "도구에 되돌려 주는 글에도 없다: {reply}"
+            "tool reply must not echo secret: {reply}"
         );
         nowhere(&db, &secret).await;
     }
-    // 원장에는 세 단계 모두 고정 사유의 보류이고, 감사는 `held:receipt_credential`이다
     let rows: Vec<(String, Option<String>, Option<String>)> =
         sqlx::query_as("select state, reason, receipt from bot_effects order by step")
             .fetch_all(db.store.pool())
@@ -138,7 +136,6 @@ async fn a_hold_reason_that_carries_a_secret_is_replaced_and_the_value_is_stored
     };
     let run = running(&db).await;
     let c = channel(&db, &run.attempt);
-    // 사유 낱말(소문자·숫자·밑줄)로 들어올 수 있는 자격 값만 사유 자리를 지나간다
     for (step, secret) in [("one", PASSWORD.to_owned())] {
         let effect = effect_of(&c.handle(request(step).as_bytes()).await);
         let reply = c
@@ -148,7 +145,7 @@ async fn a_hold_reason_that_carries_a_secret_is_replaced_and_the_value_is_stored
         assert!(!reply.contains(&secret), "{reply}");
         nowhere(&db, &secret).await;
     }
-    // 토큰 모양(`ghp_` + 소문자·숫자)도 사유 자리에서 막힌다
+    // Token-shaped strings (`ghp_` + lowercase/digits) are also scrubbed from hold reasons.
     let shaped = format!("{}_{}", "ghp", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6");
     let effect = effect_of(&c.handle(request("two").as_bytes()).await);
     let reply = c
@@ -156,7 +153,7 @@ async fn a_hold_reason_that_carries_a_secret_is_replaced_and_the_value_is_stored
         .await;
     assert!(reply.contains("reason_credential"), "{reply}");
     nowhere(&db, &shaped).await;
-    // 깨끗한 사유는 그대로 남는다
+
     let effect = effect_of(&c.handle(request("three").as_bytes()).await);
     c.handle(report(&effect, "held", "reason", "timeout").as_bytes())
         .await;
@@ -192,7 +189,7 @@ async fn a_step_name_that_is_a_secret_is_refused_before_the_start_is_audited() {
     };
     let run = running(&db).await;
     let c = channel(&db, &run.attempt);
-    // `effect.start` 감사의 낱말은 단계 이름이라, 자격인 이름은 기록하기 전에 거절한다
+    // Reject credential step names before `effect.start` can audit them.
     let reply = c.handle(request(PASSWORD).as_bytes()).await;
     assert_eq!(reply, r#"{"v":1,"id":"1","error":"invalid"}"#);
     assert_eq!(
@@ -212,7 +209,6 @@ async fn the_operator_sees_only_the_fixed_reason_and_a_later_lookup_shows_no_rec
     let effect = effect_of(&c.handle(request("upload").as_bytes()).await);
     c.handle(report(&effect, "confirmed", "receipt", &format!("pw={PASSWORD}")).as_bytes())
         .await;
-    // 조회 양식도 영수증을 싣지 않는다(보류 사유 코드는 조회에 나오지 않는다)
     let lookup = c
         .handle(
             r#"{"v":1,"id":"7","method":"effect.status","step":"upload","args":{"n":1}}"#
@@ -232,7 +228,6 @@ async fn the_operator_sees_only_the_fixed_reason_and_a_later_lookup_shows_no_rec
         })
         .await
         .unwrap();
-    // 관리자 보류 목록·상세에 단계의 사유가 고정 사유로만 보인다
     let holds = AdminRead::holds(&db.store, &operator(), None)
         .await
         .unwrap();

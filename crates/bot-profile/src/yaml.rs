@@ -1,8 +1,4 @@
-//! 안전한 YAML → JSON 값. 파서 이벤트를 직접 받아 만들면서 위험한 구성을 그 자리에서 거절한다.
-//!
-//! 거절: 앵커·별칭·태그·다중 문서·중복 키·복합 키·한도 초과(깊이·노드·문자열)·무한대/NaN.
-//! 평문 스칼라는 YAML 1.2 코어 스키마(`true/false/null`, 10진·16진·8진 정수, 실수)로 풀고,
-//! `yes/no/on/off`는 문자열로 둔다. 매핑 키는 스타일과 무관하게 글자 그대로 문자열이다.
+//! Strict YAML 1.2 Core Schema to JSON parser rejecting anchors, aliases, tags, multi-doc, duplicate/complex keys, and limit breaches.
 use crate::{hint, issue::Issue, limits::Limits, text};
 use saphyr_parser::{Event, Parser, ScalarStyle, Span};
 use serde_json::{Map, Number, Value};
@@ -37,21 +33,26 @@ pub fn parse(path: &str, text: &str, limits: &Limits) -> Result<Value, Issue> {
         match item {
             Ok((event, span)) => builder.event(event, span)?,
             Err(e) => {
-                // 파서의 영어 설명은 고칠 방법으로 바꾸고, 줄과 칸을 함께 알린다(파일 내용은 싣지 않는다)
+                // Report actionable hint with line/column only (never echo file contents).
                 let marker = e.marker();
-                return Err(Issue::error("yaml-syntax", path, hint::yaml_hint(e.info()))
-                    .at(format!("줄 {}, 칸 {}", marker.line(), marker.col() + 1)));
+                return Err(
+                    Issue::error("yaml-syntax", path, hint::yaml_hint(e.info())).at(format!(
+                        "line {}, column {}",
+                        marker.line(),
+                        marker.col() + 1
+                    )),
+                );
             }
         }
     }
     builder
         .root
-        .ok_or_else(|| Issue::error("yaml-empty", path, "내용이 없어요"))
+        .ok_or_else(|| Issue::error("yaml-empty", path, "YAML file is empty"))
 }
 
 impl Builder<'_> {
     fn fail(&self, code: &'static str, span: Span, message: &str) -> Issue {
-        Issue::error(code, self.path, message).at(format!("줄 {}", span.start.line()))
+        Issue::error(code, self.path, message).at(format!("line {}", span.start.line()))
     }
 
     fn event(&mut self, event: Event<'_>, span: Span) -> Result<(), Issue> {
@@ -60,23 +61,35 @@ impl Builder<'_> {
             Event::DocumentStart(_) => {
                 self.docs += 1;
                 if self.docs > 1 {
-                    return Err(self.fail("yaml-multi-doc", span, "문서가 둘 이상이에요(`---`)"));
+                    return Err(self.fail(
+                        "yaml-multi-doc",
+                        span,
+                        "Multiple YAML documents (`---`) are not allowed",
+                    ));
                 }
             }
             Event::Alias(_) => {
-                return Err(self.fail("yaml-alias", span, "별칭(`*이름`)은 쓸 수 없어요"));
+                return Err(self.fail(
+                    "yaml-alias",
+                    span,
+                    "YAML aliases (`*name`) are not allowed",
+                ));
             }
             Event::Scalar(text, style, anchor, tag) => {
                 self.guard(anchor, tag.is_some(), span)?;
                 self.node(span)?;
                 if text.len() > self.limits.max_yaml_scalar {
-                    return Err(self.fail("yaml-too-large", span, "값 하나가 너무 길어요"));
+                    return Err(self.fail(
+                        "yaml-too-large",
+                        span,
+                        "Scalar value exceeds length limit",
+                    ));
                 }
                 if text::has_forbidden(&text) {
                     return Err(self.fail(
                         "yaml-control",
                         span,
-                        "이스케이프로 만든 제어·보이지 않는 문자는 쓸 수 없어요",
+                        "Escaped control or invisible characters are not allowed",
                     ));
                 }
                 self.scalar(&text, style, span)?;
@@ -109,10 +122,14 @@ impl Builder<'_> {
 
     fn guard(&self, anchor: usize, tagged: bool, span: Span) -> Result<(), Issue> {
         if anchor != 0 {
-            return Err(self.fail("yaml-anchor", span, "앵커(`&이름`)는 쓸 수 없어요"));
+            return Err(self.fail(
+                "yaml-anchor",
+                span,
+                "YAML anchors (`&name`) are not allowed",
+            ));
         }
         if tagged {
-            return Err(self.fail("yaml-tag", span, "태그(`!`)는 쓸 수 없어요"));
+            return Err(self.fail("yaml-tag", span, "YAML tags (`!`) are not allowed"));
         }
         Ok(())
     }
@@ -120,7 +137,7 @@ impl Builder<'_> {
     fn node(&mut self, span: Span) -> Result<(), Issue> {
         self.nodes += 1;
         if self.nodes > self.limits.max_yaml_nodes {
-            return Err(self.fail("yaml-too-large", span, "항목이 너무 많아요"));
+            return Err(self.fail("yaml-too-large", span, "Too many YAML nodes"));
         }
         Ok(())
     }
@@ -128,10 +145,10 @@ impl Builder<'_> {
     fn open(&mut self, frame: Frame, span: Span) -> Result<(), Issue> {
         self.node(span)?;
         if let Some(Frame::Map { pending: None, .. }) = self.stack.last() {
-            return Err(self.fail("yaml-complex-key", span, "매핑 키는 문자열이어야 해요"));
+            return Err(self.fail("yaml-complex-key", span, "Mapping keys must be strings"));
         }
         if self.stack.len() >= self.limits.max_yaml_depth {
-            return Err(self.fail("yaml-too-deep", span, "중첩이 너무 깊어요"));
+            return Err(self.fail("yaml-too-deep", span, "YAML nesting is too deep"));
         }
         self.stack.push(frame);
         Ok(())
@@ -142,7 +159,7 @@ impl Builder<'_> {
             && pending.is_none()
         {
             if map.contains_key(text) {
-                let message = format!("같은 키가 두 번 나와요: {text}");
+                let message = format!("Duplicate key: {text}");
                 return Err(self.fail("yaml-duplicate-key", span, &message));
             }
             *pending = Some(text.to_owned());
@@ -170,14 +187,14 @@ impl Builder<'_> {
     }
 }
 
-/// YAML 1.2 코어 스키마의 평문 스칼라.
+/// YAML 1.2 Core Schema plain scalars (`yes`/`no`/`on`/`off` remain strings).
 fn resolve_plain(s: &str) -> Result<Value, &'static str> {
     match s {
         "" | "~" | "null" | "Null" | "NULL" => return Ok(Value::Null),
         "true" | "True" | "TRUE" => return Ok(Value::Bool(true)),
         "false" | "False" | "FALSE" => return Ok(Value::Bool(false)),
         ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" | "-.inf" | "-.Inf" | "-.INF"
-        | ".nan" | ".NaN" | ".NAN" => return Err("무한대·NaN은 쓸 수 없어요"),
+        | ".nan" | ".NaN" | ".NAN" => return Err("Infinity and NaN are not allowed"),
         _ => {}
     }
     if let Some(hex) = s.strip_prefix("0x")
@@ -197,26 +214,26 @@ fn resolve_plain(s: &str) -> Result<Value, &'static str> {
         return int(s.strip_prefix('+').unwrap_or(s).parse::<i128>());
     }
     if is_float(unsigned) {
-        let n: f64 = s.parse().map_err(|_| "실수를 읽을 수 없어요")?;
+        let n: f64 = s.parse().map_err(|_| "Invalid floating-point number")?;
         return Number::from_f64(n)
             .map(Value::Number)
-            .ok_or("무한대·NaN은 쓸 수 없어요");
+            .ok_or("Infinity and NaN are not allowed");
     }
     Ok(Value::String(s.to_owned()))
 }
 
 fn int(parsed: Result<i128, std::num::ParseIntError>) -> Result<Value, &'static str> {
-    let n = parsed.map_err(|_| "정수 범위를 넘어요")?;
+    let n = parsed.map_err(|_| "Integer out of range")?;
     if let Ok(v) = i64::try_from(n) {
         Ok(Value::Number(v.into()))
     } else if let Ok(v) = u64::try_from(n) {
         Ok(Value::Number(v.into()))
     } else {
-        Err("정수 범위를 넘어요")
+        Err("Integer out of range")
     }
 }
 
-/// `(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?` 이고 `.`이나 지수가 있는 것
+/// Matches `(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?` containing `.` or an exponent.
 fn is_float(s: &str) -> bool {
     let b = s.as_bytes();
     let mut i = 0;
@@ -291,7 +308,7 @@ mod tests {
         assert_eq!(code("a: !!str 1\n"), "yaml-tag");
         assert_eq!(code("a: !custom {b: 1}\n"), "yaml-tag");
         assert_eq!(code("a: &m {b: 1}\nc:\n  <<: *m\n"), "yaml-anchor");
-        // 병합 키 자체는 평범한 키일 뿐이다
+        // Merge key without alias is treated as a literal key.
         assert_eq!(ok("<<: 1\n"), json!({"<<": 1}));
     }
 
@@ -340,7 +357,10 @@ mod tests {
     fn rejects_control_characters_made_by_escapes() {
         assert_eq!(code("a: \"x\\u0000y\"\n"), "yaml-control");
         assert_eq!(code("a: \"x\\u202ey\"\n"), "yaml-control");
-        assert_eq!(ok("a: \"줄\\n바꿈\\t탭\"\n"), json!({"a": "줄\n바꿈\t탭"}));
+        assert_eq!(
+            ok("a: \"line\\nbreak\\ttab\"\n"),
+            json!({"a": "line\nbreak\ttab"})
+        );
     }
 
     #[test]
@@ -361,7 +381,7 @@ mod tests {
     fn reports_syntax_errors_with_line() {
         let e = parse("t.yaml", "a: 1\nb: [1, 2\nc: 3\n", &Limits::default()).unwrap_err();
         assert_eq!(e.code, "yaml-syntax");
-        assert!(e.at.starts_with("줄 "), "{e}");
+        assert!(e.at.starts_with("line "), "{e}");
     }
 
     #[test]
@@ -376,12 +396,12 @@ mod tests {
             match outcome {
                 Ok(Ok(_)) => ok += 1,
                 Ok(Err(_)) => err += 1,
-                Err(_) => panic!("패닉: {text:?}"),
+                Err(_) => panic!("panic: {text:?}"),
             }
         }
         assert!(
             ok > 100 && err > 100,
-            "다양한 입력이 섞여야 한다: ok {ok}, err {err}"
+            "mixed inputs expected: ok {ok}, err {err}"
         );
     }
 }

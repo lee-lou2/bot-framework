@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# 다른 크레이트의 시험이 쓰는 가짜 원장·카탈로그·실행기·샌드박스. 운영 빌드에는 넣지 않는다.
+# Test doubles (ledger, catalog, runner, sandbox) shared by other crates; omitted from release builds.
 testing = []
 
 [dependencies]
@@ -14,7 +14,7 @@ base64.workspace = true
 bot-core.workspace = true
 hmac.workspace = true
 serde.workspace = true
-# float_roundtrip: 소수를 항상 올바르게 반올림해 읽는다(정규화·해시가 구현마다 같아야 한다)
+# float_roundtrip ensures deterministic float parsing so canonical JSON and hashes match across implementations.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
 tokio = { workspace = true, features = ["process"] }

@@ -1,5 +1,4 @@
-//! OTLP 로그 내보내기 설정(`admin.logs`)의 지문. 호스트 활성화 지문에 섞어, 로그 수집을 거두거나
-//! 목적지·헤더·수준을 바꾸는 것을 활성화 사건으로 만든다. 설정이 없으면 `None`이라 기존 지문은 바뀌지 않는다.
+//! Authority fingerprint contribution for `admin.logs` (`None` when disabled to preserve existing hashes).
 
 use super::LogConfig;
 use crate::obs::HostHeaderValue;

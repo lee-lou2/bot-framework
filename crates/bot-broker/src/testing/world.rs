@@ -1,4 +1,4 @@
-//! 시험용 프로필 스냅샷·실행 컨텍스트·도구 선언 조립기.
+//! Test builders for profile snapshots, run contexts, and tool declarations.
 
 use bot_core::{
     command::{JsonPayload, Target, Work},
@@ -15,7 +15,6 @@ fn set(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
-/// 서버 `demo-agenda`의 도구 선언. 입력 스키마는 아무 객체나 받는다.
 pub fn tool(class: Risk, scopes: &[&str]) -> Tool {
     Tool {
         server: "demo-agenda".into(),
@@ -36,7 +35,7 @@ pub fn tool(class: Risk, scopes: &[&str]) -> Tool {
     }
 }
 
-/// CLI 대화에서 접수된 실행. 고정 판본은 `r1`, 승인자는 요청자 본인이다.
+/// Builds a CLI-origin `RunContext` pinned at `r1` with requester as approver.
 pub fn run_context(
     profile: &str,
     run: &str,
@@ -77,7 +76,6 @@ pub fn run_context(
         },
         approver: Some(principal),
         trigger: None,
-        // CLI 출처의 기본값: 루트의 원래 바인딩 `desk`와 OpenAI 접수 출처 없음(OpenAI 출처 시험은 이 값을 덮어쓴다)
         binding: bot_core::id::BindingId("desk".into()),
         api: None,
     }
@@ -104,7 +102,7 @@ pub struct SnapshotBuilder {
     agent_scopes: BTreeMap<AgentId, BTreeSet<String>>,
 }
 
-/// 루트 에이전트 `main`만 있는 빈 스냅샷. 정책 판본은 `p-<판본>`이다.
+/// Starts an empty snapshot with root agent `main` and policy revision `p-<revision>`.
 pub fn snapshot(profile: &str, revision: &str) -> SnapshotBuilder {
     let root = AgentId("main".into());
     let snapshot = Snapshot {
@@ -162,7 +160,6 @@ impl SnapshotBuilder {
         self
     }
 
-    /// `policy.agents`에 지정 경로의 추가 제한을 둔다.
     pub fn agent_limit(mut self, path: &str, scopes: &[&str]) -> Self {
         self.snapshot
             .policy
@@ -171,7 +168,6 @@ impl SnapshotBuilder {
         self.agent(path)
     }
 
-    /// 이 에이전트가 받는 Slack DM 바인딩.
     pub fn slack_dm_binding(mut self, id: &str, agent: &str) -> Self {
         self.snapshot.bindings.insert(
             BindingId(id.into()),
@@ -185,7 +181,6 @@ impl SnapshotBuilder {
         self
     }
 
-    /// 이 에이전트가 받는 Slack 채널 바인딩.
     pub fn slack_channel_binding(mut self, id: &str, agent: &str) -> Self {
         self.snapshot.bindings.insert(
             BindingId(id.into()),
@@ -201,7 +196,6 @@ impl SnapshotBuilder {
         self
     }
 
-    /// OpenAI 호환 모델 바인딩: 호스트 입구 `endpoint`가 공개 모델 `model`을 이 에이전트로 보낸다. `approvers`는 HTTP 주체 → 인간 승인 경로다.
     pub fn openai_binding(
         mut self,
         id: &str,
@@ -230,11 +224,10 @@ impl SnapshotBuilder {
     pub fn secret(mut self, name: &str) -> Self {
         self.snapshot
             .secrets
-            .push(SecretName::parse(name).expect("비밀 이름"));
+            .push(SecretName::parse(name).expect("secret name"));
         self
     }
 
-    /// 프로필 시간대(IANA 이름).
     pub fn timezone(mut self, timezone: &str) -> Self {
         self.snapshot.timezone = timezone.into();
         self
@@ -245,7 +238,6 @@ impl SnapshotBuilder {
         self
     }
 
-    /// 에이전트의 환경(`Agent.env`, 상속을 마친 값) 항목 하나. 도구가 `Tool.env`로 고를 수 있다.
     pub fn agent_env(mut self, path: &str, name: &str, value: &str) -> Self {
         self = self.agent(path);
         self.snapshot
@@ -257,7 +249,6 @@ impl SnapshotBuilder {
         self
     }
 
-    /// 에이전트와 조상들을 만든다.
     pub fn agent(mut self, path: &str) -> Self {
         let mut prefix = String::new();
         let mut parent: Option<AgentId> = None;
@@ -276,10 +267,9 @@ impl SnapshotBuilder {
         self
     }
 
-    /// 에이전트가 볼 수 있는 스킬에 도구를 넣는다. 스킬 이름은 도구 ID의 앞부분이다.
     pub fn tool(mut self, agent: &str, id: &str, tool: Tool) -> Self {
         self = self.agent(agent);
-        let skill = id.split('.').next().expect("도구 ID").to_owned();
+        let skill = id.split('.').next().expect("tool ID").to_owned();
         let agent = self
             .snapshot
             .agents
@@ -301,14 +291,13 @@ impl SnapshotBuilder {
         self
     }
 
-    /// 프로필이 계산해 주는 `Agent.scopes`를 대신 정한다(기본은 정책 상한과 경로 조상 상한의 교집합).
+    /// Overrides the derived `Agent.scopes` (normally the intersection of policy and ancestor ceilings).
     pub fn agent_scopes(mut self, path: &str, scopes: &[&str]) -> Self {
         self = self.agent(path);
         self.agent_scopes.insert(AgentId(path.into()), set(scopes));
         self
     }
 
-    /// 에이전트가 소유한 트리거를 모두 지운다.
     pub fn clear_triggers(mut self, agent: &str) -> Self {
         self = self.agent(agent);
         self.snapshot
@@ -320,7 +309,6 @@ impl SnapshotBuilder {
         self
     }
 
-    /// 일반 처리기보다 먼저 잡는 private DM 트리거(바인딩의 메시지 이벤트 → 지정 도구).
     pub fn private_trigger(mut self, agent: &str, id: &str, binding: &str, tool: &str) -> Self {
         self = self.agent(agent);
         self.snapshot
@@ -349,7 +337,6 @@ impl SnapshotBuilder {
         self
     }
 
-    /// 에이전트가 소유한 cron 트리거. `approver`가 `None`이면 승인자를 지정하지 않은 것이다.
     pub fn cron_trigger(
         mut self,
         agent: &str,
@@ -387,7 +374,7 @@ impl SnapshotBuilder {
     }
 
     pub fn build(mut self) -> Arc<Snapshot> {
-        // 프로필 계약: Agent.scopes는 조상·프로필 상한을 이미 적용한 값이다.
+        // Profile contract: `Agent.scopes` already reflects profile and ancestor ceilings.
         let paths: Vec<AgentId> = self.snapshot.agents.keys().cloned().collect();
         for path in paths {
             let derived = match self.agent_scopes.remove(&path) {

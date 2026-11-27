@@ -1,4 +1,4 @@
-"""오류 문서와 SDK 예외: 401·403·404·405·415·422, 키가 어디에도 되돌아오지 않음, 접수된 뒤의 실패는 SDK가 다시 보내는 상태가 아니다."""
+"""Error payload and SDK exception tests: 401/403/404/405/415/422, key non-echoing, and no SDK retries on post-admission failure."""
 import json
 import unittest
 
@@ -12,7 +12,7 @@ ENDPOINTS = (("GET", "/models", None), ("GET", f"/models/{MODEL}", None), ("POST
 class Errors(Wired):
     def test_401_for_a_missing_blank_wrong_non_bearer_or_doubled_key_on_every_endpoint(self):
         variants = {
-            "no header": dict(key=None), "blank bearer": dict(key=""), "wrong key": dict(key=BAD), "basic scheme": dict(key=None, extra_auth=[f"Basic {KEY}"]),  # 유효한 키 값이어도 Bearer가 아니면 받지 않는다
+            "no header": dict(key=None), "blank bearer": dict(key=""), "wrong key": dict(key=BAD), "basic scheme": dict(key=None, extra_auth=[f"Basic {KEY}"]),
             "two bearer headers": dict(key=KEY, extra_auth=[f"Bearer {KEY}"]),
         }
         secrets = [KEY, ROTATED, GUEST, BAD]
@@ -24,7 +24,7 @@ class Errors(Wired):
                         self.assertEqual(status, 401)
                         assert_error(self, json.loads(reply), 401, "authentication_error", "invalid_api_key")
                         for secret in secrets:
-                            self.assertNotIn(secret.encode(), reply, "오류 본문은 키를 되돌려 주지 않는다")
+                            self.assertNotIn(secret.encode(), reply, "error body must not echo API keys")
         self.assertEqual((d.runs, d.model_calls), (0, 0))
         with self.assertRaises(openai.AuthenticationError) as caught:
             client(BAD).models.list()
@@ -57,12 +57,12 @@ class Errors(Wired):
         script(fail=True)
         with Delta() as d:
             with self.assertRaises(openai.UnprocessableEntityError) as caught:
-                default_client().chat.completions.create(model=MODEL, messages=USER)  # 기본 max_retries=2
+                default_client().chat.completions.create(model=MODEL, messages=USER)
         attempts = chat_attempts()
-        self.assertEqual([a["status"] for a in attempts], [422], "SDK가 다시 보낼 상태가 아니고 x-should-retry도 false")
+        self.assertEqual([a["status"] for a in attempts], [422], "422 with x-should-retry=false must not be retried")
         self.assertEqual(attempts[0]["res"]["x-should-retry"], "false")
         assert_error(self, {"error": caught.exception.body}, 422, "server_error", "run_failed")
-        self.assertEqual(d.runs, 1, "접수된 일은 SDK 재시도로 다시 실행되지 않는다")
+        self.assertEqual(d.runs, 1, "post-admission failure must not spawn retries")
         self.assertTrue(all(a["status"] not in RETRYABLE and a["status"] < 500 for a in attempts))
 
 

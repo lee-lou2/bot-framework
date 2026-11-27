@@ -1,4 +1,4 @@
-//! HTTP 시험 공용 조립: 실제 TCP 서버와 원시 HTTP/1.1 클라이언트.
+//! Shared HTTP test harness: live TCP server and raw HTTP/1.1 client.
 #![allow(dead_code)]
 use bot_core::{
     id::{BindingId, PrincipalId, ProfileId, RequestId},
@@ -94,7 +94,6 @@ pub async fn rig_full(
     rig_active(profiles, secrets, None, tune).await
 }
 
-/// 저장소의 활성 집합과 견주는 확인(`active`)을 붙여 조립한다. None이면 확인하지 않는다.
 pub async fn rig_active(
     profiles: Vec<Fixture>,
     secrets: Arc<MemorySecrets>,
@@ -163,7 +162,7 @@ pub async fn send(
     let mut raw = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut raw))
         .await
-        .expect("응답 시간 초과")
+        .expect("response timeout")
         .unwrap();
     let raw = String::from_utf8(raw).unwrap();
     let (head, body) = raw.split_once("\r\n\r\n").unwrap();

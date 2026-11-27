@@ -1,5 +1,4 @@
-//! 운영자 조치: dead letter 재개와 취소. 관리 API는 인증한 운영자와 화면에서 확인한 실행 조건을 넘긴다.
-//! 같은 명령의 재전송은 전이와 함께 기록한 감사 행으로 확인한다.
+//! Operator run controls: dead-letter resume and cancellation, with idempotent receipt checks via audit rows.
 
 use crate::{
     audit::{self, Entry, OwnedEntry},
@@ -16,7 +15,6 @@ use bot_core::{
 use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
-/// 사유는 감사 판정 칸에 앞 200자만 남긴다.
 fn short(reason: &str) -> String {
     reason.chars().take(200).collect()
 }
@@ -34,7 +32,7 @@ fn state_name(state: RunState) -> &'static str {
 }
 
 impl Store {
-    /// 일반 루트의 상태를 잠근 뒤 확인하고, 성공한 명령은 감사와 함께 커밋한다.
+    /// Locks a non-private root run, checks idempotency and preconditions, applies the command, and commits with audit.
     pub(crate) async fn control_root_run(
         &self,
         actor: &PrincipalId,
@@ -74,7 +72,7 @@ impl Store {
         if row.get::<String, _>("root") != *run {
             return Err(Error::Conflict.into());
         }
-        // 같은 run의 잠금 아래 재전송을 먼저 찾는다. 전이 후 상태나 세대가 바뀌어도 최초 결과를 돌려준다.
+        // Check for command replay under the run lock first so retries return the original result even after state/generation changes.
         if let Some(previous) = sqlx::query_scalar::<_, Vec<u8>>(
             "select args_sha256 from bot_audit where profile = $1 and target = $2 and run_command_id = $3",
         )
@@ -135,7 +133,7 @@ impl Store {
         Ok(RunCommandOutcome::Applied)
     }
 
-    /// dead letter 재개. 같은 논리 run·효과 키를 유지하고 시도 횟수만 비운다. 다시 집을 때 세대는 오른다.
+    /// Resumes a dead-letter run, resetting attempts while preserving logical run/effect keys; generation advances on next claim.
     pub(crate) async fn resume_run(
         &self,
         profile: &ProfileId,
@@ -167,8 +165,7 @@ impl Store {
         Ok(())
     }
 
-    /// 취소 요청. 대기 중인 run은 바로 취소로 끝내고, 실행 중인 run은 표시만 한다(소유자가 다음 외부 효과 전에 멈춘다).
-    /// 자식도 함께 처리한다. 잠금 순서는 위에서 아래(부모 → 자식)다.
+    /// Cancels queued/waiting runs immediately and flags leased runs to stop before their next external effect. Lock order: parent -> child.
     pub(crate) async fn cancel_run(
         &self,
         profile: &ProfileId,
@@ -229,7 +226,7 @@ async fn move_dead_run(tx: &mut Tx<'_>, profile: &str, run: &str) -> R<bool> {
     Ok(true)
 }
 
-/// 조회는 상세 스냅숏에서, 명령은 하위 트리 잠금 안에서 같은 열린 발생을 확인한다.
+/// Checks whether any run in the root's tree has an open hold (used under subtree lock for commands and snapshots for reads).
 pub(crate) async fn tree_has_open_hold(tx: &mut Tx<'_>, profile: &str, root: &str) -> R<bool> {
     Ok(sqlx::query_scalar(
         "select exists (
@@ -244,8 +241,8 @@ pub(crate) async fn tree_has_open_hold(tx: &mut Tx<'_>, profile: &str, root: &st
 }
 
 async fn lock_subtree(tx: &mut Tx<'_>, profile: &str, run: &str) -> R<Vec<PgRow>> {
-    // 위임이 쥔 부모 잠금을 기다리는 동안 그 위임의 자식이 커밋될 수 있다.
-    // 이미 잠근 부모에게는 새 위임이 생기지 않는다. 새 문장의 스냅숏에서 노드 수가 같아질 때까지 잠근다.
+    // A child delegation may commit while waiting on its parent's lock; locked parents accept no new
+    // delegations, so re-lock in depth/id order until the subtree size stabilizes.
     let mut locked = 0;
     loop {
         let nodes = sqlx::query(

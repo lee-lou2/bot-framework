@@ -1,9 +1,9 @@
-//! 기준 구현(`MemLedger`)이 지키는 불변식. 실제 저장소가 같은 시험을 통과해야 한다.
+//! Invariant suite for `MemLedger` that production stores must also satisfy.
 
 use super::*;
 use bot_core::ledger::*;
 
-/// 시험 장부는 세대가 오를 때마다 claim epoch도 하나 오른다(처음 1·1, 인계하면 2·2).
+/// Advances claim epoch alongside generation in tests (1/1 initially, 2/2 after handover).
 fn attempt(generation: u64) -> Attempt {
     Attempt {
         profile: ProfileId("personal".into()),
@@ -48,13 +48,13 @@ fn start(call: &str, private_recall: bool) -> StartCall {
 fn a_private_flag_raised_between_judgement_and_start_is_a_conflict() {
     let (ledger, _) = ledger();
     begin(&ledger, "c1");
-    ledger.set_private_recall("r1"); // 브로커가 플래그를 읽은 뒤 다른 실행이 private 기억을 조회했다
+    ledger.set_private_recall("r1"); // Another run read private memory after the broker checked the flag.
     assert!(matches!(
         block_on(ledger.start(start("c1", false))),
         Err(Error::Conflict)
     ));
     assert!(matches!(ledger.phase("r1", "c1"), CallPhase::Open { .. }));
-    // 플래그를 알고 판정했다면(승인 대상으로) 시작할 수 있다
+    // Succeeds once re-evaluated with the flag observed.
     block_on(ledger.start(start("c1", true))).unwrap();
 }
 
@@ -141,7 +141,7 @@ fn a_started_call_cannot_start_again_in_the_same_or_a_later_generation_without_r
         block_on(ledger.start(later)),
         Err(Error::Conflict)
     ));
-    // 미실행이 입증돼 풀리면 다시 시작할 수 있다
+    // Releasing after proving non-execution permits a fresh start.
     block_on(ledger.finish(FinishCall {
         attempt: attempt(2),
         call: CallId("c1".into()),

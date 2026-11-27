@@ -1,4 +1,4 @@
-//! 범용 OTLP(Langfuse·LangSmith·HTTPS TLS), OTLP 로그(`/v1/logs`), Sentry 호환 이슈 트래커(`/api/*/envelope/`) 통합 시험.
+//! Integration tests for OTLP traces (Langfuse/LangSmith), OTLP logs (`/v1/logs`), and Sentry-compatible envelopes.
 
 use crate::support::collector::{self, Attr, Mode};
 use bot_admin::{
@@ -182,12 +182,12 @@ async fn langfuse_and_langsmith_share_universal_otlp_with_genai_and_identity_pse
     assert_eq!(
         lf_root.str(key::USER_ID).map(str::len),
         Some(12),
-        "기본 hash 모드는 user.id를 가명 처리한다"
+        "default hash mode pseudonymizes user.id"
     );
     assert_eq!(
         lf_root.str(key::SESSION_ID).map(str::len),
         Some(12),
-        "기본 hash 모드는 session.id를 가명 처리한다"
+        "default hash mode pseudonymizes session.id"
     );
     assert_ne!(lf_root.str(key::USER_ID), Some("local:alice"));
     let lf_model = lf_spans.iter().find(|s| s.name == "worker.model").unwrap();
@@ -251,12 +251,12 @@ async fn otlp_logs_respect_level_redactor_secret_store_and_activation_gate() {
         Duration::from_secs(1),
     );
 
-    // Info는 min_level(Warn) 미만이라 전송하지 않는다
+    // Info is below min_level (Warn) and must not be exported.
     exporter.record(LogEntry {
         timestamp_nano: now_nano(),
         level: LogLevel::Info,
         target: "bot_cli::serve".into(),
-        message: "무시되는 info".into(),
+        message: "ignored info".into(),
         fields: Vec::new(),
         trace_id: None,
         span_id: None,
@@ -265,7 +265,7 @@ async fn otlp_logs_respect_level_redactor_secret_store_and_activation_gate() {
         timestamp_nano: now_nano(),
         level: LogLevel::Warn,
         target: "bot_gateway::slack".into(),
-        message: "경고 host-logs-secret-999 발생".into(),
+        message: "warning host-logs-secret-999 occurred".into(),
         fields: vec![("run".into(), "r-9".into())],
         trace_id: Some([0x11; 16]),
         span_id: Some([0x22; 8]),
@@ -285,7 +285,7 @@ async fn otlp_logs_respect_level_redactor_secret_store_and_activation_gate() {
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].severity_number, 13);
     assert_eq!(logs[0].severity_text, "WARN");
-    assert_eq!(logs[0].body, "경고 [redacted] 발생");
+    assert_eq!(logs[0].body, "warning [redacted] occurred");
     assert_eq!(
         logs[0].attrs.get("code.namespace"),
         Some(&Attr::Str("bot_gateway::slack".into()))
@@ -294,13 +294,13 @@ async fn otlp_logs_respect_level_redactor_secret_store_and_activation_gate() {
     assert_eq!(logs[0].trace, vec![0x11; 16]);
     assert_eq!(logs[0].span, vec![0x22; 8]);
 
-    // 활성화 문이 닫히면 큐의 로그를 보내지 않고 stale로 버린다
+    // Closed activation gate drops queued logs as stale instead of sending.
     gate_open.store(false, Ordering::Relaxed);
     exporter.record(LogEntry {
         timestamp_nano: now_nano(),
         level: LogLevel::Error,
         target: "bot_gateway::slack".into(),
-        message: "철회 뒤 로그".into(),
+        message: "post-withdrawal log".into(),
         fields: Vec::new(),
         trace_id: None,
         span_id: None,
@@ -357,13 +357,13 @@ async fn sentry_issue_exporter_sends_envelopes_throttles_bursts_and_surfaces_in_
     )
     .unwrap();
 
-    // 같은 (kind, target) 연타는 쿨다운으로 한 번만 보낸다
+    // Cooldown throttles bursts sharing the same (kind, target) to a single report.
     for _ in 0..3 {
         issues.report(
             IssueEvent::new(
                 IssueLevel::Error,
                 "tool_failed",
-                "오류 rotated-sentry-secret 발생",
+                "error rotated-sentry-secret occurred",
                 "worker.run",
             )
             .profile(ProfileId("personal".into()))
@@ -402,7 +402,7 @@ async fn sentry_issue_exporter_sends_envelopes_throttles_bursts_and_surfaces_in_
     let st = issues.stats();
     assert_eq!((st.sent, st.dropped), (1, 2));
 
-    // /v1/admin/status의 process.logs · process.issues에 origin만 보이고 경로·키는 노출되지 않는다
+    // /v1/admin/status exposes backend origins without paths or secret keys.
     let s = crate::support::start_cfg(Fake::demo(), |cfg| cfg.logs(logs).issues(issues)).await;
     let status_json = crate::support::get(&s, crate::support::OPERATOR, "/v1/admin/status")
         .await
@@ -428,7 +428,7 @@ async fn malformed_secrets_fail_closed_without_sending_unauthenticated_requests(
     let col = collector::start(Mode::Ok).await;
     let secrets: Arc<dyn SecretStore> = Arc::new(MapSecrets(BTreeMap::from([
         (("crlf".into(), "k".into()), "Bearer ok\r\nX-Evil: 1".into()),
-        (("utf8".into(), "k".into()), "Bearer 한글키".into()),
+        (("utf8".into(), "k".into()), "Bearer key-€€€".into()),
         (("trimmed".into(), "k".into()), "Basic Z29vZA==\n".into()),
         (("host".into(), "bad-log".into()), "a\nb".into()),
         (
@@ -482,7 +482,6 @@ async fn malformed_secrets_fail_closed_without_sending_unauthenticated_requests(
         let st = traces.stats(&ProfileId(p.into())).unwrap();
         assert_eq!((st.sent, st.failed, st.last_error), (0, 1, Some("secret")));
     }
-    // 끝 줄바꿈이 있는 정상 비밀은 trim 후 정상 전송된다
     let ok_st = traces.stats(&ProfileId("trimmed".into())).unwrap();
     assert_eq!((ok_st.sent, ok_st.failed), (1, 0));
 
@@ -550,7 +549,7 @@ async fn malformed_secrets_fail_closed_without_sending_unauthenticated_requests(
         (0, 1, Some("secret"))
     );
 
-    // 잘못된 비밀은 단 한 건도 전송되지 않고, 정상 trimmed 추적 1건만 도착했다
+    // Only the trimmed valid trace request arrives; all malformed secrets fail closed.
     let reqs = col.requests();
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].path, "/v1/traces");

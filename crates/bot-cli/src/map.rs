@@ -1,5 +1,5 @@
-//! `bot map` — 검증한 프로필의 구조 지도. 이름·분류·개수만 싣는다(지침·지식 본문·자격 값은 읽지 않는다).
-//! 카드와 연결은 관리 화면(`bot-admin`)과 같은 조립을 쓴다.
+//! `bot map` command rendering validated profile topology without reading prompt bodies or secret values.
+
 use crate::{load::load, settings::Settings, validate::known_profile};
 use bot_admin::map::{Card, Kind, Map, build, to_json};
 use bot_core::id::ProfileId;
@@ -21,9 +21,9 @@ pub fn markdown(map: &Map) -> String {
     for card in &map.nodes {
         by_profile.entry(&card.profile).or_default().push(card);
     }
-    let mut out = format!("# 구조 지도 (판본 {})\n", map.rev);
+    let mut out = format!("# Structure map (revision {})\n", map.rev);
     for (profile, cards) in by_profile {
-        out.push_str(&format!("\n## 프로필 {profile}\n"));
+        out.push_str(&format!("\n## Profile {profile}\n"));
         for kind in ORDER {
             let of_kind: Vec<&&Card> = cards.iter().filter(|c| c.kind == kind).collect();
             if of_kind.is_empty() {
@@ -51,7 +51,7 @@ pub fn run(settings: &Settings, json: bool, profile: Option<&str>) -> Result<(),
     let mut active = (**loaded.set.active()).clone();
     if let Some(name) = profile {
         if !known_profile(loaded.set.active(), name) {
-            return Err(format!("프로필 {name}이(가) 없어요"));
+            return Err(format!("profile {name} not found"));
         }
         active.retain(|id, _| *id == ProfileId(name.to_owned()));
     }

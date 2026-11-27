@@ -1,7 +1,4 @@
-//! 기억 공유(`MemoryStore::share`): 활성 판본·리스·소유자·본문 지문을 확인하고, 승인 소비·가시성 변경·호출 완료·감사를 **한 커밋**으로 한다.
-//! 지문은 카드에 보인 정확한 본문의 SHA-256과 기억 ID를 묶은 값(`bot_core::command::memory_share_hash`)이다. 호출·승인의 인자 해시가
-//! 지금 본문의 지문과 다르면(카드를 본 뒤 편집) 승인을 소비하지 않고 `Conflict`다. 완료한 호출의 재접수는 아무것도 바꾸지 않는다.
-//! 일반 `CallLedger::start`는 이 도구를 거절한다.
+//! Atomic memory sharing (`MemoryStore::share`): verifies owner and body digest, consumes approval, updates visibility, completes the call, and audits in one commit.
 
 use crate::{
     audit::{self, OwnedEntry},
@@ -20,7 +17,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
-/// 기억 공유 도구의 ID.
 pub(crate) use bot_core::builtin::SHARE_TOOL;
 
 impl Store {
@@ -28,7 +24,7 @@ impl Store {
         let at = &s.attempt;
         ids_ok(&[&s.owner, &s.checked_revision.0, &id.0, &s.call.0])?;
         let mut tx = self.begin_authorized().await?;
-        // 잠금 순서: 활성 판본 → 루트 run(공유) → 이 run → 호출 → 승인 → 기억 → 감사
+        // Lock order: active revision -> root run (FOR SHARE) -> run -> call -> approval -> memory -> audit.
         crate::active::guard_active(&mut tx, &at.profile.0, &s.checked_revision).await?;
         let shared_flag = lock_root_shared(&mut tx, at).await?;
         let run = fence(&mut tx, at).await?;
@@ -38,7 +34,7 @@ impl Store {
         }
         match phase_of(&call)? {
             CallPhase::Done(result) => {
-                // 완료한 호출의 재접수: 같은 기억이면 다시 공유하지 않는다
+                // Idempotent replay of a completed share call for the same memory ID.
                 tx.rollback().await?;
                 let done = serde_json::from_str::<Value>(&result.0)
                     .ok()
@@ -53,9 +49,9 @@ impl Store {
             _ => return Err(Error::Conflict.into()),
         }
         if tree_flagged(&mut tx, &run, shared_flag).await? && !s.private_recall {
-            return Err(Error::Conflict.into()); // 판정한 뒤 다른 실행이 private 기억을 조회했다
+            // Another run read private memory after policy evaluation.
+            return Err(Error::Conflict.into());
         }
-        // 승인은 소유자 본인이 자기 기억에 대해서만 한다
         let Some((expected, reasons)) = &s.approval else {
             return Err(Error::Denied.into());
         };
@@ -91,7 +87,7 @@ impl Store {
         {
             return Err(Error::Denied.into());
         }
-        // 카드에 보인 본문 지문과 지금 본문의 지문이 같아야 한다(다르면 승인은 소비되지 않고 되돌아간다)
+        // Reject if memory body changed after the approval card was shown (rolls back approval consumption).
         let body: String = memory.get("body");
         let fingerprint = memory_share_hash(&id, &Sha256::digest(body.as_bytes()).into());
         let call_hash: Vec<u8> = call.get("args_sha256");

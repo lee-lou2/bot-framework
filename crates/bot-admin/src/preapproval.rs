@@ -1,6 +1,4 @@
-//! 사전 승인 관리 API: 목록과 트리거 단위 정지·재개(운영자 전용).
-//! 요청은 화면이 본 승인 ID와 정지 세대(`{grant_id, epoch}`)를 함께 보내고, 저장소가 현재와 대조해 전환과 감사를 한 커밋에 쓴다.
-//! 성공 본문은 래핑 없는 새 행이다. 같은 명령의 재전달·이미 그 상태인 요청은 중복 감사 없이 같은 결과(200)이고, 교체·ABA는 409 `stale`이다.
+//! Pre-approval admin API (`/v1/admin/preapprovals`): listing and CAS-guarded pause/resume (operator-only).
 
 use crate::{
     api::{INVALID, R, S, V, body, identifier, operator, profile_id},
@@ -17,7 +15,7 @@ use bot_core::{
 };
 use serde_json::{Value, json};
 
-/// 에이전트 ID는 `main`·`main/developer`처럼 이름을 `/`로 이은 것이다(경로 한 조각으로 퍼센트 인코딩돼 온다).
+/// Nested agent IDs (e.g. `main/developer`) arrive percent-encoded as a single path segment.
 fn agent_id(text: &str) -> Result<AgentId, crate::resp::Fail> {
     (!text.is_empty() && text.split('/').all(bot_core::id::is_name))
         .then(|| AgentId(text.to_owned()))
@@ -30,7 +28,6 @@ pub(crate) async fn list(
     RawQuery(raw): RawQuery,
 ) -> R {
     operator(&v)?;
-    // 프로필 선택은 화면에서만 한다: 알 수 없는 쿼리는 거절한다
     if raw.as_deref().is_some_and(|q| !q.is_empty()) {
         return Err(INVALID);
     }
@@ -72,7 +69,6 @@ async fn toggle(
             .then_some(trigger)
             .ok_or(INVALID)?,
     };
-    // 본문은 정확히 {grant_id, epoch} 둘뿐이다(epoch는 JSON 정수)
     let b = body(&bytes, &["grant_id", "epoch"])?;
     let cas = GrantCas {
         grant_id: identifier(b.get("grant_id").and_then(Value::as_str).ok_or(INVALID)?)?,

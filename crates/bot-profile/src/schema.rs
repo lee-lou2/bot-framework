@@ -1,6 +1,4 @@
-//! JSON Schema(2020-12)의 소집합 해석기. 번들한 스키마(schemas/v1)와 도구 `input` 스키마를 같은 코드로 실행한다.
-//! 어떤 키워드를 받는지는 `vocab`이 정한다(지원하지 않는 키워드·외부 참조는 컴파일 단계에서 거절).
-//! `pattern`은 선형 시간 정규식(regex)이라 악의적 패턴이 시간을 끌지 못한다.
+//! Draft 2020-12 JSON Schema subset evaluator for bundled schemas and tool input schemas.
 mod value;
 
 pub(crate) use value::{as_exact_i64, as_exact_u64};
@@ -20,16 +18,15 @@ use value::{as_int, is_integer, json_equal, num_cmp};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Violation {
-    /// 검사한 값의 JSON 포인터(`/bindings/0/adapter`, 최상위는 빈 문자열)
+    /// JSON pointer to the offending value (empty for root).
     pub pointer: String,
     pub message: String,
 }
 
-/// 한 번의 `validate`가 쓰는 검사 횟수. 중첩된 anyOf/oneOf가 지수로 불어나는 스키마를 끊는다.
+/// Evaluation step budget preventing exponential blowup in nested combinators; fails closed once exceeded.
 #[derive(Default)]
 struct Cx {
     steps: Cell<usize>,
-    /// 한도를 넘으면 켠다. 이때 어느 가지도 믿을 수 없으므로 결과는 반드시 위반이다(닫힌 쪽으로 실패).
     over: Cell<bool>,
 }
 
@@ -43,20 +40,18 @@ pub struct Schema {
 }
 
 impl Schema {
-    /// 번들한 스키마용. 메타 스키마 참조·`$ref`·`$defs` 등 전체 소집합을 허용한다.
     pub fn compile_bundled(doc: Value) -> Result<Self, Vec<String>> {
         Self::build(doc, Dialect::Bundled)
     }
 
-    /// 도구 입력 스키마용. docs/plugins.md의 어휘만 허용한다.
     pub fn compile_input(doc: Value) -> Result<Self, Vec<String>> {
         Self::compile_input_problems(doc).map_err(|found| found.iter().map(Problem::line).collect())
     }
 
-    /// `compile_input`과 같되 문제를 고정 코드와 JSON 포인터로 알린다(`Problem::message`는 스키마 안의 글을 되풀이할 수 있으니, 출처를 믿을 수 없는 스키마의 진단에는
-    /// `code`와 `pointer`만 쓴다).
+    /// Compiles a tool input schema, returning structured codes and pointers (avoid exposing
+    /// `Problem::message` for untrusted schemas because it may echo schema text).
     pub fn compile_input_problems(doc: Value) -> Result<Self, Vec<Problem>> {
-        // 도구 입력 스키마의 로컬 `$ref`(재귀 없는 것)는 컴파일 때 펼친다. 번들 스키마는 평가 때 `$ref`를 직접 따른다.
+        // Tool input schemas expand acyclic local `$ref` at compile time; bundled schemas resolve `$ref` lazily.
         let doc = crate::refs::expand(doc).map_err(|found| vec![found])?;
         let patterns = vocab::check_problems(&doc, Dialect::Input)?;
         Ok(Self {
@@ -84,9 +79,13 @@ impl Schema {
         let mut out = Vec::new();
         self.eval(&cx, &self.doc, instance, "", 0, &mut out);
         if cx.over.get() {
-            push(&mut out, "", "스키마가 너무 복잡해요(검사 횟수 한도)");
+            push(
+                &mut out,
+                "",
+                "schema is too complex (evaluation step limit exceeded)",
+            );
         }
-        // 같은 자리의 같은 문구는 한 번만 보인다(서로 다른 규칙이 같은 말을 하는 경우)
+        // Deduplicate identical messages at the same pointer (e.g. overlapping pattern rules).
         let mut seen = HashSet::new();
         out.retain(|v| seen.insert((v.pointer.clone(), v.message.clone())));
         out
@@ -109,12 +108,12 @@ impl Schema {
         }
         let obj = match schema {
             Value::Bool(true) => return,
-            Value::Bool(false) => return push(out, ptr, "허용하지 않는 값이에요"),
+            Value::Bool(false) => return push(out, ptr, "value is not allowed"),
             Value::Object(o) => o,
             _ => return,
         };
         if depth > MAX_DEPTH {
-            return push(out, ptr, "스키마 참조가 너무 깊어요");
+            return push(out, ptr, "schema reference depth exceeded");
         }
         if let Some(Value::String(r)) = obj.get("$ref") {
             self.eval_ref(cx, r, inst, ptr, depth, out);
@@ -123,21 +122,17 @@ impl Schema {
             push(
                 out,
                 ptr,
-                format!("{}이어야 해요(받은 값: {})", type_label(t), kind(inst)),
+                format!("expected {}, got {}", type_label(t), kind(inst)),
             );
         }
         if let Some(c) = obj.get("const").filter(|c| !json_equal(c, inst)) {
-            push(out, ptr, format!("값은 {c}이어야 해요"));
+            push(out, ptr, format!("must equal {c}"));
         }
         if let Some(Value::Array(options)) = obj.get("enum")
             && !options.iter().any(|o| json_equal(o, inst))
         {
             let list: Vec<String> = options.iter().map(Value::to_string).collect();
-            push(
-                out,
-                ptr,
-                format!("허용 값이 아니에요(허용: {})", list.join(", ")),
-            );
+            push(out, ptr, format!("must be one of: {}", list.join(", ")));
         }
         match inst {
             Value::Object(map) => self.eval_object(cx, obj, map, ptr, depth, out),
@@ -161,13 +156,13 @@ impl Schema {
         if r == META_REF && self.dialect == Dialect::Bundled {
             if let Err(errors) = Schema::compile_input(inst.clone()) {
                 for e in errors {
-                    push(out, ptr, format!("입력 스키마가 올바르지 않아요: {e}"));
+                    push(out, ptr, format!("invalid input schema: {e}"));
                 }
             }
         } else if let Some(target) = r.strip_prefix('#').and_then(|p| self.doc.pointer(p)) {
             self.eval(cx, target, inst, ptr, depth + 1, out);
         } else {
-            push(out, ptr, format!("참조를 찾을 수 없어요: {r}"));
+            push(out, ptr, format!("unresolved reference: {r}"));
         }
     }
 
@@ -181,7 +176,7 @@ impl Schema {
         out: &mut Vec<Violation>,
     ) {
         let props = obj.get("properties").and_then(Value::as_object);
-        // 오타: 알 수 없는 필드마다 비슷한 알려진 필드를 찾는다(이미 쓴 필드는 제안하지 않는다). 필수 필드의 오타면 «없어요» 줄은 따로 내지 않는다.
+        // For closed objects, match unknown keys to unused known keys and suppress duplicate missing-required errors.
         let closed = obj.get("additionalProperties") == Some(&Value::Bool(false));
         let typos: Vec<(&str, &str)> = match props.filter(|_| closed) {
             Some(known) => map
@@ -204,7 +199,7 @@ impl Schema {
                 .filter(|n| !map.contains_key(*n))
                 .filter(|n| !typos.iter().any(|(_, meant)| meant == n))
             {
-                push(out, ptr, format!("필수 필드 `{name}`이 없어요"));
+                push(out, ptr, format!("missing required field `{name}`"));
             }
         }
         for (key, sub) in props.into_iter().flatten() {
@@ -229,9 +224,7 @@ impl Schema {
                     Value::Bool(false) => {
                         let message = match typos.iter().find(|(typo, _)| typo == key) {
                             Some((_, meant)) => {
-                                format!(
-                                    "알 수 없는 필드 `{key}`예요. `{meant}`를 잘못 쓴 것 같아요"
-                                )
+                                format!("unknown field `{key}`; did you mean `{meant}`?")
                             }
                             None => unknown_field(key, props),
                         };
@@ -256,7 +249,7 @@ impl Schema {
                     push(
                         out,
                         &format!("{ptr}/{}", escape(key)),
-                        format!("키 `{key}`: {}", v.message),
+                        format!("key `{key}`: {}", v.message),
                     );
                 }
             }
@@ -265,7 +258,7 @@ impl Schema {
             obj,
             ("minProperties", "maxProperties"),
             map.len(),
-            "필드",
+            ("field", "fields"),
             ptr,
             out,
         );
@@ -285,12 +278,19 @@ impl Schema {
                 self.eval(cx, sub, item, &format!("{ptr}/{i}"), depth + 1, out);
             }
         }
-        count_bounds(obj, ("minItems", "maxItems"), items.len(), "항목", ptr, out);
+        count_bounds(
+            obj,
+            ("minItems", "maxItems"),
+            items.len(),
+            ("item", "items"),
+            ptr,
+            out,
+        );
         if obj.get("uniqueItems") == Some(&Value::Bool(true)) {
             let mut seen: Vec<&Value> = Vec::new();
             for item in items {
                 if seen.iter().any(|prev| json_equal(prev, item)) {
-                    push(out, ptr, format!("중복된 항목이 있어요: {item}"));
+                    push(out, ptr, format!("duplicate item: {item}"));
                 } else {
                     seen.push(item);
                 }
@@ -303,17 +303,16 @@ impl Schema {
             obj,
             ("minLength", "maxLength"),
             s.chars().count(),
-            "글자",
+            ("character", "characters"),
             ptr,
             out,
         );
         if let Some(Value::String(p)) = obj.get("pattern")
             && !self.patterns.get(p).is_some_and(|re| re.is_match(s))
         {
-            // 번들 스키마의 정규식은 사람 말로, 도구가 정한 패턴은 원문 그대로 보인다
             match hint::pattern_hint(p) {
-                Some(text) => push(out, ptr, format!("형식이 맞지 않아요. {text}")),
-                None => push(out, ptr, format!("형식이 맞지 않아요(패턴 {p})")),
+                Some(text) => push(out, ptr, format!("invalid format: {text}")),
+                None => push(out, ptr, format!("invalid format (pattern {p})")),
             }
         }
     }
@@ -343,14 +342,14 @@ impl Schema {
             match runs.iter().filter(|r| r.is_empty()).count() {
                 1 => {}
                 0 => report_union(out, ptr, one, inst, runs),
-                _ => push(out, ptr, "허용하는 형식 둘 이상과 동시에 맞아요"),
+                _ => push(out, ptr, "matches more than one allowed schema"),
             }
         }
         if obj
             .get("not")
             .is_some_and(|sub| self.passes(cx, sub, inst, ptr, depth))
         {
-            push(out, ptr, "허용하지 않는 형태예요");
+            push(out, ptr, "matches a disallowed schema");
         }
         if let Some(cond) = obj.get("if") {
             let branch = if self.passes(cx, cond, inst, ptr, depth) {
@@ -388,21 +387,20 @@ impl Schema {
     }
 }
 
-/// 알 수 없는 필드의 문구: 쓸 수 있는 필드가 많지 않으면 그 목록을 함께 보인다.
 fn unknown_field(key: &str, props: Option<&Map<String, Value>>) -> String {
     match props {
         Some(known) if !known.is_empty() && known.len() <= 12 => {
             let names: Vec<&str> = known.keys().map(String::as_str).collect();
             format!(
-                "알 수 없는 필드 `{key}`예요. 쓸 수 있는 필드: {}",
+                "unknown field `{key}`; allowed fields: {}",
                 names.join(", ")
             )
         }
-        _ => format!("알 수 없는 필드 `{key}`"),
+        _ => format!("unknown field `{key}`"),
     }
 }
 
-/// 모든 가지가 같은 필드를 서로 다른 `const`로 고정해 두었으면(예: `adapter`) 그 필드의 이름과 가지별 값. 판별 필드가 없으면 `None`.
+/// Returns a property fixed to a `const` across every union branch (e.g. `adapter`), if any.
 fn discriminator(subs: &[Value]) -> Option<(&str, Vec<&Value>)> {
     let first = subs.first()?.get("properties")?.as_object()?;
     first.keys().find_map(|key| {
@@ -414,8 +412,7 @@ fn discriminator(subs: &[Value]) -> Option<(&str, Vec<&Value>)> {
     })
 }
 
-/// 어느 가지도 안 맞을 때의 보고. 판별 필드가 있으면 그 값으로 가지를 고른다: 값이 어느 가지의 것도 아니면 허용 값을 모두 보이고(비슷한 값을 제안),
-/// 어느 가지의 것이면 그 가지들 중에서 가장 가까운 가지의 위반만 보인다. 판별 필드가 없거나 인스턴스에 없으면 전체에서 가장 가까운 가지다.
+/// Reports union failures using the discriminator branch when present, or the closest branch otherwise.
 fn report_union(
     out: &mut Vec<Violation>,
     ptr: &str,
@@ -449,22 +446,18 @@ fn report_union(
     let meant = value
         .as_str()
         .and_then(|text| hint::nearest(text, allowed.iter().filter_map(|tag| tag.as_str())));
-    let tail = meant.map_or(String::new(), |m| format!(" — 혹시 \"{m}\"인가요?"));
+    let tail = meant.map_or(String::new(), |m| format!(" — did you mean \"{m}\"?"));
     push(
         out,
         &format!("{ptr}/{}", escape(key)),
-        format!(
-            "허용 값은 {} 중 하나예요(받은 값: {value}{tail})",
-            list.join(", ")
-        ),
+        format!("must be one of {} (got {value}{tail})", list.join(", ")),
     );
 }
 
-/// 어느 가지도 안 맞을 때, 위반이 가장 적은(가장 가까운) 가지의 위반을 보여 준다.
 fn closest(out: &mut Vec<Violation>, ptr: &str, runs: Vec<Vec<Violation>>) {
     match runs.into_iter().min_by_key(Vec::len) {
         Some(best) if !best.is_empty() => out.extend(best),
-        _ => push(out, ptr, "허용하는 형식 중 어느 것과도 맞지 않아요"),
+        _ => push(out, ptr, "does not match any allowed schema"),
     }
 }
 
@@ -482,11 +475,11 @@ fn escape(key: &str) -> String {
 fn kind(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
-        Value::Bool(_) => "불리언",
-        Value::Number(_) => "숫자",
-        Value::String(_) => "문자열",
-        Value::Array(_) => "배열",
-        Value::Object(_) => "객체",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -496,21 +489,21 @@ fn type_label(t: &Value) -> String {
         Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
         _ => vec![],
     };
-    let ko = |n: &str| match n {
+    let label = |n: &str| match n {
         "null" => "null",
-        "boolean" => "불리언",
-        "object" => "객체",
-        "array" => "배열",
-        "string" => "문자열",
-        "number" => "숫자",
-        "integer" => "정수",
+        "boolean" => "boolean",
+        "object" => "object",
+        "array" => "array",
+        "string" => "string",
+        "number" => "number",
+        "integer" => "integer",
         _ => "?",
     };
     names
         .iter()
-        .map(|n| ko(n))
+        .map(|n| label(n))
         .collect::<Vec<_>>()
-        .join(" 또는 ")
+        .join(" or ")
 }
 
 fn type_matches(t: &Value, inst: &Value) -> bool {
@@ -535,7 +528,7 @@ fn count_bounds(
     obj: &Map<String, Value>,
     keys: (&str, &str),
     n: usize,
-    unit: &str,
+    unit: (&str, &str),
     ptr: &str,
     out: &mut Vec<Violation>,
 ) {
@@ -544,46 +537,48 @@ fn count_bounds(
         .and_then(as_exact_u64)
         .filter(|m| (n as u64) < *m)
     {
-        push(out, ptr, format!("{unit}이(가) {m}개 이상이어야 해요"));
+        let label = if m == 1 { unit.0 } else { unit.1 };
+        push(out, ptr, format!("must have at least {m} {label}"));
     }
     if let Some(m) = obj
         .get(keys.1)
         .and_then(as_exact_u64)
         .filter(|m| (n as u64) > *m)
     {
-        push(out, ptr, format!("{unit}이(가) {m}개 이하여야 해요"));
+        let label = if m == 1 { unit.0 } else { unit.1 };
+        push(out, ptr, format!("must have at most {m} {label}"));
     }
 }
 
 fn eval_number(obj: &Map<String, Value>, n: &Number, ptr: &str, out: &mut Vec<Violation>) {
     let get = |k: &str| obj.get(k).and_then(Value::as_number);
     if let Some(m) = get("minimum").filter(|m| num_cmp(n, m) == Some(Ordering::Less)) {
-        push(out, ptr, format!("{m} 이상이어야 해요"));
+        push(out, ptr, format!("must be >= {m}"));
     }
     if let Some(m) = get("maximum").filter(|m| num_cmp(n, m) == Some(Ordering::Greater)) {
-        push(out, ptr, format!("{m} 이하여야 해요"));
+        push(out, ptr, format!("must be <= {m}"));
     }
     if let Some(m) = get("exclusiveMinimum")
         .filter(|m| matches!(num_cmp(n, m), Some(Ordering::Less | Ordering::Equal)))
     {
-        push(out, ptr, format!("{m}보다 커야 해요"));
+        push(out, ptr, format!("must be > {m}"));
     }
     if let Some(m) = get("exclusiveMaximum")
         .filter(|m| matches!(num_cmp(n, m), Some(Ordering::Greater | Ordering::Equal)))
     {
-        push(out, ptr, format!("{m}보다 작아야 해요"));
+        push(out, ptr, format!("must be < {m}"));
     }
     if let Some(m) = get("multipleOf") {
         if let (Some(ni), Some(mi)) = (as_int(n), as_int(m)) {
             if mi > 0 && ni % mi != 0 {
-                push(out, ptr, format!("{m}의 배수여야 해요"));
+                push(out, ptr, format!("must be a multiple of {m}"));
             }
         } else if let (Some(nf), Some(mf)) = (n.as_f64(), m.as_f64())
             && mf > 0.0
         {
             let q = nf / mf;
             if !q.is_finite() || (q - q.round()).abs() > 1e-9 {
-                push(out, ptr, format!("{m}의 배수여야 해요"));
+                push(out, ptr, format!("must be a multiple of {m}"));
             }
         }
     }

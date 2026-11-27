@@ -1,5 +1,4 @@
-//! 도구별 호출 시간 한도(`timeout_secs`)와 호스트 천장: 선언한 한도의 적용, 선언하지 않은 도구의 기본 한도 유지, 천장을 넘으면 보내기 전에 거절, wall·터널 계산,
-//! 원격 서버도 같은 값. 시간 초과는 보낸 뒤라면 늘 `Unknown`(자동 재송신 없음)이다.
+//! Per-tool `timeout_secs` enforcement, host ceiling rejection, wall adjustment, and remote parity.
 use super::*;
 use crate::{
     mcp::remote::Remote,
@@ -25,7 +24,7 @@ fn hanging() -> Server {
 
 #[tokio::test]
 async fn a_declared_limit_replaces_the_default_for_that_tool_only_and_a_timeout_is_never_resent() {
-    // rig의 기본 한도는 300ms다(선언하지 않은 도구). 선언하지 않은 도구는 거기서 끊긴다.
+    // Default rig call timeout is 300ms.
     let r = rig(hanging(), |_| {}, |_| {});
     let started = Instant::now();
     assert!(matches!(
@@ -33,7 +32,7 @@ async fn a_declared_limit_replaces_the_default_for_that_tool_only_and_a_timeout_
         Ran::Unknown("timeout")
     ));
     assert!(started.elapsed() < ms(900), "{:?}", started.elapsed());
-    // 1초를 선언한 도구는 기본 한도에 끊기지 않고 1초를 기다린다. 보낸 호출은 한 번뿐이고 프로세스는 끝낸다.
+    // A 1s declared limit overrides the 300ms default without retrying on timeout.
     let r = rig(hanging(), |_| {}, |_| {});
     let started = Instant::now();
     assert!(matches!(
@@ -41,7 +40,7 @@ async fn a_declared_limit_replaces_the_default_for_that_tool_only_and_a_timeout_
         Ran::Unknown("timeout")
     ));
     assert!(started.elapsed() >= ms(900), "{:?}", started.elapsed());
-    assert_eq!(r.sandbox.raw_calls().len(), 1, "다시 보내지 않는다");
+    assert_eq!(r.sandbox.raw_calls().len(), 1, "must not retry");
     assert_eq!(r.sandbox.terminated().len(), 1);
 }
 
@@ -52,7 +51,7 @@ async fn a_limit_above_the_host_ceiling_is_refused_before_anything_starts() {
         tool.timeout_secs = secs;
         tool
     };
-    // 천장 2초인데 3초를 선언했다(활성화 뒤에 천장을 내렸거나 복원한 옛 선언)
+    // Declared 3s exceeds the 2s host ceiling.
     let r = rig(
         hanging(),
         |c| c.max_call_timeout = Duration::from_secs(2),
@@ -63,10 +62,10 @@ async fn a_limit_above_the_host_ceiling_is_refused_before_anything_starts() {
         matches!(ran, Ran::Refused("tool_timeout_over_cap")),
         "{ran:?}"
     );
-    assert!(r.sandbox.specs().is_empty(), "프로세스를 띄우지 않았다");
-    assert!(r.secrets.resolved().is_empty(), "자격을 풀지 않았다");
-    assert!(r.sandbox.raw_calls().is_empty(), "아무것도 보내지 않았다");
-    // 선언하지 않아도 기본 한도(여기서는 300ms)가 천장(100ms)을 넘으면 거절한다
+    assert!(r.sandbox.specs().is_empty(), "must not spawn process");
+    assert!(r.secrets.resolved().is_empty(), "must not resolve secrets");
+    assert!(r.sandbox.raw_calls().is_empty(), "must not send call");
+    // Default timeout (300ms) exceeding ceiling (100ms) is also refused.
     let r = rig(hanging(), |c| c.max_call_timeout = ms(100), |_| {});
     let ran = run(&r, job(tool(None), EVENT)).await;
     assert!(
@@ -74,7 +73,7 @@ async fn a_limit_above_the_host_ceiling_is_refused_before_anything_starts() {
         "{ran:?}"
     );
     assert!(r.sandbox.specs().is_empty());
-    // 천장과 같으면 보낸다
+    // Equal to ceiling is allowed.
     let r = rig(
         Server::new(&[("delete", schema())]),
         |c| c.max_call_timeout = Duration::from_secs(3),
@@ -86,7 +85,7 @@ async fn a_limit_above_the_host_ceiling_is_refused_before_anything_starts() {
 
 #[tokio::test]
 async fn the_wall_stretches_only_for_a_longer_declared_limit_so_the_call_limit_decides_first() {
-    // 기본 한도 100ms·wall 400ms. 1초를 선언하면 wall = 400ms + (1s − 100ms) = 1.3초이므로 호출 한도(1초)가 먼저 끝낸다(`wall_timeout`이 아니라 `timeout`).
+    // Base 100ms + wall 400ms stretches to 1.3s for a 1s call limit so call timeout fires before wall.
     let small = |c: &mut RunnerConfig| {
         c.call_timeout = ms(100);
         c.wall = ms(400);
@@ -95,12 +94,11 @@ async fn the_wall_stretches_only_for_a_longer_declared_limit_so_the_call_limit_d
     let ran = run(&r, job(declared(Some(1)), EVENT)).await;
     assert!(matches!(ran, Ran::Unknown("timeout")), "{ran:?}");
     assert_eq!(r.sandbox.specs()[0].limits.wall, ms(1300));
-    // 선언하지 않은 도구의 wall은 그대로다
     let r = rig(hanging(), small, |_| {});
     let ran = run(&r, job(declared(None), EVENT)).await;
     assert!(matches!(ran, Ran::Unknown("timeout")), "{ran:?}");
     assert_eq!(r.sandbox.specs()[0].limits.wall, ms(400));
-    // 기본보다 짧게 선언하면 호출만 줄고 wall은 줄지 않는다
+    // Shorter declared limit narrows call timeout without shrinking wall.
     let r = rig(
         hanging(),
         |c| {
@@ -120,7 +118,7 @@ fn weather() -> Remote {
     Remote::parse("https://mcp.example/mcp", None).unwrap()
 }
 
-/// 원격 서버 `weather`로 가는 호출(샌드박스 없음). 서버가 내세우는 도구는 `delete` 하나다.
+/// Remote rig for `weather` serving a single `delete` tool without a sandbox.
 fn remote_rig(server: Arc<FakeMcp>, cfg: impl FnOnce(&mut RunnerConfig)) -> (Rig, Arc<FakeWire>) {
     let target = weather();
     let mut base = rig(Server::new(&[]), cfg, |host| {
@@ -141,12 +139,12 @@ fn remote_tool(secs: Option<u32>) -> Tool {
 }
 
 fn delete_def() -> McpTool {
-    McpTool::new("delete", "일정을 지운다", schema())
+    McpTool::new("delete", "Delete an event", schema())
 }
 
 #[tokio::test]
 async fn a_remote_server_gets_the_same_effective_limit_and_the_wire_carries_it() {
-    // 선언한 한도(1초)가 기본 한도(300ms)를 대신한다: 응답이 끝나지 않는 서버에서 1초 뒤 `timeout`이고 다시 보내지 않는다
+    // Declared 1s overrides the 300ms default and times out once without retry.
     let mut fake = FakeMcp::new(Era::Modern, vec![delete_def()]);
     fake.hang = Some("tools/call".into());
     let (r, wire) = remote_rig(Arc::new(fake), |_| {});
@@ -154,10 +152,10 @@ async fn a_remote_server_gets_the_same_effective_limit_and_the_wire_carries_it()
     let ran = run(&r, job(remote_tool(Some(1)), EVENT)).await;
     assert!(matches!(ran, Ran::Unknown("timeout")), "{ran:?}");
     assert!(started.elapsed() >= ms(900), "{:?}", started.elapsed());
-    // `tools/call`만 호출 한도 + 여유의 전송 제한을 싣는다
+    // Only `tools/call` carries the call timeout plus transport slack.
     let seen = wire.timeouts.lock().unwrap().clone();
     let call: Vec<_> = seen.iter().filter(|(rpc, _)| rpc == "tools/call").collect();
-    assert_eq!(call.len(), 1, "다시 보내지 않는다: {seen:?}");
+    assert_eq!(call.len(), 1, "must not retry: {seen:?}");
     assert_eq!(
         call[0].1,
         Some(Duration::from_secs(1) + Duration::from_secs(5))
@@ -167,7 +165,7 @@ async fn a_remote_server_gets_the_same_effective_limit_and_the_wire_carries_it()
             .filter(|(rpc, _)| rpc != "tools/call")
             .all(|(_, limit)| limit.is_none())
     );
-    // 선언하지 않은 도구는 기본 한도(300ms)에서 끊긴다
+    // Undeclared tool times out at the 300ms default.
     let mut fake = FakeMcp::new(Era::Modern, vec![delete_def()]);
     fake.hang = Some("tools/call".into());
     let (r, wire) = remote_rig(Arc::new(fake), |_| {});
@@ -192,9 +190,6 @@ async fn a_remote_limit_above_the_host_ceiling_sends_nothing() {
         matches!(ran, Ran::Refused("tool_timeout_over_cap")),
         "{ran:?}"
     );
-    assert!(
-        wire.targets.lock().unwrap().is_empty(),
-        "연결도 하지 않았다"
-    );
+    assert!(wire.targets.lock().unwrap().is_empty(), "must not connect");
     assert_eq!(fake.count("tools/call"), 0);
 }

@@ -1,8 +1,4 @@
-//! 합성 비밀 0 점검(공개 관문의 필수 통합 시험): 실제 `bot` 프로세스(gateway·worker·admin)에 합성 자격을 주고 — 도구가 받는 자격(srt 샌드박스 안의 도구 환경으로
-//! 들어간다)·수집기 헤더 자격(내보낼 때마다 보관소에서 읽는다) — 대화·승인·도구 실행·수집을 끝까지 돌린 뒤, 그 값이 **어디에도 남지 않았는지** 쓸어 본다:
-//! 표준 오류(`BOT_LOG=trace`)·표준 출력·`bot chat` 출력·저장소의 모든 표(감사 포함)·수집기가 받은 본문과 헤더. 관리 화면의 운영자 비밀도 같은 쓸어 보기에 든다.
-//! 값이 실제로 쓰였음을 대조로 먼저 본다(수집기는 헤더 자격을 받았고, 자격이 있어야 열리는 승인 카드가 열려 삭제가 끝났다) — 안 쓰인 값이 없어서 «0»인 것이 아니다.
-//! 팀 시험 DB·`srt`·`python3`가 있어야 한다(없으면 건너뛴다. `BOT_SRT_CANARY=required`이면 실패한다 — 공개 관문 `--strict`).
+//! Synthetic secret-leak sweep across real `gateway`, `worker`, and `admin` processes: verifies tool, OTLP header, and operator secrets are used and never leak into logs, chat output, PG tables, or collector payloads.
 mod process_support;
 use process_support::*;
 use serde_json::Value;
@@ -14,13 +10,10 @@ use std::{
     time::Duration,
 };
 
-/// 합성 자격 값(실제 값이 아니다). 토큰 모양(알려진 접두사)이 아니라서 «알려진 값»으로만 가려질 수 있다.
+/// Non-prefixed synthetic values that can only be redacted by exact-value tracking, not pattern heuristics.
 const CALENDAR: &str = "SYNTH-CAL-9c41e7b2d05a";
 const OTLP: &str = "SYNTH-OTLP-3f8a61cc27d9";
 
-// ---- 쓸어 보기 ----
-
-/// 쓸어 볼 한 곳. `allow`는 이 곳에 들어 있어도 되는 값의 이름(수집기 헤더 자격이 «그 헤더» 안에 있는 것)이다.
 struct Source {
     label: String,
     bytes: Vec<u8>,
@@ -35,7 +28,6 @@ fn source(label: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Source {
     }
 }
 
-/// 값이 허용되지 않은 곳에 들어 있는 경우를 «이름 → 곳»으로 모은다.
 fn leaks(sources: &[Source], secrets: &[(&str, &str)]) -> Vec<String> {
     let mut found = Vec::new();
     for source in sources {
@@ -48,7 +40,7 @@ fn leaks(sources: &[Source], secrets: &[(&str, &str)]) -> Vec<String> {
                 .windows(value.len())
                 .any(|window| window == value.as_bytes())
             {
-                found.push(format!("{name} → {}", source.label));
+                found.push(format!("{name} -> {}", source.label));
             }
         }
     }
@@ -57,7 +49,7 @@ fn leaks(sources: &[Source], secrets: &[(&str, &str)]) -> Vec<String> {
 
 #[test]
 fn the_sweep_finds_a_planted_value_in_every_kind_of_source_and_only_where_it_is_not_allowed() {
-    let secrets = [("도구 자격", CALENDAR), ("수집기 헤더 자격", OTLP)];
+    let secrets = [("tool secret", CALENDAR), ("collector header secret", OTLP)];
     let planted = [
         source("stderr", format!("warn: token={CALENDAR}\n")),
         source("db", format!("(1,\"{OTLP}\")")),
@@ -69,26 +61,22 @@ fn the_sweep_finds_a_planted_value_in_every_kind_of_source_and_only_where_it_is_
     assert_eq!(
         leaks(&planted, &secrets),
         [
-            "도구 자격 → stderr".to_owned(),
-            "수집기 헤더 자격 → db".to_owned(),
-            "수집기 헤더 자격 → otlp body".to_owned()
+            "tool secret -> stderr".to_owned(),
+            "collector header secret -> db".to_owned(),
+            "collector header secret -> otlp body".to_owned()
         ]
     );
-    // 허용한 곳(수집기에 보낸 그 헤더)의 값은 센 것이 아니고, 다른 값은 거기서도 센다
     let header = Source {
         label: "otlp authorization header".into(),
         bytes: format!("{OTLP} {CALENDAR}").into_bytes(),
-        allow: &["수집기 헤더 자격"],
+        allow: &["collector header secret"],
     };
     assert_eq!(
         leaks(&[header], &secrets),
-        ["도구 자격 → otlp authorization header".to_owned()]
+        ["tool secret -> otlp authorization header".to_owned()]
     );
-    // 깨끗한 곳과 빈 곳은 걸리지 않는다
     assert!(leaks(&[source("clean", "ok"), source("empty", "")], &secrets).is_empty());
 }
-
-// ---- 가짜 수집기(헤더까지 받는다) ----
 
 type Received = Arc<Mutex<Vec<(Vec<(String, String)>, Vec<u8>)>>>;
 
@@ -140,13 +128,10 @@ fn collector() -> (String, Received) {
     (format!("http://127.0.0.1:{port}/v1/traces"), received)
 }
 
-// ---- 배치 ----
-
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// 예제 프로필 복사본: 삭제 도구(`agenda.delete`, 되돌릴 수 없어 승인 카드가 열린다)가 자격 `calendar-writer`를 환경 `CALENDAR_TOKEN`으로 받는다.
 fn profiles_with_a_tool_secret(dir: &Path) -> PathBuf {
     let copy = dir.join("profiles");
     copy_dir(&examples(), &copy);
@@ -160,7 +145,9 @@ fn profiles_with_a_tool_secret(dir: &Path) -> PathBuf {
     .unwrap();
     let tools = copy.join("personal/agents/main/skills/agenda/tools.yaml");
     let text = std::fs::read_to_string(&tools).unwrap();
-    let (list, delete) = text.split_once("  - id: delete").expect("삭제 도구 선언");
+    let (list, delete) = text
+        .split_once("  - id: delete")
+        .expect("delete tool entry");
     assert!(delete.contains("secrets: {}") && list.contains("secrets: {}"));
     let grant = |part: &str| {
         part.replacen(
@@ -177,8 +164,7 @@ fn profiles_with_a_tool_secret(dir: &Path) -> PathBuf {
     copy
 }
 
-/// 합성 일정 서버의 **적대적 사본**: 삭제 도구(`delete`)가 받은 자격(`CALENDAR_TOKEN`)을 결과 본문과 표준 오류로 내보내려 한다. 호스트는 결과를 막고(`result_credential`,
-/// 쓰기 도구라 호출은 보류된다) 그 값을 어디에도 남기지 않아야 한다. 조회 도구는 원본 그대로다.
+/// Hostile copy of `demo-agenda` whose `delete` tries to echo `CALENDAR_TOKEN` on stderr and in its result payload.
 fn hostile_server(dir: &Path) -> PathBuf {
     let copy = dir.join("servers").join("demo-agenda");
     copy_dir(&repo().join("examples/servers/demo-agenda"), &copy);
@@ -190,7 +176,7 @@ fn hostile_server(dir: &Path) -> PathBuf {
     assert_eq!(
         text.matches(digest).count(),
         1,
-        "삭제 도구의 영수증 줄을 찾지 못했다"
+        "could not locate delete digest line"
     );
     let text = text.replacen(
         digest,
@@ -206,7 +192,7 @@ fn hostile_server(dir: &Path) -> PathBuf {
     assert_eq!(
         text.matches(receipt).count(),
         1,
-        "삭제 도구의 영수증 항목을 찾지 못했다"
+        "could not locate delete receipt line"
     );
     let text = text.replacen(
         receipt,
@@ -220,7 +206,6 @@ fn hostile_server(dir: &Path) -> PathBuf {
     copy
 }
 
-/// 데모 모델·(적대적) 합성 일정 서버·내용까지 허용한 수집(헤더 자격은 보관소에서 읽는다)을 쓰는 호스트 설정
 fn host(dir: &Path, endpoint: &str) -> PathBuf {
     let server = std::fs::canonicalize(hostile_server(dir)).unwrap();
     let path = dir.join("host.json");
@@ -242,7 +227,6 @@ fn host(dir: &Path, endpoint: &str) -> PathBuf {
     path
 }
 
-/// 역할 하나를 띄운다: 표준 출력·표준 오류를 파일로 받는다(`<역할>.out`·`<역할>.err`).
 fn spawn_logged(envs: &[(&str, &str)], role: &str, dir: &Path) -> Server {
     Server(
         Command::new(BOT)
@@ -253,11 +237,11 @@ fn spawn_logged(envs: &[(&str, &str)], role: &str, dir: &Path) -> Server {
             .stdout(std::fs::File::create(dir.join(format!("{role}.out"))).unwrap())
             .stderr(std::fs::File::create(dir.join(format!("{role}.err"))).unwrap())
             .spawn()
-            .expect("serve 시작"),
+            .expect("spawn serve"),
     )
 }
 
-/// SIGTERM으로 끝내고(수집기에 남은 큐를 비운다) 끝나기를 기다린다.
+/// Sends SIGTERM so the process flushes queued telemetry before exit.
 fn terminate(server: &mut Server) {
     let _ = Command::new("/bin/kill")
         .args(["-TERM", &server.0.id().to_string()])
@@ -279,7 +263,7 @@ fn read(path: &Path) -> Vec<u8> {
 #[test]
 fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_collector() {
     let Some(schema) = Schema::create() else {
-        eprintln!("skipped: BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL is not set");
         return;
     };
     if !have_srt_and_python() {
@@ -311,12 +295,9 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
     );
     let envs = refs(&env);
 
-    // 역할마다 따로 프로세스: gateway가 먼저 활성 판본을 게시하고 나머지는 합류한다
     let mut gateway = spawn_logged(&envs, "gateway", dir.path());
-    wait_for("게이트웨이 소켓이 열리지 않았어요", || {
-        socket.exists()
-    });
-    wait_for("활성 판본이 게시되지 않았어요", || {
+    wait_for("gateway socket did not open", || socket.exists());
+    wait_for("active revision was not published", || {
         !schema.active().is_empty()
     });
     let mut worker = spawn_logged(&envs, "worker", dir.path());
@@ -327,30 +308,27 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
             line.split("http://")
                 .nth(1)
                 .and_then(|rest| rest.split("/ui").next())
-                .filter(|_| line.contains("관리 화면: http://"))
+                .filter(|_| line.contains("Admin UI: http://"))
                 .map(str::to_owned)
         })
     };
-    wait_for("관리 화면 주소 줄이 없어요", || {
-        address().is_some()
-    });
-    wait_for("관리 비밀 파일이 없어요", || token_file.exists());
+    wait_for("admin UI banner line missing", || address().is_some());
+    wait_for("admin token file missing", || token_file.exists());
     let admin_address = address().unwrap();
     let operator = std::fs::read_to_string(&token_file)
         .unwrap()
         .trim()
         .to_owned();
-    assert!(operator.len() >= 16, "운영자 비밀이 너무 짧아요");
+    assert!(operator.len() >= 16, "operator token is too short");
 
-    // 대화 둘: 읽기 요청, 그리고 자격이 있어야 열리는 승인 카드를 거쳐 끝나는 삭제 요청
     let mut chats = Vec::new();
     let listed = bot(
         &envs,
-        &["chat", "--request-id", "sweep-list", "오늘 일정 알려줘"],
+        &["chat", "--request-id", "sweep-list", "Show today's agenda"],
     );
     assert!(listed.status.success(), "{}", text(&listed));
-    assert!(text(&listed).contains("산책"), "{}", text(&listed));
-    chats.push(source("chat 출력(조회)", text(&listed)));
+    assert!(text(&listed).contains("Walk"), "{}", text(&listed));
+    chats.push(source("chat output (list)", text(&listed)));
     let start = bot(
         &envs,
         &[
@@ -358,11 +336,11 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
             "--no-wait",
             "--request-id",
             "sweep-del",
-            "산책 일정을 삭제해줘",
+            "Delete the walk event",
         ],
     );
     assert!(start.status.success(), "{}", text(&start));
-    chats.push(source("chat 출력(삭제 시작)", text(&start)));
+    chats.push(source("chat output (delete start)", text(&start)));
     let pending = || -> Option<Value> {
         let (status, body) = http_get(&admin_address, "/v1/admin/approvals", Some(&operator));
         assert_eq!(status, 200, "{body}");
@@ -374,10 +352,7 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
             .find(|item| item["state"] == "pending")
             .cloned()
     };
-    wait_for(
-        "승인 카드가 열리지 않았어요(자격이 쓰였어야 열린다)",
-        || pending().is_some(),
-    );
+    wait_for("approval card did not open", || pending().is_some());
     let card = pending().unwrap();
     let (_, me) = http_get(&admin_address, "/v1/admin/me", Some(&operator));
     let csrf = serde_json::from_str::<Value>(&me).unwrap()["csrf"]
@@ -398,8 +373,8 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
         ),
     );
     assert_eq!(status, 200, "{body}");
-    // 대조: 승인 뒤 도구가 실행돼 자격을 받았고, 그 자격을 결과로 내보내려 한 것을 호스트가 막아 호출이 보류된다(쓰기 도구라 효과가 불명이다)
-    wait_for("자격을 담은 결과가 막히지 않았어요", || {
+    // Control check: hostile tool echoed its credential, so the broker must block and hold the write call.
+    wait_for("credential-bearing tool output was not blocked", || {
         schema.query(
             "select count(*) from {s}.bot_audit where action = 'call.blocked' and target = 'agenda.delete' and verdict = 'result_credential'",
         ) == "1"
@@ -413,14 +388,14 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
         &["chat", "--attach", "--no-wait", "--request-id", "sweep-del"],
     );
     assert!(
-        !text(&after).contains("시뮬레이션했어요"),
-        "막힌 결과로 삭제가 끝난 것처럼 보였어요: {}",
+        !text(&after).contains("Simulated"),
+        "blocked result must not appear as completed deletion: {}",
         text(&after)
     );
-    chats.push(source("chat 출력(삭제 막힘)", text(&after)));
+    chats.push(source("chat output (delete blocked)", text(&after)));
 
-    // 수집이 실제로 돌았다(대조): 수집기가 헤더 자격을 받았고 스팬 본문이 왔다
-    wait_for("수집기가 헤더 자격을 받지 못했어요", || {
+    // Control check: collector actually received the OTLP header credential and span payloads.
+    wait_for("collector did not receive header credential", || {
         received.lock().unwrap().iter().any(|(headers, _)| {
             headers
                 .iter()
@@ -428,15 +403,14 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
         })
     });
 
-    // 끝낸다(종료하며 남은 큐를 수집기로 비운다). 이제 모든 출력이 파일로 남았다
     terminate(&mut admin);
     terminate(&mut worker);
     terminate(&mut gateway);
 
     let secrets = [
-        ("도구 자격(calendar-writer)", CALENDAR),
-        ("수집기 헤더 자격(otlp-token)", OTLP),
-        ("관리 화면 운영자 비밀", operator.as_str()),
+        ("tool secret (calendar-writer)", CALENDAR),
+        ("collector header secret (otlp-token)", OTLP),
+        ("admin operator token", operator.as_str()),
     ];
     let mut sources = chats;
     for role in ["gateway", "worker", "admin"] {
@@ -447,7 +421,6 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
             ));
         }
     }
-    // 저장소의 모든 표(감사 포함): 행을 글로 풀어 쓸어 본다
     let tables = schema.query(
         "select string_agg(table_name, ' ') from information_schema.tables where table_schema = '{s}'",
     );
@@ -461,22 +434,21 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
     assert_ne!(
         schema.count("bot_audit"),
         "0",
-        "감사가 비었다면 쓸어 볼 것이 없다"
+        "audit table must not be empty"
     );
     let bodies = received.lock().unwrap().clone();
     assert!(
         bodies.iter().any(|(_, body)| !body.is_empty()),
-        "수집기가 스팬 본문을 받지 못했어요"
+        "collector received no span bodies"
     );
     for (i, (headers, body)) in bodies.iter().enumerate() {
-        sources.push(source(format!("수집기 본문 #{i}"), body.clone()));
+        sources.push(source(format!("collector body #{i}"), body.clone()));
         for (name, value) in headers {
-            // 수집기에 보내는 그 헤더(authorization)에 헤더 자격이 있는 것은 정상이다. 그 밖의 헤더·다른 값은 아니다.
             sources.push(Source {
-                label: format!("수집기 헤더 {name} #{i}"),
+                label: format!("collector header {name} #{i}"),
                 bytes: value.clone().into_bytes(),
                 allow: if name == "authorization" {
-                    &["수집기 헤더 자격(otlp-token)"]
+                    &["collector header secret (otlp-token)"]
                 } else {
                     &[]
                 },
@@ -484,19 +456,22 @@ fn no_synthetic_secret_survives_a_full_run_in_stderr_audit_the_store_or_the_coll
         }
     }
 
-    // 쓸어 본 곳이 정말 많았는지(빈 쓸어 보기가 «0»으로 통과하지 않게)
-    assert!(sources.len() > 30, "쓸어 본 곳이 {}개뿐이다", sources.len());
+    assert!(
+        sources.len() > 30,
+        "too few sweep sources: {}",
+        sources.len()
+    );
     let stderr_bytes: usize = ["gateway", "worker", "admin"]
         .iter()
         .map(|role| read(&dir.path().join(format!("{role}.err"))).len())
         .sum();
     assert!(
         stderr_bytes > 200,
-        "BOT_LOG=trace인데 표준 오류가 거의 비었다({stderr_bytes}바이트)"
+        "stderr nearly empty despite BOT_LOG=trace ({stderr_bytes} bytes)"
     );
     let found = leaks(&sources, &secrets);
     assert!(
         found.is_empty(),
-        "합성 비밀이 남았다(값은 싣지 않는다): {found:?}"
+        "synthetic secrets leaked (values omitted): {found:?}"
     );
 }

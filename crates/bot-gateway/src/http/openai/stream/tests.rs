@@ -8,7 +8,6 @@ use std::{
     },
 };
 
-/// 확인 결과를 차례로 돌려주는 가짜 경계(비면 통과). `delay`만큼 기다린 뒤 답한다.
 struct Fake {
     verdicts: Mutex<VecDeque<Result<(), Failure>>>,
     calls: AtomicUsize,
@@ -52,7 +51,7 @@ impl Boundary for Fake {
 fn queue(items: Vec<Item>) -> mpsc::Receiver<Item> {
     let (tx, rx) = mpsc::channel(items.len().max(1));
     for item in items {
-        assert!(tx.try_send(item).is_ok(), "큐에 들어가야 해요");
+        assert!(tx.try_send(item).is_ok(), "queue must accept item");
     }
     rx
 }
@@ -105,7 +104,7 @@ async fn every_data_item_is_checked_when_it_is_taken_and_a_beat_needs_no_check()
     assert_eq!(
         fake.calls(),
         3,
-        "본문 조각마다 한 번씩(주석은 확인하지 않는다)"
+        "one check per data item; keep-alive comments skip checks"
     );
 }
 
@@ -129,7 +128,7 @@ async fn a_failed_check_discards_that_item_and_everything_queued_and_ends_with_o
     assert_eq!(out[0], "first");
     assert_eq!(code_of(&out[1]), "access_denied");
     assert!(!out.concat().contains("SECRET"), "{out:?}");
-    assert_eq!(fake.calls(), 2, "버린 조각은 더 확인하지 않는다");
+    assert_eq!(fake.calls(), 2, "discarded items are not checked");
 }
 
 #[tokio::test]
@@ -162,8 +161,7 @@ async fn after_the_deadline_no_data_passes_and_one_unknown_outcome_event_closes_
     .await;
     assert_eq!(out.len(), 1, "{out:?}");
     assert_eq!(code_of(&out[0]), "request_outcome_unknown");
-    assert_eq!(fake.calls(), 0, "기한을 넘겼으면 확인할 것도 없다");
-    // 기한 뒤의 주석은 쓰지 않고 닫는다
+    assert_eq!(fake.calls(), 0, "no checks past deadline");
     let out = collect(gated(
         queue(vec![beat(), data("SECRET")]),
         Instant::now() - Duration::from_millis(1),
@@ -228,7 +226,6 @@ async fn closing_the_stream_releases_a_producer_waiting_for_room() {
         }
         sent
     });
-    // 첫 확인이 실패해 오류 사건으로 닫힌다: 큐가 닫혀 생산자가 풀려난다
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(
         code_of(std::str::from_utf8(&first).unwrap()),
@@ -237,21 +234,20 @@ async fn closing_the_stream_releases_a_producer_waiting_for_room() {
     assert!(stream.next().await.is_none());
     let sent = tokio::time::timeout(Duration::from_secs(2), producer)
         .await
-        .expect("생산자가 풀려나야 해요")
+        .expect("producer must unblock")
         .unwrap();
     assert!(sent <= BUFFER + 2, "{sent}");
 }
 
 fn one_slot() -> (Arc<tokio::sync::Semaphore>, OwnedSemaphorePermit) {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-    let permit = semaphore.clone().try_acquire_owned().expect("한 자리");
+    let permit = semaphore.clone().try_acquire_owned().expect("one permit");
     (semaphore, permit)
 }
 
 #[tokio::test]
 async fn the_connection_slot_stays_taken_until_the_body_ends_even_when_the_producer_is_long_gone() {
     let (semaphore, permit) = one_slot();
-    // 생산자는 조각을 다 넣고 사라졌다(큐의 송신 쪽이 이미 닫혔다). 본문은 아직 확인을 기다린다.
     let fake = Fake::slow(Duration::from_millis(300));
     let mut stream = Box::pin(gated(
         queue(vec![data("a"), data("b")]),
@@ -268,22 +264,21 @@ async fn the_connection_slot_stays_taken_until_the_body_ends_even_when_the_produ
     assert_eq!(
         semaphore.available_permits(),
         0,
-        "확인을 기다리는 동안 자리를 돌려주면 안 돼요"
+        "permit must remain held while awaiting boundary check"
     );
     let (got, mut stream) = first.await.unwrap();
     assert!(got);
+    assert_eq!(semaphore.available_permits(), 0, "body not finished yet");
+    while stream.next().await.is_some() {}
     assert_eq!(
         semaphore.available_permits(),
-        0,
-        "본문이 아직 끝나지 않았다"
+        1,
+        "permit released when body ends"
     );
-    while stream.next().await.is_some() {}
-    assert_eq!(semaphore.available_permits(), 1, "본문이 끝나면 돌려준다");
 }
 
 #[tokio::test]
 async fn the_connection_slot_is_returned_when_the_body_is_dropped_or_closes_on_an_error() {
-    // 버려지면(상대가 끊었다) 돌려준다
     let (semaphore, permit) = one_slot();
     let stream = Box::pin(gated(
         queue(vec![data("a"), data("b")]),
@@ -295,7 +290,6 @@ async fn the_connection_slot_is_returned_when_the_body_is_dropped_or_closes_on_a
     assert_eq!(semaphore.available_permits(), 0);
     drop(stream);
     assert_eq!(semaphore.available_permits(), 1);
-    // 오류 사건으로 닫혀도 본문이 끝날 때까지는 쥐고, 끝나면 돌려준다
     let (semaphore, permit) = one_slot();
     let mut stream = Box::pin(gated(
         queue(vec![data("a")]),
@@ -308,7 +302,7 @@ async fn the_connection_slot_is_returned_when_the_body_is_dropped_or_closes_on_a
     assert_eq!(
         semaphore.available_permits(),
         0,
-        "오류 사건을 넘긴 뒤에도 본문이 끝나기 전이다"
+        "permit remains held until stream yields None"
     );
     assert!(stream.next().await.is_none());
     assert_eq!(semaphore.available_permits(), 1);
@@ -323,11 +317,11 @@ async fn a_full_queue_gives_up_at_the_deadline_instead_of_waiting_forever() {
         hard: later(120),
         every: Duration::from_secs(10),
     };
-    assert!(sink.data("a".into()).await, "자리가 있으면 바로 들어간다");
+    assert!(sink.data("a".into()).await, "enqueues when room exists");
     let started = Instant::now();
     assert!(
         !sink.data("b".into()).await,
-        "아무도 꺼내 가지 않으면 기한에 포기한다"
+        "aborts at deadline when consumer never drains"
     );
     let waited = started.elapsed();
     assert!(
@@ -345,17 +339,15 @@ async fn a_closed_queue_is_noticed_at_once_and_keep_alive_is_due_only_after_the_
         hard: later(5_000),
         every: Duration::from_millis(80),
     };
-    // 간격 안에는 쓰지 않는다
     assert!(sink.keep_alive().await);
     assert!(sink.until_keep_alive() > Duration::ZERO);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(sink.until_keep_alive(), Duration::ZERO);
-    assert!(sink.keep_alive().await, "간격이 지나면 주석 하나를 쓴다");
+    assert!(sink.keep_alive().await, "emits comment after interval");
     drop(rx);
-    // 받는 쪽이 사라졌다: 기다리지 않고 알아챈다
     tokio::time::timeout(Duration::from_millis(200), sink.gone())
         .await
-        .expect("곧바로 알아채야 해요");
+        .expect("detects closed receiver immediately");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!sink.keep_alive().await);
     assert!(!sink.data("x".into()).await);

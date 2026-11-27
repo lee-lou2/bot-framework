@@ -7,7 +7,7 @@ async fn cancel(db: &TestDb, at: &Attempt) {
             at.profile.clone(),
             at.run.clone(),
             PrincipalId("operator".into()),
-            "중지".into(),
+            "stop".into(),
         )
         .await
         .unwrap();
@@ -36,7 +36,7 @@ async fn a_committed_cancel_wins_before_finish_and_creates_no_reply() {
         .store
         .finish_with(
             at.clone(),
-            done("늦은 답"),
+            done("late reply"),
             RunOutcome {
                 truncated: true,
                 usage: Some(TokenUsage {
@@ -60,7 +60,7 @@ async fn a_committed_cancel_wins_before_finish_and_creates_no_reply() {
         db.scalar::<String>("select result from bot_calls").await,
         r#"{"receipt":"one"}"#
     );
-    assert!(stale(db.store.finish(at, done("재전달")).await));
+    assert!(stale(db.store.finish(at, done("redelivery")).await));
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'run.cancelled'")
             .await,
@@ -77,7 +77,7 @@ async fn a_finish_committed_first_keeps_its_reply_and_cancelled_child_wakes_its_
         .await
         .attempt;
     assert_eq!(
-        db.store.finish(first.clone(), done("완료")).await.unwrap(),
+        db.store.finish(first.clone(), done("done")).await.unwrap(),
         Completion::Succeeded
     );
     cancel(&db, &first).await;
@@ -90,7 +90,7 @@ async fn a_finish_committed_first_keeps_its_reply_and_cancelled_child_wakes_its_
             parent: parent.clone(),
             step: "child".into(),
             child: AgentId("main/a".into()),
-            instruction: "조사".into(),
+            instruction: "investigate".into(),
             scopes: scopes(&["run"]),
             checked_revision: Revision("r1".into()),
         })
@@ -99,7 +99,7 @@ async fn a_finish_committed_first_keeps_its_reply_and_cancelled_child_wakes_its_
     let child = db.store.claim().await.unwrap().unwrap().attempt;
     cancel(&db, &child).await;
     db.store
-        .finish(child.clone(), done("늦은 자식 답"))
+        .finish(child.clone(), done("late child reply"))
         .await
         .unwrap();
     let resumed = db.store.claim().await.unwrap().unwrap();
@@ -108,7 +108,7 @@ async fn a_finish_committed_first_keeps_its_reply_and_cancelled_child_wakes_its_
         serde_json::from_str::<serde_json::Value>(&resumed.work.steps[0].body.0).unwrap()["state"],
         "cancelled"
     );
-    assert!(stale(db.store.finish(child, done("다시")).await));
+    assert!(stale(db.store.finish(child, done("again")).await));
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'run.wake'")
             .await,
@@ -168,7 +168,7 @@ async fn terminal_retry_and_expiry_consume_the_last_attempt() {
                     profile_id(),
                     run.clone(),
                     PrincipalId("operator".into()),
-                    "재개".into(),
+                    "resume".into(),
                 )
                 .await
                 .unwrap();
@@ -214,7 +214,7 @@ async fn success_permanent_failure_and_cancellation_preserve_already_spent_attem
         assert_eq!(next.run, first.run);
         match end {
             "succeeded" => {
-                db.store.finish(next.clone(), done("완료")).await.unwrap();
+                db.store.finish(next.clone(), done("done")).await.unwrap();
             }
             "dead" => {
                 db.store
@@ -226,7 +226,7 @@ async fn success_permanent_failure_and_cancellation_preserve_already_spent_attem
                 cancel(&db, &next).await;
                 assert_eq!(
                     db.store
-                        .finish(next.clone(), done("늦은 답"))
+                        .finish(next.clone(), done("late reply"))
                         .await
                         .unwrap(),
                     Completion::Cancelled

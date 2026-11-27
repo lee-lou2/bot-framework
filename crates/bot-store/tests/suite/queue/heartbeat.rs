@@ -6,7 +6,7 @@ async fn renew_after_waiting_past_expiry_is_stale() {
         return;
     };
     let run = leased(&db, "heartbeat").await;
-    // 행 잠금을 유지한 채 이 시험 스키마의 DB 시계만 움직인다.
+    // Advance the test-schema DB clock while holding the row lock.
     db.sql("create table test_clock (ms bigint not null)").await;
     db.sql("insert into test_clock values (1000)").await;
     db.sql("create or replace function bot_now_ms() returns bigint language sql volatile as 'select ms from test_clock'").await;
@@ -48,7 +48,7 @@ async fn renew_after_waiting_past_expiry_is_stale() {
             current.profile.clone(),
             current.run.clone(),
             PrincipalId("operator".into()),
-            "중지".into(),
+            "stop".into(),
         )
         .await
         .unwrap();

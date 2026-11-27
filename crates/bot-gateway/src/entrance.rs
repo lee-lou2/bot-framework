@@ -1,5 +1,6 @@
-//! 입구 키와 유일성. 같은 입구를 두 프로필(또는 두 바인딩)이 쓰면 기동 전에 거절한다.
-//! 오류에는 프로필·바인딩 ID와 호스트 별칭만 싣는다(실제 워크스페이스·채널 ID, 토큰은 싣지 않는다).
+//! Entrance keys and exact-match uniqueness table across profiles and bindings.
+//!
+//! Conflict messages report only profile/binding IDs and host aliases — never real workspace/channel IDs, UIDs, or tokens.
 use bot_core::{
     id::{BindingId, ProfileId},
     profile::Adapter,
@@ -7,18 +8,13 @@ use bot_core::{
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// 프로필이 선언한 입구(별칭 수준). `profile-spec.md`의 바인딩 종류와 변종이 1:1이다.
+/// Alias-level entrance declared by a profile binding.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Entrance {
-    /// 호스트가 OS 사용자에 연결한 별칭
     Cli { account: String },
-    /// 호스트에 등록한 워크스페이스·채널 별칭
     SlackChannel { workspace: String, channel: String },
-    /// 워크스페이스의 봇과 1:1 DM 전체
     SlackDm { workspace: String },
-    /// 호스트에 등록한 인증된 HTTP 입구
     Http { endpoint: String },
-    /// 호스트에 등록한 OpenAI 호환 입구 별칭과 그 위의 공개 모델 이름
     HttpModel { endpoint: String, model: String },
 }
 
@@ -53,45 +49,29 @@ impl From<&Adapter> for Entrance {
 impl fmt::Display for Entrance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Entrance::Cli { account } => write!(f, "cli 계정 {account}"),
+            Entrance::Cli { account } => write!(f, "cli account {account}"),
             Entrance::SlackChannel { workspace, channel } => {
-                write!(f, "slack {workspace}의 채널 {channel}")
+                write!(f, "slack {workspace} channel {channel}")
             }
-            Entrance::SlackDm { workspace } => write!(f, "slack {workspace}의 DM"),
-            Entrance::Http { endpoint } => write!(f, "http 입구 {endpoint}"),
+            Entrance::SlackDm { workspace } => write!(f, "slack {workspace} DM"),
+            Entrance::Http { endpoint } => write!(f, "http endpoint {endpoint}"),
             Entrance::HttpModel { endpoint, model } => {
-                write!(f, "http 입구 {endpoint}의 모델 {model}")
+                write!(f, "http endpoint {endpoint} model {model}")
             }
         }
     }
 }
 
-/// 호스트 등록부로 별칭을 풀어 얻은 실제 입구. 어댑터가 이벤트에서 인증한 사실과 정확히 일치해야 한다.
+/// Host-resolved entrance key matched strictly against adapter-authenticated facts.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Real {
-    /// 연결한 로컬 사용자(uid)와 그가 고른 프로필
-    Cli {
-        uid: u32,
-        profile: ProfileId,
-    },
-    SlackChannel {
-        team: String,
-        channel: String,
-    },
-    SlackDm {
-        team: String,
-    },
-    Http {
-        endpoint: String,
-    },
-    /// OpenAI 호환 입구 별칭과 그 위의 공개 모델 이름. 모델을 고르면 그 모델의 바인딩이 정해진다.
-    HttpModel {
-        endpoint: String,
-        model: String,
-    },
+    Cli { uid: u32, profile: ProfileId },
+    SlackChannel { team: String, channel: String },
+    SlackDm { team: String },
+    Http { endpoint: String },
+    HttpModel { endpoint: String, model: String },
 }
 
-/// 입구를 쓰는 바인딩
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Owner {
     pub profile: ProfileId,
@@ -104,36 +84,33 @@ impl fmt::Display for Owner {
     }
 }
 
-/// 같은 입구가 두 번 올라왔다.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Conflict {
-    /// 나중에 온 주인이 쓰는 입구(별칭 수준)
     pub entrance: Entrance,
-    /// 먼저 온 주인이 쓰는 입구. 같으면 같은 별칭을 두 번 쓴 것이고, 다르면 서로 다른 별칭이 호스트 설정에서 같은 실제 입구로 풀린 것이다.
+    /// When equal to `entrance`, the same alias was declared twice; otherwise distinct aliases resolved to the same real entrance.
     pub first_entrance: Entrance,
     pub first: Owner,
     pub second: Owner,
 }
 
 impl Conflict {
-    /// 고치는 방법. 입구 종류는 `Entrance` 변종으로 가른다(새 입구를 더하면 이 `match`가 컴파일 오류로 알려 준다). 실제 팀·채널 ID는 싣지 않는다(별칭과 설정 위치만).
     fn fix(&self) -> &'static str {
         let same = self.first_entrance == self.entrance;
         match (&self.entrance, same) {
             (Entrance::Cli { .. }, true) => {
-                "한 입구는 바인딩 하나에만 연결할 수 있어요. 한쪽 바인딩의 `account`를 다른 계정 별칭으로 바꾸거나 바인딩을 지워 주세요"
+                "Each entrance can only belong to one binding. Change `account` on one binding to a different account alias or remove one binding."
             }
             (Entrance::Cli { .. }, false) => {
-                "같은 프로필의 CLI 입구는 OS 사용자마다 하나예요. 두 계정 별칭이 호스트 설정 `gateway.cli.accounts`에서 같은 OS 사용자를 가리켜요 — 계정마다 다른 OS 사용자를 연결하거나 한쪽 바인딩을 지워 주세요"
+                "A profile allows only one CLI entrance per OS user. Two account aliases resolve to the same OS user in `gateway.cli.accounts` — map each alias to a different OS user or remove one binding."
             }
             (Entrance::SlackChannel { .. } | Entrance::SlackDm { .. }, true) => {
-                "한 입구는 바인딩 하나에만 연결할 수 있어요. 한쪽 바인딩의 채널(또는 워크스페이스) 별칭을 바꾸거나 바인딩을 지워 주세요"
+                "Each entrance can only belong to one binding. Change the channel (or workspace) alias on one binding or remove one binding."
             }
             (Entrance::SlackChannel { .. } | Entrance::SlackDm { .. }, false) => {
-                "두 별칭이 호스트 설정 `gateway.slack.workspaces`에서 같은 Slack 채널(또는 팀)을 가리켜요 — 한쪽 별칭을 다른 채널로 바꾸거나 바인딩을 지워 주세요"
+                "Two aliases resolve to the same Slack channel (or team) in `gateway.slack.workspaces` — point one alias to a different channel or remove one binding."
             }
             (Entrance::Http { .. } | Entrance::HttpModel { .. }, _) => {
-                "한 입구는 바인딩 하나에만 연결할 수 있어요. 한쪽 바인딩의 `endpoint`를 바꾸거나 바인딩을 지워 주세요"
+                "Each entrance can only belong to one binding. Change `endpoint` on one binding or remove one binding."
             }
         }
     }
@@ -142,11 +119,11 @@ impl Conflict {
 impl fmt::Display for Conflict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.first == self.second {
-            write!(f, "{}: 같은 바인딩이 두 번 올라왔어요", self.first)
+            write!(f, "{}: duplicate binding", self.first)
         } else if self.first_entrance == self.entrance {
             write!(
                 f,
-                "입구가 겹쳐요: {} 와 {} 가 모두 {}를 써요. {}",
+                "Entrance conflict: {} and {} both use {}. {}",
                 self.first,
                 self.second,
                 self.entrance,
@@ -155,7 +132,7 @@ impl fmt::Display for Conflict {
         } else {
             write!(
                 f,
-                "입구가 겹쳐요: {}({})와 {}({})가 같은 실제 입구로 이어져요. {}",
+                "Entrance conflict: {} ({}) and {} ({}) resolve to the same entrance. {}",
                 self.first,
                 self.first_entrance,
                 self.second,
@@ -168,8 +145,7 @@ impl fmt::Display for Conflict {
 
 impl std::error::Error for Conflict {}
 
-/// 입구 → 주인. 같은 키가 두 번 들어오면 `Conflict`. 조회는 키 정확 일치뿐이다(부분 일치·와일드카드 없음).
-/// 항목마다 오류 문구용으로 그 입구의 별칭 수준 선언(`Entrance`)을 받는다.
+/// Exact-match entrance-to-owner map rejecting any duplicate key with `Conflict`.
 #[derive(Debug)]
 pub struct Table<K: Ord> {
     map: BTreeMap<K, (Owner, Entrance)>,
@@ -212,7 +188,6 @@ impl<K: Ord + Clone> Table<K> {
 }
 
 impl Table<Entrance> {
-    /// 키가 곧 별칭 수준 입구인 표
     pub fn build_described(
         entries: impl IntoIterator<Item = (Entrance, Owner)>,
     ) -> Result<Self, Box<Conflict>> {
@@ -297,7 +272,6 @@ mod tests {
             table.get(&channel("home", "planning")),
             Some(&owner("personal", "team"))
         );
-        // 별칭이 다르면 다른 입구다. 부분 일치는 없다.
         assert_eq!(table.get(&channel("home", "plan")), None);
         assert_eq!(table.get(&channel("other", "planning")), None);
     }
@@ -321,17 +295,18 @@ mod tests {
         .unwrap_err();
         let text = err.to_string();
         assert!(
-            text.starts_with("입구가 겹쳐요: p/a 와 q/b 가 모두 cli 계정 owner를 써요."),
+            text.starts_with("Entrance conflict: p/a and q/b both use cli account owner."),
             "{text}"
         );
-        assert!(text.contains("`account`를 다른 계정 별칭으로"), "{text}");
-        // 별칭·ID와 설정 위치 말고는 싣지 않는다
+        assert!(
+            text.contains("`account` on one binding to a different account alias"),
+            "{text}"
+        );
         assert!(!text.contains("uid"), "{text}");
     }
 
     #[test]
     fn two_cli_accounts_that_resolve_to_one_os_user_say_so_and_where_to_fix_it() {
-        // 서로 다른 계정 별칭이 호스트 설정에서 같은 OS 사용자(uid)로 풀렸다: 별칭만 보이고 실제 uid는 싣지 않는다
         let real = Real::Cli {
             uid: 501,
             profile: ProfileId("notes".into()),
@@ -356,14 +331,14 @@ mod tests {
         let text = err.to_string();
         assert!(
             text.contains(
-                "notes/desk(cli 계정 owner)와 notes/lab(cli 계정 researcher)가 같은 실제 입구로"
+                "notes/desk (cli account owner) and notes/lab (cli account researcher) resolve to the same entrance"
             ),
             "{text}"
         );
-        assert!(text.contains("OS 사용자마다 하나"), "{text}");
+        assert!(text.contains("one CLI entrance per OS user"), "{text}");
         assert!(text.contains("`gateway.cli.accounts`"), "{text}");
         assert!(
-            !text.contains("501") && !text.contains("모두 cli 계정 researcher를 써요"),
+            !text.contains("501") && !text.contains("both use cli account researcher"),
             "{text}"
         );
     }
@@ -377,7 +352,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            same_alias.contains("채널(또는 워크스페이스) 별칭을 바꾸거나"),
+            same_alias.contains("channel (or workspace) alias"),
             "{same_alias}"
         );
         let http = Table::build_described([
@@ -396,12 +371,11 @@ mod tests {
         ])
         .unwrap_err()
         .to_string();
-        assert!(http.contains("`endpoint`를 바꾸거나"), "{http}");
+        assert!(http.contains("Change `endpoint`"), "{http}");
     }
 
     #[test]
     fn resolved_entrances_collide_even_when_aliases_differ() {
-        // 두 별칭이 같은 실제 채널을 가리키면 라벨은 별칭 수준으로 보이고 실제 ID는 나오지 않는다
         let real = Real::SlackChannel {
             team: "T1".into(),
             channel: "C1".into(),

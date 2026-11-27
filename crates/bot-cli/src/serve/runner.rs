@@ -1,7 +1,4 @@
-//! 도구 실행기(srt 샌드박스 안의 MCP 서버)와 읽기 전용 설치본. worker의 브로커와 민감 DM 접수(`PrivateGate`)가 같은 방식으로 만든다.
-//!
-//! 호스트에서 계산하는 값: srt 실행 파일(`sandbox.srt.binary`, 내장 데모는 PATH의 `srt`)·작업 루트(`sandbox.srt.work_root`, 기본은
-//! 설치 폴더 옆 `work`)·srt가 쓰는 PATH(srt 폴더 + 시스템 기본)·도구가 읽지 못하는 곳(홈·프로필 루트·호스트 설정·비밀 파일·소켓·설치 기준).
+//! Sandboxed MCP tool runner (`srt` + read-only installs) and live update handle.
 use super::{guard::GuardedWire, watched::Watched};
 use crate::{
     host::HostFile,
@@ -29,7 +26,6 @@ use std::{
     time::Duration,
 };
 
-/// srt 샌드박스 안 도구 프로세스의 `PATH`: srt 실행 폴더 + 운영자가 `sandbox.srt.extra_path`로 지정한 폴더 + 시스템 기본 경로(중복 제거).
 fn srt_path(srt_dir: &str, extra: &[std::path::PathBuf]) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut push = |dir: &str| {
@@ -47,14 +43,13 @@ fn srt_path(srt_dir: &str, extra: &[std::path::PathBuf]) -> String {
     parts.join(":")
 }
 
-/// PATH에서 실행 파일을 찾는다(내장 데모의 srt 위치).
 fn on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     std::env::split_paths(path?)
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_absolute() && candidate.is_file())
 }
 
-/// 도구가 읽지 못해야 하는 곳 중 지금 있는 것: 홈·프로필 루트·호스트 설정·비밀 보관 파일·소켓·관리 비밀 파일·설치 기준.
+/// Host paths blocked from sandboxed tool reads (only existing absolute paths are included).
 fn denied(settings: &Settings, base: &Path) -> Vec<PathBuf> {
     let mut paths = vec![base.to_owned()];
     paths.extend(std::env::var_os("HOME").map(PathBuf::from));
@@ -69,26 +64,23 @@ fn denied(settings: &Settings, base: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// srt가 상태 요구를 지킬 수 없는(`state: required`) 서버가 있으면 Err. 판정은 srt 어댑터의 `supports_state`(호출마다 거절하는 `admit`과 같은 것)이고,
-/// 호출할 때마다 거절되기 전에 도구를 실행하는 역할의 시작에서 막는다(영속 볼륨은 격리·용량·잠금을 검증한 별도 어댑터가 생긴 뒤에 쓴다).
+/// Rejects `state: required` servers at startup using the same `supports_state` check as `srt::admit`.
 pub(crate) fn refuse_required_state(
     servers: &BTreeMap<String, install::ServerSpec>,
 ) -> Result<(), String> {
     match servers.iter().find(|(_, spec)| !supports_state(spec.state)) {
         Some((alias, _)) => Err(format!(
-            "servers.{alias}.state=required: srt 샌드박스는 호출 간 상태 볼륨을 지원하지 않아 시작하지 않아요 — 상태를 요구하는 서버는 영속 볼륨을 검증한 어댑터가 생긴 뒤에 쓸 수 있어요"
+            "servers.{alias}.state=required: srt sandbox does not support persistent state volumes — refusing to start"
         )),
         None => Ok(()),
     }
 }
 
-/// `<설치 기준>/../work`: 호출별 작업 폴더를 만드는 곳의 기본값
 pub(super) fn default_work(base: &Path) -> PathBuf {
     base.parent().unwrap_or(base).join("work")
 }
 
-/// 로컬 서버가 처음에 없어도 실행 중 추가되면 `SrtSandbox`를 나중에 연결할 수 있는 동적 샌드박스 래퍼.
-/// 열기 전에는 아무것도 띄우지 않고(`Unavailable`), 열리면 기존 `SrtSandbox`에 그대로 위임한다.
+/// Late-initializable `SrtSandbox` wrapper allowing local stdio servers to be added live when none existed at startup.
 pub(super) struct DynamicSandbox {
     inner: RwLock<Option<Arc<SrtSandbox>>>,
 }
@@ -155,7 +147,6 @@ impl Sandbox for DynamicSandbox {
     }
 }
 
-/// 실행 중 MCP 추가·제거 뒤 호스트 등록부·샌드박스 서버 표·설치 잠금을 함께 갱신하는 핸들.
 #[derive(Clone)]
 pub(super) struct LiveRunner {
     runner: Arc<McpRunner>,
@@ -168,7 +159,6 @@ impl LiveRunner {
         self.runner.clone()
     }
 
-    /// 새 호스트 설정에 맞춰 로컬 서버 설치·샌드박스 갱신까지 준비한다(실패해도 기존 실행 상태는 바뀌지 않는다).
     pub(super) async fn prepare_update(
         &self,
         host: &HostFile,
@@ -200,7 +190,6 @@ impl LiveRunner {
         })
     }
 
-    /// 준비된 갱신을 즉시 적용한다(비동기 경계 없이 원자적으로 교체).
     pub(super) fn apply(&self, update: PreparedUpdate) {
         if let Some(srt) = update.new_sandbox {
             self.sandbox.set(srt);
@@ -251,7 +240,7 @@ fn host_registry(host: &HostFile, installs: &Installs) -> Result<HostRegistry, S
                 .iter()
                 .map(|target| {
                     HostPort::parse(target)
-                        .ok_or_else(|| format!("egress.{profile}: {target}을 해석할 수 없어요"))
+                        .ok_or_else(|| format!("egress.{profile}: cannot parse {target}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok((ProfileId(profile.clone()), ports))
@@ -279,8 +268,6 @@ fn host_registry(host: &HostFile, installs: &Installs) -> Result<HostRegistry, S
     })
 }
 
-/// 호스트 설정에서 만드는 실행기 설정. 호출 시간 한도의 천장은 `limits.tool_call_max_secs`다: 활성화 때 도구 선언을 대조했고, 복원한 옛 선언은 실행기가 보내기 전에 다시 대조한다.
-/// 선언하지 않은 도구의 호출 한도(60초)는 천장과 상관없다.
 fn runner_config(host: &HostFile) -> RunnerConfig {
     RunnerConfig {
         max_call_timeout: Duration::from_secs(u64::from(host.limits.tool_call_max_secs)),
@@ -324,7 +311,6 @@ pub(super) async fn build(
     })
 }
 
-/// 로컬 서버의 읽기 전용 설치본과 srt 샌드박스.
 async fn local_sandbox(
     host: &HostFile,
     settings: &Settings,
@@ -338,18 +324,17 @@ async fn local_sandbox(
     let installs = install::install(&host.servers, &base, uid)?;
     let srt = host.sandbox.srt.clone();
     let binary = match &srt {
-            Some(srt) => srt.binary.clone(),
-            // 설정이 없으면 PATH의 srt를 쓴다(내장 데모의 5분 시작)
-            None => on_path("srt", std::env::var_os("PATH").as_deref()).ok_or(
-                "도구를 실행하려면 srt가 필요해요 — 호스트 설정의 sandbox.srt.binary를 적거나 PATH에 srt를 두세요",
-            )?,
-        };
+        Some(srt) => srt.binary.clone(),
+        None => on_path("srt", std::env::var_os("PATH").as_deref()).ok_or(
+            "srt is required to run local tool servers — set sandbox.srt.binary in host config or place `srt` on PATH",
+        )?,
+    };
     let work_root = srt
         .as_ref()
         .map_or_else(|| default_work(&base), |srt| srt.work_root.clone());
     let srt_dir = binary
         .parent()
-        .ok_or("sandbox.srt.binary에 폴더가 필요해요")?
+        .ok_or("sandbox.srt.binary must have a parent directory")?
         .display()
         .to_string();
     let servers: BTreeMap<String, ServerCommand> = host
@@ -373,24 +358,24 @@ async fn local_sandbox(
         .as_ref()
         .map_or(&[][..], |srt| srt.extra_path.as_slice());
     let sandbox = SrtSandbox::open(
-            SrtConfig {
-                binary,
-                work_root,
-                servers,
-                deny_read: denied(settings, &base),
-                path: srt_path(&srt_dir, extra_path),
-                terminate_wait: Duration::from_secs(5),
-                host_tools: None,
-            },
-            Arc::new(OsEntropy),
+        SrtConfig {
+            binary,
+            work_root,
+            servers,
+            deny_read: denied(settings, &base),
+            path: srt_path(&srt_dir, extra_path),
+            terminate_wait: Duration::from_secs(5),
+            host_tools: None,
+        },
+        Arc::new(OsEntropy),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "failed to initialize srt — ensure pinned version ({}) is at sandbox.srt.binary (or on PATH) and work_root is writable",
+            bot_broker::srt::PINNED_VERSION
         )
-        .await
-        .map_err(|_| {
-            format!(
-                "srt를 열지 못했어요 — 고정 판본({})의 srt가 sandbox.srt.binary(또는 PATH)에 있어야 하고 작업 루트를 만들 수 있어야 해요",
-                bot_broker::srt::PINNED_VERSION
-            )
-        })?;
+    })?;
     Ok((installs, sandbox))
 }
 
@@ -410,7 +395,6 @@ mod tests {
             (name == "BOT_PROFILES").then(|| dir.path().join("profiles").display().to_string())
         })
         .unwrap();
-        // 없는 프로필 루트는 거르고, 있는 설치 기준만 남는다(홈은 환경에 따라 있을 수 있다)
         let base = dir.path().join("installs");
         std::fs::create_dir(&base).unwrap();
         let paths = denied(&settings, &base);
@@ -419,8 +403,6 @@ mod tests {
         assert!(paths.iter().all(|path| path.exists()));
     }
 
-    /// 도구가 읽지 못하는 곳의 전체 집합을 고정한다: 설치 기준·프로필 루트·호스트 설정·소켓·관리 비밀 파일·(있으면) 홈, 그리고 파일 기반 보관소(SOPS)의 암호화 파일.
-    /// 환경 변수·키체인 보관소는 도구가 읽을 파일이 따로 없다. 파일 기반 보관소를 더해도 이 집합에 자기 파일이 따라오는지 이 시험이 지킨다.
     #[test]
     fn the_denied_set_holds_the_host_files_and_the_file_of_a_file_backed_secret_store() {
         let dir = tempfile::tempdir().unwrap();
@@ -450,7 +432,6 @@ mod tests {
             })
             .unwrap()
         };
-        // 홈은 시험을 돌리는 환경에 따라 있을 수 있다
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute() && path.exists());
@@ -487,7 +468,6 @@ mod tests {
             r#", "limits": {"tool_call_max_secs": 300}"#,
         ));
         assert_eq!(raised.max_call_timeout, Duration::from_secs(300));
-        // 천장만 올려도 선언하지 않은 도구의 호출 한도·wall은 그대로다
         for config in [default, raised] {
             assert_eq!(config.call_timeout, Duration::from_secs(60));
             assert_eq!(config.wall, Duration::from_secs(300));
@@ -534,8 +514,7 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.contains("servers.stateful.state=required"), "{error}");
-        assert!(!installs.exists(), "설치 폴더도 만들지 않았어요");
-        // 서버가 없는 호스트는 srt도 설치도 필요 없다
+        assert!(!installs.exists(), "must not create installs directory");
         let none = crate::host::parse(r#"{"version": 1}"#).unwrap();
         let effects: Arc<dyn EffectJournal> = Arc::new(bot_broker::testing::FakeEffects::new());
         assert!(

@@ -1,8 +1,7 @@
-//! MCP 클라이언트. 여기는 stdio(JSON-RPC 2.0, 한 줄에 메시지 하나)이고, 원격 서버는 Streamable HTTP(`http`)로 말한다.
+//! Stdio MCP JSON-RPC 2.0 client and result validation (remote HTTP lives in `http`).
 //!
-//! 한 호출에 한 세션이다: `initialize`(협상한 판본 확인) → `tools/list`(선언과 대조할 입력 스키마) → `tools/call`.
-//! 서버가 보낸 요청은 지원하지 않는다고 답하고(우리는 어떤 클라이언트 기능도 내세우지 않는다), 알림은 무시한다.
-//! 서버가 준 글은 믿지 않는다: 줄·결과 크기를 제한하고 형식이 맞는 결과만 받아들인다.
+//! One session per call: `initialize` (version check) -> `tools/list` -> `tools/call`.
+//! Server-initiated requests are rejected and notifications are ignored; outputs are size-capped and schema-checked.
 
 use crate::{
     canon::canonicalize,
@@ -24,9 +23,9 @@ pub mod remote;
 pub mod sse;
 pub mod wire;
 
-/// 지원하는 MCP 판본. 서버가 이 밖의 판본으로 답하면 호출하지 않는다.
+/// Supported MCP protocol versions; servers negotiating anything else are rejected.
 pub const SUPPORTED: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
-/// 서버가 보내는 줄 하나의 상한.
+/// Maximum byte length of a single JSON-RPC line from the server.
 pub const MAX_FRAME: usize = 1 << 20;
 const MAX_SKIPPED: usize = 256;
 const MAX_PAGES: usize = 16;
@@ -38,20 +37,20 @@ pub enum McpError {
     Closed,
     Protocol,
     Version,
-    /// 서버가 JSON-RPC 오류로 답했다(코드만 취한다).
+    /// JSON-RPC error response from the server (code only).
     Server(i64),
-    /// (HTTP) 연결을 맺기 전에 실패했다: 요청이 서버에 닿지 않았다.
+    /// (HTTP) Failed before connecting; the request never reached the server.
     Unreached,
-    /// (HTTP) 2xx가 아닌 응답. `code`는 본문이 같은 요청의 JSON-RPC 오류일 때의 코드다(분류에는 쓰지 않는다: 실행 여부를 알려 주지 않는다).
+    /// (HTTP) Non-2xx response; `code` is populated only when the body matches the request's JSON-RPC error (never used to infer non-execution).
     Status {
         status: u16,
         code: Option<i64>,
     },
-    /// (HTTP) 서버 응답 어딘가(원문·해석한 글·키·숫자 표기·커서)에 이쪽 자격이 섞여 있다. 응답을 쓰지 않는다.
+    /// (HTTP) Outbound credentials appeared in the server response; output is discarded.
     Exposed,
-    /// (HTTP) 도구 목록을 모으는 동안 서버가 목록이 바뀌었다고 알렸다: 모은 목록은 한 시점의 것이 아니다.
+    /// (HTTP) Server signaled a tool list change mid-pagination.
     Changed,
-    /// (HTTP) 요청을 보내기 직전 확인에서 이 프로세스의 판본이 더는 활성이 아니다: 아무것도 보내지 않았다.
+    /// (HTTP) Process revision became stale before sending; nothing was transmitted.
     Stale,
 }
 
@@ -79,7 +78,6 @@ impl Session {
         self.write.flush().await.map_err(|_| McpError::Io)
     }
 
-    /// 요청을 보내고 요청 번호를 돌려준다. `params`는 JSON 객체 글이다.
     async fn send(&mut self, method: &str, params: &str) -> Result<u64, McpError> {
         let id = self.next;
         self.next += 1;
@@ -101,7 +99,6 @@ impl Session {
         parse(text).ok_or(McpError::Protocol)
     }
 
-    /// 서버가 보낸 요청에는 오류로 답한다.
     async fn reject(&mut self, id: &Value) -> Result<(), McpError> {
         let id = serde_json::to_string(id).map_err(|_| McpError::Protocol)?;
         let frame = format!(
@@ -139,7 +136,6 @@ impl Session {
         Err(McpError::Protocol)
     }
 
-    /// 보낸 요청의 응답을 기다린다.
     pub async fn await_result(&mut self, id: u64, limit: Duration) -> Result<Value, McpError> {
         timeout(limit, self.wait(id))
             .await
@@ -156,7 +152,6 @@ impl Session {
         self.await_result(id, limit).await
     }
 
-    /// 판본을 협상하고 `initialized`를 알린다.
     pub async fn initialize(&mut self, limit: Duration) -> Result<(), McpError> {
         let params = format!(
             "{{\"protocolVersion\":{},\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"bot-broker\",\"version\":\"0.1.0\"}}}}",
@@ -171,7 +166,7 @@ impl Session {
             .await
     }
 
-    /// 서버가 내세우는 도구 `name`의 정의 한 건(`name`·`description`·`inputSchema` …). 없으면 `None`, 같은 이름이 둘이면 모호하므로 오류다.
+    /// Finds tool `name` across paginated `tools/list`; returns an error if duplicated.
     pub async fn find_tool(
         &mut self,
         name: &str,
@@ -205,8 +200,7 @@ impl Session {
         Err(McpError::Protocol)
     }
 
-    /// `tools/call`을 보낸다. `arguments`는 정규화한 인자 글 그대로, `meta`는 `_meta` 객체 글이다.
-    /// 보내다 실패하면 도착했는지 알 수 없다.
+    /// Sends `tools/call` with canonical `arguments` and `_meta` JSON; failure after write leaves delivery uncertain.
     pub async fn send_call(
         &mut self,
         name: &str,
@@ -221,31 +215,27 @@ impl Session {
     }
 }
 
-/// 도구가 결과 `_meta`에 후속 확인을 요청하는 키.
+/// Result `_meta` key for tool-requested one-shot follow-up wakes.
 pub const WAKE_KEY: &str = "bot/wake";
-/// 직접 호출한 도구가 «이 이벤트를 처리하지 않았다»고 알리는 넘김 키. 일반 Slack 직접 트리거의 성공 결과에서만 해석한다(`service::pass`).
+/// Result `_meta` key signaling that a direct-trigger tool declined the event (`service::pass`).
 pub const PASS_KEY: &str = "bot/pass";
-/// 넘김 표식과 함께 `_meta`에 다른 항목이 왔다는 표지. 다른 항목의 내용은 검사·보관하지 않고 버리되, 표식이 «다른 지시와 함께 온 것»임을 `payload`에 남겨
-/// 브로커가 `invalid_pass`로 닫게 한다(표식 말고 남는 것이 있으면 유효하지 않다). 표식이 없는 결과에는 싣지 않는다.
+/// Sentinel emitted in `_meta` when `bot/pass` arrives with extra `_meta` keys so the broker rejects it as `invalid_pass`.
 pub const EXTRA_KEY: &str = "bot/extra";
 
-/// 검증을 마친 도구 결과.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Output {
     pub is_error: bool,
     pub texts: Vec<String>,
     pub structured: Option<Value>,
-    /// 결과 최상위 `_meta["bot/wake"]`(도구가 요청하는 한 번짜리 후속 확인). 다른 `_meta` 항목은 버린다. 브로커가 선언·권한을
-    /// 확인한 뒤 모델에게 가기 전에 제거하고 예약으로 옮긴다.
+    /// Top-level `_meta["bot/wake"]`, stripped before forwarding to the model and converted to a schedule.
     pub wake: Option<Value>,
-    /// 결과 최상위 `_meta["bot/pass"]`(값은 그대로: 불리언 `true`인지는 브로커가 호출 맥락과 함께 판정한다). 모델에게 가기 전에 제거한다.
+    /// Top-level `_meta["bot/pass"]`, stripped before forwarding to the model and validated in call context.
     pub pass: Option<Value>,
-    /// `_meta`에 후속 확인(`bot/wake`)·넘김(`bot/pass`) 말고 다른 항목이 있었다(내용은 버린다). 넘김 표식이 있을 때만 `payload`에 표지로 남는다.
+    /// True when `_meta` held keys other than `bot/wake` / `bot/pass`; emitted as `EXTRA_KEY` only alongside `pass`.
     pub meta_extra: bool,
 }
 
-/// `{content:[{type:"text",text}], isError?, structuredContent?}`만 받는다.
-/// 이미지·오디오·리소스 같은 다른 형식과 모양이 틀린 결과는 거절한다(`result_shape`).
+/// Accepts only `{content: [{type: "text", text}], isError?, structuredContent?}` and rejects other shapes as `result_shape`.
 pub fn parse_result(value: &Value) -> Result<Output, &'static str> {
     const SHAPE: &str = "result_shape";
     let obj = value.as_object().ok_or(SHAPE)?;
@@ -288,7 +278,7 @@ pub fn parse_result(value: &Value) -> Result<Output, &'static str> {
     })
 }
 
-/// 모델에게 돌려줄 고정 형식 결과. 알 수 없는 필드는 버린다. 정규화할 수 없는 수가 있으면 `None`.
+/// Canonicalizes a validated output for the model, dropping unknown fields.
 pub fn payload(output: &Output) -> Option<String> {
     let mut map = Map::new();
     map.insert(
@@ -317,7 +307,7 @@ pub fn payload(output: &Output) -> Option<String> {
         }
         if let Some(pass) = &output.pass {
             meta.insert(PASS_KEY.into(), pass.clone());
-            // 표식과 다른 `_meta` 항목이 함께 왔다: 내용은 버리지만 «표식만 온 것이 아니다»는 남겨 `invalid_pass`로 닫게 한다
+            // Preserve that extra `_meta` keys accompanied `pass` so the broker closes with `invalid_pass`.
             if output.meta_extra {
                 meta.insert(EXTRA_KEY.into(), Value::Bool(true));
             }
@@ -327,7 +317,7 @@ pub fn payload(output: &Output) -> Option<String> {
     canonicalize(&Value::Object(map))
 }
 
-/// 서버가 JSON-RPC 오류로 답했을 때 모델에게 돌려줄 고정 결과. 서버가 준 문장은 싣지 않는다.
+/// Fixed error payload returned to the model on JSON-RPC errors without forwarding server text.
 pub fn error_payload() -> String {
     "{\"content\":[{\"text\":\"tool_error\",\"type\":\"text\"}],\"isError\":true}".to_owned()
 }

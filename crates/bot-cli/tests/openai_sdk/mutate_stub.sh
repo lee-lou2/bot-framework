@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 계약을 일부러 어긴 대역(STUB_MUTANT)으로 SDK 시험이 그 위반을 잡는지 본다. 사용: mutate_stub.sh <venv 파이썬> <node 폴더> [변이 이름...]  (없으면 전부)
-# 잡히면 «caught», 시험이 통과해 버리면 «SURVIVED»(시험이 약하다는 뜻이라 종료 코드가 0이 아니다). 기준 대역은 run_stub.sh·run_node_stub.sh가 통과해야 한다.
+# Runs the SDK suites against intentional contract violations (STUB_MUTANT) to verify every mutant is caught.
+# Usage: mutate_stub.sh <venv_python> <node_dir> [mutant...]   Exits with the number of surviving mutants.
 set -u
 PY="$1"; NODE_DIR="$2"; shift 2; HERE="$(cd "$(dirname "$0")" && pwd)"
-# 변이 | 파이썬 프로필 | 파이썬 시험 파일 | node 프로필(없으면 -)
+# Columns: mutant | python profile | python test file | node profile (- if python-only)
 CASES="any_key main test_errors.py main
 no_auth_models main test_errors.py -
 key_echo main test_errors.py main
@@ -45,15 +45,15 @@ while read -r mutant profile pattern node; do
   case "$WANTED" in "  ") ;; *" $mutant "*) ;; *) continue;; esac
   TOTAL=$((TOTAL + 1)); how=""
   out="$(ONLY="$profile" PATTERNS="$pattern" TAIL=400 "$HERE/run_stub.sh" "$PY" "$mutant" 2>&1)"; code=$?
-  if [ "$code" -ne 0 ]; then how="python: $(echo "$out" | grep -E '^(FAIL|ERROR):' | head -2 | sed -E 's/\(.*//' | tr '\n' ' ')$(echo "$out" | grep -q '스키마 위반 있음' && echo '[스키마 위반]')"; fi
+  if [ "$code" -ne 0 ]; then how="python: $(echo "$out" | grep -E '^(FAIL|ERROR):' | head -2 | sed -E 's/\(.*//' | tr '\n' ' ')$(echo "$out" | grep -qi 'schema.*violation' && echo '[schema violation]')"; fi
   if [ -z "$how" ] && [ "$node" != "-" ]; then
     out="$(ONLY="$node" "$HERE/run_node_stub.sh" "$PY" "$NODE_DIR" "$mutant" 2>&1)"; code=$?
     [ "$code" -ne 0 ] && how="node: $(echo "$out" | grep -E '^not ok' | head -2 | tr '\n' ' ')"
   elif [ -n "$how" ] && [ "$node" != "-" ]; then
     out="$(ONLY="$node" "$HERE/run_node_stub.sh" "$PY" "$NODE_DIR" "$mutant" 2>&1)"; code=$?
-    [ "$code" -ne 0 ] && how="$how | node 도 잡음" || how="$how | node 는 못 잡음"
+    [ "$code" -ne 0 ] && how="$how | node caught" || how="$how | node missed"
   fi
-  if [ -n "$how" ]; then echo "caught   $mutant  ← $how"; else echo "SURVIVED $mutant"; SURVIVED=$((SURVIVED + 1)); fi
+  if [ -n "$how" ]; then echo "caught   $mutant  <- $how"; else echo "SURVIVED $mutant"; SURVIVED=$((SURVIVED + 1)); fi
 done <<< "$CASES"
-echo "변이 $TOTAL 개 중 살아남은 것 $SURVIVED"
+echo "$SURVIVED of $TOTAL mutants survived"
 exit "$SURVIVED"

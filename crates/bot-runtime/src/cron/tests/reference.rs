@@ -1,11 +1,8 @@
-//! 독립 기준과의 무작위 대조: UTC 분을 하나씩 현지 시각으로 바꿔 보는 전수 탐색과 `occurrences`가 DST 창에서도 같은 결과를 내는지 본다.
+//! Randomized differential tests comparing `occurrences` against a minute-by-minute UTC brute-force reference across DST windows.
 
 use super::*;
 use chrono::Timelike;
 
-// ── 독립 기준과의 대조 ─────────────────────────────────────────────────────────────────────────────
-
-/// 한 칸이 가리키는 값을 비트가 아니라 목록으로 들고 있는 표현식 재료
 #[derive(Clone, Debug)]
 enum Spec {
     Star,
@@ -41,7 +38,7 @@ impl Spec {
     }
 }
 
-/// 재현할 수 있는 무작위 (xorshift64*)
+/// Deterministic xorshift64* PRNG.
 struct Rng(u64);
 
 impl Rng {
@@ -80,8 +77,7 @@ fn gen_spec(r: &mut Rng, min: u32, max: u32, dense: bool) -> Spec {
     }
 }
 
-/// 독립 기준: `(after, until]`의 UTC 분을 하나씩 현지 시각으로 바꿔 모든 칸이 맞는지 본다.
-/// 없는 현지 시각은 어떤 UTC 분에도 대응하지 않고, 두 번 오는 현지 시각은 두 UTC 분에 대응하므로 DST 규칙이 저절로 나온다.
+/// Brute-force oracle over every UTC minute in `(after, until]`: DST gaps map to zero UTC minutes and folds map to two.
 fn reference(
     f: &[Spec; 5],
     tz: Tz,
@@ -121,7 +117,6 @@ fn year_start(year: i32) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-/// 그 해 안에서 UTC 오프셋이 바뀌는 순간(30분 표본으로 찾은 전환 직후 표본)
 fn transitions(tz: Tz, year: i32) -> Vec<DateTime<Utc>> {
     let mut t = year_start(year);
     let end = year_start(year + 1);
@@ -144,7 +139,7 @@ fn transitions(tz: Tz, year: i32) -> Vec<DateTime<Utc>> {
 
 #[test]
 fn occurrences_agree_with_a_brute_force_reference_across_dst_windows() {
-    // (시간대, 해). 뉴펀들랜드는 전환이 00:01이던 2010년으로 본다.
+    // St_Johns uses 2010 because its DST transition occurred at 00:01 that year.
     let zones = [
         ("UTC", 2026),
         ("Asia/Seoul", 2026),
@@ -171,7 +166,6 @@ fn occurrences_agree_with_a_brute_force_reference_across_dst_windows() {
             ];
             let text = f.iter().map(Spec::text).collect::<Vec<_>>().join(" ");
             let cron = Cron::parse(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
-            // 전환 근처 창이 절반, 나머지는 그 해 아무 때나
             let anchor = if !moves.is_empty() && r.below(2) == 0 {
                 moves[r.below(moves.len() as u64) as usize] - Span::minutes(r.below(20 * 60) as i64)
             } else {
@@ -186,7 +180,6 @@ fn occurrences_agree_with_a_brute_force_reference_across_dst_windows() {
                 .map(Into::into)
                 .collect();
             assert_eq!(got, want, "{name} #{case} `{text}` ({after} ~ {until})");
-            // 같은 창을 둘로 나눠 이어 붙여도 같다(청크 경계가 결과를 바꾸지 않는다)
             let mid =
                 after + Span::minutes(r.below(((until - after).num_minutes() + 1) as u64) as i64);
             let mut split = cron.occurrences(tz, after.into(), mid.into(), usize::MAX);
@@ -197,9 +190,8 @@ fn occurrences_agree_with_a_brute_force_reference_across_dst_windows() {
                     .map(DateTime::<Utc>::from)
                     .collect::<Vec<_>>(),
                 want,
-                "{name} #{case} 분할"
+                "{name} #{case} split"
             );
-            // limit은 앞에서부터 자른다
             let k = r.below(5) as usize;
             let head: Vec<DateTime<Utc>> = cron
                 .occurrences(tz, after.into(), until.into(), k)
@@ -218,10 +210,10 @@ fn occurrences_agree_with_a_brute_force_reference_across_dst_windows() {
     }
     assert!(
         matched > 4000,
-        "무작위 표현식이 실제로 맞는 때를 충분히 만들어야 시험이 의미 있어요: {matched}"
+        "random expressions must produce enough matches: {matched}"
     );
     assert!(
         folds_or_gaps > cases / 5,
-        "전환 근처 창이 충분해야 해요: {folds_or_gaps}/{cases}"
+        "must cover enough DST transition windows: {folds_or_gaps}/{cases}"
     );
 }

@@ -1,15 +1,8 @@
-//! HTTP 어댑터. 요청 순서는 다른 입구와 같다: 인증(등록한 발급자·대상·만료) → 정규화 → `Ingress::admit` → 응답.
+//! HTTP webhook and OpenAI-compatible ingress adapter.
 //!
-//! - `POST|PUT|PATCH|DELETE|GET /{endpoint}{path}` — 트리거 `{http: {method, path}, binding}`. `Idempotency-Key`가 필수다.
-//!   `accepted`(기본)는 커밋 뒤 202 + 요청 상태 URL, `sync`는 도구 결과 `{status, body}`를 그대로 응답하고
-//!   기한을 넘기면 202로 바꾼다.
-//! - `GET /{endpoint}/_requests/{id}` — 같은 인증 주체의 요청 결과 재조회(새 도구 호출을 만들지 않는다).
-//!   응답 방식은 호출자가 고르지 않는다. 최초 접수 때 저장소에 저장한 방식(`RequestState.http.response`)만 쓰므로
-//!   POST 재전달·재조회가 최초 응답과 같은 렌더러를 쓴다(저장된 방식이 없는 이전 요청은 `accepted` 형식).
-//!   결과·상태를 돌려주기 직전마다 지금의 바인딩·멤버 권한과 이 프로세스의 판본이 저장소의 활성 판본인지를 다시
-//!   확인한다(철회된 뒤에는 본문이 나가지 않고, 구판 프로세스는 503으로 닫는다).
-//!
-//! 인증 실패는 이유를 알리지 않는다. 등록되지 않은 입구 별칭은 인증 전에 404지만, 등록된 입구는 경로가 없어도 먼저 인증한다.
+//! Webhook routes authenticate before returning path 404, replay/poll using only the stored response mode from
+//! initial acceptance, and re-verify current binding membership plus active revision immediately before releasing
+//! any status or result body.
 mod openai;
 pub use openai::{Passed, Probe};
 pub mod reply;
@@ -57,13 +50,12 @@ use wire::{
     split_endpoint, state_name, stored_mode, terminal, unauthorized, unavailable,
 };
 
-/// SSE keep-alive 기본 간격(계약 상한 15초 안)
 pub const KEEP_ALIVE_DEFAULT: Duration = openai::KEEP_ALIVE_EVERY;
 const KEY_TTL: Duration = Duration::from_secs(30);
 const MAX_IN_FLIGHT: usize = 256;
 
 type Clock = dyn Fn() -> u64 + Send + Sync;
-/// (프로필, 바인딩, 판본, 자격 이름) — 입구 소유자·판본이 바뀌면 옛 키를 쓰지 않는다.
+/// Keyed by `(profile, binding, revision, secret_name)` so ownership or revision changes never reuse old keys.
 type KeyId = (String, String, String, String);
 type KeyCache = Mutex<HashMap<KeyId, (Instant, Arc<Vec<u8>>)>>;
 
@@ -73,20 +65,15 @@ pub struct HttpGateway {
     secrets: Arc<dyn SecretStore>,
     clock: Box<Clock>,
     keys: KeyCache,
-    /// 상태 조회는 제출보다 자주 한다. 제출 한도의 10배까지 허용한다.
+    /// Status polling allows 10x the per-principal submission rate.
     status_limiter: RateLimiter,
     in_flight: Arc<Semaphore>,
-    /// OpenAI 호환 입구의 접수·조회 포트(없으면 그 입구는 열리지 않는다: 503)
     api: Option<Arc<dyn ApiRuns>>,
-    /// `/v1/models`의 `created`(판본 번들을 처음 보관한 시각)
     bundles: Option<Arc<dyn ProfileBundles>>,
-    /// SSE에서 쓰는 것이 없을 때 `: keep-alive`를 쓰는 간격(계약 상한 15초)
     keep_alive: Duration,
-    /// 모델 목록·조회 한 번에 주는 총 시간
     models_budget: Duration,
-    /// 스트림 조각이 «넘기는 경계»를 지날 때마다 알리는 관찰 지점(시험용)
     probe: Option<Probe>,
-    /// OpenAI 키 인증 실패를 출처(접속한 피어 IP)별로 센다: 한도를 넘은 출처는 비밀 보관소를 읽기 전에 거절한다
+    /// Per-peer-IP auth failure budget rejecting abusive callers before reading SecretStore.
     auth_failures: SourceFailures,
 }
 
@@ -118,7 +105,6 @@ impl HttpGateway {
         }
     }
 
-    /// 시험용: OpenAI 키 인증 실패 예산(집계 창 안의 실패 횟수·창·차단 시간)을 바꾼다(운영은 기본값: 60초 안에 20번이면 60초 차단).
     pub fn with_auth_failure_limit(
         mut self,
         max: usize,
@@ -129,49 +115,41 @@ impl HttpGateway {
         self
     }
 
-    /// 시험용: SSE 조각이 HTTP 본문으로 넘어가는 경계를 지날 때마다 (종류, 바이트 수)를 알린다.
     pub fn with_probe(mut self, probe: Probe) -> Self {
         self.probe = Some(probe);
         self
     }
 
-    /// 시험용: 모델 목록·조회의 총 시간을 줄인다(운영은 기본값).
     pub fn with_models_budget(mut self, budget: Duration) -> Self {
         self.models_budget = budget;
         self
     }
 
-    /// 시험용: 동시에 붙잡을 수 있는 요청 수를 줄인다(운영은 256).
     pub fn with_connection_limit(mut self, limit: usize) -> Self {
         self.in_flight = Arc::new(Semaphore::new(limit));
         self
     }
 
-    /// 시험용: SSE keep-alive 간격을 줄인다(운영은 기본값).
     pub fn with_keep_alive(mut self, every: Duration) -> Self {
         self.keep_alive = every;
         self
     }
 
-    /// OpenAI 호환 입구(`/v1`)를 여는 저장소 포트. 호스트에 OpenAI 입구가 있으면 반드시 붙인다.
     pub fn with_openai(mut self, api: Arc<dyn ApiRuns>, bundles: Arc<dyn ProfileBundles>) -> Self {
         self.api = Some(api);
         self.bundles = Some(bundles);
         self
     }
 
-    /// 시험용: 토큰 만료 판정에 쓰는 시계(유닉스 초)를 바꾼다.
     pub fn with_clock(mut self, clock: impl Fn() -> u64 + Send + Sync + 'static) -> Self {
         self.clock = Box::new(clock);
         self
     }
 
-    /// 종료 신호가 없는 라우터(시험·단독 사용). 기다리는 요청은 기한까지 간다.
     pub fn router(self: Arc<Self>) -> Router {
         self.router_with(CancellationToken::new())
     }
 
-    /// `stop`이 오면 기다리는 OpenAI 요청이 기다림을 멈추고 진행 중 안내로 끝낸다(작업은 그대로 두고 같은 키로 다시 조회한다).
     pub fn router_with(self: Arc<Self>, stop: CancellationToken) -> Router {
         Router::new().fallback(handle).with_state(Shared {
             gateway: self,
@@ -179,13 +157,12 @@ impl HttpGateway {
         })
     }
 
-    /// stop이 오면 진행 중인 요청을 마치고 돌아온다. TLS 종단·연결 한도·느린 클라이언트 방어는 앞단 프록시 몫이다.
+    /// Serves until `stop` is cancelled; TLS termination and slow-client limits belong to the front proxy.
     pub async fn serve(
         self: Arc<Self>,
         listener: TcpListener,
         stop: CancellationToken,
     ) -> std::io::Result<()> {
-        // 실제 연결의 피어 주소(`ConnectInfo`)를 요청에 실어 출처별 인증 실패 한도에 쓴다
         axum::serve(
             listener,
             self.router_with(stop.clone())
@@ -204,7 +181,6 @@ struct Shared {
 
 async fn handle(State(shared): State<Shared>, request: Request) -> Response {
     let gateway = shared.gateway;
-    // 호스트에 OpenAI 입구가 있으면 `/v1` 아래는 모두 그 입구의 몫이다(웹훅 별칭 `v1`은 이 경우 호스트 검증이 거절한다)
     let openai = openai::is_openai_path(request.uri().path())
         && !gateway.ingress.host().http.openai.is_empty();
     let Ok(permit) = gateway.in_flight.clone().try_acquire_owned() else {
@@ -220,8 +196,7 @@ async fn handle(State(shared): State<Shared>, request: Request) -> Response {
     gateway.process(request).await
 }
 
-/// 요청 하나가 끝까지 쓰는 입구 문맥. 인증과 접수가 같은 라우팅 표·소유자·판본을 보게 해, 그 사이에 입구 소유자가
-/// 바뀌어도 인증한 프로필과 다른 프로필로 접수되지 않는다.
+/// Pins routes, owner, and revision for one request so authentication and admission never split across reloads.
 struct Ctx<'a> {
     endpoint: &'a str,
     config: &'a HttpEndpoint,
@@ -278,8 +253,6 @@ impl HttpGateway {
         }
     }
 
-    /// 응답(결과·상태) 직전 재확인. 막아야 하면 돌려줄 응답을 준다: 지금의 활성 집합에서 이 입구의 같은 바인딩 멤버가
-    /// 아니면 403, 이 프로세스의 판본이 저장소의 활성 판본이 아니면(구판) 503이다.
     async fn withheld(&self, ctx: &Ctx<'_>, principal: &PrincipalId) -> Option<Response> {
         let real = Real::Http {
             endpoint: ctx.endpoint.to_owned(),
@@ -300,12 +273,11 @@ impl HttpGateway {
             max_age_secs: ctx.config.max_token_age_secs,
         };
         token::verify(token, &key, &expect, (self.clock)()).map_err(|reason| {
-            tracing::debug!(endpoint = ctx.endpoint, ?reason, "토큰을 거절했어요");
+            tracing::debug!(endpoint = ctx.endpoint, ?reason, "rejected token");
             AuthError::Unauthorized
         })
     }
 
-    /// 입구 키(HS256). 값은 바인딩 소유 프로필의 이름 공간에서 읽고, (프로필·바인딩·판본·자격 이름)별로 잠깐만 기억한다.
     async fn key(&self, ctx: &Ctx<'_>) -> Result<Arc<Vec<u8>>, AuthError> {
         let id: KeyId = (
             ctx.owner.profile.0.clone(),
@@ -340,13 +312,13 @@ impl HttpGateway {
             Some(_) => {
                 tracing::error!(
                     endpoint,
-                    "HTTP 입구 키가 {}바이트보다 짧아요",
+                    "HTTP endpoint key is shorter than {} bytes",
                     token::MIN_KEY_BYTES
                 );
                 Err(AuthError::Unavailable)
             }
             None => {
-                tracing::error!(endpoint, "HTTP 입구 키를 읽지 못했어요");
+                tracing::error!(endpoint, "failed to read HTTP endpoint key");
                 Err(AuthError::Unavailable)
             }
         }
@@ -389,7 +361,6 @@ impl HttpGateway {
             principal: principal.clone(),
             request: RequestId(request.clone()),
         };
-        // 인증에 쓴 라우팅 표로 접수한다(그 사이 입구 소유자·판본이 바뀌어도 같은 프로필·바인딩으로만 접수된다)
         let admission = self
             .ingress
             .admit_with(
@@ -416,7 +387,7 @@ impl HttpGateway {
             .await;
         match admission {
             Admission::Accepted { .. } => {
-                // 최초 접수 때 저장한 응답 방식만 쓴다 — 같은 요청의 재전달도 최초 방식으로 렌더링·대기한다
+                // Honor the response mode stored on initial acceptance so replays render identically.
                 let stored = match self.store.status(key.clone()).await {
                     Ok(stored) => stored,
                     Err(_) => return unavailable(),
@@ -430,7 +401,6 @@ impl HttpGateway {
                         .unwrap_or(crate::host::DEFAULT_SYNC_WAIT_MS),
                 );
                 let waited = self.wait(key, wait).await;
-                // 기다리는 동안 권한이 철회됐을 수 있다 — 결과를 돌려주기 직전에 다시 확인한다
                 if let Some(response) = self.withheld(ctx, &principal).await {
                     return response;
                 }
@@ -441,7 +411,7 @@ impl HttpGateway {
                 }
             }
             Admission::Rejected(rejection) => rejected(rejection),
-            // 민감 입력은 DM 전용이라 HTTP 입구에는 올 수 없다. 오면 설정 오류이므로 알리지 않고 거절한다.
+            // Private triggers are DM-only; reject silently if ever reached on HTTP.
             Admission::Private | Admission::Ignored => not_found(),
         }
     }
@@ -475,13 +445,11 @@ impl HttpGateway {
             request: RequestId(id.to_owned()),
         };
         let found = self.store.status(key).await;
-        // 읽는 사이에 권한이 철회됐을 수 있다 — 상태·결과를 돌려주기 직전에 다시 확인한다
         if let Some(response) = self.withheld(ctx, &principal).await {
             return response;
         }
         match found {
             Ok(None) => not_found(),
-            // 접수 때 저장한 응답 방식만 쓴다(호출자가 고를 수 없다)
             Ok(Some(state)) if terminal(state.state) => {
                 finished(&state, id, stored_mode(Some(&state)))
             }
@@ -493,7 +461,6 @@ impl HttpGateway {
         }
     }
 
-    /// 끝날 때까지(또는 기한까지) 상태를 지켜본다. 새 도구 호출을 만들지 않는다.
     async fn wait(&self, key: RequestKey, wait: Duration) -> Waited {
         let deadline = Instant::now() + wait;
         let mut delay = Duration::from_millis(20);

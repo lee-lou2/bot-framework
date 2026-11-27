@@ -1,5 +1,4 @@
-//! `bot add tool <스킬>.<도구>`: 스킬 폴더의 `tools.yaml`에 도구 항목을 새로 만들거나 덧붙인다.
-//! `profile.yaml`과 `host.json`은 읽지도 고치지도 않고, 권한·호스트 설정 조각을 출력만 한다.
+//! Scaffolds or appends tool declarations in a skill's `tools.yaml` (`bot add tool`).
 use super::{
     add::{NAME_RULE, agent_dir, finish, has_agent, lineage, open},
     files::Writer,
@@ -13,7 +12,7 @@ use bot_profile::{
 use serde_json::{Value, json};
 use std::path::Path;
 
-/// YAML 1.2/1.1 모두에서 문자열로 읽히도록 예약 단어는 큰따옴표로 감싼다.
+/// Quote YAML 1.1/1.2 boolean/null literals so they parse as strings.
 fn yaml_name(text: &str) -> String {
     if matches!(
         text,
@@ -36,31 +35,29 @@ fn class_label(class: ToolClass) -> &'static str {
 fn parse_tool_id(id: &str) -> Result<(&str, &str), String> {
     let Some((skill, tool)) = id.split_once('.') else {
         return Err(format!(
-            "도구 ID {id:?}은(는) `<스킬>.<도구>` 형식이어야 해요(둘 다 {NAME_RULE}) — 예: agenda.search"
+            "tool ID {id:?} must be `<skill>.<tool>` (both {NAME_RULE}) — e.g. agenda.search"
         ));
     };
     if !is_name(skill) {
         return Err(format!(
-            "스킬 이름 {skill:?}이(가) 이름 규칙({NAME_RULE})에 맞지 않아요 — 예: agenda.search"
+            "skill name {skill:?} does not match naming rule ({NAME_RULE}) — e.g. agenda.search"
         ));
     }
     if !is_name(tool) {
         return Err(format!(
-            "도구 이름 {tool:?}이(가) 이름 규칙({NAME_RULE})에 맞지 않아요 — 예: agenda.search"
+            "tool name {tool:?} does not match naming rule ({NAME_RULE}) — e.g. agenda.search"
         ));
     }
     if builtin::reserved(id) {
         return Err(format!(
-            "`{id}`는 호스트 내장 도구 이름이라 선언할 수 없어요 — 다른 도구 이름을 써 주세요"
+            "`{id}` is a reserved built-in tool name — choose a different tool name"
         ));
     }
     Ok((skill, tool))
 }
 
 struct SkillLocation {
-    /// `None`이면 프로필 루트 `skills/<스킬>`, `Some(계보)`면 해당 에이전트 아래 스킬.
     agent: Option<Vec<String>>,
-    /// 프로필 폴더 기준 경로 조각(예: `["agents", "main", "skills", "agenda"]`).
     parts: Vec<String>,
 }
 
@@ -79,7 +76,7 @@ fn find_skill(writer: &Writer, skill: &str, agent: Option<&str>) -> Result<Skill
         let scope = lineage(agent_path)?;
         if !has_agent(writer, &scope)? {
             return Err(format!(
-                "에이전트 {agent_path}이(가) 없어요 — 먼저 `bot add agent {agent_path}`로 만들어 주세요"
+                "agent {agent_path} does not exist — create it first with `bot add agent {agent_path}`"
             ));
         }
         let mut parts = agent_dir(&scope);
@@ -88,7 +85,7 @@ fn find_skill(writer: &Writer, skill: &str, agent: Option<&str>) -> Result<Skill
         skill_md.push("SKILL.md");
         if !writer.file_exists(&skill_md)? {
             return Err(format!(
-                "스킬 `{skill}`이(가) 에이전트 {agent_path} 아래에 없어요 — 먼저 `bot add skill {skill} --agent {agent_path}`로 스킬을 만들어 주세요"
+                "skill `{skill}` does not exist under agent {agent_path} — create it first with `bot add skill {skill} --agent {agent_path}`"
             ));
         }
         return Ok(SkillLocation {
@@ -143,7 +140,7 @@ fn find_skill(writer: &Writer, skill: &str, agent: Option<&str>) -> Result<Skill
     found.sort_by_key(SkillLocation::dir_path);
     match found.len() {
         0 => Err(format!(
-            "스킬 `{skill}`을(를) 찾을 수 없어요 — 먼저 `bot add skill {skill}`(또는 `--agent <에이전트 경로>`)로 스킬을 만들어 주세요"
+            "skill `{skill}` not found — create it first with `bot add skill {skill}` (or `--agent <agent-path>`)"
         )),
         1 => Ok(found.remove(0)),
         _ => {
@@ -155,7 +152,7 @@ fn find_skill(writer: &Writer, skill: &str, agent: Option<&str>) -> Result<Skill
                 })
                 .collect();
             Err(format!(
-                "스킬 `{skill}`이(가) 여러 곳에 있어요({}) — `--agent <에이전트 경로>`로 어느 스킬에 더할지 지정해 주세요",
+                "skill `{skill}` exists in multiple locations ({}) — specify `--agent <agent-path>`",
                 places.join(", ")
             ))
         }
@@ -228,8 +225,8 @@ fn is_seq_item(trimmed_start: &str) -> bool {
     trimmed_start == "-" || trimmed_start.starts_with("- ") || trimmed_start.starts_with("-\t")
 }
 
-/// 기존 `tools.yaml`의 주석·줄 끝(`\r\n`/`\n`)·키 순서·들여쓰기를 유지하며 새 항목을 삽입한다.
-/// 비어 있지 않은 플로우 배열 등 주석 보존 편집이 불가능하면 `None`을 돌려주고 원본을 건드리지 않는다.
+/// Inserts a new tool entry while preserving existing comments, line endings, key order, and indentation.
+/// Returns `None` without modifying the file when comment-preserving insertion is not possible (e.g. non-empty flow arrays).
 fn append_preserving_comments(
     existing_text: &str,
     tool: &str,
@@ -249,7 +246,6 @@ fn append_preserving_comments(
             Some((idx, prefix, rest, line_eol))
         })?;
 
-    // `tools: []`(+ 선택 인라인 주석) 형태면 그 자리에서 블록 목록으로 바꾼다
     if let Some(tail) = strip_empty_flow_list(after_key) {
         let mut out = String::with_capacity(existing_text.len() + 192);
         for line in &lines[..tools_idx] {
@@ -265,13 +261,11 @@ fn append_preserving_comments(
         return Some(out);
     }
 
-    // `tools:` 뒤에 인라인 값이 남아 있으면(예: `tools: [{...}]`) 주석을 잃지 않도록 수동 편집으로 넘긴다
     let after_trim = after_key.trim_start_matches([' ', '\t']);
     if !after_trim.is_empty() && !after_trim.starts_with('#') {
         return None;
     }
 
-    // `tools:` 블록이 끝나는 지점(다음 최상위 키·문서 끝 표식 직전)과 첫 항목의 들여쓰기를 찾는다
     let mut last_content_idx = tools_idx;
     let mut list_indent = None;
     for (idx, line) in lines.iter().enumerate().skip(tools_idx + 1) {
@@ -288,7 +282,6 @@ fn append_preserving_comments(
             last_content_idx = idx;
             continue;
         }
-        // 들여쓰기 0칸 블록 목록(`- id: ...`)은 `tools:` 항목이다
         if is_seq_item(raw) {
             if list_indent.is_none() {
                 list_indent = Some(0);
@@ -348,12 +341,12 @@ fn next_steps(
 ) -> String {
     let verb = if created {
         format!(
-            "만들었어요: {rel} (도구 {full_id}, 등급 {})",
+            "Created: {rel} (tool {full_id}, class {})",
             class_label(class)
         )
     } else {
         format!(
-            "더했어요: {rel}에 도구 {full_id}(등급 {})를 추가했어요",
+            "Updated: added tool {full_id} (class {}) to {rel}",
             class_label(class)
         )
     };
@@ -361,48 +354,48 @@ fn next_steps(
     if let Some(agent) = agent_path.filter(|a| a.contains('/')) {
         policy_lines.push("    agents:".to_owned());
         policy_lines.push(format!(
-            "      {agent}: [..., {full_id}]   # policy.agents를 쓰는 경우"
+            "      {agent}: [..., {full_id}]   # if using policy.agents"
         ));
     }
     let approval_note = match class {
         ToolClass::Read => String::new(),
         ToolClass::Write => {
             policy_lines.push(format!(
-                "    approve: [..., {full_id}]   # 쓰기 도구에 사람 승인을 요구하려면 추가"
+                "    approve: [..., {full_id}]   # add to require human approval for this write tool"
             ));
             String::new()
         }
         ToolClass::Irreversible => {
-            "\n  # class: irreversible 도구는 policy.approve에 적지 않아도 항상 사람 승인을 거쳐요."
+            "\n  # Tools with `class: irreversible` always require human approval even without `policy.approve`."
                 .to_owned()
         }
     };
     format!(
         "{verb}\n\
-권한과 호스트 설정은 자동으로 바꾸지 않았어요. 아래 네 곳을 맞춰 주세요:\n\
+Permissions and host config were not modified automatically. Complete these four steps:\n\
 \n\
-1. 호스트 설정(host.json)의 `servers`에 도구 서버를 등록해요(로컬 stdio 예시; 원격 HTTP는 docs/plugins.md 참고):\n\
+1. Register the tool server under `servers` in host.json (local stdio example; see docs/plugins.md for remote HTTP):\n\
   \"servers\": {{\n\
     \"{server}\": {{\n\
-      \"root\": \"/절대/경로/servers/{server}\",\n\
+      \"root\": \"/absolute/path/servers/{server}\",\n\
       \"command\": [\"bin/server\", \"--stdio\"]\n\
     }}\n\
   }}\n\
 \n\
-2. profile.yaml에서 필요한 역할과 정책 상한에만 스코프를 허용해요:\n\
+2. Allow the scope only on the needed roles and policy ceiling in profile.yaml:\n\
   roles:\n\
     owner: [..., {full_id}]\n\
   policy:\n\
 {policy}{approval_note}\n\
 \n\
-3. (선택) 일반 설정·비밀·외부 통신·원격 잠금이 필요하면:\n\
-  - 일반 설정: 에이전트 `env.yaml`에 키를 넣고 tools.yaml에 `env: [KEY]`를 적어요.\n\
-  - 비밀: profile.yaml `secrets: [my-secret]`과 tools.yaml `secrets: {{API_TOKEN: my-secret}}`을 맞추고 보관소(`BOT_SECRET__<프로필>__my_secret`)에 값을 넣어요.\n\
-  - 외부 통신: tools.yaml `egress: [\"api.example.com:443\"]`를 적어요. 원격 HTTP 서버의 정의를 잠그려면 `input`을 빼고 `bot mcp sync <프로필>/{skill_dir}`을 실행해요.\n\
+3. (Optional) If the tool needs config, secrets, egress, or remote schema locking:\n\
+  - Config: add keys to the agent's `env.yaml` and list them in `env: [KEY]` in tools.yaml.\n\
+  - Secrets: declare `secrets: [my-secret]` in profile.yaml, map `secrets: {{API_TOKEN: my-secret}}` in tools.yaml, and store the value in your secret backend (`BOT_SECRET__<profile>__my_secret`).\n\
+  - Egress: list `egress: [\"api.example.com:443\"]` in tools.yaml. For remote HTTP servers, omit `input` and run `bot mcp sync <profile>/{skill_dir}` to lock definitions.\n\
 \n\
-4. 검증해요:\n\
+4. Validate:\n\
   bot validate\n\
-자세한 예시와 최소 MCP 서버 코드는 docs/first-tool.md에 있어요.",
+See docs/first-tool.md for a full example and minimal MCP server.",
         policy = policy_lines.join("\n"),
     )
 }
@@ -419,7 +412,7 @@ pub fn tool(
         && !is_name(alias)
     {
         return Err(format!(
-            "서버 별칭 {alias:?}이(가) 이름 규칙({NAME_RULE})에 맞지 않아요 — 예: --server my-server"
+            "server alias {alias:?} does not match naming rule ({NAME_RULE}) — e.g. --server my-server"
         ));
     }
     let writer = open(dir)?;
@@ -430,7 +423,7 @@ pub fn tool(
     let scope = format!("{skill}.{tool_name}");
 
     let skill_parts: Vec<&str> = location.parts.iter().map(String::as_str).collect();
-    // 같은 스킬 폴더의 동시 `bot add tool` 읽기·검증·교체를 잠금 파일 없이 직렬화한다
+    // Serialize concurrent `bot add tool` read/validate/replace on the skill directory without lock files.
     let _skill_lock = writer.lock_dir(&skill_parts)?;
 
     let mut tools_parts = skill_parts.clone();
@@ -456,7 +449,7 @@ pub fn tool(
         )
         .map_err(|issues| {
             format!(
-                "만든 tools.yaml이 검증을 통과하지 못했어요:\n{}",
+                "generated tools.yaml failed validation:\n{}",
                 format_issues(&issues)
             )
         })?;
@@ -483,20 +476,20 @@ pub fn tool(
     )
     .map_err(|issues| {
         format!(
-            "기존 {rel}에 오류가 있어 항목을 더할 수 없어요 — 먼저 아래 문제를 고쳐 주세요:\n{}",
+            "existing {rel} has validation errors — fix them before adding a tool:\n{}",
             format_issues(&issues)
         )
     })?;
     if existing.tool_ids.iter().any(|known| known == tool_name) {
         return Err(format!(
-            "도구 `{scope}`은(는) 이미 {rel}에 있어요 — 덮어쓰지 않아요. 다른 도구 이름을 쓰거나 {rel}을 직접 고쳐 주세요"
+            "tool `{scope}` already exists in {rel} — refusing to overwrite; choose another tool name or edit {rel} directly"
         ));
     }
     if let Some(given) = server
         && given != existing.server
     {
         return Err(format!(
-            "{rel}은(는) 이미 서버 `{}`에 연결돼 있어요(`--server {given}`과 달라요). 같은 스킬의 도구는 한 서버를 쓰므로 `--server`를 생략하거나 `{}`로 맞춰 주세요(다른 서버라면 새 스킬을 만들어 주세요)",
+            "{rel} is already bound to server `{}` (differs from `--server {given}`). Tools in one skill share a server; omit `--server`, pass `{}` instead, or create a new skill",
             existing.server, existing.server
         ));
     }
@@ -509,17 +502,16 @@ pub fn tool(
         &limits,
     )
     .is_ok();
-    // 새 도구 단독 항목도 스키마·잠금·규칙을 항상 통과해야 한다
     let solo = new_tools_yaml(&existing.server, tool_name, class, &scope);
     parse_tools_yaml(skill, &rel, solo.as_bytes(), None, true, &limits).map_err(|issues| {
         format!(
-            "새 도구 항목이 검증을 통과하지 못해 아무것도 바꾸지 않았어요:\n{}",
+            "new tool entry failed validation; file was not modified:\n{}",
             format_issues(&issues)
         )
     })?;
     let expected_new = new_tool_value(tool_name, class, &scope);
-    let existing_text = std::str::from_utf8(&existing_bytes)
-        .map_err(|_| format!("{rel}이(가) UTF-8이 아니에요"))?;
+    let existing_text =
+        std::str::from_utf8(&existing_bytes).map_err(|_| format!("{rel} is not valid UTF-8"))?;
     let verify = |text: &str| {
         parse_tools_yaml(
             skill,
@@ -538,13 +530,13 @@ pub fn tool(
     else {
         let snippet = format_entry(2, tool_name, class, &scope, "\n");
         return Err(format!(
-            "기존 {rel}의 서식·주석을 보존한 채 자동으로 덧붙일 수 없어 파일을 바꾸지 않았어요(예: 비어 있지 않은 플로우 배열 `tools: [...]`).\n\
-             아래 항목을 {rel}의 `tools` 목록에 직접 붙여 넣어 주세요:\n\n{snippet}"
+            "cannot append to {rel} while preserving its formatting and comments (for example, a non-empty flow array `tools: [...]`); file was not modified.\n\
+             Paste this entry into the `tools` list of {rel} manually:\n\n{snippet}"
         ));
     };
     if updated.len() as u64 > limits.max_yaml_bytes {
         return Err(format!(
-            "{rel}이(가) 크기 한도({} 바이트)를 넘어 아무것도 바꾸지 않았어요",
+            "{rel} would exceed the size limit ({} bytes); file was not modified",
             limits.max_yaml_bytes
         ));
     }

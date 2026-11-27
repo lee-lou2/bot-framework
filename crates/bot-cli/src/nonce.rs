@@ -1,6 +1,5 @@
-//! 이름에 붙이는 무작위 조각(임시·보관 파일이 서로, 그리고 운영자가 따로 만든 파일과 겹치지 않게 한다).
+//! Random hex nonces used to keep temporary and backup filenames collision-free.
 
-/// 운영체제 난수 8바이트의 16진 16자리.
 pub fn hex() -> String {
     bot_core::random::random_hex(8)
 }

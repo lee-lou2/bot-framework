@@ -1,16 +1,8 @@
-//! 소유자 DM 승인 카드 전달 작업(`bot_card_jobs`): 점유(`claim`)·최초 전송자 확인(`begin`)·정산(`settle`)·영수증 조회.
-//! 계약은 docs/reliability.md «Slack 소유자에게 승인 카드를 전달할 때».
+//! Owner-DM approval card outbox (`bot_card_jobs`): claim, first-sender begin, settlement, and receipts.
 //!
-//! 채널 출처의 «명시 목적지 생성»·«전송 초안» 승인은 `approval_open`이 승인 행(pending)과 이 작업을 같은 커밋에 만든다. 작업이 `posted`가 되기 전의 카드는
-//! 열리지 않은 카드다: 결정(`approval_decide`)·관리 목록·클릭 대상이 아니다. 영수증(팀·DM 채널·메시지 `ts`)을 확인한 한 커밋에서만 카드가 열리고
-//! 원래 채널·스레드에는 «DM으로 승인 요청을 보냈어요» 한 줄만 간다.
-//!
-//! 열 수 없거나(`Unavailable`) 올라갔는지 알 수 없으면(`Held`, 120초를 넘긴 `sending`도 같다) 자동으로 다시 올리지 않고 `approval_dm_unavailable`로 닫는다:
-//! 같은 커밋에서 승인을 시스템 거절로 닫고 감사를 한 번 남기며 원래 채널·스레드에 닫혔다는 안내 한 줄만 등록한다(올릴 수 없다고 확정했으면 `DM_UNAVAILABLE_NOTICE`, 불명이면
-//! `DM_UNCONFIRMED_NOTICE`). 생성 승인이면 기다리던 run을 깨우고(예약 0), 전송 승인이면 이번 발생을 미발송으로 끝낸다(반복 예약의 정의는 그대로).
-//! 같은 정산의 재전달은 같은 결과이고 중복이 없다.
-//!
-//! 잠금 순서: 활성 집합 → run → 호출 → 승인 → 작업 → 초안 → 감사 head.
+//! Cards stay closed until a `Posted` receipt commits, opening the card and enqueuing `DM_SENT_NOTICE`.
+//! `Unavailable` and `Held` (including stalled `sending` jobs) close the approval as `approval_dm_unavailable`
+//! without auto-reposting. Lock order: active set -> run -> call -> approval -> job -> draft -> audit head.
 
 mod closing;
 
@@ -31,14 +23,12 @@ use bot_core::{
 use closing::Closing;
 use sqlx::{Row, postgres::PgRow};
 
-/// 한 번 점유한 리스. 이 안에 `begin`을 부르지 않으면 다른 전달자가 다시 점유한다.
+/// Claim lease duration before another dispatcher may reclaim an unbegun job.
 const LEASE_MS: i64 = 90_000;
-/// 일시 실패 뒤 다시 점유하기까지의 기본 간격.
 const BACKOFF_MS: i64 = 5_000;
-/// 이만큼 점유하고도 올리지 못하면 DM 경로가 없는 것으로 닫는다.
+/// Max claim attempts before closing the job as unavailable.
 const MAX_ATTEMPTS: i32 = 6;
 
-/// 잠근 활성 집합·승인·작업 행과 run.
 struct Locks {
     active: Option<String>,
     run: crate::unsent::Locked,
@@ -47,7 +37,7 @@ struct Locks {
     job: PgRow,
 }
 
-/// 활성 집합 → run → 호출 → 승인 → 작업 순서로 잠근다. 승인이나 작업이 없으면 `Missing`.
+/// Locks active set -> run -> call -> approval -> job in order, verifying the claim attempt matches.
 async fn lock_attempt(tx: &mut Tx<'_>, key: &CardKey) -> R<Locks> {
     let active = lock_active_set(tx).await?;
     let nonce = &key.nonce.0;
@@ -100,7 +90,7 @@ fn lease_expired(job: &PgRow, now: i64) -> bool {
     job.get::<String, _>("state") == "leased" && job.get::<i64, _>("lease_until_ms") < now
 }
 
-/// 지금 이 카드를 열 수 있는가: 승인이 대기 중이고 만료 전이며, run이 같은 세대로 승인을 기다리고 취소되지 않았다.
+/// True when the approval is pending/unexpired and the run is still waiting on the same generation without cancellation.
 fn can_open(locks: &Locks, now: i64) -> bool {
     locks.approval.get::<String, _>("state") == "pending"
         && locks.approval.get::<i64, _>("expires_ms") > now
@@ -115,7 +105,7 @@ async fn now_ms(tx: &mut Tx<'_>) -> R<i64> {
         .await?)
 }
 
-/// 호스트 활성 집합 판본을 `FOR SHARE`로 먼저 잠가 읽는다(잠금 순서: 활성 집합 → run → …). 게시 전이면 `None`.
+/// Takes `FOR SHARE` on `bot_active` first to preserve lock order; returns `None` before initial publish.
 async fn lock_active_set(tx: &mut Tx<'_>) -> R<Option<String>> {
     Ok(
         sqlx::query_scalar::<_, String>(
@@ -136,8 +126,7 @@ fn job_card(card: &str) -> R<JsonPayload> {
 }
 
 impl Store {
-    /// 전달할 작업을 최대 `limit`건 점유한다(리스 90초). 점유 전에 낡은 작업을 정리한다: 카드가 더는 열 수 없는 작업은 닫고, 점유 한도를 넘긴 작업과
-    /// 120초를 넘긴 `sending`은 `approval_dm_unavailable`로 닫는다(자동으로 다시 올리지 않는다). 카드가 대기 중·미만료일 때만 점유한다.
+    /// Sweeps stale/stalled jobs, then claims up to `limit` pending, unexpired card jobs with a lease.
     pub(crate) async fn cards_claim(&self, limit: u32) -> R<Vec<CardJob>> {
         self.card_sweep().await?;
         let mut tx = self.begin_authorized().await?;
@@ -181,8 +170,7 @@ impl Store {
             .collect()
     }
 
-    /// 최초 전송자 확인: 지금 활성 집합·카드 유효·세대와 프로필 판본(`checked`, 게이트웨이가 바인딩·소유자를 확인한 판본)을 대조하고 `sending`을 기록한다.
-    /// 점유한 작업에 처음 부른 쪽만 Ok이고 나머지는 `Conflict`다. 낡았으면 `Stale`이며 올리면 안 된다.
+    /// Marks a leased job `sending` after checking active set, profile revision, lease, and approval validity; only the first caller succeeds.
     pub(crate) async fn cards_begin(&self, key: &CardKey, checked: &Revision) -> R<()> {
         let mut tx = self.begin_authorized().await?;
         let locks = lock_attempt(&mut tx, key).await?;
@@ -218,7 +206,7 @@ impl Store {
         Ok(())
     }
 
-    /// 결과를 정산한다. 같은 정산의 재전달은 같은 결과(`Ok`)이고 중복 기록은 없다. 이미 다른 결과로 끝난 작업은 `Conflict`, 낡은 카드는 `Stale`이다.
+    /// Idempotently settles a card job outcome; conflicting outcomes return `Conflict`, stale cards return `Stale`.
     pub(crate) async fn cards_settle(&self, key: &CardKey, outcome: CardOutcome) -> R<()> {
         match outcome {
             CardOutcome::Posted { team, dm, ts } => self.card_post(key, (&team, &dm, &ts)).await,
@@ -231,7 +219,7 @@ impl Store {
         }
     }
 
-    /// 게시 확인: 한 커밋에서 다시 대조하고(sending·활성 집합·세대·카드 유효기간) 영수증을 남기고 카드를 열며 원래 채널에 한 줄을 등록한다.
+    /// Confirms DM delivery, persists the receipt to open the card, and enqueues `DM_SENT_NOTICE` in one commit.
     async fn card_post(&self, key: &CardKey, receipt: (&str, &str, &str)) -> R<()> {
         let (team, dm, ts) = receipt;
         if [team, dm, ts].iter().any(|v| !crate::codec::id_ok(v)) {
@@ -242,7 +230,7 @@ impl Store {
         match locks.job.get::<String, _>("state").as_str() {
             "sending" => {}
             "posted" => {
-                // 같은 정산의 재전달은 같은 결과, 다른 영수증이면 충돌이다
+                // Re-delivering the exact same receipt is idempotent; a different receipt conflicts.
                 let same = locks.job.get::<Option<String>, _>("team").as_deref() == Some(team)
                     && locks.job.get::<Option<String>, _>("dm").as_deref() == Some(dm)
                     && locks.job.get::<Option<String>, _>("ts").as_deref() == Some(ts);
@@ -254,8 +242,7 @@ impl Store {
             }
             _ => return Err(Error::Conflict.into()),
         }
-        // HTTP 출처 카드는 올라간 설치(team)가 원래 요청에 고정한 전달 설치와 정확히 같아야 영수증이 된다: 현재 상태·활성 집합만으로는 같은 별칭의 팀이 바뀐 것을 알 수 없다.
-        // 다르거나 고정한 team이 없으면 영수증·결정 대상·사람이 할 일이 없고, 지정된 사람의 클릭은 소비되지 않으며 승인 경로가 어긋난 것(`route_changed`)으로 닫는다
+        // HTTP-origin cards must land in the exact Slack team pinned at admission; team drift closes as `route_changed`.
         let now = now_ms(&mut tx).await?;
         if locks
             .job
@@ -276,7 +263,7 @@ impl Store {
         let set = locks.active.as_deref().ok_or(Error::Stale)?;
         let same_set = locks.job.get::<Option<String>, _>("activation").as_deref() == Some(set);
         if !(can_open(&locks, now) && same_set) {
-            // 올린 뒤 카드가 낡았다(집합 교체·만료·세대·취소): 카드는 열지 않는다. DM 메시지만 남고 영수증이 없어 눌러도 소비되지 않는다
+            // Card went stale after posting; leave it closed without a receipt so clicks are rejected.
             sqlx::query(
                 "update bot_card_jobs set state = 'closed', closed_reason = 'stale', updated_ms = bot_now_ms() where nonce = $1",
             )
@@ -305,7 +292,7 @@ impl Store {
         Ok(())
     }
 
-    /// 아무것도 올라가지 않았다: 백오프 뒤 다시 점유하게 되돌린다. 점유 한도에 닿았으면 DM 경로가 없는 것으로 닫는다.
+    /// Returns an unsent job to `staged` with backoff, or closes it as unavailable once `MAX_ATTEMPTS` is reached.
     async fn card_retry(&self, key: &CardKey, retry_after_ms: Option<i64>) -> R<()> {
         let mut tx = self.begin_authorized().await?;
         let locks = lock_attempt(&mut tx, key).await?;
@@ -338,7 +325,7 @@ impl Store {
         Ok(())
     }
 
-    /// HTTP(OpenAI 호환) 출처 카드가 원래 요청에서 이어받은 고정 증거. 채널 출처 카드·없는 작업은 `None`.
+    /// Admission-time origin metadata for HTTP-origin cards (`None` for channel-origin or missing jobs).
     pub(crate) async fn cards_origin(&self, nonce: &ApprovalId) -> R<Option<CardOrigin>> {
         let row = sqlx::query(
             "select origin_binding, requester, revision, origin_team from bot_card_jobs where nonce = $1 and origin_binding is not null",
@@ -354,7 +341,7 @@ impl Store {
         }))
     }
 
-    /// 게시를 확인한 영수증. 확정 전이거나 소유자 DM으로 전달한 카드가 아니면 `None`.
+    /// Confirmed DM delivery receipt, present only once the job reaches `posted`.
     pub(crate) async fn cards_receipt(&self, nonce: &ApprovalId) -> R<Option<CardReceipt>> {
         let row = sqlx::query(
             "select team, dm, ts, owner, profile, binding from bot_card_jobs where nonce = $1 and state = 'posted'",
@@ -373,7 +360,6 @@ impl Store {
     }
 }
 
-/// 게이트웨이가 쓰는 포트: 점유·최초 전송자 확인·정산(`bot_core::cards`).
 impl CardOutbox for Store {
     fn claim(&self, limit: u32) -> Reply<'_, Vec<CardJob>> {
         Box::pin(async move { self.cards_claim(limit).await.map_err(Fail::into_core) })

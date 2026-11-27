@@ -1,4 +1,4 @@
-//! 추적 내보내기: 프로필 격리, 장애 격리, 내용·식별자 정책, 한 시도의 추적 합류, 관리 API 연결.
+//! Trace exporter: profile isolation, fault isolation, content/identity redaction, and deterministic trace IDs.
 
 use crate::support::collector::{self, Attr, Collector, Mode};
 use bot_admin::trace::{
@@ -61,11 +61,14 @@ fn span(profile: &str, run: &str, name: &str) -> SpanRecord {
 async fn start(map: Vec<(&str, ProfileTrace)>, opts: Options) -> Arc<Exporter> {
     let cfg: BTreeMap<ProfileId, ProfileTrace> =
         map.into_iter().map(|(k, v)| (pid(k), v)).collect();
-    Exporter::start(cfg, None, Redactor::default(), opts).expect("시작")
+    Exporter::start(cfg, None, Redactor::default(), opts).expect("start")
 }
 
 async fn drain(e: &Exporter) {
-    assert!(e.flush(Duration::from_secs(10)).await, "큐가 비지 않았다");
+    assert!(
+        e.flush(Duration::from_secs(10)).await,
+        "queue did not drain"
+    );
 }
 
 fn raw_contains(c: &Collector, needle: &str) -> bool {
@@ -90,7 +93,6 @@ async fn isolates_profile_traces() {
     )
     .await;
     for i in 0..5 {
-        // 같은 run ID·세대라도 프로필이 다르면 추적이 다르다.
         e.record(
             span("alpha", &format!("r-{i}"), "attempt main").attr(key::BOT_AGENT, "alpha-agent"),
         );
@@ -119,11 +121,11 @@ async fn isolates_profile_traces() {
     }
     assert!(
         sa.iter().all(|x| sb.iter().all(|y| x.trace != y.trace)),
-        "프로필 사이에 추적이 겹치지 않는다"
+        "trace IDs must not collide across profiles"
     );
     assert!(
         !raw_contains(&a, "beta") && !raw_contains(&b, "alpha"),
-        "다른 프로필의 글자가 섞이지 않는다"
+        "profile payloads must not cross collectors"
     );
     assert!(
         e.stats(&pid("quiet"))
@@ -131,7 +133,7 @@ async fn isolates_profile_traces() {
     );
     assert!(
         e.stats(&pid("gamma")).is_none(),
-        "미등록 프로필은 어디로도 가지 않는다"
+        "unregistered profile must not export"
     );
     assert_eq!(
         e.stats(&pid("alpha"))
@@ -149,7 +151,6 @@ async fn exporter_failure_never_blocks_execution() {
         ..fast()
     };
     let e = start(vec![("alpha", cfg(&c, Ids::Plain))], opts).await;
-    // 수집기가 응답하지 않아도 기록은 곧바로 돌아온다.
     let started = Instant::now();
     for i in 0..5000 {
         e.record(span("alpha", &format!("r-{i}"), "attempt main"));
@@ -159,39 +160,38 @@ async fn exporter_failure_never_blocks_execution() {
         "{:?}",
         started.elapsed()
     );
-    // 다른 스레드(런타임 밖)에서도 안전하다.
+    // Recording from a non-Tokio thread must also stay non-blocking.
     let e2 = e.clone();
     std::thread::spawn(move || e2.record(span("alpha", "r-thread", "attempt main")))
         .join()
-        .expect("스레드");
+        .expect("thread");
     drain(&e).await;
-    let s = e.stats(&pid("alpha")).expect("통계");
+    let s = e.stats(&pid("alpha")).expect("stats");
     assert_eq!(
         s.sent + s.failed + s.dropped,
         5001,
-        "{s:?}: 모든 스팬은 보냄·실패·버림 중 하나로 셈된다"
+        "{s:?}: every span must be accounted for"
     );
     assert_eq!((s.sent, s.queued), (0, 0));
     assert!(s.dropped > 4000 && s.failed > 0, "{s:?}");
     assert_eq!((s.circuit, s.last_error), ("open", Some("timeout")));
-    // 수집기가 살아나면 차단기가 풀리고 다시 내보낸다.
+    // Circuit closes and exports resume once the collector recovers.
     c.set(Mode::Ok);
     tokio::time::sleep(Duration::from_millis(300)).await;
     for i in 0..3 {
         e.record(span("alpha", &format!("again-{i}"), "attempt main"));
     }
     drain(&e).await;
-    let s = e.stats(&pid("alpha")).expect("통계");
+    let s = e.stats(&pid("alpha")).expect("stats");
     assert_eq!((s.sent, s.circuit), (3, "closed"), "{s:?}");
     assert_eq!(c.spans().len(), 3);
 }
 
 #[tokio::test]
 async fn refused_and_failing_collectors_are_counted_by_class() {
-    // 닫힌 포트: 잡았다가 놓으면 연결이 거절된다.
     let port = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("바인드");
-        l.local_addr().expect("주소").port()
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        l.local_addr().expect("addr").port()
     };
     let dead = (format!("http://127.0.0.1:{port}/v1/traces"), ());
     let broken = collector::start(Mode::Status(500)).await;
@@ -217,7 +217,6 @@ async fn refused_and_failing_collectors_are_counted_by_class() {
         fast(),
     )
     .await;
-    // 수집기가 있든 없든 기록 호출은 바로 돌아오고 다른 프로필의 내보내기에 영향이 없다.
     for p in ["refused", "broken", "reset"] {
         e.record(span(p, "r-1", "attempt main"));
     }
@@ -252,11 +251,11 @@ async fn content_is_excluded_by_default_and_masked_when_enabled() {
     let cfg_map: BTreeMap<ProfileId, ProfileTrace> =
         [(pid("plain"), cfg(&plain, Ids::Plain)), (pid("rich"), on)].into();
     let red = Redactor::new(["zq7-secret-value".to_owned()]);
-    let e = Exporter::start(cfg_map, None, red, fast()).expect("시작");
+    let e = Exporter::start(cfg_map, None, red, fast()).expect("start");
     for p in ["plain", "rich"] {
         e.record(
             span(p, "r-1", "chat assistant")
-                .attr(key::GEN_AI_INPUT_MESSAGES, "안녕 zq7-secret-value 요청")
+                .attr(key::GEN_AI_INPUT_MESSAGES, "hello zq7-secret-value request")
                 .attr(key::GEN_AI_TOOL_CALL_ARGUMENTS, "{\"event\":\"synthetic\"}")
                 .attr("bot.approval.nonce", "ap-secret-nonce")
                 .attr(key::GEN_AI_REQUEST_MODEL, "assistant"),
@@ -271,22 +270,17 @@ async fn content_is_excluded_by_default_and_masked_when_enabled() {
     ] {
         assert!(
             !p.attrs.contains_key(k),
-            "기본은 내용을 내보내지 않는다: {k}"
+            "content must be excluded by default: {k}"
         );
     }
     assert_eq!(
         (p.str("bot.content.dropped"), p.int("bot.dropped")),
         (Some("off"), Some(3))
     );
-    assert_eq!(
-        p.str("gen_ai.request.model"),
-        Some("assistant"),
-        "메타데이터는 그대로 나간다"
-    );
-    // 켠 프로필: 내용은 비밀이 가려져 나가고, 승인 nonce는 어느 쪽에도 없다.
+    assert_eq!(p.str("gen_ai.request.model"), Some("assistant"));
     assert_eq!(
         r.str(key::GEN_AI_INPUT_MESSAGES),
-        Some("안녕 [redacted] 요청")
+        Some("hello [redacted] request")
     );
     assert_eq!(
         r.str(key::GEN_AI_TOOL_CALL_ARGUMENTS),
@@ -325,7 +319,7 @@ async fn identities_are_pseudonymized_unless_the_profile_asks_for_plain_ids() {
     }
     drain(&e).await;
     let h = &hashed.spans()[0];
-    let pseudo = h.str("bot.principal").expect("가명");
+    let pseudo = h.str("bot.principal").expect("pseudonym");
     assert_eq!(pseudo.len(), 12);
     assert!(!raw_contains(&hashed, "owner") && h.str("bot.agent") == Some("main"));
     assert_eq!(plain.spans()[0].str("bot.principal"), Some("local:owner"));
@@ -336,7 +330,7 @@ async fn spans_of_one_attempt_from_different_components_join_one_trace() {
     let c = collector::start(Mode::Ok).await;
     let e = start(vec![("alpha", cfg(&c, Ids::Plain))], fast()).await;
     let a = attempt("alpha", "r-9", 2);
-    // 워커와 브로커(다른 프로세스라고 보자)는 문맥을 주고받지 않고 각자 같은 시도에서 ID를 계산한다.
+    // Worker and broker derive matching trace/parent IDs independently from Attempt.
     let worker = SpanRecord::start(&a.profile, "attempt main", SpanIds::attempt(&a));
     let broker = SpanRecord::start(
         &a.profile,
@@ -366,7 +360,7 @@ async fn spans_of_one_attempt_from_different_components_join_one_trace() {
             .filter(|s| s.name == name)
             .nth(n)
             .cloned()
-            .expect("스팬")
+            .expect("span")
     };
     let (w, t, w2) = (
         by("attempt main", 0),
@@ -381,16 +375,16 @@ async fn spans_of_one_attempt_from_different_components_join_one_trace() {
     assert_eq!(
         (t.trace.as_slice(), t.parent.as_slice()),
         (w.trace.as_slice(), w.span.as_slice()),
-        "도구 스팬은 시도 루트의 자식이다"
+        "tool span must parent to the attempt root"
     );
-    assert_ne!(w2.trace, w.trace, "세대가 바뀌면 새 추적이다");
+    assert_ne!(w2.trace, w.trace, "new generation starts a new trace");
     assert_eq!(t.str(key::GEN_AI_OPERATION_NAME), Some("execute_tool"));
     assert_eq!(t.str(key::GEN_AI_TOOL_TYPE), Some("function"));
     assert_eq!(t.str(key::GEN_AI_TOOL_NAME), Some("agenda.delete"));
     assert_eq!(t.str(key::GEN_AI_TOOL_CALL_ID), Some("c-1"));
     assert!(
         t.int(key::BOT_DROPPED).is_none(),
-        "표준 속성은 허용 어휘를 그대로 통과한다"
+        "standard attributes pass allowlist untouched"
     );
     assert_eq!(t.status, (2, "tool_failed".to_owned()));
     assert_eq!(
@@ -437,7 +431,11 @@ async fn sampling_follows_the_trace_id_and_zero_exports_nothing() {
         .iter()
         .filter(|r| sample_hit(&SpanIds::attempt(&attempt("half", r, 1)).trace, 0.5))
         .count();
-    assert_eq!(half.spans().len(), want, "모든 프로세스가 같은 결론이다");
+    assert_eq!(
+        half.spans().len(),
+        want,
+        "deterministic trace-ID sampling across processes"
+    );
     assert!((60..140).contains(&want), "{want}");
     assert!(none.spans().is_empty());
 }
@@ -449,7 +447,7 @@ async fn oversized_spans_are_dropped_at_record_time_instead_of_filling_the_queue
     e.record(span("alpha", "r-big", "attempt main").attr(key::BOT_AGENT, "x".repeat(1024 * 1024)));
     e.record(span("alpha", "r-ok", "attempt main").attr(key::BOT_AGENT, "x".repeat(1000)));
     drain(&e).await;
-    let s = e.stats(&pid("alpha")).expect("통계");
+    let s = e.stats(&pid("alpha")).expect("stats");
     assert_eq!((s.sent, s.dropped, s.queued), (1, 1, 0), "{s:?}");
     assert_eq!(c.spans().len(), 1);
 }
@@ -462,7 +460,7 @@ async fn private_spans_never_carry_content_even_for_a_content_enabled_profile() 
     let e = start(vec![("alpha", on)], fast()).await;
     e.record(
         span("alpha", "r-dm", "execute_tool inbox.receive")
-            .attr(key::GEN_AI_TOOL_CALL_ARGUMENTS, "민감 DM 원문")
+            .attr(key::GEN_AI_TOOL_CALL_ARGUMENTS, "sensitive DM payload")
             .attr("bot.private", true),
     );
     e.record(
@@ -474,20 +472,20 @@ async fn private_spans_never_carry_content_even_for_a_content_enabled_profile() 
     let dm = all
         .iter()
         .find(|s| s.str("bot.run.id") == Some("r-dm"))
-        .expect("스팬");
+        .expect("span");
     assert!(
         dm.str(key::GEN_AI_TOOL_CALL_ARGUMENTS).is_none()
             && dm.str("bot.content.dropped") == Some("private")
     );
-    assert!(!raw_contains(&c, "민감 DM 원문") && !raw_contains(&c, "bot.private"));
+    assert!(!raw_contains(&c, "sensitive DM payload") && !raw_contains(&c, "bot.private"));
     let ok = all
         .iter()
         .find(|s| s.str("bot.run.id") == Some("r-ok"))
-        .expect("스팬");
+        .expect("span");
     assert_eq!(
         ok.str(key::GEN_AI_TOOL_CALL_ARGUMENTS),
         Some("{}"),
-        "같은 프로필의 일반 스팬은 내용이 나간다"
+        "non-private spans in the same profile still export content"
     );
 }
 
@@ -501,10 +499,9 @@ fn the_trace_id_ignores_the_claim_epoch_so_wakeups_stay_in_one_trace() {
             ..base.clone()
         })
     };
-    // 승인 대기 뒤 정상 재개는 같은 세대의 새 점유다. 관리 화면(claim 없음)과 워커(claim 있음)가 같은 추적을 가리킨다.
+    // Resuming after waiting for approval advances claim epoch within the same generation.
     assert_eq!(with(None), with(Some(ClaimEpoch(1))));
     assert_eq!(with(Some(ClaimEpoch(1))), with(Some(ClaimEpoch(9))));
-    // 세대가 바뀌면 새 추적이다.
     assert_ne!(
         with(None).trace,
         SpanIds::attempt(&attempt("alpha", "r-1", 4)).trace

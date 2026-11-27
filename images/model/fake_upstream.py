@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""모델 VM 이미지 점검용 가짜 상류(`verify.sh`가 쓴다). 실제 모델도 실제 키도 쓰지 않는다.
+"""Fake upstream for model VM image verification (`verify.sh`). Uses no real model or API key.
 
-`POST /v1/messages`에 고정한 한 줄 답(스트리밍이면 SSE)만 하고, 받은 요청마다 한 줄 JSON(메서드·경로·헤더 유무·크기)을 표준 출력에 남긴다.
-그 밖의 경로는 404, `CONNECT`(프록시로 쓰인 경우)는 403이다 — 점검은 이 기록으로 CLI가 `/v1/messages` 말고 다른 곳에 접속하려 하지 않았는지 본다.
+Responds to `POST /v1/messages` with a fixed reply (SSE when streaming) and logs one JSON line
+per request to stdout. Returns 404 for other paths and 403 for `CONNECT` (proxy attempts) so
+verification can detect outbound requests to other hosts.
 
-사용: fake_upstream.py <바인드할 주소> <포트>   (호스트 전용 망의 게이트웨이 주소에만 바인드한다. 0.0.0.0 금지)
+Usage: fake_upstream.py <bind-host> <port>  (bind only to the host-only network gateway; never 0.0.0.0)
 """
 
 import json
@@ -54,7 +55,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404)
 
     def do_CONNECT(self):
-        # 프록시로 쓰였을 때(점검이 HTTPS_PROXY를 이 서버로 준다): CLI가 다른 호스트에 접속하려 한 시도를 기록하고 거절한다.
+        # Record and reject proxy tunnel attempts when HTTPS_PROXY points here.
         self.record(0)
         self.reply(403)
 
@@ -86,7 +87,7 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
-        pass  # 거절한 접속이 끊기며 생기는 오류는 기록에 섞지 않는다
+        pass  # Keep disconnect errors from rejected connections out of the log.
 
 
 if __name__ == "__main__":

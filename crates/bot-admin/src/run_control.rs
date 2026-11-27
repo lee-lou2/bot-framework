@@ -1,4 +1,4 @@
-//! 운영자가 상세에서 본 실행에 재개·취소 명령을 보낸다.
+//! Operator-only admin API handlers for resuming and cancelling runs.
 
 use crate::{
     api::{self, INVALID, R, S, V},

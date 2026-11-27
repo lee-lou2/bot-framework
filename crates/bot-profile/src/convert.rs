@@ -1,5 +1,4 @@
-//! 검증을 마친 중간 표현을 `bot_core::profile::Snapshot`으로 바꾼다.
-//! core 타입은 데이터뿐이라 상속(지침·env·스킬·지식·스코프)이 이미 적용된 값을 담는다.
+//! Converts validated, assembled profile IR into `bot_core::profile::Snapshot`.
 use crate::{
     hash::canonical_json,
     model::{self, Built, Match, Source, TriggerTarget},
@@ -91,7 +90,7 @@ fn tool(t: &model::Tool) -> Tool {
     Tool {
         server: t.server.clone(),
         revision: t.revision.clone(),
-        // 수신자를 인자로 정하는 전송 도구는 irreversible로 올린 실효 등급을 넘긴다(선언 등급은 판본 해시에 남는다)
+        // Tools with arg-selected recipients escalate to Irreversible; declared class stays in the revision hash.
         class: t.risk(),
         scopes: t.scopes.clone(),
         input: t.input.clone(),

@@ -38,14 +38,13 @@ async fn sync_splits_segments_at_the_effective_time() {
         vec![trigger_spec("morning", "* * * * *", false)],
     );
     db.publish_schedule(set1.clone()).await.unwrap();
-    db.publish_schedule(set1).await.unwrap(); // 같은 정의의 재게시는 아무것도 바꾸지 않는다
+    db.publish_schedule(set1).await.unwrap();
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_schedule_segments")
             .await,
         1
     );
 
-    // 정의가 바뀌면 효력 시각에 구간이 나뉜다
     let mut changed = trigger_spec("morning", "0 9 * * *", false);
     changed.timezone = "Asia/Seoul".into();
     db.backdate_schedule().await;
@@ -64,7 +63,7 @@ async fn sync_splits_segments_at_the_effective_time() {
     let snapshot = db.store.snapshot().await.unwrap();
     assert_eq!(snapshot.triggers.len(), 1);
     let segments = &snapshot.triggers[0].segments;
-    assert_eq!(segments.len(), 2, "커서 이후에 걸친 구간 둘");
+    assert_eq!(segments.len(), 2, "two segments past cursor");
     assert_eq!(
         (
             segments[0].spec.cron.as_str(),
@@ -79,10 +78,13 @@ async fn sync_splits_segments_at_the_effective_time() {
         ),
         ("0 9 * * *", "Asia/Seoul")
     );
-    assert_eq!(segments[0].until, Some(segments[1].from), "구간은 이어진다");
+    assert_eq!(
+        segments[0].until,
+        Some(segments[1].from),
+        "segments must be contiguous"
+    );
     assert!(segments[1].until.is_none());
 
-    // 정의에서 빠진 트리거는 그 시각에 닫힌다
     db.publish_schedule(schedule_set("personal", "r3", vec![]))
         .await
         .unwrap();
@@ -140,7 +142,7 @@ async fn accepts_each_occurrence_once_and_advances_the_cursor() {
             .await
             .unwrap(),
         first,
-        "같은 발생은 같은 run"
+        "same occurrence must return same run"
     );
     let second = db
         .store
@@ -163,7 +165,6 @@ async fn accepts_each_occurrence_once_and_advances_the_cursor() {
         "morning:service:morning"
     );
 
-    // 커서 뒤(이미 지난 것으로 처리된 구간)·아직 오지 않은 시각·정의가 덮지 않는 시각은 받지 않는다
     let behind = db
         .store
         .accept_occurrence(occ("morning", t1 - 60_000), cmd(t1 - 60_000))
@@ -197,7 +198,6 @@ async fn accepts_each_occurrence_once_and_advances_the_cursor() {
         .await;
     assert!(matches!(unknown, Err(Error::Missing)));
 
-    // 저장된 정의와 다른 명령(다른 주체·권한·대상)은 받지 않는다
     let t3 = t2 + 60_000;
     let mut forged = cmd(t3);
     forged.event.principal = PrincipalId("local:owner".into());
@@ -232,7 +232,7 @@ async fn accepts_each_occurrence_once_and_advances_the_cursor() {
     assert_eq!(
         run_count(&db).await,
         2,
-        "거절된 명령은 아무것도 남기지 않는다"
+        "denied commands must leave no runs"
     );
 }
 
@@ -285,7 +285,7 @@ async fn two_schedulers_converge_on_the_same_occurrences() {
         tasks.remove(0).await.unwrap(),
         tasks.remove(0).await.unwrap(),
     );
-    assert_eq!(a, b, "두 스케줄러가 같은 발생에 같은 run을 얻는다");
+    assert_eq!(a, b, "competing schedulers must converge on identical runs");
     assert_eq!(run_count(&db).await, 6);
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_occurrences")
@@ -331,7 +331,6 @@ async fn beat_coalesces_pending_runs_and_keeps_the_last_signal() {
         .accept_occurrence(occ("health", t(1)), cmd(t(1)))
         .await
         .unwrap();
-    // 처리 전(pending)에 더 들어온 신호는 같은 run에 합쳐진다
     assert_eq!(
         db.store
             .accept_occurrence(occ("health", t(2)), cmd(t(2)))
@@ -346,7 +345,7 @@ async fn beat_coalesces_pending_runs_and_keeps_the_last_signal() {
         1
     );
 
-    // 처리 중에 들어온 신호는 마지막 갱신을 놓치지 않도록 다음 run 하나가 된다. 앞의 run이 끝나기 전에는 집히지 않는다
+    // Signals arriving while a beat runs queue a single follow-up that waits for completion.
     let running = db.store.claim().await.unwrap().unwrap();
     assert_eq!(running.attempt.run, a);
     let b = db
@@ -357,7 +356,7 @@ async fn beat_coalesces_pending_runs_and_keeps_the_last_signal() {
     assert_ne!(b, a);
     assert!(
         db.store.claim().await.unwrap().is_none(),
-        "같은 beat는 동시에 하나만 실행한다"
+        "only one run per beat may execute at once"
     );
     assert_eq!(
         db.store
@@ -365,7 +364,7 @@ async fn beat_coalesces_pending_runs_and_keeps_the_last_signal() {
             .await
             .unwrap(),
         b,
-        "기다리는 run에 다시 합쳐진다"
+        "additional signals must coalesce into the waiting run"
     );
     assert_eq!(run_count(&db).await, 2);
 
@@ -414,13 +413,13 @@ async fn expired_beat_and_unrelated_work_both_progress() {
     let original = db.store.claim().await.unwrap().unwrap();
     assert_eq!(original.attempt.run, first);
     let next = beat(cursor + 120_000).await.unwrap();
-    // 후속 beat는 리스 만료보다 먼저 준비됐다. 시간 순서만 보면 선행 beat를 앞지른다.
+    // Give the queued follow-up beat an earlier timestamp than the expired first beat.
     db.sql("update bot_runs set not_before_ms = 1 where state = 'ready'")
         .await;
     db.expire_lease(&first).await;
     let ordinary = db
         .store
-        .accept(accept("work", "ordinary", "일반 질문"))
+        .accept(accept("work", "ordinary", "ordinary question"))
         .await
         .unwrap();
 
@@ -438,7 +437,7 @@ async fn expired_beat_and_unrelated_work_both_progress() {
     );
     assert_eq!(healthy.attempt.run, ordinary);
     db.store
-        .finish(healthy.attempt, done("완료"))
+        .finish(healthy.attempt, done("done"))
         .await
         .unwrap();
     assert!(peer.claim().await.unwrap().is_none());
@@ -450,7 +449,7 @@ async fn expired_beat_and_unrelated_work_both_progress() {
         1
     );
 
-    // 선행 beat가 마지막 시도를 소진하면 같은 키의 후속 beat를 바로 점유할 수 있다.
+    // Exhausting the leading beat's last attempt unblocks claiming the follow-up beat immediately.
     db.expire_lease(&first).await;
     assert_eq!(peer.claim().await.unwrap().unwrap().attempt.run, next);
     assert_eq!(state_of_run(&db, &first).await, "dead");
@@ -516,9 +515,9 @@ async fn occurrence_at_a_segment_boundary_belongs_to_the_old_segment() {
         .await;
     assert!(
         boundary >= db.now_ms().await - 5_000,
-        "효력 시각은 DB 시각 이상이다"
+        "effective time must be near current DB time"
     );
-    // 경계 시각은 (from, until] 규칙에 따라 옛 구간의 정의로만 접수된다
+    // Segments use half-open (from, until] intervals, so `boundary` belongs to the old segment (r1).
     db.sql("update bot_schedule_cursors set cursor_ms = cursor_ms - 7200000")
         .await;
     let old = occurrence_accept(
@@ -528,7 +527,6 @@ async fn occurrence_at_a_segment_boundary_belongs_to_the_old_segment() {
         tool("agenda.list"),
         &["calendar.read"],
     );
-    // 옛 구간의 판본은 r1이고 새 구간의 판본은 r2다
     let accepted = db
         .store
         .accept_occurrence(occ("morning", boundary), old)

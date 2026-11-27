@@ -1,4 +1,4 @@
-//! 도구의 후속 확인 요청(`_meta["bot/wake"]`): 선언한 신뢰 도구만, 결과와 예약을 한 커밋으로, 확정하지 못하면 보류.
+//! Tests for tool-requested follow-up wakes (`_meta["bot/wake"]`).
 
 use super::*;
 use crate::ports::Ran;
@@ -25,7 +25,7 @@ fn result_with(meta: &str) -> Ran {
     )))
 }
 
-/// `report.upload`: 효과 단계를 쓰는 도구(`effects`)이고 `schedule.create`를 선언했다.
+/// `report.upload`: effect-tracked tool declaring `schedule.create`.
 fn waker() -> bot_core::profile::Tool {
     let mut t = tool(Risk::Write, &["upload.write", "schedule.create"]);
     t.effects = true;
@@ -69,9 +69,8 @@ fn a_declared_tool_gets_its_followup_with_the_result_in_one_commit_and_the_model
     let payload = done(upload(&w, "c1"));
     assert_eq!(
         payload, r#"{"content":[{"text":"uploaded","type":"text"}],"isError":false}"#,
-        "모델이 보는 결과에 _meta가 없다"
+        "model payload must not contain _meta"
     );
-    // 예약은 원래 대화에 한 번(at), quiet까지 요청 그대로다
     let wakes = w.schedules.wakes();
     assert_eq!(wakes.len(), 1);
     assert_eq!(wakes[0].0, "verify the upload");
@@ -80,10 +79,9 @@ fn a_declared_tool_gets_its_followup_with_the_result_in_one_commit_and_the_model
         bot_core::schedule::utc::parse_utc("2030-01-01T12:00:00Z").unwrap()
     );
     assert!(wakes[0].2);
-    // 결과는 한 커밋으로 원장에 남았다(떼어 낸 모양 그대로)
     assert!(matches!(&w.ledger.phase("r1", "c1"), CallPhase::Done(p) if p.0 == payload));
     assert_eq!(w.runner.jobs().len(), 1);
-    // 같은 논리 호출을 재전달해도 예약은 하나뿐이고 도구도 다시 실행하지 않는다
+    // Redelivery returns the stored payload without duplicating the wake or re-running.
     assert_eq!(done(upload(&w, "c1")), payload);
     assert_eq!(w.schedules.wakes().len(), 1);
     assert_eq!(w.runner.jobs().len(), 1);
@@ -99,7 +97,7 @@ fn other_meta_entries_stay_and_a_result_without_a_request_is_unchanged() {
         payload.contains(r#""_meta":{"note":"x"}"#) && !payload.contains("bot/wake"),
         "{payload}"
     );
-    // 요청이 없는 결과는 바이트 그대로다
+    // Results without a wake request pass through unchanged.
     w.runner.script(Ran::Done(JsonPayload(
         r#"{"content":[],"isError":false}"#.into(),
     )));
@@ -111,7 +109,7 @@ fn other_meta_entries_stay_and_a_result_without_a_request_is_unchanged() {
 
 #[test]
 fn a_tool_that_did_not_declare_effects_and_the_scope_cannot_ask_for_a_followup() {
-    // 효과 단계를 안 쓰는 도구 / `schedule.create`를 선언하지 않은 도구
+    // Missing `effects` or missing `schedule.create` scope.
     for report in [
         {
             let mut t = waker();
@@ -151,7 +149,7 @@ fn an_error_result_is_not_a_success_so_its_request_is_dropped() {
 #[test]
 fn a_request_a_declared_tool_makes_but_cannot_be_read_holds_the_call() {
     for bad in [
-        r#""bot/wake":{"at":"1970-01-02T00:00:00Z","instruction":"x"}"#, // 장치의 시계보다 앞선 시각
+        r#""bot/wake":{"at":"1970-01-02T00:00:00Z","instruction":"x"}"#, // Timestamp before clock now.
         r#""bot/wake":{"at":"2030-01-01T12:00:00+09:00","instruction":"x"}"#,
         r#""bot/wake":{"at":"2030-01-01T12:00:00Z","instruction":"   "}"#,
         r#""bot/wake":{"at":"2030-01-01T12:00:00Z"}"#,
@@ -169,13 +167,13 @@ fn a_request_a_declared_tool_makes_but_cannot_be_read_holds_the_call() {
             matches!(&w.ledger.phase("r1", "c1"), CallPhase::Held { reason, .. } if reason == "wake_invalid"),
             "{bad}"
         );
-        assert_eq!(w.runner.jobs().len(), 1, "도구는 한 번 실행됐다");
+        assert_eq!(w.runner.jobs().len(), 1, "tool ran once");
     }
 }
 
 #[test]
 fn a_followup_needs_the_requester_to_still_hold_the_scope_and_be_a_person() {
-    // 실행하는 동안 판본이 바뀌어 요청자가 `schedule.create`를 잃었다
+    // Revision change revoked requester's `schedule.create` mid-call.
     let w = wake_world();
     w.runner.script(result_with(WAKE));
     let (catalog, ledger) = (w.catalog.clone(), w.ledger.clone());
@@ -196,7 +194,7 @@ fn a_followup_needs_the_requester_to_still_hold_the_scope_and_be_a_person() {
     assert!(
         matches!(&w.ledger.phase("r1", "c1"), CallPhase::Held { reason, .. } if reason == "wake_denied")
     );
-    // 서비스 주체(정적 예약의 실행)는 예약 주체가 될 수 없다
+    // Service principals cannot own follow-up wakes.
     let w = wake_world();
     w.ledger.add_run(run_context(
         "personal",
@@ -221,7 +219,7 @@ fn a_followup_needs_the_requester_to_still_hold_the_scope_and_be_a_person() {
 
 #[test]
 fn when_the_store_cannot_confirm_the_call_is_held_unless_the_commit_is_found() {
-    // 저장소 장애 / 한도: 확정하지 못했으니 보류한다(예약은 없다)
+    // Store failures hold the call without creating a wake.
     for failure in [Error::Unavailable, Error::Conflict, Error::Denied] {
         let w = wake_world();
         w.schedules.fail_wake_with(Some(failure));
@@ -234,7 +232,7 @@ fn when_the_store_cannot_confirm_the_call_is_held_unless_the_commit_is_found() {
         );
         assert_eq!(w.runner.jobs().len(), 1);
     }
-    // 커밋했는데 응답을 잃었다: 기록을 먼저 보고 완료돼 있으면 그 결과를 돌려준다(보류하지 않는다)
+    // Lost response after commit returns the persisted result instead of holding.
     let w = wake_world();
     w.schedules.lose_wake_response(true);
     w.runner.script(result_with(WAKE));
@@ -242,7 +240,7 @@ fn when_the_store_cannot_confirm_the_call_is_held_unless_the_commit_is_found() {
     assert!(!payload.contains("bot/wake"));
     assert_eq!(w.schedules.wakes().len(), 1);
     assert!(matches!(&w.ledger.phase("r1", "c1"), CallPhase::Done(_)));
-    // 한도(32)에 걸리면 보류한다
+    // Reaching the per-owner schedule cap (32) holds the call.
     let w = wake_world();
     w.schedules.fill("personal", OWNER, 32);
     w.runner.script(result_with(WAKE));
@@ -273,7 +271,7 @@ fn the_runner_payload_shape_round_trips_through_the_extraction() {
     let out = extract(&payload, now);
     assert_eq!(out.payload.0, r#"{"content":[],"isError":false}"#);
     assert!(matches!(out.request, Some(Ok(_))) && !out.is_error);
-    // 모양이 다른 결과(객체가 아님)는 요청이 없다
+    // Non-object or wake-free payloads yield no request.
     for text in ["[]", "\"x\"", "not json", r#"{"content":[]}"#] {
         let out = extract(&JsonPayload(text.into()), now);
         assert!(out.request.is_none() && out.payload.0 == text, "{text}");
@@ -283,7 +281,7 @@ fn the_runner_payload_shape_round_trips_through_the_extraction() {
 
 #[test]
 fn the_current_declaration_of_the_tool_must_still_allow_a_followup_before_the_commit() {
-    // 실행하는 동안 새 판본이 도구의 `schedule.create` 선언(또는 `effects`)을 철회했다. 요청자의 스코프는 그대로다.
+    // New revision revoked the tool's `schedule.create` scope or `effects` mid-call.
     let revoked = [
         {
             let mut t = waker();

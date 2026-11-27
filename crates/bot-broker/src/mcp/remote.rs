@@ -1,12 +1,9 @@
-//! 원격(Streamable HTTP) MCP 서버의 접속 대상. 호스트 설정 `servers.<별칭>`의 `{"transport": "http", "url": …, "auth": {"kind": "bearer", "secret": …}}`.
+//! Remote Streamable HTTP MCP server endpoint parsing, validation, and revision hashing.
 //!
-//! 주소 규칙(위반하면 시작하지 않는다):
-//! - `https`만. `http`는 **루프백 IPv4 주소**(`127.0.0.0/8`)일 때만(시험·로컬). `localhost` 같은 이름은 안 된다. IPv6 리터럴은 허용 목록(`호스트:포트`)에 적을 수 없어 쓰지 않는다.
-//! - 사용자 정보(`user:pass@`)·조각(`#…`)은 거절한다. 인증은 `auth`로만 한다.
-//! - 이름은 소문자 ASCII(IDN은 punycode)다. **숫자로 끝나는 호스트**(WHATWG URL의 «끝이 수인 호스트»: 마지막 라벨이 십진수이거나 `0x` 16진수)는 URL 파서(`reqwest`)와
-//!   운영체제가 IPv4로 읽으므로 이름이 아니다: 점으로 나눈 십진수 네 마디의 정규 표기(`93.184.216.34`)만 받고, 16진·8진·정수·축약·끝의 점(`0x7f000001`·`2130706433`·
-//!   `0177.0.0.1`·`127.1`·`1.2.3.4.`)은 거절한다. 정책이 «이름»으로 본 것을 연결 쪽이 IP로 읽어 이름 풀이 검사를 건너뛰는 틈이 없다.
-//! - 접속하는 곳은 이 주소의 `호스트:포트` 하나뿐이다(리다이렉트를 따라가지 않는다).
+//! - Requires `https` except for loopback IPv4 literals (`127.0.0.0/8`); IPv6 literals, userinfo, and fragments are rejected.
+//! - Rejects WHATWG "ends in a number" non-canonical numeric hosts (hex/octal/integer/short IPv4/trailing dot) so URL parsers and OS resolvers cannot bypass hostname egress checks.
+//! - Connections target only this `host:port` with redirects disabled.
+
 use crate::{egress::canon_host, resolve::HostPort};
 use bot_core::id::SecretName;
 use sha2::{Digest, Sha256};
@@ -16,14 +13,14 @@ const MAX_URL: usize = 2048;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Remote {
-    /// `https`이면 true. `http`는 루프백 IPv4 주소일 때만 만들어진다.
+    /// True for `https`; `false` is constructed only for loopback IPv4 literals.
     pub tls: bool,
-    /// 정규화한 호스트: 이름은 소문자, IPv4는 정규 점-십진 표기
+    /// Normalized lowercase hostname or canonical dotted-decimal IPv4 address.
     pub host: String,
     pub port: u16,
-    /// `/`로 시작하는 경로와 질의
+    /// Path and query beginning with `/`.
     pub path: String,
-    /// bearer 값을 담은 자격 이름(프로필 이름공간). 값은 요청 머리에만 들어간다. 없으면 인증 머리를 보내지 않는다.
+    /// Profile-scoped secret name sent only in the Authorization header when set.
     pub bearer: Option<SecretName>,
 }
 
@@ -33,7 +30,6 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
 }
 
 impl Remote {
-    /// 주소를 해석한다. 규칙을 어기면 사람이 읽을 이유를 돌려준다.
     pub fn parse(url: &str, bearer: Option<SecretName>) -> Result<Self, String> {
         if url.is_empty()
             || url.len() > MAX_URL
@@ -41,58 +37,65 @@ impl Remote {
             || url.bytes().any(|b| b.is_ascii_control() || b == b' ')
         {
             return Err(format!(
-                "url은 공백·제어 문자 없는 ASCII {MAX_URL}자 이하여야 해요(이름은 punycode로 적으세요)"
+                "url must be ASCII without spaces or control chars and at most {MAX_URL} bytes (use punycode for IDN)"
             ));
         }
         let (scheme, rest) = url
             .split_once("://")
-            .ok_or("url은 `https://…` 모양이어야 해요")?;
+            .ok_or("url must have a scheme (https://...)")?;
         let tls = match scheme.to_ascii_lowercase().as_str() {
             "https" => true,
             "http" => false,
-            _ => return Err("url은 https여야 해요(루프백 IPv4 주소만 http를 쓸 수 있어요)".into()),
+            _ => {
+                return Err(
+                    "url must use https (http is allowed only for loopback IPv4 addresses)".into(),
+                );
+            }
         };
         if rest.contains('#') {
-            return Err("url에 조각(`#…`)을 쓸 수 없어요".into());
+            return Err("url must not contain a fragment (#...)".into());
         }
         let end = rest.find(['/', '?']).unwrap_or(rest.len());
         let (authority, tail) = rest.split_at(end);
         if authority.contains('@') {
             return Err(
-                "url에 사용자 정보(`user:pass@`)를 쓸 수 없어요 — 인증은 `auth.bearer`로 해요"
-                    .into(),
+                "url must not contain userinfo (user:pass@); configure auth.bearer instead".into(),
             );
         }
         let (host, port) = split_authority(authority)?;
         if host.contains(':') {
-            return Err("IPv6 리터럴 주소는 쓸 수 없어요(허용 목록 `호스트:포트`에 적을 수 없어요) — 이름이나 IPv4 주소를 쓰세요".into());
+            return Err(
+                "IPv6 literal addresses are not supported; use a hostname or IPv4 address".into(),
+            );
         }
         let port = match port {
             Some(text) => text
                 .parse::<u16>()
                 .ok()
                 .filter(|p| *p != 0 && text.bytes().all(|b| b.is_ascii_digit()))
-                .ok_or("url의 포트는 1~65535여야 해요")?,
+                .ok_or("url port must be between 1 and 65535")?,
             None if tls => 443,
             None => 80,
         };
         let lower = host.to_ascii_lowercase();
         let host = if ends_in_number(&lower) {
-            // URL 파서와 운영체제가 IPv4로 읽는 호스트: 정규 점-십진 표기만(다른 표기는 같은 주소를 이름 풀이 검사 없이 가리킬 수 있다)
+            // Hosts parsed as IPv4 by URL parsers/OS must use canonical dotted-decimal form.
             let ip = lower
                 .parse::<Ipv4Addr>()
                 .ok()
                 .filter(|ip| ip.to_string() == lower)
                 .ok_or(
-                    "url의 호스트가 비정규 숫자 표기예요 — 점으로 나눈 십진수 네 마디(`93.184.216.34`)만 쓸 수 있어요(16진·8진·정수·축약·끝의 점은 안 돼요)",
+                    "url host uses a non-canonical numeric form; use canonical dotted-decimal IPv4 (e.g. 93.184.216.34)",
                 )?;
             if !tls && !ip.is_loopback() {
-                return Err("http는 루프백 IPv4 주소(`127.0.0.0/8`)만 쓸 수 있어요".into());
+                return Err(
+                    "http is allowed only for loopback IPv4 addresses (127.0.0.0/8)".into(),
+                );
             }
             ip.to_string()
         } else if !tls {
             return Err(
-                "http는 루프백 IPv4 주소(`127.0.0.0/8`)만 쓸 수 있어요 — 이름이면 https를 쓰세요"
+                "http is allowed only for loopback IPv4 addresses (127.0.0.0/8); use https for hostnames"
                     .into(),
             );
         } else {
@@ -112,7 +115,6 @@ impl Remote {
         })
     }
 
-    /// 허용 목록에 적는 `호스트:포트`.
     pub fn target(&self) -> HostPort {
         HostPort {
             host: self.host.clone(),
@@ -120,12 +122,12 @@ impl Remote {
         }
     }
 
-    /// 사람이 읽는 `호스트:포트`(진단·허용 목록 안내용). 경로·질의는 싣지 않는다.
+    /// `host:port` without path or query for diagnostics and allowlist messages.
     pub fn target_text(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
 
-    /// 서버 설치 판본. 승인에 묶이는 값이라 주소·접속 방식·자격 이름 중 하나라도 바뀌면 달라진다(옛 승인이 바뀐 목적지에 쓰이지 않는다).
+    /// Stable revision hash bound into approvals so scheme, endpoint, path, or credential changes invalidate prior approvals.
     pub fn revision(&self) -> String {
         let mut hash = Sha256::new();
         hash.update(b"bot-server-v1-remote\0");
@@ -144,16 +146,16 @@ impl Remote {
     }
 }
 
-/// `호스트[:포트]` 또는 `[IPv6][:포트]`를 나눈다(IPv6는 `:`가 든 호스트로 돌려주고 부르는 쪽이 거절한다).
+/// Splits `host[:port]` or `[IPv6][:port]`; returns IPv6 with `:` so the caller rejects it.
 fn split_authority(authority: &str) -> Result<(&str, Option<&str>), String> {
     if let Some(inner) = authority.strip_prefix('[') {
-        let (ip, after) = inner.split_once(']').ok_or("url의 `[`가 닫히지 않았어요")?;
+        let (ip, after) = inner.split_once(']').ok_or("unclosed '[' in url host")?;
         return match after {
             "" => Ok((ip, None)),
             _ => after
                 .strip_prefix(':')
                 .map(|port| (ip, Some(port)))
-                .ok_or_else(|| "url의 호스트 뒤에는 `:포트`만 올 수 있어요".to_owned()),
+                .ok_or_else(|| "only ':port' may follow url host".to_owned()),
         };
     }
     Ok(match authority.rsplit_once(':') {
@@ -162,7 +164,7 @@ fn split_authority(authority: &str) -> Result<(&str, Option<&str>), String> {
     })
 }
 
-/// WHATWG URL의 «끝이 수인 호스트» 검사: 마지막 라벨(끝의 빈 라벨 하나는 건너뛴다)이 십진수이거나 `0x`로 시작하는 16진수(`0x`만 있어도)면 URL 파서가 IPv4로 읽는다.
+/// WHATWG URL "ends in a number" check: a final non-empty label that is decimal or `0x`-prefixed hex is parsed as IPv4.
 fn ends_in_number(host: &str) -> bool {
     let mut parts: Vec<&str> = host.split('.').collect();
     if parts.last() == Some(&"") {
@@ -179,7 +181,6 @@ fn ends_in_number(host: &str) -> bool {
     !last.is_empty() && (last.bytes().all(|b| b.is_ascii_digit()) || hex)
 }
 
-/// 이름 호스트: 정규화할 수 있어야 하고 라벨이 `-`로 시작하거나 끝나지 않아야 한다(숫자로 끝나는 호스트는 부르기 전에 걸러진다).
 fn named(host: &str) -> Result<String, String> {
     canon_host(host)
         .filter(|name| {
@@ -187,7 +188,7 @@ fn named(host: &str) -> Result<String, String> {
                 .all(|label| !label.starts_with('-') && !label.ends_with('-'))
         })
         .ok_or_else(|| {
-            "url의 호스트가 올바른 이름이 아니에요(소문자·숫자·`.`·`-`, 라벨이 `-`로 시작하거나 끝나면 안 돼요)"
+            "url host is not a valid hostname (lowercase ASCII, digits, '.', '-'; labels cannot start or end with '-')"
                 .to_owned()
         })
 }
@@ -220,8 +221,7 @@ mod tests {
             (false, "127.0.0.1", 9000)
         );
         assert_eq!(ok("http://127.9.9.9/").port, 80);
-        // IPv6 리터럴은 허용 목록 문법에 쓸 수 없어 쓰지 않는다(아래 거절 목록)
-        // https에 IP 리터럴을 써도 되지만 연결 때 공개 주소 검사를 받는다
+        // HTTPS IP literals are parsed here and checked against public-IP egress rules at connect time.
         assert_eq!(ok("https://93.184.216.34/mcp").host, "93.184.216.34");
     }
 
@@ -252,7 +252,7 @@ mod tests {
             "https://127.1/",
             "https://2130706433/",
             "https://0x7f.1/",
-            // 운영체제·URL 파서가 IPv4로 읽는 비정규 숫자 표기: 16진·8진·정수·축약·끝의 점
+            // Non-canonical numeric forms parsed as IPv4 by URL parsers/OS.
             "https://0x7f000001/",
             "https://0X7F000001/mcp",
             "https://0x7f.0x0.0x0.0x1/",

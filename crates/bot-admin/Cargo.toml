@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# 가짜 저장소(`fake`)와 시험 보조. 다른 크레이트의 시험·데모에서도 쓸 수 있다.
+# In-memory fake store (`fake`) and test helpers for downstream tests and demos.
 testing = []
 
 [dependencies]

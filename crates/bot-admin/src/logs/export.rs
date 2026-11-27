@@ -1,5 +1,5 @@
-//! OTLP 로그 내보내기 실행기: 한정 큐·배치·차단기·활성화 문·가림 장치를 두고 백그라운드로 보낸다.
-//! 내보내기 실패는 카운터·분류에만 기록하고 `tracing` 로그를 남기지 않는다(재귀 방지).
+//! Background OTLP log exporter with bounded queue, batching, circuit breaker, activation gate, and redaction.
+//! Export errors update counters only and never emit `tracing` events to avoid recursion.
 
 use super::otlp::{self, Out};
 use crate::{
@@ -28,7 +28,6 @@ const MAX_FIELD_CHARS: usize = 256;
 const MAX_ATTRS: usize = 32;
 const MAX_ENTRY_BYTES: usize = 64 * 1024;
 
-/// OTLP 로그 내보내기 수준 하한(호스트 `admin.logs.level`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum LogLevel {
     Debug,
@@ -68,7 +67,6 @@ impl LogLevel {
     }
 }
 
-/// 호스트 단위 OTLP 로그 내보내기 설정(`admin.logs`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogConfig {
     pub name: String,
@@ -84,7 +82,6 @@ impl LogConfig {
     }
 }
 
-/// 내보내기 큐에 넣을 구조화 로그 한 건.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogEntry {
     pub timestamp_nano: u64,
@@ -156,7 +153,6 @@ struct Shared {
     c: Counters,
 }
 
-/// OTLP 로그 내보내기 핸들. 꺼져 있어도(`None`) `record`는 안전하게 무시한다.
 pub struct LogExporter {
     tx: Option<mpsc::Sender<LogEntry>>,
     min_level: LogLevel,
@@ -285,7 +281,7 @@ impl LogExporter {
         };
         let runtime = tokio::runtime::Handle::try_current();
         if runtime.is_err() && target.is_some() {
-            return Err("로그 내보내기는 tokio 런타임 안에서 시작해야 한다".to_owned());
+            return Err("log exporter must be started inside a tokio runtime".to_owned());
         }
         let client = if let Some(t) = &target {
             match custom_client {
@@ -358,7 +354,6 @@ impl LogExporter {
         }
     }
 
-    /// 구조화 로그 한 건을 비동기 큐에 넣는다(동기·무대기·무실패).
     pub fn record(&self, entry: LogEntry) {
         let Some(tx) = &self.tx else { return };
         if entry.level < self.min_level {

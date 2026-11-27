@@ -1,5 +1,4 @@
-//! 화면의 순수 규칙(`ui/holdpin.js` 등)을 노드로 시험한다. 노드가 없으면 건너뛴다(`BOT_REQUIRE_NODE=1`이면 없을 때 실패).
-//! 브라우저 없이 돌 수 있도록 규칙은 화면 요소를 모르는 순수 함수로 두었다.
+//! Runs pure UI rule tests (`tests/js/*.mjs`) under Node.js; skips if `node` is absent unless `BOT_REQUIRE_NODE=1`.
 
 use std::{io::ErrorKind, path::Path, process::Command};
 
@@ -7,14 +6,14 @@ use std::{io::ErrorKind, path::Path, process::Command};
 fn the_pure_ui_rules_pass_their_node_tests() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/js");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .expect("tests/js 폴더")
+        .expect("tests/js dir")
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "mjs"))
         .collect();
     files.sort();
-    assert!(!files.is_empty(), "노드 시험 파일이 있어야 한다");
-    // TAP 형식으로 받아 «몇 건 통과·실패 0건»을 확인한다(출력 형식이 노드 판본마다 달라지지 않게 고정).
+    assert!(!files.is_empty(), "expected at least one Node test file");
+    // Pin TAP output format so pass/fail parsing stays stable across Node versions.
     let run = Command::new("node")
         .args(["--test", "--test-reporter=tap"])
         .args(&files)
@@ -25,17 +24,20 @@ fn the_pure_ui_rules_pass_their_node_tests() {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr),
             );
-            assert!(out.status.success(), "노드 시험 실패:\n{stdout}\n{stderr}");
-            assert!(stdout.contains("# fail 0"), "실패가 있다:\n{stdout}");
+            assert!(
+                out.status.success(),
+                "Node tests failed:\n{stdout}\n{stderr}"
+            );
+            assert!(stdout.contains("# fail 0"), "failures present:\n{stdout}");
             let passed = stdout
                 .lines()
                 .find_map(|l| l.strip_prefix("# pass "))
                 .and_then(|n| n.trim().parse::<u32>().ok());
             assert!(
                 passed.is_some_and(|n| n >= 1),
-                "통과한 시험이 없다:\n{stdout}"
+                "no passing tests reported:\n{stdout}"
             );
-            // 파일을 지우거나 이름을 바꿔 조용히 빠지지 않게, 핵심 시험의 이름을 출력에서 찾는다.
+            // Assert key test titles so deleted or renamed files cannot silently stop running.
             for must in [
                 "the first confirmation pins the step",
                 "pause sends exactly the approval id and epoch the screen saw",
@@ -46,15 +48,17 @@ fn the_pure_ui_rules_pass_their_node_tests() {
                 "every button variant that paints its own background has a hover rule that keeps it",
                 "runs URL hash stays consistent across revisit, bare tab switch, and hashchange back",
             ] {
-                assert!(stdout.contains(must), "빠진 화면 시험: {must}");
+                assert!(stdout.contains(must), "missing UI test: {must}");
             }
         }
         Err(e)
             if e.kind() == ErrorKind::NotFound
                 && std::env::var_os("BOT_REQUIRE_NODE").is_none() =>
         {
-            eprintln!("node가 없어 화면 규칙 시험을 건너뛴다(BOT_REQUIRE_NODE=1이면 실패로 본다)");
+            eprintln!(
+                "skipping UI rule tests because node is unavailable (set BOT_REQUIRE_NODE=1 to fail)"
+            );
         }
-        Err(e) => panic!("node를 실행할 수 없다: {e}"),
+        Err(e) => panic!("failed to run node: {e}"),
     }
 }

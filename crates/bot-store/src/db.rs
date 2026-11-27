@@ -1,4 +1,4 @@
-//! 연결·설정·오류 변환·마이그레이션. 시각은 DB의 `bot_now_ms()`만 쓴다.
+//! Database pool setup, configuration, error mapping, and embedded SQL migrations (all timestamps use DB `bot_now_ms()`).
 
 use bot_core::port::Error;
 use sqlx::{
@@ -11,7 +11,7 @@ use std::{borrow::Cow, sync::Arc, time::Duration};
 pub(crate) type Tx<'a> = Transaction<'a, Postgres>;
 pub(crate) type R<T> = Result<T, Fail>;
 
-/// 저장소 내부 오류. 포트 경계에서 `bot_core::port::Error`로 바뀐다.
+/// Internal store error converted to `bot_core::port::Error` at port boundaries.
 #[derive(Debug)]
 pub enum Fail {
     Core(Error),
@@ -31,7 +31,7 @@ impl From<Error> for Fail {
 }
 
 impl Fail {
-    /// DB 오류는 SQLSTATE 코드만 로그에 남기고 `Unavailable`로 바꾼다(문장·값은 남기지 않는다).
+    /// Logs only the SQLSTATE (never queries or values) and maps database errors to `Error::Unavailable`.
     pub fn into_core(self) -> Error {
         match self {
             Fail::Core(e) => e,
@@ -54,19 +54,19 @@ impl Fail {
     }
 }
 
-/// 저장소 설정. 기본값은 개인 비서 한 대 규모에 맞춘다.
+/// Store runtime configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// 이 프로세스의 소유자 표지(진단용). 판정에는 쓰지 않는다.
+    /// Diagnostic worker label; not used for fencing decisions.
     pub worker: String,
     pub lease: Duration,
-    /// 실패·리스 만료로 이 횟수를 쓰면 dead letter가 된다.
+    /// Attempts before a failing or lease-expired run moves to dead-letter.
     pub max_attempts: u32,
     pub backoff_base: Duration,
     pub backoff_cap: Duration,
-    /// 회신 발송 점유 시간. begin 전에 끝나면 재점유되고, sending에서 끝나면 보류된다.
+    /// Outbox claim lease duration; unbegun expiries reclaim, `sending` expiries hold.
     pub delivery_lease: Duration,
-    /// 저장소 연결 풀의 최대 연결 수(기본 10, 1 미만은 1로 올린다).
+    /// Maximum PG pool connections (clamped to at least 1).
     pub max_connections: u32,
 }
 
@@ -229,8 +229,7 @@ fn migrator() -> Migrator {
 }
 
 impl Store {
-    /// 저장소가 쓰는 풀 설정(최대 연결 수 지정, 1 미만은 1로 올린다). 반납되는 연결은 `ping`으로 마저 보내지 못한 ROLLBACK을 끝낸다 —
-    /// 오류로 버려진 트랜잭션이 연결 안에서 행 잠금을 쥔 채 남지 않게 한다.
+    /// Builds pool options with an `after_release` ping so dropped transactions finish ROLLBACK before releasing row locks.
     pub fn pool_options_with(max_connections: u32) -> PgPoolOptions {
         PgPoolOptions::new()
             .max_connections(max_connections.max(1))
@@ -242,7 +241,6 @@ impl Store {
             })
     }
 
-    /// 저장소가 쓰는 기본 풀 설정(최대 10 연결). 밖에서 풀을 만들 때도 이 설정을 쓴다.
     pub fn pool_options() -> PgPoolOptions {
         Self::pool_options_with(10)
     }
@@ -254,8 +252,7 @@ impl Store {
         Ok(Store::from_pool(pool, cfg))
     }
 
-    /// 접속하지 않고 주소 형식만 본다(`connect`가 쓰는 것과 같은 구문 분석). 이유와 주소는 돌려주지도 남기지도 않는다 — 구문 분석기는 모르는
-    /// 매개변수의 **값**을 경고로 남기므로(예: 주소에 든 `sslpassword`) 이 호출 동안은 기록을 받지 않는다.
+    /// Validates connection URL syntax without connecting, suppressing tracing so sqlx never logs unknown parameter values (e.g. `sslpassword`).
     pub fn check_url(url: &str) -> bool {
         use std::str::FromStr;
         tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
@@ -271,7 +268,7 @@ impl Store {
         }
     }
 
-    /// 마이그레이션은 검사합이 맞아야 하고, 같은 DB에 동시에 돌려도 한 번만 적용된다.
+    /// Runs checksum-verified migrations serialized across concurrent processes.
     pub async fn migrate(&self) -> R<()> {
         migrator().run(&self.pool).await.map_err(|e| {
             tracing::warn!("store migration failed: {e}");
@@ -310,7 +307,6 @@ pub(crate) fn time_to_ms(t: std::time::SystemTime) -> i64 {
     }
 }
 
-/// 한 열을 문자열로 읽는 줄임. 열 이름 오타는 시험이 잡는다.
 pub(crate) fn text(row: &PgRow, col: &str) -> String {
     use sqlx::Row;
     row.get::<String, _>(col)

@@ -10,7 +10,6 @@ fn schema() -> Value {
     json!({"type": "object", "properties": {"event": {"type": "string"}}})
 }
 
-/// 가짜 서버 한 대와 이어진 세션. 서버 태스크는 세션이 살아 있는 동안 계속 읽는다.
 fn connect(server: Server) -> (Session, Arc<Recorder>) {
     let (to_server, from_client) = duplex(1 << 16);
     let (to_client, from_server) = duplex(1 << 16);
@@ -97,7 +96,6 @@ async fn requests_from_the_server_are_refused_and_notifications_ignored_while_wa
         s.await_result(id, SHORT).await.unwrap()["content"][0]["text"],
         "ok"
     );
-    // 세션이 열려 있는 동안 서버가 거절 응답을 읽는다
     for _ in 0..50 {
         if rec.client_replies.lock().unwrap().len() >= 2 {
             break;
@@ -203,21 +201,18 @@ fn only_text_results_in_the_expected_shape_are_accepted() {
     }
 }
 
-/// 넘김 표식과 함께 온 다른 `_meta` 항목(후속 확인이 아닌 것)은 내용을 버리되 «표식만 온 것이 아니다»는 남긴다 — 그래야 브로커가 `invalid_pass`로 닫는다.
-/// 표식이 없는 결과의 다른 `_meta`는 지금까지처럼 조용히 버린다.
+/// Extra `_meta` alongside `bot/pass` is dropped but flagged (`bot/extra`) so the broker rejects as `invalid_pass`.
 #[test]
 fn a_pass_marker_with_other_meta_keeps_a_flag_and_other_meta_is_dropped_without_a_marker() {
     let parse = |meta: Value| {
         parse_result(&json!({"content": [], "isError": false, "_meta": meta})).unwrap()
     };
-    // 표식만: 표지 없음
     let alone = parse(json!({"bot/pass": true}));
     assert!(!alone.meta_extra);
     assert_eq!(
         payload(&alone).unwrap(),
         r#"{"_meta":{"bot/pass":true},"content":[],"isError":false}"#
     );
-    // 표식 + 다른 항목(무엇이든): 내용은 없고 표지만 남는다
     for other in [
         json!({"bot/pass": true, "x": 1}),
         json!({"bot/pass": true, "bot/other": {"secret": "s"}}),
@@ -231,7 +226,6 @@ fn a_pass_marker_with_other_meta_keeps_a_flag_and_other_meta_is_dropped_without_
             "{other}"
         );
     }
-    // 표식이 없으면 다른 항목은 버리고 표지도 싣지 않는다(후속 확인만 남는다)
     let none = parse(json!({"x": 1}));
     assert!(none.meta_extra);
     assert_eq!(payload(&none).unwrap(), r#"{"content":[],"isError":false}"#);
@@ -280,12 +274,10 @@ fn only_the_wake_request_survives_from_the_result_meta() {
     });
     let out = parse_result(&result).unwrap();
     assert_eq!(out.wake, Some(wake.clone()));
-    // 모델에게 가는 모양에는 `bot/wake`만 실리고(브로커가 곧바로 떼어 낸다) 다른 `_meta`는 버린다
     assert_eq!(
         payload(&out).unwrap(),
         r#"{"_meta":{"bot/wake":{"at":"2030-01-01T12:00:00Z","instruction":"check","quiet":true}},"content":[{"text":"done","type":"text"}],"isError":false}"#
     );
-    // `_meta`가 없거나 객체가 아니거나 키가 없으면 요청이 없다
     for result in [
         json!({"content": []}),
         json!({"content": [], "_meta": "text"}),

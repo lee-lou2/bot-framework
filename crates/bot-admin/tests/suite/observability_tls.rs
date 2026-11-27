@@ -1,5 +1,4 @@
-//! 실제 HTTPS(TLS) 전송 검증: 로컬 CA + 서버 인증서 체인과 Python stdlib ThreadingHTTPServer로
-//! OTLP 추적·OTLP 로그·Sentry Envelope의 실제 TLS 핸드셰이크와 리다이렉트 거절을 확인한다.
+//! Real HTTPS (TLS) transport verification for OTLP traces, OTLP logs, and Sentry envelopes, including redirect refusal.
 
 use bot_admin::{
     issues::{IssueConfig, IssueExporter, IssueKind, IssueOptions},
@@ -63,8 +62,8 @@ fn run_openssl(args: &[&str]) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .expect("openssl 실행");
-    assert!(status.success(), "openssl 실패: {args:?}");
+        .expect("run openssl");
+    assert!(status.success(), "openssl failed: {args:?}");
 }
 
 struct TlsServerGuard {
@@ -80,7 +79,7 @@ impl Drop for TlsServerGuard {
     }
 }
 
-/// rustls-webpki 검증을 통과하는 로컬 CA + 서버(localhost, 127.0.0.1) 인증서 쌍을 만든다.
+/// Generates a local CA + server cert pair (`localhost`, `127.0.0.1`) accepted by rustls-webpki.
 fn make_tls_chain(dir: &Path) -> (Vec<u8>, std::path::PathBuf, std::path::PathBuf) {
     let ca_key = dir.join("ca.key");
     let ca_cert = dir.join("ca.pem");
@@ -204,7 +203,7 @@ srv.serve_forever()
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("로컬 HTTPS 목 서버 시작");
+        .expect("start local HTTPS mock server");
     let mut guard = TlsServerGuard { child, dir };
 
     let mut port = None;
@@ -217,7 +216,7 @@ srv.serve_forever()
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let port = port.expect("HTTPS 서버 포트 대기 시간 초과");
+    let port = port.expect("timed out waiting for HTTPS server port");
 
     let trace_cfg = BTreeMap::from([
         (
@@ -256,7 +255,7 @@ srv.serve_forever()
     ]);
     let traces =
         Exporter::start_with_root_pem(trace_cfg, None, Redactor::default(), fast(), &ca_pem)
-            .expect("HTTPS 추적 시작");
+            .expect("start HTTPS trace exporter");
     for p in ["alpha", "redir"] {
         let a = Attempt {
             profile: ProfileId(p.into()),
@@ -295,7 +294,7 @@ srv.serve_forever()
         fast(),
         &ca_pem,
     )
-    .expect("HTTPS 로그 시작");
+    .expect("start HTTPS log exporter");
     logs.record(LogEntry {
         timestamp_nano: now_nano(),
         level: LogLevel::Info,
@@ -328,7 +327,7 @@ srv.serve_forever()
         },
         &ca_pem,
     )
-    .expect("HTTPS 이슈 시작");
+    .expect("start HTTPS issue exporter");
     issues.report(IssueEvent::new(
         IssueLevel::Error,
         "tls_error",

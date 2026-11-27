@@ -1,4 +1,4 @@
-//! 폴더 구조 검사. 알려진 이름만 허용한다 — 오타 난 `trigger.yaml`이 조용히 무시되면 안 된다.
+//! Profile directory layout validation; rejects unknown entries so typos are never silently ignored.
 use crate::{issue::Issues, limits::Limits, names, scan::Tree};
 
 #[derive(Debug, Default)]
@@ -7,13 +7,11 @@ pub struct SkillFiles {
     pub dir: String,
     pub skill_md: Option<String>,
     pub tools: Option<String>,
-    /// `tools.lock.yaml`(서버가 내세우는 도구 정의를 적어 둔 파일, `bot mcp sync`가 만든다)
     pub lock: Option<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct AgentFiles {
-    /// 계보 경로(`main/research`)
     pub id: String,
     pub parent: Option<String>,
     pub agent_md: String,
@@ -29,11 +27,10 @@ pub struct Layout {
     pub rules: Option<String>,
     pub knowledge: Vec<String>,
     pub skills: Vec<SkillFiles>,
-    /// 부모가 자식보다 앞선다.
+    /// Ordered parent-before-child.
     pub agents: Vec<AgentFiles>,
 }
 
-/// 계보 경로(`main/research`)의 폴더(`agents/main/agents/research`)
 pub fn agent_dir(id: &str) -> String {
     format!("agents/{}", id.replace('/', "/agents/"))
 }
@@ -56,12 +53,12 @@ pub fn discover(tree: &Tree, limits: &Limits, issues: &mut Issues) -> Layout {
                 issues,
                 "unknown-file",
                 file,
-                "프로필 폴더에는 profile.yaml·rules.md만 둘 수 있어요",
+                "Profile root may only contain profile.yaml and rules.md",
             ),
         }
     }
     if tree.file("profile.yaml").is_none() {
-        issues.error("missing-file", "profile.yaml", "profile.yaml이 필요해요");
+        issues.error("missing-file", "profile.yaml", "profile.yaml is required");
     }
     for dir in tree.child_dirs("") {
         if !matches!(dir, "agents" | "knowledge" | "skills") {
@@ -69,7 +66,7 @@ pub fn discover(tree: &Tree, limits: &Limits, issues: &mut Issues) -> Layout {
                 issues,
                 "unknown-dir",
                 dir,
-                "프로필 폴더에는 agents·knowledge·skills만 둘 수 있어요",
+                "Profile root may only contain agents, knowledge, and skills directories",
             );
         }
     }
@@ -80,10 +77,9 @@ pub fn discover(tree: &Tree, limits: &Limits, issues: &mut Issues) -> Layout {
 }
 
 fn unknown(issues: &mut Issues, code: &'static str, path: &str, hint: &str) {
-    issues.error(code, path, format!("알 수 없는 항목이에요. {hint}"));
+    issues.error(code, path, format!("Unknown entry. {hint}"));
 }
 
-/// `dir/` 아래 모든 문서. 확장자는 소문자 `exts`만 허용한다.
 fn documents(tree: &Tree, dir: &str, exts: &[&str], issues: &mut Issues) -> Vec<String> {
     let mut found = Vec::new();
     for path in tree.files_under(dir) {
@@ -95,11 +91,11 @@ fn documents(tree: &Tree, dir: &str, exts: &[&str], issues: &mut Issues) -> Vec<
                 .iter()
                 .map(|e| format!(".{e}"))
                 .collect::<Vec<_>>()
-                .join("·");
+                .join(", ");
             issues.error(
                 "bad-document",
                 path,
-                format!("이 폴더에는 {allowed} 파일만 둘 수 있어요"),
+                format!("Only {allowed} files are allowed in this directory"),
             );
         }
     }
@@ -112,7 +108,7 @@ fn skills(tree: &Tree, dir: &str, limits: &Limits, issues: &mut Issues) -> Vec<S
             issues,
             "unknown-file",
             &join(dir, file),
-            "스킬은 폴더로 만들어요(`skills/<이름>/SKILL.md`)",
+            "Skills must be subdirectories (`skills/<name>/SKILL.md`)",
         );
     }
     let names = tree.child_dirs(dir);
@@ -120,7 +116,7 @@ fn skills(tree: &Tree, dir: &str, limits: &Limits, issues: &mut Issues) -> Vec<S
         issues.error(
             "too-many",
             dir,
-            format!("스킬이 너무 많아요(최대 {})", limits.max_skills),
+            format!("Too many skills (max {})", limits.max_skills),
         );
     }
     let mut out = Vec::new();
@@ -130,7 +126,7 @@ fn skills(tree: &Tree, dir: &str, limits: &Limits, issues: &mut Issues) -> Vec<S
             issues.error(
                 "bad-name",
                 &path,
-                "스킬 이름은 소문자로 시작하는 소문자·숫자·`-` 63자 이하예요",
+                "Skill name must start with a lowercase letter and use only lowercase letters, digits, and `-` (max 63 chars)",
             );
             continue;
         }
@@ -148,7 +144,7 @@ fn skills(tree: &Tree, dir: &str, limits: &Limits, issues: &mut Issues) -> Vec<S
                     issues,
                     "unknown-file",
                     &join(&path, file),
-                    "스킬 폴더에는 SKILL.md·tools.yaml·tools.lock.yaml만 둘 수 있어요",
+                    "Skill directory may only contain SKILL.md, tools.yaml, and tools.lock.yaml",
                 ),
             }
         }
@@ -157,14 +153,14 @@ fn skills(tree: &Tree, dir: &str, limits: &Limits, issues: &mut Issues) -> Vec<S
                 issues,
                 "unknown-dir",
                 &join(&path, sub),
-                "스킬 폴더에는 하위 폴더를 둘 수 없어요",
+                "Skill directory cannot contain subdirectories",
             );
         }
         if skill.skill_md.is_none() {
             issues.error(
                 "missing-file",
                 &join(&path, "SKILL.md"),
-                "스킬에는 SKILL.md가 필요해요",
+                "Skill requires SKILL.md",
             );
         }
         out.push(skill);
@@ -178,7 +174,7 @@ fn agents(tree: &Tree, limits: &Limits, issues: &mut Issues, layout: &mut Layout
             issues,
             "unknown-file",
             &join("agents", file),
-            "agents에는 에이전트 폴더만 둘 수 있어요",
+            "agents directory may only contain agent subdirectories",
         );
     }
     let roots = tree.child_dirs("agents");
@@ -186,14 +182,14 @@ fn agents(tree: &Tree, limits: &Limits, issues: &mut Issues, layout: &mut Layout
         0 => issues.error(
             "no-root-agent",
             "agents",
-            "agents 아래에 루트 에이전트 폴더가 하나 필요해요",
+            "agents directory must contain one root agent subdirectory",
         ),
         1 => {}
         _ => issues.error(
             "multiple-root-agents",
             "agents",
             format!(
-                "루트 에이전트는 하나예요(지금 {}개: {})",
+                "Only one root agent is allowed (found {}: {})",
                 roots.len(),
                 roots.join(", ")
             ),
@@ -210,7 +206,7 @@ fn agents(tree: &Tree, limits: &Limits, issues: &mut Issues, layout: &mut Layout
             issues.error(
                 "bad-name",
                 &dir,
-                "에이전트 이름은 소문자로 시작하는 소문자·숫자·`-` 63자 이하예요",
+                "Agent name must start with a lowercase letter and use only lowercase letters, digits, and `-` (max 63 chars)",
             );
             continue;
         }
@@ -219,7 +215,7 @@ fn agents(tree: &Tree, limits: &Limits, issues: &mut Issues, layout: &mut Layout
                 "too-deep",
                 &dir,
                 format!(
-                    "에이전트 계보가 너무 깊어요(최대 {}단계)",
+                    "Agent hierarchy is too deep (max {} levels)",
                     limits.max_agent_depth
                 ),
             );
@@ -229,7 +225,7 @@ fn agents(tree: &Tree, limits: &Limits, issues: &mut Issues, layout: &mut Layout
             issues.error(
                 "too-many",
                 &dir,
-                format!("에이전트가 너무 많아요(최대 {})", limits.max_agents),
+                format!("Too many agents (max {})", limits.max_agents),
             );
             return;
         }
@@ -248,7 +244,7 @@ fn agents(tree: &Tree, limits: &Limits, issues: &mut Issues, layout: &mut Layout
                 issues,
                 "unknown-file",
                 &join(&children, file),
-                "agents에는 에이전트 폴더만 둘 수 있어요",
+                "agents directory may only contain agent subdirectories",
             );
         }
         for child in tree.child_dirs(&children).into_iter().rev() {
@@ -274,7 +270,7 @@ fn agent_entries(tree: &Tree, dir: &str, agent: &mut AgentFiles, issues: &mut Is
                 issues,
                 "unknown-file",
                 &path,
-                "에이전트 폴더에는 AGENT.md·env.yaml·triggers.yaml만 둘 수 있어요",
+                "Agent directory may only contain AGENT.md, env.yaml, and triggers.yaml",
             ),
         }
     }
@@ -282,7 +278,7 @@ fn agent_entries(tree: &Tree, dir: &str, agent: &mut AgentFiles, issues: &mut Is
         issues.error(
             "missing-file",
             &join(dir, "AGENT.md"),
-            "에이전트에는 AGENT.md가 필요해요",
+            "Agent requires AGENT.md",
         );
     }
     for sub in tree.child_dirs(dir) {
@@ -291,7 +287,7 @@ fn agent_entries(tree: &Tree, dir: &str, agent: &mut AgentFiles, issues: &mut Is
                 issues,
                 "unknown-dir",
                 &join(dir, sub),
-                "에이전트 폴더에는 memory·knowledge·skills·agents만 둘 수 있어요",
+                "Agent directory may only contain memory, knowledge, skills, and agents subdirectories",
             );
         }
     }
@@ -376,7 +372,7 @@ mod tests {
             "profile.yaml",
             "agents/main/AGENT.md",
             "knowledge/guide.md",
-            "knowledge/sub/회의 규칙.txt",
+            "knowledge/sub/meeting notes.txt",
             "knowledge/data.csv",
             "agents/main/memory/a.md",
             "agents/main/memory/b.txt",
@@ -384,7 +380,7 @@ mod tests {
         assert_eq!(codes, ["bad-document", "bad-document"]);
         assert_eq!(
             layout.knowledge,
-            ["knowledge/guide.md", "knowledge/sub/회의 규칙.txt"]
+            ["knowledge/guide.md", "knowledge/sub/meeting notes.txt"]
         );
         assert_eq!(layout.agents[0].memory, ["agents/main/memory/a.md"]);
     }

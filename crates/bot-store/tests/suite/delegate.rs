@@ -33,11 +33,10 @@ async fn state_of(db: &TestDb, run: &RunId) -> String {
     .await
 }
 
-/// 부모(main)를 접수·집은 뒤 자식에게 위임한다. (부모 컨텍스트, 자식 run)을 돌려준다.
 async fn delegated(db: &TestDb) -> (RunContext, RunId) {
     let parent_run = db
         .store
-        .accept(accept("personal", "r1", "조사해줘"))
+        .accept(accept("personal", "r1", "please investigate"))
         .await
         .unwrap();
     let parent = db.store.claim().await.unwrap().unwrap();
@@ -48,7 +47,7 @@ async fn delegated(db: &TestDb) -> (RunContext, RunId) {
             &parent.attempt,
             "1",
             "main/research",
-            "일정 맥락을 조사해",
+            "check schedule context",
             &["run"],
         ))
         .await
@@ -75,10 +74,9 @@ async fn delegation_parks_the_parent_and_wakes_it_once_with_the_child_result() {
             db.store.renew(parent.attempt.clone()).await,
             Err(Error::Stale)
         ),
-        "대기 중인 부모의 리스는 놓였다"
+        "waiting parent's lease was released"
     );
 
-    // 자식은 같은 요청 트리·주체·대화를 이어받고 권한은 좁아진다
     let got = db.store.claim().await.unwrap().unwrap();
     assert_eq!(got.attempt.run, child);
     assert_eq!(
@@ -96,11 +94,11 @@ async fn delegation_parks_the_parent_and_wakes_it_once_with_the_child_result() {
     assert_eq!(got.scopes, scopes(&["run"]));
     assert!(
         db.store.claim().await.unwrap().is_none(),
-        "부모는 자식이 끝나기 전에 집히지 않는다"
+        "parent is not claimable before child finishes"
     );
 
     db.store
-        .finish(got.attempt.clone(), done("조사 결과"))
+        .finish(got.attempt.clone(), done("research result"))
         .await
         .unwrap();
     assert_eq!(state_of(&db, &parent.attempt.run).await, "ready");
@@ -110,10 +108,9 @@ async fn delegation_parks_the_parent_and_wakes_it_once_with_the_child_result() {
     assert_eq!(step.key, "1");
     assert_eq!(
         step.body.0,
-        r#"{"result":{"text":"조사 결과"},"state":"succeeded"}"#
+        r#"{"result":{"text":"research result"},"state":"succeeded"}"#
     );
 
-    // 같은 자식 완료를 다시 보내도 부모는 두 번 깨지 않는다
     assert!(matches!(
         db.store.finish(got.attempt, done("again")).await,
         Err(Error::Stale)
@@ -136,14 +133,13 @@ async fn resumed_parent_gets_the_same_child_for_the_same_step() {
     let got = db.store.claim().await.unwrap().unwrap();
     db.store.finish(got.attempt, done("x")).await.unwrap();
     let resumed = db.store.claim().await.unwrap().unwrap();
-    // 재개한 부모가 같은 단계를 다시 요청하면 같은 자식이다(새 자식·새 대기 없음)
     let again = db
         .store
         .delegate(delegate(
             &resumed.attempt,
             "1",
             "main/research",
-            "일정 맥락을 조사해",
+            "check schedule context",
             &["run"],
         ))
         .await
@@ -156,19 +152,18 @@ async fn resumed_parent_gets_the_same_child_for_the_same_step() {
             &resumed.attempt,
             "1",
             "main/research",
-            "다른 지시",
+            "different instruction",
             &["run"],
         ))
         .await;
     assert!(matches!(changed, Err(Error::Conflict)));
-    // 좁힌 권한이 달라져도 같은 단계의 재요청은 충돌이다
     let wider = db
         .store
         .delegate(delegate(
             &resumed.attempt,
             "1",
             "main/research",
-            "일정 맥락을 조사해",
+            "check schedule context",
             &["run", "calendar.read"],
         ))
         .await;
@@ -197,14 +192,13 @@ async fn failed_and_cancelled_children_wake_the_parent_with_their_outcome() {
         r#"{"error":"invalid_output","state":"dead"}"#
     );
 
-    // 취소: 두 번째 위임을 취소하면 부모가 취소 결과로 깨어난다
     let second = db
         .store
         .delegate(delegate(
             &resumed.attempt,
             "2",
             "main/research",
-            "다시",
+            "again",
             &["run"],
         ))
         .await
@@ -214,7 +208,7 @@ async fn failed_and_cancelled_children_wake_the_parent_with_their_outcome() {
             profile(),
             second,
             PrincipalId("local:owner".into()),
-            "그만".into(),
+            "stop".into(),
         )
         .await
         .unwrap();
@@ -239,26 +233,26 @@ async fn resuming_a_dead_child_never_wakes_the_parent_twice() {
     let resumed = db.store.claim().await.unwrap().unwrap();
     assert_eq!(resumed.attempt.run, parent.attempt.run);
 
-    // 운영자가 dead letter를 재개하고 이번엔 성공한다: 부모는 이미 결과를 받았으므로 다시 깨지 않는다
+    // Resuming a dead child and finishing it must not wake the parent a second time.
     db.store
         .resume(
             profile(),
             child.clone(),
             PrincipalId("local:owner".into()),
-            "고침".into(),
+            "fixed".into(),
         )
         .await
         .unwrap();
     let retry = db.store.claim().await.unwrap().unwrap();
     assert_eq!(retry.attempt.run, child);
     db.store
-        .finish(retry.attempt, done("이번엔 성공"))
+        .finish(retry.attempt, done("succeeded now"))
         .await
         .unwrap();
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_steps").await,
         1,
-        "체크포인트는 한 번뿐"
+        "checkpoint recorded once"
     );
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'run.wake'")
@@ -268,7 +262,7 @@ async fn resuming_a_dead_child_never_wakes_the_parent_twice() {
     assert_eq!(
         state_of(&db, &parent.attempt.run).await,
         "leased",
-        "부모는 계속 자기 소유자가 쥔다"
+        "parent stays leased by its owner"
     );
 }
 
@@ -283,10 +277,10 @@ async fn delegation_rules_reject_unsafe_requests() {
         .unwrap();
     let parent = db.store.claim().await.unwrap().unwrap();
     let denied = [
-        ("main/research/deep", &["run"][..]), // 직계가 아님
-        ("main", &["run"][..]),               // 자기 자신
-        ("other/research", &["run"][..]),     // 다른 계보
-        ("main/research", &["run", "calendar.delete"][..]), // 부모에게 없는 권한
+        ("main/research/deep", &["run"][..]), // not a direct child
+        ("main", &["run"][..]),               // self
+        ("other/research", &["run"][..]),     // different lineage
+        ("main/research", &["run", "calendar.delete"][..]), // scope outside parent ceiling
     ];
     for (child, granted) in denied {
         let result = db
@@ -299,7 +293,7 @@ async fn delegation_rules_reject_unsafe_requests() {
     assert_eq!(
         state_of(&db, &parent.attempt.run).await,
         "leased",
-        "거절된 위임은 부모를 건드리지 않는다"
+        "denied delegation leaves parent unchanged"
     );
     let empty = db
         .store
@@ -313,7 +307,7 @@ async fn delegation_rules_reject_unsafe_requests() {
         .await;
     assert!(matches!(empty, Err(Error::Invalid)));
 
-    // 취소 요청이 선 부모는 새 일을 맡기지 못한다
+    // A parent with cancel_requested cannot delegate new work.
     db.store
         .cancel(
             profile(),
@@ -347,7 +341,7 @@ async fn cancelling_a_parent_cancels_the_waiting_tree_without_waking_it() {
             profile(),
             parent.attempt.run.clone(),
             PrincipalId("local:owner".into()),
-            "그만".into(),
+            "stop".into(),
         )
         .await
         .unwrap();
@@ -388,15 +382,18 @@ async fn child_answers_are_not_delivered() {
         .await
         .unwrap();
     let got = db.store.claim().await.unwrap().unwrap();
-    db.store.finish(got.attempt, done("자식 답")).await.unwrap();
+    db.store
+        .finish(got.attempt, done("child reply"))
+        .await
+        .unwrap();
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_outbox").await,
         0,
-        "부모만 답한다"
+        "only parent replies"
     );
     let resumed = db.store.claim().await.unwrap().unwrap();
     db.store
-        .finish(resumed.attempt, done("부모 답"))
+        .finish(resumed.attempt, done("parent reply"))
         .await
         .unwrap();
     assert_eq!(db.scalar::<i64>("select count(*) from bot_outbox").await, 1);
@@ -411,7 +408,13 @@ async fn cancel_covers_child_committed_while_waiting_for_parent() {
         let root = leased(&db, "tree").await;
         let parent = if grandchild {
             db.store
-                .delegate(delegate(&root.attempt, "first", "main/a", "조사", &["run"]))
+                .delegate(delegate(
+                    &root.attempt,
+                    "first",
+                    "main/a",
+                    "investigate",
+                    &["run"],
+                ))
                 .await
                 .unwrap();
             db.store.claim().await.unwrap().unwrap()
@@ -430,7 +433,7 @@ async fn cancel_covers_child_committed_while_waiting_for_parent() {
             &parent.attempt,
             "next",
             &format!("{}/b", parent.agent.0),
-            "조사",
+            "investigate",
             &["run"],
         );
         let creating = tokio::spawn(async move { peer.delegate(cmd).await });
@@ -443,7 +446,7 @@ async fn cancel_covers_child_committed_while_waiting_for_parent() {
                     profile(),
                     target,
                     PrincipalId("operator".into()),
-                    "중지".into(),
+                    "stop".into(),
                 )
                 .await
         });
@@ -479,13 +482,13 @@ async fn delegation_waiting_for_a_committing_cancel_cannot_create_a_child() {
                 profile(),
                 target,
                 PrincipalId("operator".into()),
-                "중지".into(),
+                "stop".into(),
             )
             .await
     });
     let cancelling_pid = db.waiter_blocked_by(pid).await;
     let peer = db.peer("delegate").await;
-    let cmd = delegate(&root.attempt, "next", "main/a", "조사", &["run"]);
+    let cmd = delegate(&root.attempt, "next", "main/a", "investigate", &["run"]);
     let creating = tokio::spawn(async move { peer.delegate(cmd).await });
     db.waiter_blocked_by(cancelling_pid).await;
     lock.commit().await.unwrap();
@@ -508,7 +511,13 @@ async fn cancelling_a_subtree_leaves_its_sibling_alone() {
     let parent = db.store.claim().await.unwrap().unwrap();
     let second = db
         .store
-        .delegate(delegate(&parent.attempt, "2", "main/b", "조사", &["run"]))
+        .delegate(delegate(
+            &parent.attempt,
+            "2",
+            "main/b",
+            "investigate",
+            &["run"],
+        ))
         .await
         .unwrap();
     db.store
@@ -516,7 +525,7 @@ async fn cancelling_a_subtree_leaves_its_sibling_alone() {
             profile(),
             first.clone(),
             PrincipalId("operator".into()),
-            "재개".into(),
+            "resume".into(),
         )
         .await
         .unwrap();
@@ -525,7 +534,7 @@ async fn cancelling_a_subtree_leaves_its_sibling_alone() {
             profile(),
             first.clone(),
             PrincipalId("operator".into()),
-            "중지".into(),
+            "stop".into(),
         )
         .await
         .unwrap();

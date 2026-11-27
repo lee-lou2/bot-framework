@@ -1,4 +1,4 @@
-//! 시험 전용 결정적 난수(xorshift). 같은 씨앗이면 같은 입력을 만들어 실패를 다시 재현할 수 있다.
+//! Deterministic xorshift PRNG and YAML fuzz token generator for tests.
 pub struct Rng(u64);
 
 impl Rng {
@@ -22,7 +22,6 @@ impl Rng {
     }
 }
 
-/// YAML에서 의미가 있는 조각을 무작위로 이어 붙인 글
 pub fn yaml_soup(rng: &mut Rng) -> String {
     const TOKENS: &[&str] = &[
         "a",
@@ -68,7 +67,7 @@ pub fn yaml_soup(rng: &mut Rng) -> String {
         "1e999",
         "\u{202e}",
         "\\u0000",
-        "한글",
+        "€★",
         "[[",
         "]]",
         "{{",

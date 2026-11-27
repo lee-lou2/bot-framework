@@ -1,4 +1,4 @@
-//! 환경·정책: 런처 환경 고정, 이름 거절, 판본 상수, 공용 임시 폴더.
+//! Environment isolation, carrier variables, version pinning, and shared tmp restrictions.
 
 use super::*;
 
@@ -57,13 +57,13 @@ async fn the_launcher_environment_is_host_fixed_and_credentials_ride_fixed_carri
     assert_eq!(
         names,
         ["BOT_CARRY_0", "CLAUDE_CODE_TMPDIR", "PATH"].into(),
-        "런처 환경은 이것뿐이다: {launcher}"
+        "unexpected launcher env: {launcher}"
     );
     assert!(
         !launcher.contains("TOKEN="),
-        "선언한 이름은 런처에 올라가지 않는다"
+        "declared name must not appear in launcher env"
     );
-    // 자식 안에서는 선언한 이름으로 옮겨 달리고 운반 변수는 없다
+    // Inside the child, carrier vars are remapped to declared names and stripped.
     let env = wait_for(&work_dir(tmp.path()).join("env.txt")).await;
     assert!(
         env.lines().any(|l| l == "TOKEN=sekret-value-1") && !env.contains("BOT_CARRY"),
@@ -119,7 +119,7 @@ async fn credential_names_that_could_steer_the_launcher_or_the_shell_are_refused
         .flatten()
         .filter(|e| e.file_name() != ".srt")
         .collect();
-    assert!(entries.is_empty(), "거절하면 작업 폴더도 만들지 않는다");
+    assert!(entries.is_empty(), "must not create work dir on refusal");
     assert!(
         std::fs::read_dir(tmp.path().join("work/.srt"))
             .unwrap()
@@ -136,7 +136,7 @@ async fn credential_names_that_could_steer_the_launcher_or_the_shell_are_refused
 #[tokio::test]
 async fn the_version_is_compared_to_the_pinned_constant_only() {
     let tmp = tempfile::tempdir().unwrap();
-    // 설정으로 판본을 바꿀 수 있는 입구가 없다: 다른 판본의 srt는 어떤 설정으로도 열리지 않는다
+    // Version is pinned to a compile-time constant.
     for version in ["0.0.82", "0.0.84", "1.0.0", "0.0.83-rc1"] {
         let binary = fake_srt(tmp.path(), version);
         assert!(
@@ -189,10 +189,10 @@ async fn host_provided_variables_reach_the_child_through_carriers_only_when_allo
     .await;
     assert!(
         !launcher.contains("BOT_EFFECT_URL=") && launcher.contains("BOT_CARRY_1="),
-        "런처에는 운반 변수만: {launcher}"
+        "launcher should see carrier var only: {launcher}"
     );
     Box::new(process.handle).terminate().await.unwrap();
-    // 허용한 이름이 아니면 띄우지 않는다
+    // Disallowed host_env names are rejected.
     for name in ["BOT_OTHER", "PATH", "NODE_OPTIONS", "BOT_CARRY_0"] {
         let mut bad = spec("r1.1.c2", false);
         bad.host_env = vec![(name.into(), "x".into())];

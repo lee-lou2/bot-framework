@@ -1,4 +1,3 @@
-//! 활성 집합·입구 표·민감 입력 ack·저장 경로 시험(공통 도구는 부모 모듈의 것을 쓴다).
 use super::*;
 
 #[tokio::test]
@@ -8,7 +7,6 @@ async fn follows_the_active_set_and_keeps_the_old_table_when_the_new_one_is_inva
         rig.ingress.admit(cli_chat("r1", "hi")).await,
         Admission::Accepted { .. }
     ));
-    // 새 집합: 멤버를 없앤다 → 곧바로 거절
     rig.catalog.replace([profile("personal")
         .binding(
             "desk",
@@ -22,7 +20,7 @@ async fn follows_the_active_set_and_keeps_the_old_table_when_the_new_one_is_inva
         rig.ingress.admit(cli_chat("r2", "hi")).await,
         Admission::Rejected(Rejection::Unregistered)
     );
-    // 호스트에 없는 별칭을 쓰는 잘못된 집합은 반영하지 않고 이전 표를 계속 쓴다
+    // Invalid replacement referencing an unregistered alias keeps the previous table active.
     rig.catalog.replace([base()
         .binding(
             "ghost",
@@ -36,7 +34,6 @@ async fn follows_the_active_set_and_keeps_the_old_table_when_the_new_one_is_inva
         rig.ingress.admit(cli_chat("r3", "hi")).await,
         Admission::Rejected(Rejection::Unregistered)
     );
-    // 고쳐진 집합은 다시 반영된다
     rig.catalog.replace([base().build()]);
     assert!(matches!(
         rig.ingress.admit(cli_chat("r4", "hi")).await,
@@ -98,7 +95,7 @@ async fn a_failed_active_set_is_built_once_not_per_request() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let builds = Arc::new(AtomicUsize::new(0));
     let counter = builds.clone();
-    // a-desk가 먼저 풀려 uid 해석 횟수가 곧 표를 만든 횟수다. z-team은 호스트에 없는 채널이라 실패한다.
+    // `a-desk` resolves first (counting builds) before `z-team` fails on an unregistered channel.
     let invalid = || {
         profile("personal")
             .binding(
@@ -140,22 +137,20 @@ async fn a_failed_active_set_is_built_once_not_per_request() {
     assert_eq!(
         builds.load(Ordering::SeqCst),
         1,
-        "같은 실패 집합을 요청마다 다시 만들면 안 돼요"
+        "must not rebuild the same failed active set on every request"
     );
-    // 다른(고쳐진) 집합이 오면 다시 만들어 반영한다
     catalog.replace([base().build()]);
     assert!(matches!(
         ingress.admit(cli_chat("r9", "hi")).await,
         Admission::Accepted { .. }
     ));
     assert_eq!(builds.load(Ordering::SeqCst), 2);
-    // 이후 잘못된 집합이 와도 이전 표(멤버가 있는 집합)를 계속 쓰고, 그 실패 집합은 한 번만 만든다
     catalog.replace([invalid()]);
     for n in 0..2 {
         let result = ingress.admit(cli_chat(&format!("s{n}"), "hi")).await;
         assert!(
             matches!(result, Admission::Accepted { .. }),
-            "이전 표를 쓴다: {result:?}"
+            "expected previous table to remain active: {result:?}"
         );
     }
     assert_eq!(builds.load(Ordering::SeqCst), 3);
@@ -166,11 +161,9 @@ async fn private_inputs_are_acked_only_on_a_conclusive_outcome() {
     let mut secure = event_trigger("secure", "direct", tool_target("inbox.receive", "{}"));
     secure.private = true;
     secure.input.insert("text".into(), "body.text".into());
-    // 이 시험은 요청을 6번 보내므로 주체 한도를 넉넉히 둔다(기본 fixture는 3)
     let rig = rig_with(base().trigger("main", secure), |host| {
         host.limits.per_principal_per_min = Some(30)
     });
-    // 진행 중·시작 전 재시도·충돌·장애 신호는 모두 재전달(ack 안 함)
     for (n, error) in [
         Error::Unavailable,
         Error::Stale,
@@ -183,29 +176,28 @@ async fn private_inputs_are_acked_only_on_a_conclusive_outcome() {
         rig.private.fail_next(error);
         let result = rig
             .ingress
-            .admit(slack_dm("U1", &format!("p{n}"), "비밀"))
+            .admit(slack_dm("U1", &format!("p{n}"), "secret"))
             .await;
         assert_eq!(result, Admission::Rejected(Rejection::Unavailable), "{n}");
         assert!(!result.settled());
     }
-    // 형식·권한 거절만 확정이다
     rig.private.fail_next(Error::Invalid);
     assert!(
         rig.ingress
-            .admit(slack_dm("U1", "q1", "비밀"))
+            .admit(slack_dm("U1", "q1", "secret"))
             .await
             .settled()
     );
     rig.private.fail_next(Error::Denied);
     assert!(
         rig.ingress
-            .admit(slack_dm("U1", "q2", "비밀"))
+            .admit(slack_dm("U1", "q2", "secret"))
             .await
             .settled()
     );
     assert!(
         rig.store.accepted().is_empty(),
-        "어느 경우에도 일반 큐에는 아무것도 없다"
+        "private inputs must never reach the normal queue"
     );
 }
 
@@ -236,7 +228,7 @@ async fn http_requests_store_their_route_and_mode_and_chat_requests_do_not() {
     for inbound in [
         http_post("http:inbox/svc", "r1", "/agenda", json!({})),
         http_post("http:inbox/svc", "r2", "/list", json!({})),
-        cli_chat("c1", "안녕"),
+        cli_chat("c1", "hello"),
     ] {
         assert!(matches!(
             rig.ingress.admit(inbound).await,

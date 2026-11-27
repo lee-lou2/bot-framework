@@ -1,4 +1,4 @@
-//! 종료·대기·깨움: 결과·outbox·부모 깨우기를 한 커밋으로. 잠금 순서는 부모 run → 자식 run → 감사 head.
+//! Run completion, parking, waking, and reply outbox enqueue; lock order: parent run -> child run -> audit head.
 
 use crate::{
     audit::{self, OwnedEntry},
@@ -15,7 +15,6 @@ use bot_core::{
 use serde_json::{Value, json};
 use sqlx::Row;
 
-/// 잠근 run 한 줄. 종료·펜싱에 필요한 열만 읽는다.
 pub(crate) struct RunRow {
     pub profile: String,
     pub id: String,
@@ -38,7 +37,7 @@ pub(crate) enum Wait {
     Hold,
 }
 
-/// 부모를 먼저 잠근다(순서 규칙). 부모가 없으면 아무것도 하지 않는다.
+/// Locks the parent run first to enforce parent -> child lock order.
 pub(crate) async fn lock_parent(tx: &mut Tx<'_>, profile: &str, parent: Option<&str>) -> R<()> {
     if let Some(parent) = parent {
         sqlx::query("select 1 from bot_runs where profile = $1 and id = $2 for update")
@@ -50,7 +49,7 @@ pub(crate) async fn lock_parent(tx: &mut Tx<'_>, profile: &str, parent: Option<&
     Ok(())
 }
 
-/// 잠금을 기다리지 않는 부모 잠금. 잠겨 있으면 false이고 트랜잭션은 이미 중단된 상태다(호출자가 롤백한다).
+/// Non-blocking parent lock (`NOWAIT`); returns `false` on lock contention (`55P03`) leaving the tx aborted for caller rollback.
 pub(crate) async fn try_lock_parent(
     tx: &mut Tx<'_>,
     profile: &str,
@@ -93,8 +92,7 @@ fn run_row(row: &sqlx::postgres::PgRow) -> RunRow {
     }
 }
 
-/// 이 세대의 실행이 지금도 소유자인가: 행 잠금 + 같은 세대 + leased + 리스가 안 끝남.
-/// 시각은 잠금을 얻은 **다음 문장**에서 읽는다(잠금을 기다리는 동안 끝난 리스를 통과시키지 않는다).
+/// Locks the run and checks active lease, generation, and claim epoch using DB time read after acquiring the lock.
 pub(crate) async fn lock_leased(tx: &mut Tx<'_>, at: &Attempt) -> R<RunRow> {
     let row = sqlx::query(
         "select profile, id, parent, parent_step, attempts, cancel_requested, private, state, generation, claim_epoch,
@@ -112,7 +110,6 @@ pub(crate) async fn lock_leased(tx: &mut Tx<'_>, at: &Attempt) -> R<RunRow> {
         .fetch_one(&mut **tx)
         .await?;
     let lease: Option<i64> = row.get("lease_until_ms");
-    // 실행기 접근은 세대·claim 토큰·leased 상태·리스 만료를 모두 대조한다(토큰이 없는 attempt는 신원 확인용일 뿐이다)
     let live = row.get::<String, _>("state") == "leased"
         && row.get::<i64, _>("generation") as u64 == at.generation.0
         && at.claim == Some(ClaimEpoch(row.get::<i64, _>("claim_epoch") as u64))
@@ -123,7 +120,7 @@ pub(crate) async fn lock_leased(tx: &mut Tx<'_>, at: &Attempt) -> R<RunRow> {
     Ok(run_row(&row))
 }
 
-/// 깨운다: waiting → ready, 같은 세대로 재개한다. 조건에 맞지 않으면(이미 깨어남·취소) 0행이다.
+/// Wakes a waiting run (`waiting -> ready`) while preserving its generation.
 pub(crate) async fn wake(
     tx: &mut Tx<'_>,
     profile: &str,
@@ -146,7 +143,7 @@ pub(crate) async fn wake(
     Ok(woke == 1)
 }
 
-/// 자발적 대기: leased → waiting, 리스를 놓는다. 시도 횟수는 쓰지 않는다. 호출자가 run을 이미 잠갔다.
+/// Parks a locked leased run into `waiting` and releases its lease without spending an attempt.
 pub(crate) async fn park(tx: &mut Tx<'_>, run: &RunRow, wait: &Wait) -> R<()> {
     let (kind, child) = match wait {
         Wait::Child(child) => ("child", Some(child.as_str())),
@@ -167,8 +164,7 @@ pub(crate) async fn park(tx: &mut Tx<'_>, run: &RunRow, wait: &Wait) -> R<()> {
     Ok(())
 }
 
-/// run을 끝내고(성공·dead·취소) 부모가 이 자식을 기다리는 중이면 결과를 체크포인트로 넣어 **한 번만** 깨운다.
-/// 호출자가 부모와 이 run을 이미 잠갔다. 감사 항목은 `audits`에 모아 호출자가 커밋 직전에 한 번에 잇는다.
+/// Ends a locked run (caller already holds parent and child locks), checkpoints the result into a waiting parent once, and queues audits.
 pub(crate) async fn end_run_into(
     tx: &mut Tx<'_>,
     run: &RunRow,
@@ -176,7 +172,7 @@ pub(crate) async fn end_run_into(
     actor: &str,
     audits: &mut Vec<OwnedEntry>,
 ) -> R<()> {
-    // 예약 미발송 안내 등 성공에 딸린 쓰기도 같은 트랜잭션이므로 취소가 먼저면 함께 롤백한다.
+    // Reject success if cancelled so companion writes in the same transaction roll back together.
     if run.cancel_requested && matches!(end, End::Succeeded(_)) {
         return Err(Error::Stale.into());
     }
@@ -210,9 +206,8 @@ pub(crate) async fn end_run_into(
     .bind(attempts)
     .execute(&mut **tx)
     .await?;
-    // 끝난 run의 열린 승인은 쓸 수 없다
     crate::approvals::close_for_run(tx, &run.profile, &run.id).await?;
-    // 실행 중인 도구의 판정은 닫는다. 별도 회신 원장의 전달 판정은 독립적이다.
+    // Close open tool holds only; outbox reply delivery holds remain independent.
     sqlx::query(
         "update bot_holds set closed_ms = bot_now_ms()
          where profile = $1 and run = $2 and kind = 'tool' and closed_ms is null",
@@ -260,15 +255,13 @@ pub(crate) async fn end_run_into(
     Ok(())
 }
 
-/// run을 끝내고 즉시 감사를 이어 붙인다(커밋 직전 단독 호출용).
 pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: &str) -> R<()> {
     let mut audits = Vec::new();
     end_run_into(tx, run, end, actor, &mut audits).await?;
     audit::append_many(tx, &audits).await
 }
 
-/// 발송 어댑터가 없는 구판/미매핑 푸시 실행의 회신은 `pending`으로 쌓지 않고 즉시 보류로 연다.
-/// `bot_outbox_hold` 트리거는 `UPDATE`에서만 돌므로 `INSERT` 직후 보류 발생을 열고 감사 항목을 `audits`에 모은다.
+/// Opens a reply hold immediately after inserting a missing-transport outbox row (`bot_outbox_hold` triggers on `UPDATE` only).
 pub(crate) async fn hold_missing_transport_into(
     tx: &mut Tx<'_>,
     profile: &str,
@@ -292,7 +285,7 @@ pub(crate) async fn hold_missing_transport_into(
     Ok(())
 }
 
-/// 푸시 어댑터(Slack 등)의 대화에만 회신 행을 쌓고, 보류 감사가 생기면 `audits`에 모은다.
+/// Enqueues a reply row for push conversations (`direct`/`channel`) only, opening a hold if `reply_transport` is missing.
 pub(crate) async fn push_reply_into(
     tx: &mut Tx<'_>,
     profile: &str,
@@ -325,7 +318,6 @@ pub(crate) async fn push_reply_into(
     Ok(())
 }
 
-/// 푸시 어댑터(Slack 등)의 대화에만 회신 행을 쌓고 필요 시 감사를 즉시 이어 붙인다(커밋 직전 단독 호출용).
 pub(crate) async fn push_reply(tx: &mut Tx<'_>, profile: &str, run: &str, body: &str) -> R<()> {
     let mut audits = Vec::new();
     push_reply_into(tx, profile, run, body, &mut audits).await?;
@@ -333,13 +325,11 @@ pub(crate) async fn push_reply(tx: &mut Tx<'_>, profile: &str, run: &str, body: 
 }
 
 impl Store {
-    /// 성공 완료. 결과·회신(outbox)·부모 깨우기가 한 커밋이다. 옛 세대·리스 만료 뒤는 `Stale`.
-    /// 위임한 자식의 답은 저장하지 않는다(부모만 답한다). 자식 결과는 부모 체크포인트로 간다.
     pub(crate) async fn finish_run(&self, at: &Attempt, done: Finish) -> R<Completion> {
         self.finish_run_with(at, done, None).await
     }
 
-    /// `finish_run`과 같되 실행 계량(잘림·사용량)을 같은 커밋에 기록한다. `None`이면 계량 열은 비워 둔다(지어내지 않는다).
+    /// Completes a run atomically with outbox replies, parent wake, and optional usage/truncation telemetry.
     pub(crate) async fn finish_run_with(
         &self,
         at: &Attempt,
@@ -367,8 +357,7 @@ impl Store {
         if answers.len() > 16 {
             return invalid();
         }
-        // 다른 수신자로 가는 예약 발화는 동결한 초안을 소유자가 승인해야 끝난다(`ScheduledReplies`). 일반 완료로 답을 원래 대화로 돌리거나 승인을 건너뛰지 못한다
-        // (보낼 것이 없는 조용한 성공만 `dropped`로 일반 완료를 받는다)
+        // Explicit-destination scheduled runs must settle via `ScheduledReplies`, unless a quiet attachment-free run dropped its draft.
         let delivery: Option<String> =
             sqlx::query_scalar("select state from bot_deliveries where profile = $1 and run = $2")
                 .bind(&run.profile)
@@ -399,14 +388,13 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
-        // 조용한 예약: 성공 결과 전체가 `<조용히>`이면 사용자에게 보낼 답이 없다(승인·오류·첨부는 이 경로로 오지 않는다)
+        // Suppress replies only for quiet schedules whose final text is `<quiet>` with no attachments.
         let quiet: bool =
             sqlx::query_scalar("select quiet from bot_runs where profile = $1 and id = $2")
                 .bind(&run.profile)
                 .bind(&run.id)
                 .fetch_one(&mut *tx)
                 .await?;
-        // 첨부가 있는 답은 조용히 넘기지 않는다(표식 글만 첨부 없이 성공했을 때만 답이 없다)
         let has_attachments = answers.iter().any(|a| has_attachments(a));
         let silent = quiet_completion(quiet, &final_text(&result)) && !has_attachments;
         if run.parent.is_none() && !silent {
@@ -420,7 +408,6 @@ impl Store {
     }
 }
 
-/// 결과 JSON의 최종 글(`{"text": …}`). 글이 없으면 빈 문자열이다.
 pub(crate) fn final_text(result: &str) -> String {
     serde_json::from_str::<serde_json::Value>(result)
         .ok()
@@ -432,7 +419,6 @@ pub(crate) fn final_text(result: &str) -> String {
         .unwrap_or_default()
 }
 
-/// 정규화한 답 문서에 첨부가 하나라도 있는가.
 pub(crate) fn has_attachments(answer: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(answer)
         .ok()

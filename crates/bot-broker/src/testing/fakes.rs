@@ -14,7 +14,6 @@ use std::{
 
 use super::lock;
 
-/// 프로필 판본을 손으로 게시하는 카탈로그. 게시하면 그 판본이 활성이 된다.
 #[derive(Default)]
 pub struct FakeCatalog {
     inner: Mutex<CatalogState>,
@@ -40,15 +39,17 @@ impl FakeCatalog {
         state.active.insert(snapshot.id.clone(), snapshot);
     }
 
-    /// 이미 게시한 옛 판본을 다시 활성으로 돌린다.
     pub fn activate(&self, profile: &str, revision: &str) {
         let mut state = lock(&self.inner);
         let key = (ProfileId(profile.into()), Revision(revision.into()));
-        let snapshot = state.by_revision.get(&key).cloned().expect("게시한 판본");
+        let snapshot = state
+            .by_revision
+            .get(&key)
+            .cloned()
+            .expect("published revision");
         state.active.insert(key.0, snapshot);
     }
 
-    /// 프로필을 활성 집합에서 뺀다(철회).
     pub fn retire(&self, profile: &str) {
         lock(&self.inner).active.remove(&ProfileId(profile.into()));
     }
@@ -67,7 +68,6 @@ impl ProfileCatalog for FakeCatalog {
     }
 }
 
-/// 실행한 일을 기록하고 미리 적어 둔 결과를 돌려주는 실행기.
 pub struct FakeRunner {
     jobs: Mutex<Vec<ToolJob>>,
     script: Mutex<VecDeque<Result<Ran, Error>>>,
@@ -75,21 +75,13 @@ pub struct FakeRunner {
     reaped: Mutex<Vec<String>>,
     reap_ok: Mutex<bool>,
     images: Mutex<HashMap<String, String>>,
-    /// 다음 실행을 이 문이 열릴 때까지 붙잡아 둔다(실행 중에 일어나는 일을 보려고).
     gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
-    /// 실행이 시작될 때마다 부르는 함수(실행하는 동안 판본이 바뀌는 상황을 만들려고).
     on_run: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    /// `admit`이 거절하는 서버 별칭(상태 볼륨을 요구하는데 지원하지 않는 서버).
     refused: Mutex<Vec<String>>,
-    /// 보관소에 없는 자격 이름(`admit_secrets`가 `Missing`으로 답한다).
     missing_secrets: Mutex<Vec<String>>,
-    /// `admit_secrets`가 이 오류로 실패한다(보관소를 읽지 못함).
     secret_failure: Mutex<Option<Error>>,
-    /// `admit_secrets`가 받은 (프로필, 이름들).
     secret_checks: Mutex<Vec<(ProfileId, Vec<String>)>>,
-    /// 서버 별칭 → 호스트가 그 서버에 묶은 자격 이름들(`server_secrets`, 원격 서버의 bearer처럼).
     server_secrets: Mutex<HashMap<String, Vec<String>>>,
-    /// `reap`이 성공해도 «끝났다»의 증명이 아닌 서버 별칭들(원격 서버).
     unproven: Mutex<Vec<String>>,
 }
 
@@ -118,45 +110,36 @@ impl FakeRunner {
     pub fn new() -> Self {
         Self::default()
     }
-    /// 다음 실행의 결과를 적어 둔다. 비어 있으면 `{"ok":true}`로 끝난다.
     pub fn script(&self, ran: Ran) {
         lock(&self.script).push_back(Ok(ran));
     }
-    /// 스크립트가 비었을 때 돌려줄 결과를 바꾼다.
     pub fn set_default_result(&self, result: &str) {
         *lock(&self.default_result) = result.to_owned();
     }
-    /// 다음 실행을 붙잡아 둔다. 돌려준 문에 `add_permits(1)`을 하면 풀린다(`jobs()`에는 실행이 시작될 때 이미 보인다).
+    /// Pauses the next `run` until the returned semaphore receives a permit (after recording the job).
     pub fn hold_next(&self) -> Arc<tokio::sync::Semaphore> {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         *lock(&self.gate) = Some(gate.clone());
         gate
     }
-    /// 이 서버 별칭을 `admit`이 거절하게 한다(상태 볼륨을 요구하는데 지원하지 않는 서버).
     pub fn refuse_server(&self, server: &str) {
         lock(&self.refused).push(server.to_owned());
     }
-    /// 이 자격 이름이 보관소에 없다(`admit_secrets`가 `Missing`).
     pub fn miss_secret(&self, name: &str) {
         lock(&self.missing_secrets).push(name.to_owned());
     }
-    /// 이 자격 이름이 다시 보관소에 있다.
     pub fn restore_secret(&self, name: &str) {
         lock(&self.missing_secrets).retain(|missing| missing != name);
     }
-    /// 이후 `admit_secrets`가 이 오류로 실패한다(보관소를 읽지 못함, `None`이면 다시 정상).
     pub fn fail_secret_checks_with(&self, error: Option<Error>) {
         *lock(&self.secret_failure) = error;
     }
-    /// `admit_secrets`가 받은 (프로필, 이름들).
     pub fn secret_checks(&self) -> Vec<(ProfileId, Vec<String>)> {
         lock(&self.secret_checks).clone()
     }
-    /// 실행이 시작될 때마다 `hook`을 부른다(이 호출은 이미 `start`를 지났다).
     pub fn on_run(&self, hook: impl Fn() + Send + Sync + 'static) {
         *lock(&self.on_run) = Some(Arc::new(hook));
     }
-    /// 다음 실행에서 실행기 자체가 실패한다.
     pub fn fail_next(&self) {
         lock(&self.script).push_back(Err(Error::Unavailable));
     }
@@ -166,22 +149,19 @@ impl FakeRunner {
     pub fn reaped(&self) -> Vec<String> {
         lock(&self.reaped).clone()
     }
-    /// 옛 프로세스 종료를 확인할 수 있는가(기본 true).
     pub fn set_reap_ok(&self, ok: bool) {
         *lock(&self.reap_ok) = ok;
     }
-    /// 이 서버로 가는 호출이 쓰는 호스트 쪽 자격 이름을 더한다(`server_secrets`).
     pub fn bind_server_secret(&self, server: &str, name: &str) {
         lock(&self.server_secrets)
             .entry(server.to_owned())
             .or_default()
             .push(name.to_owned());
     }
-    /// 이 서버의 `reap` 성공은 옛 호출이 끝났다는 증명이 아니다(원격 서버처럼 연결을 닫아도 원격 실행은 이어질 수 있다).
+    /// Marks `server` so a successful `reap` does not prove termination (e.g., remote HTTP servers).
     pub fn reap_proves_nothing_for(&self, server: &str) {
         lock(&self.unproven).push(server.to_owned());
     }
-    /// 서버의 설치 판본을 바꾼다(`None`이면 미설치).
     pub fn set_image(&self, server: &str, image: Option<&str>) {
         let mut images = lock(&self.images);
         match image {
@@ -258,7 +238,6 @@ impl ToolRunner for FakeRunner {
     }
 }
 
-/// 미결 단계를 손으로 정하는 단계 원장. 단계 접수·기록은 `effects` 모듈의 시험이 따로 다룬다.
 #[derive(Default)]
 pub struct FakeEffects {
     unresolved: Mutex<Vec<(String, EffectState, Option<String>)>>,
@@ -269,14 +248,12 @@ impl FakeEffects {
     pub fn new() -> Self {
         Self::default()
     }
-    /// 미결 단계(효과 ID, 상태, 사유)를 적어 둔다.
     pub fn set_unresolved(&self, steps: &[(&str, EffectState, Option<&str>)]) {
         *lock(&self.unresolved) = steps
             .iter()
             .map(|(id, state, why)| (id.to_string(), *state, why.map(str::to_owned)))
             .collect();
     }
-    /// 단계 원장 조회가 실패하게 한다.
     pub fn set_unavailable(&self, fail: bool) {
         *lock(&self.fail) = fail;
     }
@@ -320,7 +297,6 @@ impl EffectJournal for FakeEffects {
     }
 }
 
-/// 단독 감사 기록을 모으는 가짜.
 #[derive(Default)]
 pub struct MemAudit {
     entries: Mutex<Vec<AuditEntry>>,
@@ -333,7 +309,6 @@ impl MemAudit {
     pub fn entries(&self) -> Vec<AuditEntry> {
         lock(&self.entries).clone()
     }
-    /// `(action, verdict)` 쌍만 본다.
     pub fn verdicts(&self) -> Vec<(String, String)> {
         lock(&self.entries)
             .iter()
@@ -362,7 +337,6 @@ impl AuditLog for MemAudit {
     }
 }
 
-/// 끝난 스팬을 모으는 추적기.
 #[derive(Default)]
 pub struct RecordingTracer {
     spans: Mutex<Vec<SpanRecord>>,

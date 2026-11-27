@@ -1,4 +1,4 @@
-//! Claude Code 실행기 시험: 실제 CLI 출력에서 줄인 표본으로 파서를, 가짜 샌드박스로 명세 조립과 정리를 본다.
+//! Unit tests for Claude Code stream parsing, CLI argument assembly, and token confinement.
 
 use super::*;
 use crate::model::{
@@ -9,10 +9,7 @@ use bot_core::{id::*, profile::Builtin};
 use std::{collections::BTreeSet, path::PathBuf, sync::Mutex, time::Duration};
 use tokio::sync::watch;
 
-/// 호출 폴더가 있을 때 읽은 (입력 폴더, AGENTS.md, MCP 설정)
 type Seen = Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>>;
-
-/// 시작 순간 훑은 결과: (토큰이 든 파일, 설정이 쓰기 공간에 있는가, 입력 폴더에 설정이 있는가)
 type Found = Arc<Mutex<Vec<(Vec<PathBuf>, bool, bool)>>>;
 
 fn model() -> CliModel {
@@ -25,17 +22,16 @@ fn model() -> CliModel {
     }
 }
 
-// 실제 `claude -p --output-format stream-json --include-partial-messages` 출력에서 줄인 표본
 const OK: &str = r#"{"type":"system","subtype":"ui_invalidate","session_id":"s"}
 {"type":"system","subtype":"init","cwd":"/w","session_id":"s","tools":[],"mcp_servers":[],"model":"claude-sonnet-5-5","apiKeySource":"ANTHROPIC_API_KEY"}
 {"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant"}}}
 {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}
-{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"흠"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}}
 {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"x"}}}
 {"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}
-{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"1+1은 2입니"}}}
-{"type":"assistant","message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"1+1은 2입니다."}]}}
-{"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"1+1은 2입니다.\n","usage":{"input_tokens":164,"output_tokens":12},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":164,"outputTokens":12,"contextWindow":1000000}}}"#;
+{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"1+1 is "}}}
+{"type":"assistant","message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"1+1 is 2."}]}}
+{"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"1+1 is 2.\n","usage":{"input_tokens":164,"output_tokens":12},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":164,"outputTokens":12,"contextWindow":1000000}}}"#;
 
 const API_ERROR: &str = r#"{"type":"system","subtype":"api_retry","attempt":1,"max_retries":2,"retry_delay_ms":578,"error_status":503,"error":"server_error"}
 {"type":"system","subtype":"api_retry","attempt":2,"max_retries":2,"retry_delay_ms":1139,"error_status":503,"error":"server_error"}
@@ -60,7 +56,7 @@ fn parses_progress_events_text_and_usage() {
         ]
     );
     let out = out.unwrap();
-    assert_eq!(out.text, "1+1은 2입니다.");
+    assert_eq!(out.text, "1+1 is 2.");
     assert_eq!(
         out.usage,
         Usage {
@@ -80,7 +76,7 @@ fn api_error_is_a_transient_failure_and_retries_are_signalled() {
             code: "overloaded",
             transient: true
         }),
-        "503은 잠시 뒤 다시 하면 풀릴 수 있다"
+        "503 is transient"
     );
     let limited =
         r#"{"type":"result","is_error":true,"api_error_status":429,"result":"rate limit"}"#;
@@ -122,7 +118,6 @@ fn missing_result_and_empty_answer_are_failures() {
             transient: false
         })
     );
-    // 해석할 수 없는 줄은 무시한다
     assert!(Tracker::default().feed("not json").is_none());
 }
 
@@ -141,7 +136,7 @@ fn builtin(items: &[Builtin]) -> BTreeSet<Builtin> {
 fn after<'a>(a: &'a [String], flag: &str) -> &'a str {
     a[a.iter()
         .position(|x| x == flag)
-        .unwrap_or_else(|| panic!("{flag} 없음"))
+        .unwrap_or_else(|| panic!("missing {flag}"))
         + 1]
     .as_str()
 }
@@ -158,12 +153,11 @@ fn args_run_claude_bare_with_only_the_relay_server_and_no_builtin_tools_by_defau
         "--verbose",
         "--include-partial-messages",
     ] {
-        assert!(a.iter().any(|x| x == flag), "{flag} 누락");
+        assert!(a.iter().any(|x| x == flag), "missing {flag}");
     }
     for flag in ["--plugin-dir", "--system-prompt-file", "--settings"] {
-        assert!(!a.iter().any(|x| x == flag), "{flag}는 쓰지 않아요");
+        assert!(!a.iter().any(|x| x == flag), "{flag} must not be passed");
     }
-    // `--bare`는 작업 폴더의 AGENTS.md를 자동으로 읽지 않는다: 지침은 이 인자로 시스템 지침에 실린다(이어 받는 세션에서도 같다)
     assert_eq!(after(&a, "--append-system-prompt-file"), "/bot/AGENTS.md");
     let resumed = ClaudeCodeRunner::args(
         &model(),
@@ -176,7 +170,7 @@ fn args_run_claude_bare_with_only_the_relay_server_and_no_builtin_tools_by_defau
         after(&resumed, "--append-system-prompt-file"),
         "/bot/AGENTS.md"
     );
-    assert_eq!(after(&a, "--tools"), "", "내장 도구는 기본 0개");
+    assert_eq!(after(&a, "--tools"), "", "zero built-in tools by default");
     assert_eq!(
         (after(&a, "--mcp-config"), after(&a, "--allowedTools")),
         ("/work/mcp.claude.json", "mcp__relay")
@@ -191,7 +185,7 @@ fn args_run_claude_bare_with_only_the_relay_server_and_no_builtin_tools_by_defau
     );
     assert!(
         !a.iter().any(|x| x.contains("sess-token-1")),
-        "토큰은 인자에 실리지 않는다"
+        "token must not appear in CLI arguments"
     );
 }
 
@@ -235,11 +229,11 @@ fn request(
             generation: Generation(2),
         },
         model: model.into(),
-        system: "너는 비서다.".into(),
+        system: "You are an assistant.".into(),
         conversation: vec![Message {
             role: Role::User,
             speaker: Some(PrincipalId("local:owner".into())),
-            text: "1+1은?".into(),
+            text: "What is 1+1?".into(),
         }],
         tools: vec![],
         exchanges: vec![],
@@ -260,7 +254,6 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
     let seen: Seen = Arc::default();
     let sink = seen.clone();
     let sandbox = FakeSandbox::new([Script::output(OK)]).inspect(move |spec| {
-        // 호출 폴더가 아직 있을 때 지침과 도구 설정 파일을 읽는다
         let input = &spec.readonly_mounts[0].host;
         let work = &spec.scratch.as_ref().unwrap().host;
         let agents = std::fs::read_to_string(input.join("AGENTS.md")).ok();
@@ -271,11 +264,7 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
     });
     let config = CliConfig::new(&ws).with_model("assistant", model());
     let runner = ClaudeCodeRunner::new(Arc::new(sandbox.clone()), config);
-    assert_eq!(
-        runner.kind(),
-        RunnerKind::Loop,
-        "CLI는 자기 도구 순환을 가진다"
-    );
+    assert_eq!(runner.kind(), RunnerKind::Loop);
     let (_tx, rx) = watch::channel(false);
     let step = runner
         .step(request("assistant", rx, Some(relay())))
@@ -284,12 +273,12 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
     assert_eq!(
         step,
         ModelStep::Final {
-            text: "1+1은 2입니다.".into(),
+            text: "1+1 is 2.".into(),
             usage: Usage {
                 input_tokens: 164,
                 output_tokens: 12
             },
-            // 가짜 CLI의 결과에는 요청별 스트림 이벤트가 없어 실측으로 확인할 수 없다(총합만으로는 모든 요청이 보고됐는지 모른다)
+            // Sample lacks per-request stream usage events, so measured outcome stays None.
             outcome: RunOutcome::default(),
         }
     );
@@ -309,12 +298,12 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
     assert_eq!(
         env("ANTHROPIC_API_KEY"),
         Some("sess-token-1"),
-        "이 시도에 발급한 세션 토큰이다(실제 제공자 키가 아니다)"
+        "must receive attempt session token, not provider key"
     );
     assert_eq!(
         env("RELAY_TOKEN"),
         Some("sess-token-1"),
-        "MCP 설정의 자리표시가 채워지는 곳(토큰은 환경으로만 간다)"
+        "token is injected via environment only"
     );
     for (name, want) in [
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
@@ -346,7 +335,7 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
     assert_eq!(env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"), Some("1"));
     assert!(
         spec.env.iter().all(|(k, _)| !k.starts_with("BOT_")),
-        "요청자·권한은 환경으로 가지 않는다"
+        "requester and scopes must not leak into environment"
     );
     assert_eq!(spec.readonly_mounts.len(), 1);
     assert_eq!(spec.readonly_mounts[0].guest, "/bot");
@@ -355,7 +344,7 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
     assert_ne!(scratch.host, spec.readonly_mounts[0].host);
     let stdin = String::from_utf8(spec.stdin.clone().unwrap()).unwrap();
     assert!(
-        stdin.contains("### 사용자 (local:owner)\n1+1은?"),
+        stdin.contains("### User (local:owner)\nWhat is 1+1?"),
         "{stdin}"
     );
     assert_eq!(
@@ -364,16 +353,15 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
     );
     assert_eq!(
         (spec.attempt.run.0.as_str(), spec.attempt.generation.0),
-        ("r/1", 2),
-        "샌드박스 구현은 이 claim의 브로커 채널만 연결한다"
+        ("r/1", 2)
     );
 
     let seen = seen.lock().unwrap();
-    assert_eq!(seen[0].1.as_deref(), Some("너는 비서다."));
+    assert_eq!(seen[0].1.as_deref(), Some("You are an assistant."));
     let mcp = seen[0]
         .2
         .as_deref()
-        .expect("중계가 있으면 MCP 설정 파일이 모델이 읽는 입력 폴더 밖(쓰기 공간)에 있다");
+        .expect("MCP config should exist in scratch directory");
     let mcp: serde_json::Value = serde_json::from_str(mcp).unwrap();
     assert_eq!(mcp["mcpServers"]["relay"]["type"], "http");
     assert_eq!(
@@ -382,17 +370,17 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
     );
     assert_eq!(
         mcp["mcpServers"]["relay"]["headers"]["Authorization"], "Bearer ${RELAY_TOKEN}",
-        "토큰 값은 파일에 없고 환경변수 자리표시만 있다"
+        "MCP config must use env placeholder, not literal token"
     );
     assert!(
         seen[0].0.contains("personal-r_1-g2-"),
-        "폴더 이름에는 안전한 글자만: {}",
+        "directory name should be sanitized: {}",
         seen[0].0
     );
     assert_eq!(
         std::fs::read_dir(&ws).unwrap().count(),
         0,
-        "호출이 끝나면 호출 폴더를 지운다"
+        "call directory should be cleaned up on drop"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
@@ -400,7 +388,6 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
 #[tokio::test]
 async fn the_session_token_is_in_the_environment_only_never_in_a_file_or_argument() {
     let ws = workspace("sweep");
-    // 시작 순간(호출 폴더가 있을 때) 모델이 읽을 수 있는 두 폴더 전체를 훑는다: 입력(`/bot`)과 쓰기 공간(`/work`)
     let found: Found = Arc::default();
     let sink = found.clone();
     let sandbox = FakeSandbox::new([Script::output(OK)]).inspect(move |spec| {
@@ -419,7 +406,6 @@ async fn the_session_token_is_in_the_environment_only_never_in_a_file_or_argumen
     let runner = ClaudeCodeRunner::new(Arc::new(sandbox.clone()), config);
     let (_tx, rx) = watch::channel(false);
     let mut asked = request("assistant", rx, Some(relay()));
-    // 내장 Read를 켠 구성: 모델이 입력 폴더를 읽을 수 있다
     asked.builtin = builtin(&[Builtin::Read]);
     runner.step(asked).await.unwrap();
 
@@ -427,10 +413,10 @@ async fn the_session_token_is_in_the_environment_only_never_in_a_file_or_argumen
     assert_eq!(
         found[0].0,
         Vec::<PathBuf>::new(),
-        "모델이 읽는 폴더의 어떤 파일에도 세션 토큰이 없다"
+        "session token must not appear in any mounted file"
     );
-    assert!(found[0].1, "설정은 쓰기 공간에 있다");
-    assert!(!found[0].2, "모델이 읽는 입력 폴더에는 MCP 설정이 없다");
+    assert!(found[0].1, "MCP config must reside in scratch directory");
+    assert!(!found[0].2, "MCP config must not reside in input directory");
     let spec = sandbox.specs().remove(0);
     assert!(
         spec.args.iter().all(|a| !a.contains("sess-token-1")),
@@ -443,11 +429,7 @@ async fn the_session_token_is_in_the_environment_only_never_in_a_file_or_argumen
         .filter(|(_, v)| v.contains("sess-token-1"))
         .map(|(k, _)| k.as_str())
         .collect();
-    assert_eq!(
-        carrying,
-        ["ANTHROPIC_API_KEY", "RELAY_TOKEN"],
-        "토큰을 싣는 환경변수는 이 둘뿐이다"
-    );
+    assert_eq!(carrying, ["ANTHROPIC_API_KEY", "RELAY_TOKEN"]);
     let _ = std::fs::remove_dir_all(&ws);
 }
 
@@ -468,7 +450,6 @@ async fn step_maps_failures_to_fixed_codes_and_cleans_up() {
             transient: true
         })
     );
-    // 결과 없이 죽었다: stderr는 분류에만 쓴다
     assert_eq!(
         run_script(
             &config,
@@ -494,7 +475,6 @@ async fn step_maps_failures_to_fixed_codes_and_cleans_up() {
             transient: true
         })
     );
-    // 모르는 별칭·잘못된 프런트 채널·채널 없음은 샌드박스를 부르기 전에 거절한다
     let sandbox = FakeSandbox::new([]);
     let runner = ClaudeCodeRunner::new(Arc::new(sandbox.clone()), config.clone());
     let (_tx, rx) = watch::channel(false);
@@ -512,8 +492,7 @@ async fn step_maps_failures_to_fixed_codes_and_cleans_up() {
         Err(ModelError::Failed {
             code: "relay_unavailable",
             transient: true
-        }),
-        "채널이 없으면 CLI가 모델에 닿지 못한다"
+        })
     );
     let bad = RelayChannel {
         token: "has space".into(),
@@ -550,7 +529,6 @@ async fn builtin_tools_need_the_confined_reads_guarantee_and_reach_the_launch_ar
             (result, sandbox.specs())
         }
     };
-    // 가둘 수 있다고 보증하지 않으면 내장 도구를 요구하는 실행을 거절한다(샌드박스도 부르지 않는다)
     let (result, specs) = run(false, vec![Builtin::Read]).await;
     assert_eq!(
         result,
@@ -560,15 +538,12 @@ async fn builtin_tools_need_the_confined_reads_guarantee_and_reach_the_launch_ar
         })
     );
     assert!(specs.is_empty());
-    // 보증이 있으면 명시한 것만 연다
     let (result, specs) = run(true, vec![Builtin::Read]).await;
     assert!(result.is_ok());
     assert_eq!(after(&specs[0].args, "--tools"), "Read");
-    // 내장 도구를 요구하지 않으면 보증이 없어도 실행되고 도구는 0개다
     let (result, specs) = run(false, vec![]).await;
     assert!(result.is_ok());
     assert_eq!(after(&specs[0].args, "--tools"), "");
-    // 실행기가 못 여는 도구는 실행 전에 거절한다
     let (result, specs) = run(true, vec![Builtin::Glob]).await;
     assert_eq!(
         result,

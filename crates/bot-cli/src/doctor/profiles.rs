@@ -1,5 +1,6 @@
-//! 프로필 검증, 입구 표, 필요한 자격 이름 점검. 자격은 **이름**만 보고하고 값은 출력하지 않는다.
-//! 보관소가 복호화를 요구하면(`SecretsKind::decryptor`, 지금은 sops: 외부 프로그램·키 서비스 접속 가능) 확인하지 않고 «미검사»로 둔다.
+//! Profile, entrance binding, and secret-name checks for `bot doctor`.
+//! Reports secret names only (never values) and skips backends requiring external decryption (e.g., sops).
+
 use super::{Item, State, capped, host::Checked};
 use crate::{
     host::HostFile,
@@ -14,9 +15,9 @@ use crate::{
 use bot_profile::{Limits, ProfileSet, Registry};
 use std::sync::Arc;
 
-const PROFILES: &str = "프로필";
-const ENTRANCES: &str = "입구";
-const SECRETS: &str = "자격";
+const PROFILES: &str = "Profiles";
+const ENTRANCES: &str = "Entrances";
+const SECRETS: &str = "Secrets";
 
 fn skipped_rest(items: &mut Vec<Item>, why: &str) {
     items.push(Item::skipped(ENTRANCES, why));
@@ -26,13 +27,13 @@ fn skipped_rest(items: &mut Vec<Item>, why: &str) {
 pub async fn check(settings: &Settings, host: Option<&Checked>, items: &mut Vec<Item>) {
     let Some(root) = settings.profiles.as_ref() else {
         items.push(
-            Item::new(State::Fail, PROFILES, "프로필 루트 폴더가 없어요").with([
-                "BOT_PROFILES나 `--profiles <폴더>`로 프로필 폴더들의 부모 폴더를 지정해 주세요"
+            Item::new(State::Fail, PROFILES, "profiles root directory is not set").with([
+                "Set BOT_PROFILES or `--profiles <dir>` to the parent directory of profile folders"
                     .to_owned(),
-                "새로 시작하려면 `bot init <이름>`으로 만들 수 있어요".to_owned(),
+                "Run `bot init <name>` to create a new profile".to_owned(),
             ]),
         );
-        skipped_rest(items, "프로필을 읽지 못해 건너뛰었어요");
+        skipped_rest(items, "skipped because profiles could not be loaded");
         return;
     };
     let Some(Checked {
@@ -42,9 +43,9 @@ pub async fn check(settings: &Settings, host: Option<&Checked>, items: &mut Vec<
     else {
         items.push(Item::skipped(
             PROFILES,
-            "호스트 설정이 올바르지 않아 건너뛰었어요",
+            "skipped because host config is invalid",
         ));
-        skipped_rest(items, "호스트 설정이 올바르지 않아 건너뛰었어요");
+        skipped_rest(items, "skipped because host config is invalid");
         return;
     };
     let registry = Registry::new();
@@ -57,21 +58,20 @@ pub async fn check(settings: &Settings, host: Option<&Checked>, items: &mut Vec<
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
             items.push(
-                Item::new(State::Fail, PROFILES, "검증에 실패했어요").with(capped(lines, 30)),
+                Item::new(State::Fail, PROFILES, "validation failed").with(capped(lines, 30)),
             );
-            skipped_rest(items, "프로필 검증이 실패해 건너뛰었어요");
+            skipped_rest(items, "skipped because profile validation failed");
             return;
         }
     };
     items.push(profiles(&set, host, revisions.as_ref()));
     items.push(match check_entrances(set.active().clone(), host) {
-        Ok(_) => Item::new(State::Pass, ENTRANCES, "바인딩과 호스트 입구가 맞아요"),
+        Ok(_) => Item::new(State::Pass, ENTRANCES, "bindings match host entrances"),
         Err(error) => Item::new(State::Fail, ENTRANCES, error),
     });
     items.push(secrets(settings, host, &set).await);
 }
 
-/// 프로필 검증 뒤 `bot validate`·`bot serve`가 시작 전에 하는 나머지 판정(모델 VM 설정·시드·활성화 판본)을 같은 함수로 한다.
 fn profiles(
     set: &Arc<ProfileSet>,
     host: &HostFile,
@@ -83,7 +83,7 @@ fn profiles(
         problems.extend(unsupported_builtin_tools(snapshot, host));
         problems.extend(seed::problems(snapshot));
     }
-    // 서버 판본을 계산하지 못했으면(도구 서버 항목이 이미 알린다) 활성화 판본은 만들 수 없다
+    // Publication requires server revisions; server failures are already reported by the host check.
     if let Some(revisions) = revisions
         && let Err(error) = Publication::of(set, host, revisions)
     {
@@ -99,14 +99,14 @@ fn profiles(
         return Item::new(
             State::Pass,
             PROFILES,
-            format!("{}개 검증을 통과했어요", set.active().len()),
+            format!("{} profile(s) passed validation", set.active().len()),
         )
         .with(capped(lines, 30));
     }
     Item::new(
         State::Fail,
         PROFILES,
-        format!("시작 전 점검에서 막히는 것 {}건", problems.len()),
+        format!("{} pre-start check failure(s)", problems.len()),
     )
     .with(capped(problems, 30))
     .with(capped(lines, 30))
@@ -117,7 +117,7 @@ async fn secrets(settings: &Settings, host: &HostFile, set: &Arc<ProfileSet>) ->
         return Item::skipped(
             SECRETS,
             &format!(
-                "{program} 보관소는 복호화가 필요해 확인하지 않았어요 — `bot validate`가 확인해요"
+                "{program} store requires decryption and was not checked — run `bot validate` to verify"
             ),
         );
     }
@@ -139,8 +139,8 @@ async fn secrets(settings: &Settings, host: &HostFile, set: &Arc<ProfileSet>) ->
     problems.extend(weak_openai_keys(&*store, &snapshots, &host.gateway).await);
     if problems.is_empty() {
         let summary = match total {
-            0 => "필요한 자격이 없어요".to_owned(),
-            n => format!("필요한 자격 {n}개가 모두 있어요(값은 확인만 하고 출력하지 않아요)"),
+            0 => "no secrets required".to_owned(),
+            n => format!("all {n} required secret(s) present (values checked, not printed)"),
         };
         return Item::new(State::Pass, SECRETS, summary);
     }
@@ -148,7 +148,7 @@ async fn secrets(settings: &Settings, host: &HostFile, set: &Arc<ProfileSet>) ->
         State::Fail,
         SECRETS,
         format!(
-            "없거나 문제 있는 자격 {}건(이름만 보여 줘요, 값은 출력하지 않아요)",
+            "{} missing or invalid secret(s) (names only, values not printed)",
             problems.len()
         ),
     )

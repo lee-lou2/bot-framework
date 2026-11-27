@@ -1,11 +1,4 @@
-//! 기억 저장. 프로필·에이전트 범위에서 **현재 요청자에게 보이는 행만** 읽는다.
-//! - 읽기: 프로필 공용(profile)은 어디서나, private은 소유자 본인의 DM·CLI에서만. 위임한 자식도 같은 요청자·대화 종류를 이어받는다.
-//!   private 행이 한 건이라도 나가면 모델에 전달하기 전에 요청 트리(루트 run)에 플래그를 커밋한다.
-//! - 쓰기: owner는 인증된 요청자로 고정한다. 수정·삭제는 소유자만, 수정하면 공유가 풀려 다시 승인받아야 한다.
-//! - 미리보기(`preview`): 카드에 쓸 기억 한 건을 ID로 읽는다(검색과 같은 가시성). 본문 SHA-256을 함께 준다.
-//! - 공유(`share`, share.rs): 소유자의 승인 카드를 소비하는 한 커밋 안에서만 하고, 카드에 보인 본문 지문이 그대로일 때만 한다.
-//!
-//! 범위는 기억을 만든 에이전트와 그 아래 에이전트다(조상 → 자손 방향으로 읽는다). 삭제는 본문을 비운 표지로 남긴다.
+//! Scoped memory storage (`search`, `preview`, `change`, `seed`), committing root-run private-recall taints before returning private rows.
 
 use crate::{
     audit::{self, Entry},
@@ -41,7 +34,7 @@ fn visibility_of(s: &str) -> Visibility {
     }
 }
 
-/// `main/research/deep` → [`main`, `main/research`, `main/research/deep`]
+/// Expands `"main/research/deep"` to `["main", "main/research", "main/research/deep"]`.
 pub(crate) fn lineage(agent: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut end = 0;
@@ -52,7 +45,6 @@ pub(crate) fn lineage(agent: &str) -> Vec<String> {
     out
 }
 
-/// 검색어를 글자·숫자 단위 낱말로 쪼개 소문자로 맞춘다. 낱말은 부분 일치로 찾는다(조사가 붙은 낱말도 찾도록).
 fn terms(query: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for word in query
@@ -86,9 +78,7 @@ fn text_ok(text: &str) -> R<()> {
     }
 }
 
-/// 읽기 결과를 확정하는 트랜잭션을 연다: 루트(위임 자식이면)와 이 run을 잠근 **뒤에** 현재 claim 토큰·세대·리스·취소 요청을 확인한다.
-/// 결과를 돌려주기 전에 같은 트랜잭션에서 private 표시를 커밋하므로, 확인한 소유자가 결과를 내보내는 순간에도 소유자다.
-/// 잠금 순서: 루트 → 이 run(다른 경로와 같다). 취소·인계는 이 잠금이 풀린 뒤에 반영된다(결과는 이미 나간 효과 앞이다).
+/// Opens a read transaction locking root -> run before verifying lease/generation/cancel so private taint commits atomically before returning rows.
 pub(crate) async fn begin_read<'a>(
     store: &'a Store,
     at: &Attempt,
@@ -108,7 +98,7 @@ pub(crate) async fn begin_read<'a>(
             .fetch_optional(&mut *tx)
             .await?;
     }
-    // 이 run이 루트면 아래 잠금이 곧 루트 잠금이다(같은 행을 공유→배타로 올리지 않는다)
+    // Lock root exclusively when `run == root` to avoid upgrading a shared lock to exclusive.
     let me = sqlx::query(if root == at.run.0 {
         "select profile, id, root, agent, principal, conv_kind, binding, conv_id, thread, created_ms, trigger,
                 state, generation, claim_epoch, lease_until_ms, private, cancel_requested
@@ -123,7 +113,7 @@ pub(crate) async fn begin_read<'a>(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(Error::Stale)?;
-    // 시각은 잠금을 얻은 다음 문장에서 읽는다
+    // Read DB clock only after acquiring the lock.
     let now: i64 = sqlx::query_scalar("select bot_now_ms()")
         .fetch_one(&mut *tx)
         .await?;
@@ -141,7 +131,7 @@ pub(crate) async fn begin_read<'a>(
     Ok((tx, me))
 }
 
-/// private 행이 나간다: 요청 트리(루트 run)에 표시를 커밋한다(루트 행은 `begin_read`가 이미 잠갔다).
+/// Marks `private_memory_read` on the root run (already locked by `begin_read`).
 pub(crate) async fn flag_private(tx: &mut crate::db::Tx<'_>, at: &Attempt, root: &str) -> R<()> {
     sqlx::query(
         "update bot_runs set private_memory_read = true, updated_ms = bot_now_ms() where profile = $1 and id = $2",
@@ -193,8 +183,7 @@ impl Store {
         Ok(hits)
     }
 
-    /// 승인 카드에 보일 기억 한 건을 ID로 읽는다(스캔 없음). 가시성은 검색과 같다: 프로필 공용이거나, 소유자 본인의 DM·CLI에서 본 private.
-    /// 보이지 않는 항목은 없는 것과 같다(`Missing`). private 본문이 나가면 같은 트랜잭션에서 요청 트리에 표시를 커밋한 뒤에 돌려준다.
+    /// Fetches one visible memory by ID with its body SHA-256; commits root private taint before returning private content.
     pub(crate) async fn memory_preview(&self, at: &Attempt, id: &MemoryId) -> R<MemoryPreview> {
         ids_ok(&[&id.0])?;
         let (mut tx, me) = begin_read(self, at).await?;
@@ -259,7 +248,7 @@ impl Store {
                 text_ok(&text)?;
                 self.owned(&mut tx, &run.profile, &id.0, &principal, &kind, &agent)
                     .await?;
-                // 본문이 바뀌면 이미 한 공유 승인은 이 내용에 대한 것이 아니다: 공유를 풀어 다시 승인받게 한다
+                // Reset visibility to private on edit so any prior share approval cannot cover modified text.
                 sqlx::query(
                     "update bot_memories set body = $3, visibility = 'private', updated_ms = bot_now_ms() where profile = $1 and id = $2",
                 )
@@ -288,8 +277,7 @@ impl Store {
         Ok(MemoryId(id))
     }
 
-    /// 소유자만 고칠 수 있다. 없는(지운) 기억은 `Missing`, 남의 기억은 `Denied`.
-    /// private 기억은 자기 DM·CLI에서만 다룬다(채널에서는 읽지도 못하므로 고치지도 못한다).
+    /// Locks a memory row and verifies owner, ancestor agent lineage, and DM/CLI context for private rows.
     async fn owned(
         &self,
         tx: &mut crate::db::Tx<'_>,
@@ -306,7 +294,6 @@ impl Store {
             .await?
             .ok_or(Error::Missing)?;
         let private = row.get::<String, _>("visibility") == "private";
-        // 소유자 본인의 기억이어도 이 에이전트와 그 조상이 만든 것만 고칠 수 있다(형제 에이전트의 기억은 보이지 않는 것과 같다)
         if row.get::<String, _>("owner") != principal
             || !lineage(agent).contains(&row.get::<String, _>("agent"))
             || (private && !matches!(kind, "direct" | "cli"))
@@ -316,7 +303,6 @@ impl Store {
         Ok(row)
     }
 
-    /// 시드 하나를 등록한다(단독). 활성 집합 게시는 같은 트랜잭션 안에서 `seed_in`을 쓴다.
     pub(crate) async fn memory_seed(&self, seed: MemorySeed) -> R<()> {
         check_seed(&seed).map_err(|_| Error::Invalid)?;
         let mut tx = self.pool.begin().await?;
@@ -328,38 +314,31 @@ impl Store {
     }
 }
 
-/// 기억 시드가 저장소 규칙을 어겼다. 본문은 싣지 않는다: 고정된 이유와 길이만 있다(진단·로그에 그대로 써도 안전하다).
+/// Memory seed validation error; omits raw body content so it is safe to log.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SeedError {
-    /// 식별자 칸(`profile`·`agent`·`path`·`owner`)이 비었거나 너무 길거나 제어 문자를 담았다.
     BadField(&'static str),
     EmptyText,
-    TextTooLong {
-        bytes: usize,
-        max: usize,
-    },
+    TextTooLong { bytes: usize, max: usize },
     TextHasNul,
 }
 
 impl std::fmt::Display for SeedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SeedError::BadField(field) => write!(f, "기억 시드의 `{field}` 값이 올바르지 않아요"),
-            SeedError::EmptyText => f.write_str("기억 시드 본문이 비어 있어요"),
+            SeedError::BadField(field) => write!(f, "invalid memory seed `{field}`"),
+            SeedError::EmptyText => f.write_str("memory seed body is empty"),
             SeedError::TextTooLong { bytes, max } => {
-                write!(
-                    f,
-                    "기억 시드 본문이 너무 길어요({bytes}바이트, 최대 {max}바이트)"
-                )
+                write!(f, "memory seed body is too long ({bytes} bytes, max {max})")
             }
-            SeedError::TextHasNul => f.write_str("기억 시드 본문에 NUL 문자가 있어요"),
+            SeedError::TextHasNul => f.write_str("memory seed body contains a NUL byte"),
         }
     }
 }
 
 impl std::error::Error for SeedError {}
 
-/// 시드 검증. CLI(활성화 전 점검)와 DB(게시·등록)가 같은 규칙을 쓴다. `sha256`은 호출자가 정하는 내용 식별값이라 본문과 대조하지 않는다.
+/// Shared seed validation used by both CLI preflight checks and DB publication; does not compare `sha256` against `text`.
 pub fn check_seed(seed: &MemorySeed) -> Result<(), SeedError> {
     for (name, value) in [
         ("profile", &seed.profile.0),
@@ -386,7 +365,7 @@ pub fn check_seed(seed: &MemorySeed) -> Result<(), SeedError> {
     Ok(())
 }
 
-/// 시드 한 건을 넣는다. (profile, agent, 경로, 내용 해시)가 같으면 다시 만들지 않고, 지운 시드도 되살리지 않는다. 새로 넣었으면 `true`.
+/// Inserts a seed idempotently by `(profile, agent, seed_path, seed_sha256)` without resurrecting deleted seeds.
 pub(crate) async fn seed_in(tx: &mut crate::db::Tx<'_>, seed: &MemorySeed) -> R<bool> {
     Ok(sqlx::query(
         "insert into bot_memories (profile, agent, owner, visibility, body, seed_path, seed_sha256)
@@ -405,7 +384,6 @@ pub(crate) async fn seed_in(tx: &mut crate::db::Tx<'_>, seed: &MemorySeed) -> R<
         == 1)
 }
 
-/// 새로 등록한 시드의 감사 한 줄(본문 없이 경로·가시성·내용 해시만).
 pub(crate) fn seed_audit(seed: &MemorySeed) -> Entry<'_> {
     let mut entry = Entry::new(
         "system",
@@ -437,7 +415,10 @@ mod tests {
 
     #[test]
     fn terms_split_words_dedupe_and_cap() {
-        assert_eq!(terms("오늘 일정, 알려줘! 일정"), ["오늘", "일정", "알려줘"]);
+        assert_eq!(
+            terms("Today schedule, please! Schedule"),
+            ["today", "schedule", "please"]
+        );
         assert_eq!(terms("  "), Vec::<String>::new());
         assert_eq!(terms("A b c d e f g h i j").len(), 8);
     }

@@ -1,10 +1,7 @@
-//! 프로필 폴더 탐색·검증·불변 판본.
+//! Profile directory discovery, strict validation, immutable snapshots, and atomic registry reloads.
 //!
-//! 흐름: `scan`(링크·특수 파일을 거절하고 바이트를 한 번 읽는다) → `layout`(알려진 이름만) →
-//! `parse`(텍스트·YAML·스키마) → `assemble`(상속) → `resolve`(참조·충돌) → `convert`(core 스냅샷) → SHA-256 판본.
-//! 호스트 등록부 대조(`activate`)와 한꺼번에 교체(`registry`)가 그 위에 있다.
-//! 바깥에 내놓는 것: `load`/`Registry`(검증·교체·`ProfileCatalog`), `HostCatalog`, `Limits`, `Report`,
-//! `SchemaValidator`(`InputValidator`), `from_bundle`, `Registry::restore`(저장한 묶음에서 옛 판본 복원), `FsProfiles`(`ProfileSource`), `Cron`.
+//! Pipeline: `scan` -> `layout` -> `parse` -> `assemble` -> `resolve` -> `convert` -> SHA-256 revision,
+//! followed by host catalog validation (`activate`) and atomic swaps (`registry`).
 mod activate;
 mod approval;
 mod assemble;

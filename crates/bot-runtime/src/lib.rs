@@ -1,5 +1,5 @@
-//! 워커·예약·위임과 모델 격리. 이 파일은 모듈 선언과 재노출만 둔다.
-//! 수락 시험: fences_expired_workers, catches_up_missed_schedule(tests/).
+//! Worker loop, scheduler, delegation, and model isolation runners.
+
 pub mod context;
 pub mod cron;
 pub mod host;

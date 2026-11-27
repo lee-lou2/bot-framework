@@ -1,4 +1,4 @@
-//! `bot chat` 프로세스 시험의 공용 장치: 유닉스 소켓에서 한 연결을 받는 가짜 게이트웨이와 터미널 제어 문자 찾기.
+//! Shared test fixtures for `bot chat` process tests: fake Unix-socket gateway and terminal control-byte detector.
 #![allow(dead_code)]
 use serde_json::Value;
 use std::{
@@ -16,21 +16,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// 연결을 기다리는 최대 시간: 막 새로 만든 실행 파일의 첫 실행은 느릴 수 있다(macOS의 첫 실행 검사·과부하). 접속이 없어야 하는 시험은 `join`이 곧바로 끝낸다.
+/// Upper bound waiting for a connection; freshly built binaries can be slow on first launch (e.g. macOS first-run checks).
+/// Tests expecting zero connections terminate immediately via `Gateway::join`.
 const ACCEPT_WAIT: Duration = Duration::from_secs(30);
-/// 접속한 쪽이 요청 한 줄을 보내기를 기다리는 최대 시간
 const READ_WAIT: Duration = Duration::from_secs(5);
 
-/// 가짜 게이트웨이가 본 것
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Seen {
-    /// 받은 연결 수
     pub connections: usize,
-    /// 첫 연결에서 읽은 요청 줄(없으면 빈 값)
     pub request: String,
 }
 
-/// 소켓 폴더가 없으면 `folder_mode`로 만들어(상위 폴더도) 그 권한을 확실히 맞춘다.
 pub fn make_folder(folder: &Path, folder_mode: u32) {
     if !folder.exists() {
         std::fs::DirBuilder::new()
@@ -42,7 +38,7 @@ pub fn make_folder(folder: &Path, folder_mode: u32) {
     std::fs::set_permissions(folder, std::fs::Permissions::from_mode(folder_mode)).unwrap();
 }
 
-/// 가짜 게이트웨이 스레드. `join`은 «시험이 돌린 프로세스가 끝났다»는 신호이기도 하다 — 그때까지 연결이 하나도 오지 않았으면 더 기다리지 않고 끝난다.
+/// Fake gateway thread handle; calling `join` signals the child process has exited so the accept loop stops immediately.
 pub struct Gateway {
     handle: JoinHandle<Seen>,
     done: Arc<AtomicBool>,
@@ -55,9 +51,8 @@ impl Gateway {
     }
 }
 
-/// `socket`에서 한 연결을 받아 요청 한 줄을 읽고 `replies`를 한 줄씩 돌려준 뒤 닫는 가짜 게이트웨이. 연결을 기다리는 것은 `ACCEPT_WAIT`까지이고,
-/// 시험이 `join`하면(돌린 프로세스가 끝난 뒤) 연결이 없을 때 곧바로 끝난다.
-/// 소켓 폴더는 `folder_mode`로 만든다(0700이 정상이고, 그 밖의 값은 «믿을 수 없는 폴더»를 만든다).
+/// Accepts one connection on `socket`, reads a single request line, writes `replies` line by line, and closes.
+/// `folder_mode` sets parent directory permissions (`0o700` is trusted; wider modes simulate an untrusted directory).
 pub fn fake_gateway(socket: &Path, folder_mode: u32, replies: Vec<Value>) -> Gateway {
     make_folder(socket.parent().unwrap(), folder_mode);
     let listener = UnixListener::bind(socket).unwrap();
@@ -100,7 +95,7 @@ pub fn fake_gateway(socket: &Path, folder_mode: u32, replies: Vec<Value>) -> Gat
     Gateway { handle, done }
 }
 
-/// 터미널이 명령으로 읽을 바이트: C0(줄바꿈·탭 제외)·DEL, 그리고 UTF-8로 된 C1(U+0080–U+009F)
+/// Returns offsets of raw terminal control bytes: C0 (excluding `\n` and `\t`), DEL, and UTF-8 C1 (U+0080-U+009F).
 pub fn raw_controls(bytes: &[u8]) -> Vec<String> {
     let mut found = Vec::new();
     for (at, byte) in bytes.iter().enumerate() {

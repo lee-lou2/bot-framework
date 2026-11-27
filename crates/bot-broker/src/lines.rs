@@ -1,10 +1,10 @@
-//! 줄 단위 읽기. 상한을 넘는 줄을 메모리에 쌓지 않는다.
+//! Bounded line reader that rejects oversized lines without buffering past the limit.
 
 use crate::sandbox::BoxRead;
 use std::io;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-/// 줄 하나(개행 제외)를 읽는다. 스트림이 줄 경계에서 끝나면 `None`, 줄 도중에 끝나면 오류, 상한을 넘으면 오류다.
+/// Reads one newline-delimited line (excluding `\n`), returning `None` on clean EOF and an error on mid-line EOF or length overflow.
 pub async fn read_line(reader: &mut BufReader<BoxRead>, max: usize) -> io::Result<Option<Vec<u8>>> {
     let too_long = || io::Error::new(io::ErrorKind::InvalidData, "line too long");
     let mut line = Vec::new();

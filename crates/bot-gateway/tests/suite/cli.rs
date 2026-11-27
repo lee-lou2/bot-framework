@@ -1,4 +1,4 @@
-//! CLI 입구 수락 시험: 유닉스 소켓 + 피어 uid → 접수 → 결과 조회·재부착. 실제 소켓으로 붙는다.
+//! CLI ingress acceptance tests over a real Unix socket with peer UID verification.
 use bot_core::{
     id::{BindingId, PrincipalId, ProfileId, RequestId},
     intake::RequestKey,
@@ -65,7 +65,6 @@ async fn rig_with(
     rig_checked(account_uid, profiles, None, tune).await
 }
 
-/// 저장소의 활성 집합과 견주는 확인(`active`)을 붙여 조립한다. None이면 확인하지 않는다.
 async fn rig_checked(
     account_uid: u32,
     profiles: Vec<Fixture>,
@@ -90,7 +89,7 @@ async fn rig_checked(
     if let Some(active) = active {
         ingress = ingress.with_active(active);
     }
-    // 유닉스 소켓 주소는 104바이트 안이어야 해서 짧은 위치에 만든다
+    // Keep socket path short to stay within the 104-byte sun_path limit on macOS.
     let dir = tempfile::Builder::new()
         .prefix("g")
         .tempdir_in("/tmp")
@@ -132,11 +131,10 @@ fn chat(request: &str, text: &str) -> Chat {
 fn failed(outcome: &Outcome) -> &str {
     match outcome {
         Outcome::Failed { code, .. } => code,
-        other => panic!("실패를 기대했는데 {other:?}"),
+        other => panic!("expected failure, got {other:?}"),
     }
 }
 
-/// 원시 한 줄을 보내고 응답 줄들을 모두 읽는다.
 async fn raw(rig: &Rig, line: &[u8]) -> Vec<Value> {
     let mut stream = UnixStream::connect(&rig.socket).await.unwrap();
     stream.write_all(line).await.unwrap();
@@ -160,11 +158,11 @@ async fn chat_round_trip_reaches_the_bound_agent_and_returns_the_result() {
         store.set_state(
             &key("r1"),
             RunState::Succeeded,
-            Some(r#"{"text":"일정 3건"}"#),
+            Some(r#"{"text":"3 events"}"#),
         );
     });
     let mut events = Vec::new();
-    let outcome = client::chat(&rig.socket, &chat("r1", "오늘 일정 알려줘"), |e| {
+    let outcome = client::chat(&rig.socket, &chat("r1", "Show today's agenda"), |e| {
         events.push(e.clone())
     })
     .await
@@ -174,14 +172,14 @@ async fn chat_round_trip_reaches_the_bound_agent_and_returns_the_result() {
         outcome,
         Outcome::Done {
             state: "succeeded".into(),
-            result: Some(json!({"text": "일정 3건"}))
+            result: Some(json!({"text": "3 events"}))
         }
     );
-    assert_eq!(client::render(&json!({"text": "일정 3건"})), "일정 3건");
+    assert_eq!(client::render(&json!({"text": "3 events"})), "3 events");
     assert_eq!(events[0]["type"], "accepted");
     let accepted = rig.store.accepted();
     assert_eq!(accepted.len(), 1);
-    assert_eq!(accepted[0].target, "agent main 오늘 일정 알려줘");
+    assert_eq!(accepted[0].target, "agent main Show today's agenda");
     assert_eq!(accepted[0].approver.as_deref(), Some("local:owner"));
     assert_eq!(accepted[0].scopes, ["run"]);
 }
@@ -189,26 +187,23 @@ async fn chat_round_trip_reaches_the_bound_agent_and_returns_the_result() {
 #[tokio::test]
 async fn the_same_request_id_reattaches_without_a_second_run() {
     let rig = rig().await;
-    let mut first = chat("re1", "삭제해줘");
+    let mut first = chat("re1", "delete it");
     first.wait = false;
     assert_eq!(
         client::chat(&rig.socket, &first, |_| {}).await.unwrap(),
         Outcome::Accepted
     );
-    // 같은 요청 ID·같은 내용의 재시도는 기존 접수
     assert_eq!(
         client::chat(&rig.socket, &first, |_| {}).await.unwrap(),
         Outcome::Accepted
     );
     assert_eq!(rig.store.accepted().len(), 1);
-    // 다른 내용은 충돌
-    let mut changed = chat("re1", "다른 내용");
+    let mut changed = chat("re1", "different text");
     changed.wait = false;
     let outcome = client::chat(&rig.socket, &changed, |_| {}).await.unwrap();
     assert_eq!(failed(&outcome), "conflict");
-    // 끝난 뒤 같은 요청 ID로 결과만 다시 받는다
     rig.store
-        .set_state(&key("re1"), RunState::Succeeded, Some(r#""삭제했어요""#));
+        .set_state(&key("re1"), RunState::Succeeded, Some(r#""deleted""#));
     let again = client::result(&rig.socket, None, "re1", true, |_| {})
         .await
         .unwrap();
@@ -216,11 +211,10 @@ async fn the_same_request_id_reattaches_without_a_second_run() {
         again,
         Outcome::Done {
             state: "succeeded".into(),
-            result: Some(json!("삭제했어요"))
+            result: Some(json!("deleted"))
         }
     );
     assert_eq!(rig.store.accepted().len(), 1);
-    // 없는 요청 ID
     let missing = client::result(&rig.socket, None, "never", false, |_| {})
         .await
         .unwrap();
@@ -238,27 +232,22 @@ async fn waiting_runs_report_their_state_and_finish_later() {
         store.set_state(
             &key("w1"),
             RunState::Succeeded,
-            Some(r#"{"text":"승인돼서 지웠어요"}"#),
+            Some(r#"{"text":"Approved and deleted"}"#),
         );
     });
     let mut types = Vec::new();
-    let outcome = client::chat(
-        &rig.socket,
-        &chat("w1", "산책 일정을 삭제해줘"),
-        |e| {
-            types.push(format!(
-                "{}:{}",
-                e["type"].as_str().unwrap(),
-                e["state"].as_str().unwrap_or("")
-            ));
-        },
-    )
+    let outcome = client::chat(&rig.socket, &chat("w1", "Delete the walk event"), |e| {
+        types.push(format!(
+            "{}:{}",
+            e["type"].as_str().unwrap(),
+            e["state"].as_str().unwrap_or("")
+        ));
+    })
     .await
     .unwrap();
     driver.await.unwrap();
     assert!(matches!(outcome, Outcome::Done { ref state, .. } if state == "succeeded"));
     assert_eq!(types, ["accepted:", "state:waiting", "result:succeeded"]);
-    // dead·cancelled도 끝으로 알린다
     for (request, state, want) in [
         ("dead1", RunState::Dead, "dead"),
         ("can1", RunState::Cancelled, "cancelled"),
@@ -283,7 +272,7 @@ async fn waiting_runs_report_their_state_and_finish_later() {
 #[tokio::test]
 async fn a_peer_without_an_account_gets_no_entrance_and_nothing_is_accepted() {
     let uid = socket::current_uid().unwrap();
-    // 호스트가 이 계정을 다른 uid로 연결해 두었다 → 접속한 uid에게는 입구가 없다
+    // Map accounts to another UID so the connecting peer has no matching entrance.
     let rig = rig_with(uid + 1, vec![desk("personal", "owner")], |_| {}).await;
     let outcome = client::chat(&rig.socket, &chat("n1", "hi"), |_| {})
         .await
@@ -299,7 +288,6 @@ async fn a_peer_without_an_account_gets_no_entrance_and_nothing_is_accepted() {
 #[tokio::test]
 async fn members_are_checked_and_limits_are_reported() {
     let uid = socket::current_uid().unwrap();
-    // 멤버가 없는 프로필
     let stranger = profile("personal")
         .binding(
             "desk",
@@ -395,7 +383,6 @@ async fn malformed_oversized_and_unknown_requests_fail_closed() {
             "{name}"
         );
     }
-    // 본문 한도(기본 64 KiB)를 넘는 줄
     let big = format!(
         r#"{{"v":1,"op":"chat","request":"a","text":"{}"}}"#,
         "x".repeat(70_000)
@@ -404,7 +391,6 @@ async fn malformed_oversized_and_unknown_requests_fail_closed() {
         code(&raw(&rig, big.as_bytes()).await).as_deref(),
         Some("too_large")
     );
-    // 알 수 없는 프로필은 입구가 없다
     let unknown = br#"{"v":1,"op":"chat","request":"a","text":"x","profile":"nobody"}"#;
     assert_eq!(
         code(&raw(&rig, unknown).await).as_deref(),
@@ -444,7 +430,7 @@ async fn a_client_that_leaves_does_not_stop_the_run_or_the_server() {
     let rig = rig().await;
     {
         let mut stream = UnixStream::connect(&rig.socket).await.unwrap();
-        let line = json!({"v": 1, "op": "chat", "request": "gone1", "text": "오래 걸리는 일"})
+        let line = json!({"v": 1, "op": "chat", "request": "gone1", "text": "long task"})
             .to_string()
             + "\n";
         stream.write_all(line.as_bytes()).await.unwrap();
@@ -452,20 +438,18 @@ async fn a_client_that_leaves_does_not_stop_the_run_or_the_server() {
         let first: Value =
             serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
         assert_eq!(first["type"], "accepted");
-        // 연결을 닫는다(Ctrl-C)
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(rig.store.accepted().len(), 1);
     rig.store.set_state(
         &key("gone1"),
         RunState::Succeeded,
-        Some(r#"{"text":"끝났어요"}"#),
+        Some(r#"{"text":"done"}"#),
     );
     let outcome = client::result(&rig.socket, None, "gone1", true, |_| {})
         .await
         .unwrap();
     assert!(matches!(outcome, Outcome::Done { ref state, .. } if state == "succeeded"));
-    // 서버는 계속 일한다
     let mut next = chat("after", "hi");
     next.wait = false;
     assert_eq!(
@@ -480,7 +464,7 @@ async fn a_revoked_user_gets_no_state_or_result_over_the_socket() {
     let (store, catalog) = (rig.store.clone(), rig.catalog.clone());
     let driver = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(150)).await;
-        // 기다리는 동안 멤버에서 철회된 뒤 결과가 나온다
+        // Revoke membership while waiting, before the result is committed.
         let revoked = profile("personal")
             .binding(
                 "desk",
@@ -496,7 +480,7 @@ async fn a_revoked_user_gets_no_state_or_result_over_the_socket() {
         store.set_state(
             &key("v1"),
             RunState::Succeeded,
-            Some(r#"{"text":"합성-결과-5b2d"}"#),
+            Some(r#"{"text":"synthetic-result-5b2d"}"#),
         );
     });
     let mut events = Vec::new();
@@ -508,10 +492,9 @@ async fn a_revoked_user_gets_no_state_or_result_over_the_socket() {
     driver.await.unwrap();
     assert_eq!(failed(&outcome), "forbidden");
     assert!(
-        events.iter().all(|e| !e.contains("합성-결과-5b2d")),
+        events.iter().all(|e| !e.contains("synthetic-result-5b2d")),
         "{events:?}"
     );
-    // 철회 뒤 같은 요청 ID로 결과를 다시 받으려 해도 나가지 않는다
     let again = client::result(&rig.socket, None, "v1", false, |_| {})
         .await
         .unwrap();
@@ -538,14 +521,14 @@ async fn a_stale_process_closes_new_chats_and_result_reads() {
     rig.store.set_state(
         &key("a1"),
         RunState::Succeeded,
-        Some(r#"{"text":"합성-결과-77c1"}"#),
+        Some(r#"{"text":"synthetic-result-77c1"}"#),
     );
     let ok = client::result(&rig.socket, None, "a1", true, |_| {})
         .await
         .unwrap();
     assert!(matches!(ok, Outcome::Done { .. }), "{ok:?}");
 
-    // 다른 프로세스가 새 집합을 활성화했다 — 새 접수와 결과 조회 모두 일시 실패로 닫힌다
+    // Another process activated a newer set; both admissions and reads fail as unavailable.
     active.set(Some("set-2"));
     let mut events = Vec::new();
     let result = client::result(&rig.socket, None, "a1", true, |e| {
@@ -554,14 +537,17 @@ async fn a_stale_process_closes_new_chats_and_result_reads() {
     .await
     .unwrap();
     assert_eq!(failed(&result), "unavailable");
-    assert!(events.iter().all(|e| !e.contains("합성-결과-77c1")));
+    assert!(events.iter().all(|e| !e.contains("synthetic-result-77c1")));
     let new = client::chat(&rig.socket, &chat("a2", "hi"), |_| {})
         .await
         .unwrap();
     assert_eq!(failed(&new), "unavailable");
-    assert_eq!(rig.store.accepted().len(), 1, "구판은 저장소에 쓰지 않는다");
+    assert_eq!(
+        rig.store.accepted().len(),
+        1,
+        "stale process must not write to the store"
+    );
 
-    // 같은 집합으로 돌아오면 이어진다
     active.set(Some("set-1"));
     let back = client::result(&rig.socket, None, "a1", true, |_| {})
         .await
@@ -572,14 +558,14 @@ async fn a_stale_process_closes_new_chats_and_result_reads() {
 #[tokio::test]
 async fn cli_chat_uses_the_same_routes_snapshot_for_auth_and_admit() {
     let rig = rig().await;
-    // 인증 때 첫 번째 표 조회 직후 활성 프로필 판본이 r2로 바뀐다
+    // Flip active revision to r2 right after the first routes lookup during auth.
     rig.catalog.flip_after(
         1,
         [desk("personal", "owner").revision("personal-r2").build()],
     );
     let start = Chat {
         wait: false,
-        ..chat("snap-1", "같은 표로 접수")
+        ..chat("snap-1", "same routes snapshot")
     };
     assert_eq!(
         client::chat(&rig.socket, &start, |_| {}).await.unwrap(),
@@ -589,6 +575,6 @@ async fn cli_chat_uses_the_same_routes_snapshot_for_auth_and_admit() {
     assert_eq!(accepted.len(), 1);
     assert_eq!(
         accepted[0].revision, "personal-r1",
-        "인증에 쓴 바로 그 라우팅 표의 판본으로 접수돼야 해요"
+        "admission must use the exact routing snapshot used for auth"
     );
 }

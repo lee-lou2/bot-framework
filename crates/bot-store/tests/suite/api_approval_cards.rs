@@ -1,6 +1,4 @@
-//! 키로 이어지는 긴 요청 입구(OpenAI 호환 HTTP)로 접수된 실행의 일반 도구 승인 카드(PG). 카드는 지정된 사람의 Slack DM으로만 가고(전달 바인딩·지정된 사람은 브로커가 승인 경로에서
-//! 정해 `OpenApproval.delivery`·승인자로 싣는다), 접수 원장이 보증한 루트만 이 경로를 받는다. 게시 영수증이 확정되기 전의 카드는 열리지 않았다.
-//! 작업은 원래 요청의 바인딩·요청자·고정 판본·전달 설치(team)를 이어받고, 올리기 전에 승인 경로가 어긋났음을 알면(`block`) 낱말 그대로 저장돼 조회가 읽는다.
+//! OpenAI-compatible HTTP run approval cards: staged closed for owner Slack DM, preserving admission evidence and route-block verdicts.
 
 use crate::support::{api::*, *};
 use bot_core::{
@@ -15,7 +13,6 @@ use bot_core::{
 
 const APPROVER: &str = "slack:home/U1";
 
-/// 접수한 API 실행이 승인 대기에 들어갔다: 요청자는 HTTP 주체, 승인자는 지정된 사람, 카드는 전달 바인딩 `team`의 Slack DM으로 가야 한다.
 async fn waiting(
     db: &TestDb,
     key: &str,
@@ -68,7 +65,6 @@ async fn an_api_origin_card_is_staged_closed_keeps_the_original_evidence_and_pos
         return;
     };
     let (ctx, approval) = waiting(&db, "k1", "n1", Some("T1")).await;
-    // 카드는 닫힌 채 전달 작업이 쌓인다: 전달 바인딩·지정된 사람, 원래 요청의 증거를 이어받는다. HTTP 출처에는 원래 채널이 없어 공개 줄이 없다
     assert_eq!(
         db.scalar::<String>(
             "select binding || '|' || owner || '|' || origin_binding || '|' || requester || '|' || revision || '|' || origin_team || '|' || state from bot_card_jobs"
@@ -86,7 +82,7 @@ async fn an_api_origin_card_is_staged_closed_keeps_the_original_evidence_and_pos
         })
     );
     assert_eq!(outbox_rows(&db).await, 0);
-    // 게시 영수증 전에는 지정된 사람의 클릭도 승인을 소비하지 않고, 사람이 할 일(승인 대기)도 아니다
+    // Card stays closed until a Posted receipt is recorded.
     assert!(matches!(
         decide_as(&db, "n1", APPROVER).await,
         Err(Error::Conflict)
@@ -96,7 +92,6 @@ async fn an_api_origin_card_is_staged_closed_keeps_the_original_evidence_and_pos
         lookup(&db, "k1", "build").await.unwrap().state,
         ApiState::Active
     );
-    // 올라가고 영수증이 확정되면 열린다: 이제 승인 대기이고, 결정은 지정된 사람만(HTTP 주체는 승인할 수 없다)
     let job = card(&db).claim(8).await.unwrap().remove(0);
     assert_eq!(
         (job.binding.0.as_str(), job.owner.0.as_str()),
@@ -120,7 +115,7 @@ async fn an_api_origin_card_is_staged_closed_keeps_the_original_evidence_and_pos
     assert_eq!(
         outbox_rows(&db).await,
         0,
-        "HTTP 출처에는 공개 안내 줄이 없다"
+        "no public notice for HTTP-origin runs"
     );
     assert_eq!(
         lookup(&db, "k1", "build").await.unwrap().state,
@@ -131,7 +126,7 @@ async fn an_api_origin_card_is_staged_closed_keeps_the_original_evidence_and_pos
         .await
         .unwrap()
         .delivery;
-    let receipt = receipt.expect("영수증");
+    let receipt = receipt.expect("delivery receipt");
     assert_eq!(
         (
             receipt.team.as_str(),
@@ -155,7 +150,7 @@ async fn a_delivery_binding_without_an_authenticated_api_root_is_refused_and_rec
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 레거시(webhook·CLI) 실행은 접수 원장이 보증하지 않으므로 전달 바인딩을 받지 못한다
+    // Legacy webhook/CLI runs are not attested by the API admission ledger and cannot use a delivery binding.
     let ctx = leased(&db, "legacy").await;
     begin_call(&db, &ctx.attempt, "c1").await;
     let mut open = open_approval(Approval {
@@ -175,7 +170,7 @@ async fn a_delivery_binding_without_an_authenticated_api_root_is_refused_and_rec
         0
     );
     assert_eq!(state_of_run(&db, &ctx.attempt.run).await, "leased");
-    // 전달 바인딩이 없는 API 실행 승인은 로컬 경로다: 작업 없이 곧바로 결정할 수 있다
+    // API approvals without a delivery binding use the local path and open immediately.
     let (local, _) = {
         let req = request("k2", "build", "assistant", 2, 8);
         accepted(admit(&db, req).await);
@@ -211,7 +206,6 @@ async fn a_route_verdict_closes_the_card_before_posting_and_the_lookup_reads_the
         let (ctx, _) = waiting(&db, &key, &nonce, Some("T1")).await;
         let job = card(&db).claim(8).await.unwrap().remove(0);
         assert_eq!(job.key.nonce.0, nonce);
-        // 올리기 전에 승인 경로가 어긋났다: 카드를 올리지 않고 작업·승인을 닫는다
         card(&db).block(job.key.clone(), why).await.unwrap();
         assert_eq!(
             db.scalar::<String>(&format!(
@@ -234,7 +228,7 @@ async fn a_route_verdict_closes_the_card_before_posting_and_the_lookup_reads_the
             "{}",
             why.code()
         );
-        // 같은 판정의 재전달은 같은 결과(감사 한 번), 닫힌 작업을 게시로 열 수는 없다
+        // Replaying the same block verdict is idempotent and cannot be reopened via Posted.
         card(&db).block(job.key.clone(), why).await.unwrap();
         assert_eq!(
             db.scalar::<i64>(&format!(
@@ -254,7 +248,6 @@ async fn a_route_verdict_closes_the_card_before_posting_and_the_lookup_reads_the
             )
             .await;
         assert!(matches!(posted, Err(Error::Conflict)), "{posted:?}");
-        // 이 요청은 끝났으니 다음 요청이 같은 입구 슬롯을 쓴다
         db.sql(&format!(
             "update bot_runs set state = 'succeeded' where id = '{}'",
             ctx.attempt.run.0
@@ -286,14 +279,12 @@ async fn an_opened_card_cannot_be_blocked_later_and_a_dm_failure_is_the_dm_verdi
         )
         .await
         .unwrap();
-    // 열린 카드를 늦은 판정으로 닫지 않는다(지정된 사람의 클릭만 결정한다)
     let late = card(&db).block(job.key, ApprovalBlock::RouteChanged).await;
     assert!(matches!(late, Err(Error::Conflict)), "{late:?}");
     assert_eq!(
         lookup(&db, "k1", "build").await.unwrap().state,
         ApiState::NeedsHuman
     );
-    // 올리지 못한 카드(전달 실패)는 DM 전달 실패 판정이다
     let (_, _) = waiting(&db, "k2", "n2", Some("T1")).await;
     let job = card(&db).claim(8).await.unwrap().remove(0);
     assert_eq!(job.key.nonce.0, "n2");
@@ -324,14 +315,13 @@ async fn a_delegated_child_keeps_the_roots_origin_binding_and_delivery_team() {
             checked_revision: Revision("r1".into()),
             step: "research".into(),
             child: AgentId("main/research".into()),
-            instruction: "조사해".into(),
+            instruction: "investigate".into(),
             scopes: scopes(&["run"]),
         })
         .await
         .unwrap();
     let child = claimed(&db).await;
     assert_ne!(child.attempt.run, root.run);
-    // 자식도 루트의 정확한 원래 바인딩과 접수 출처를 이어받는다(루트→자식→재개)
     assert_eq!(child.binding.0, "b-assistant");
     assert_eq!(child.root, root.run);
     assert_eq!(
@@ -351,7 +341,6 @@ async fn a_delegated_child_keeps_the_roots_origin_binding_and_delivery_team() {
             team: Some("T9".into()),
         })
     );
-    // 자식 승인 대기 중에는 아직 카드가 올라가지 않았으니 루트는 진행 중이다. 올라가면 승인 대기다
     assert_eq!(
         lookup(&db, "k1", "build").await.unwrap().state,
         ApiState::Active
@@ -376,6 +365,5 @@ async fn a_delegated_child_keeps_the_roots_origin_binding_and_delivery_team() {
         lookup(&db, "k1", "build").await.unwrap().state,
         ApiState::NeedsHuman
     );
-    // 이 입구의 접수는 그대로 하나다
     assert_eq!(requests(&db).await, 1);
 }

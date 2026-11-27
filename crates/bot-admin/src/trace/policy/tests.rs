@@ -2,7 +2,7 @@ use super::*;
 use crate::trace::SpanIds;
 use bot_core::id::{Attempt, Generation, ProfileId, RunId};
 
-// 토큰 모양 리터럴이 소스에 남지 않게 접두사를 실행 중에 이어 붙인다.
+// Build token-shaped prefixes at runtime so literal secret patterns never appear in source.
 fn token() -> String {
     format!("{}-{}", "xoxb", "1234567890-abcdefghij")
 }
@@ -32,24 +32,24 @@ const OFF: Policy = Policy {
 #[test]
 fn ordinary_text_survives_and_secrets_of_any_length_are_masked() {
     let r = Redactor::new(["zq7".to_owned(), "alpha-token-1".to_owned(), String::new()]);
-    let plain = "일반 문구입니다. INPUT-MARK-1 그대로 남아야 한다.";
+    let plain = "Normal text. INPUT-MARK-1 must remain intact.";
     assert_eq!(r.mask(plain), plain);
-    let out = r.mask("답: ANSWER-MARK-2, 키는 zq7 그리고 alpha-token-1 입니다 zq7zq7");
-    assert!(out.contains("ANSWER-MARK-2") && out.starts_with("답: "));
+    let out = r.mask("Answer: ANSWER-MARK-2, keys zq7 and alpha-token-1 here zq7zq7");
+    assert!(out.contains("ANSWER-MARK-2") && out.starts_with("Answer: "));
     assert!(
         !out.contains("zq7") && !out.contains("alpha-token-1"),
         "{out}"
     );
     assert_eq!(out.matches(MASK).count(), 4, "{out}");
-    assert!(!r.leaks(&out), "가린 글은 누출이 아니다");
+    assert!(!r.leaks(&out), "masked text is not a leak");
 }
 
 #[test]
 fn token_shapes_are_masked_and_the_rest_is_kept() {
     let r = Redactor::default();
-    let out = r.mask(&format!("ERROR-MARK-3 실패 {} 끝", token()));
+    let out = r.mask(&format!("ERROR-MARK-3 failed {} end", token()));
     assert!(
-        out.contains("ERROR-MARK-3 실패 ") && out.ends_with(" 끝") && !out.contains(&token()),
+        out.contains("ERROR-MARK-3 failed ") && out.ends_with(" end") && !out.contains(&token()),
         "{out}"
     );
     assert!(r.leaks(&format!("token {}", token())));
@@ -61,10 +61,10 @@ fn token_shapes_are_masked_and_the_rest_is_kept() {
         "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJhYmMifQ", "c2lnbmF0dXJlLXZhbHVl"
     );
     assert!(r.leaks(&jwt) && !r.mask(&jwt).contains("eyJ"));
-    assert!(r.leaks(&"a1".repeat(30)), "길고 무작위처럼 보이는 문자열");
+    assert!(r.leaks(&"a1".repeat(30)), "long random-looking string");
     assert!(
         !r.leaks("agenda.list main/research r-17 c-9 012345"),
-        "고정 어휘·짧은 ID는 통과"
+        "fixed vocabulary and short IDs pass"
     );
 }
 
@@ -82,7 +82,7 @@ fn long_hex_revisions_pass_as_metadata_but_are_masked_in_free_text() {
     assert_eq!(
         get(&o, key::BOT_TOOL_REVISION),
         Some(&Val::Str(revision.clone())),
-        "판본 해시는 메타데이터로 나간다"
+        "revision hash passes as metadata"
     );
     let on = Policy {
         ids: Ids::Plain,
@@ -92,15 +92,14 @@ fn long_hex_revisions_pass_as_metadata_but_are_masked_in_free_text() {
     let o = apply(
         span(vec![(
             key::GEN_AI_INPUT_MESSAGES,
-            format!("키 {revision} 끝").into(),
+            format!("key {revision} end").into(),
         )]),
         &on,
         &r,
     );
     assert!(
-        matches!(get(&o, key::GEN_AI_INPUT_MESSAGES), Some(Val::Str(t)) if !t.contains(&revision) && t.ends_with(" 끝"))
+        matches!(get(&o, key::GEN_AI_INPUT_MESSAGES), Some(Val::Str(t)) if !t.contains(&revision) && t.ends_with(" end"))
     );
-    // 알려진 접두사 모양은 메타데이터에서도 막는다.
     assert!(r.leaks_meta(&format!("{}-{}", "xoxb", "1234567890-abcdefghij")));
     let known = Redactor::new(["zq7".to_owned()]);
     assert!(known.has_value("a zq7 b") && !known.has_value("a zq b") && known.leaks_meta("zq7"));
@@ -118,7 +117,7 @@ fn a_private_span_never_exports_content_even_when_the_profile_enabled_it() {
         let mut attrs = vec![
             (
                 key::GEN_AI_INPUT_MESSAGES,
-                Val::Str("개인 대화 원문".into()),
+                Val::Str("private conversation text".into()),
             ),
             (key::GEN_AI_TOOL_NAME, Val::Str("inbox.receive".into())),
         ];
@@ -137,16 +136,17 @@ fn a_private_span_never_exports_content_even_when_the_profile_enabled_it() {
         get(&o, key::GEN_AI_TOOL_NAME),
         Some(&Val::Str("inbox.receive".into()))
     );
-    assert!(get(&o, PRIVATE).is_none(), "내부 표지는 내보내지 않는다");
+    assert!(
+        get(&o, PRIVATE).is_none(),
+        "internal marker is not exported"
+    );
     assert_eq!(
         get(&o, key::BOT_DROPPED),
         Some(&Val::Int(1)),
-        "표지는 버린 것으로 세지 않는다"
+        "internal marker is not counted as dropped"
     );
-    // 표지가 없는 같은 프로필의 스팬은 내용이 나간다.
     let o = apply(rec(false), &on, &red);
     assert!(get(&o, key::GEN_AI_INPUT_MESSAGES).is_some());
-    // 표지가 false이면 일반 스팬이다.
     let mut plain = rec(false);
     plain.attrs.push((PRIVATE, Val::Bool(false)));
     assert!(get(&apply(plain, &on, &red), key::GEN_AI_INPUT_MESSAGES).is_some());
@@ -164,7 +164,7 @@ fn overlapping_values_mask_the_longer_one_first() {
 #[test]
 fn content_is_dropped_by_default_and_marked() {
     let rec = span(vec![
-        (key::GEN_AI_INPUT_MESSAGES, "원문 입력".into()),
+        (key::GEN_AI_INPUT_MESSAGES, "raw user input".into()),
         (key::GEN_AI_TOOL_CALL_ARGUMENTS, "{\"event\":\"x\"}".into()),
         (key::GEN_AI_TOOL_NAME, "agenda.list".into()),
     ]);
@@ -194,18 +194,18 @@ fn enabled_content_is_masked_and_secret_leftovers_drop_the_attribute() {
     let r = Redactor::new(["zq7".to_owned()]);
     let rec = span(vec![(
         key::GEN_AI_OUTPUT_MESSAGES,
-        format!("답 zq7 {}", token()).into(),
+        format!("reply zq7 {}", token()).into(),
     )]);
     let o = apply(rec, &on, &r);
     let Some(Val::Str(text)) = get(&o, key::GEN_AI_OUTPUT_MESSAGES) else {
-        panic!("내용이 빠졌다")
+        panic!("content missing")
     };
     assert!(
-        !text.contains("zq7") && !text.contains(&token()) && text.starts_with("답 "),
+        !text.contains("zq7") && !text.contains(&token()) && text.starts_with("reply "),
         "{text}"
     );
     assert!(get(&o, key::BOT_CONTENT_DROPPED).is_none());
-    let long = "가".repeat(20_000);
+    let long = "€".repeat(20_000);
     let o = apply(
         span(vec![(key::GEN_AI_INPUT_MESSAGES, long.into())]),
         &on,
@@ -231,7 +231,7 @@ fn unknown_keys_and_secret_valued_attributes_never_leave() {
     assert_eq!(
         get(&o, key::BOT_PROFILE),
         Some(&Val::Str("alpha".into())),
-        "프로필은 레코드 것으로 고정"
+        "profile comes from span record"
     );
     assert_eq!(get(&o, key::BOT_DROPPED), Some(&Val::Int(2)));
     assert_eq!(
@@ -269,19 +269,19 @@ fn identity_keys_become_stable_per_profile_pseudonyms_when_hashed() {
         &red,
     );
     let Some(Val::Str(x)) = get(&a, key::BOT_PRINCIPAL) else {
-        panic!("가명 없음")
+        panic!("missing pseudonym")
     };
     assert_eq!(x.len(), 12);
     assert!(!x.contains("owner"));
     assert_eq!(
         Some(&Val::Str(x.clone())),
         get(&b, key::BOT_PRINCIPAL),
-        "같은 값은 같은 가명"
+        "same value yields same pseudonym"
     );
     assert_eq!(
         get(&a, key::BOT_AGENT),
         Some(&Val::Str("main".into())),
-        "식별자가 아닌 키는 그대로"
+        "non-identity key stays plain"
     );
     assert_ne!(pseudonym("alpha", "v"), pseudonym("beta", "v"));
     let plain = apply(
@@ -320,7 +320,7 @@ fn names_events_and_counts_are_bounded() {
     assert_eq!((o.events.len(), o.links.len()), (MAX_EVENTS, MAX_LINKS));
     assert_eq!(
         o.events[0].0, "bot.content.dropped",
-        "이벤트 이름은 고정 어휘로 통과"
+        "fixed-vocabulary event name passes"
     );
     assert_eq!(
         o.attrs
@@ -340,9 +340,8 @@ fn values_added_later_are_masked_by_every_clone_and_never_unlearned() {
     assert!(!red.mask(text).contains("first-secret-value"));
     assert!(
         red.mask(text).contains("second-secret-value"),
-        "아직 모르는 값은 그대로다"
+        "unknown value stays plain"
     );
-    // 키를 교체했다: 새 값을 한 복제본에 더하면 모든 복제본이 곧바로 가린다
     red.add("second-secret-value");
     for each in [&red, &shared] {
         assert!(each.has_value("second-secret-value") && each.leaks_meta("x second-secret-value"));
@@ -352,7 +351,6 @@ fn values_added_later_are_masked_by_every_clone_and_never_unlearned() {
             each.mask(text)
         );
     }
-    // 같은 값·빈 값은 목록을 늘리지 않고, 값이 많아도 긴 것부터 가린다(겹치는 값에서 긴 쪽을 먼저)
     red.add("second-secret-value");
     red.add("");
     assert!(format!("{red:?}").contains("values: 2"), "{red:?}");
@@ -360,7 +358,7 @@ fn values_added_later_are_masked_by_every_clone_and_never_unlearned() {
     assert_eq!(
         red.mask("a second-secret-value b"),
         "a [redacted] b",
-        "짧은 값 `secret`이 긴 값의 일부를 먼저 지워 조각이 남지 않는다"
+        "shorter secret must not partially strip longer secret"
     );
 }
 

@@ -1,6 +1,4 @@
-//! 프로필 판본 묶음의 보관(PG)과 작업이 고정한 판본 목록: 재배포 뒤 옛 판본 복원의 저장소 쪽 근거.
-//! - 묶음은 `(프로필, 판본)`으로 보관하고 판본이 바이트의 SHA-256이 아니면 거절한다. 같은 바이트는 다시 보관해도 되고, 바꾸거나 지울 수 없다.
-//! - 고정 판본 목록은 활성 집합·끝나지 않은 실행·재개할 수 있는 dead letter·대기 카드·정적 구간(열린 구간과 커서가 끝에 못 이른 구간)·활성 사용자 예약의 생성 실행을 한 번에 읽는다.
+//! Profile bundle storage and pinned revision discovery for historical restore across redeploys.
 
 use crate::support::*;
 use bot_core::{
@@ -24,7 +22,6 @@ fn personal() -> ProfileId {
     ProfileId("personal".into())
 }
 
-/// `/v1/models`의 `created`가 쓰는 값: 처음 보관한 시각이고, 다시 보관하거나 읽어도 바뀌지 않으며, 없는 판본은 None이다(지어내지 않는다).
 #[tokio::test]
 async fn the_first_store_time_is_stable_and_missing_bundles_have_none() {
     let Some(db) = TestDb::new().await else {
@@ -45,10 +42,10 @@ async fn the_first_store_time_is_stable_and_missing_bundles_have_none() {
         .created_ms(&personal(), &revision)
         .await
         .unwrap()
-        .expect("보관한 묶음의 시각");
+        .expect("stored bundle timestamp");
     assert!(
         first > 1_700_000_000_000,
-        "DB 시각(밀리초)이어야 해요: {first}"
+        "expected DB timestamp in milliseconds: {first}"
     );
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     store
@@ -58,7 +55,7 @@ async fn the_first_store_time_is_stable_and_missing_bundles_have_none() {
     assert_eq!(
         store.created_ms(&personal(), &revision).await.unwrap(),
         Some(first),
-        "같은 바이트를 다시 보관해도 처음 시각 그대로"
+        "re-storing identical bytes must preserve initial timestamp"
     );
     assert_eq!(
         store
@@ -66,7 +63,7 @@ async fn the_first_store_time_is_stable_and_missing_bundles_have_none() {
             .await
             .unwrap(),
         None,
-        "다른 프로필의 같은 판본은 따로다"
+        "same revision under another profile is distinct"
     );
 }
 
@@ -87,12 +84,10 @@ async fn a_bundle_is_stored_by_its_own_hash_once_and_never_changes() {
         store.bundle(&personal(), &revision).await.unwrap(),
         Some(bytes.clone())
     );
-    // 같은 키로 같은 바이트는 다시 보관해도 된다
     store
         .put_bundle(personal(), revision.clone(), bytes.clone())
         .await
         .unwrap();
-    // 다른 프로필의 같은 판본은 따로다
     assert_eq!(
         store
             .bundle(&ProfileId("work".into()), &revision)
@@ -100,7 +95,6 @@ async fn a_bundle_is_stored_by_its_own_hash_once_and_never_changes() {
             .unwrap(),
         None
     );
-    // 판본이 바이트의 해시가 아니면 보관하지 않는다
     for wrong in [
         Revision("r1".into()),
         sha(b"other"),
@@ -121,7 +115,7 @@ async fn a_bundle_is_stored_by_its_own_hash_once_and_never_changes() {
             .await,
         1
     );
-    // DB가 불변과 키 = 해시를 강제한다(저장소 코드를 거치지 않는 쓰기도 막힌다)
+    // DB constraints enforce immutability and key == sha256(bundle) even on direct SQL writes.
     for sql in [
         "update bot_profile_bundles set bundle = '\\x00'",
         "delete from bot_profile_bundles",
@@ -145,7 +139,6 @@ async fn different_bytes_under_a_stored_key_are_refused_as_corruption() {
     };
     let bytes = b"BOTPROFILE1\noriginal".to_vec();
     let revision = sha(&bytes);
-    // 손상 흉내: 키 = 해시 검사를 끄고 같은 키에 다른 바이트를 둔다
     db.sql("alter table bot_profile_bundles drop constraint bot_profile_bundles_check")
         .await;
     sqlx::query(
@@ -165,11 +158,10 @@ async fn different_bytes_under_a_stored_key_are_refused_as_corruption() {
     assert_eq!(
         db.store.bundle(&personal(), &revision).await.unwrap(),
         Some(b"tampered".to_vec()),
-        "기존 바이트는 그대로다"
+        "existing bytes must remain untouched"
     );
 }
 
-/// 이 실행 하나를 정한 판본 · 상태로 만든다(접수한 뒤 SQL로 맞춘다).
 async fn run_at(db: &TestDb, request: &str, revision: &str, state: &str, private: bool) -> RunId {
     let run = runs(db)
         .accept(accept("personal", request, "hi"))
@@ -187,7 +179,6 @@ async fn run_at(db: &TestDb, request: &str, revision: &str, state: &str, private
     run
 }
 
-/// 이번에 게시·합류할 집합(`Publication::profiles`): 두 프로필 모두 판본 r1.
 fn both() -> BTreeMap<ProfileId, Revision> {
     BTreeMap::from([
         (personal(), Revision("r1".into())),
@@ -195,7 +186,6 @@ fn both() -> BTreeMap<ProfileId, Revision> {
     ])
 }
 
-/// 목록을 읽는다(이번 집합 = personal·work r1).
 async fn pinned(db: &TestDb) -> BTreeSet<(ProfileId, Revision)> {
     db.store.pinned_revisions(&both()).await.unwrap()
 }
@@ -212,7 +202,6 @@ async fn pinned_revisions_cover_the_active_set_and_every_run_that_can_still_use_
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 아무 작업도 없을 때는 이번 집합의 현재 쌍뿐이다
     assert_eq!(
         pinned(&db).await,
         pairs(&[("personal", "r1"), ("work", "r1")])
@@ -222,7 +211,7 @@ async fn pinned_revisions_cover_the_active_set_and_every_run_that_can_still_use_
         ("retry", "r-retry", "retry", false),
         ("waiting", "r-waiting", "waiting", false),
         ("dead", "r-dead", "dead", false),
-        // 끝난 실행·취소·재개할 수 없는 dead(비공개 접수)는 판본을 붙들지 않는다
+        // Terminal runs and non-resumable private dead runs do not pin revisions.
         ("done", "r-done", "succeeded", false),
         ("cancelled", "r-cancelled", "cancelled", false),
         ("private-dead", "r-private-dead", "dead", true),
@@ -247,7 +236,6 @@ async fn pinned_revisions_include_static_segments_that_are_open_or_not_yet_caugh
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // (트리거, 구간 끝, 커서, 판본)
     for (trigger, until, cursor, revision) in [
         ("open", "null", 500, "r-open"),
         ("pending", "100", 50, "r-pending"),
@@ -268,7 +256,7 @@ async fn pinned_revisions_include_static_segments_that_are_open_or_not_yet_caugh
     assert!(pinned.contains(&(personal(), Revision("r-pending".into()))));
     assert!(
         !pinned.contains(&(personal(), Revision("r-caught-up".into()))),
-        "구간을 다 따라잡았으면 붙들지 않는다"
+        "caught-up segment must not pin its revision"
     );
 }
 
@@ -278,7 +266,6 @@ async fn pinned_revisions_include_the_run_that_created_an_active_user_schedule_a
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 활성 사용자 예약의 생성 실행은 끝났어도 그 판본이 필요하다. 취소한 예약은 아니다
     for (id, revision, state) in [
         ("keeps", "r-created-keeps", "active"),
         ("gone", "r-created-gone", "canceled"),
@@ -287,14 +274,13 @@ async fn pinned_revisions_include_the_run_that_created_an_active_user_schedule_a
         db.sql(&format!(
             "insert into bot_user_schedules (profile, id, owner, agent, origin_run, origin_call, origin_binding, origin_kind, origin_id,
                     ceiling, at_ms, instruction, cursor_ms, next_ms, state)
-             values ('personal', '{id}', 'local:owner', 'main', '{}', 'c-{id}', 'desk', 'direct', 'c1', '{{run}}', 1000, '확인', 1,
+             values ('personal', '{id}', 'local:owner', 'main', '{}', 'c-{id}', 'desk', 'direct', 'c1', '{{run}}', 1000, 'check', 1,
                      {}, '{state}')",
             origin.0,
             if state == "active" { "1000" } else { "null" }
         ))
         .await;
     }
-    // 승인 카드가 대기 중이면 그 실행의 판본이 필요하다(실행이 끝난 것으로 보여도 카드는 그 판본의 도구·정책을 가리킨다)
     let ctx = leased(&db, "approval").await;
     begin_call(&db, &ctx.attempt, "c1").await;
     db.sql(&format!(
@@ -320,7 +306,7 @@ async fn pinned_revisions_include_the_run_that_created_an_active_user_schedule_a
             .await
             .unwrap()
             .contains(&(personal(), Revision("r-card".into()))),
-        "소비한 카드는 붙들지 않는다"
+        "consumed approval must not pin its revision"
     );
 }
 
@@ -329,7 +315,6 @@ async fn an_old_revision_nobody_references_is_not_required_even_though_it_is_the
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // DB의 활성 판본은 personal r1 · work r1이다. 이번에 게시할 집합은 personal r2 · work r1: 아무 작업도 r1을 참조하지 않으면 personal r1은 필수가 아니다
     let next = BTreeMap::from([
         (personal(), Revision("r2".into())),
         (ProfileId("work".into()), Revision("r1".into())),
@@ -338,7 +323,6 @@ async fn an_old_revision_nobody_references_is_not_required_even_though_it_is_the
         db.store.pinned_revisions(&next).await.unwrap(),
         pairs(&[("personal", "r2"), ("work", "r1")])
     );
-    // 집합에 없는 프로필(여기서는 work)의 작업은 읽지 않는다
     let work = runs(&db)
         .accept(accept("work", "gone", "hi"))
         .await
@@ -352,9 +336,8 @@ async fn an_old_revision_nobody_references_is_not_required_even_though_it_is_the
     assert_eq!(
         db.store.pinned_revisions(&only_personal).await.unwrap(),
         pairs(&[("personal", "r2")]),
-        "빠진 프로필의 dead letter는 필수가 아니다"
+        "dead letter in an omitted profile is not required"
     );
-    // 집합에 들면 읽는다
     assert!(
         db.store
             .pinned_revisions(&next)
@@ -364,7 +347,6 @@ async fn an_old_revision_nobody_references_is_not_required_even_though_it_is_the
     );
 }
 
-/// 이 집합(`next`)을 준비한 목록으로 게시한다.
 async fn publish(
     db: &TestDb,
     active: &Option<Revision>,
@@ -393,15 +375,13 @@ async fn publishing_rechecks_the_pinned_list_under_the_active_row_lock_and_refus
         (personal(), Revision("r2".into())),
         (ProfileId("work".into()), Revision("r1".into())),
     ]);
-    // 준비: 옛 판본 personal r1을 아무도 참조하지 않아 필수 목록은 새 집합의 현재 쌍뿐이다(옛 번들 없이 준비가 끝난다)
     let prepared = db.store.pinned_revisions(&next).await.unwrap();
-    // 준비 뒤 게시 전에 옛 프로세스(여전히 활성인 r1)가 새 실행을 접수한다
+    // Accept a run pinned to old r1 between preparation and publication.
     runs(&db)
         .accept(accept("personal", "late", "hi"))
         .await
         .unwrap();
     let active = db.store.current().await.unwrap();
-    // 준비한 목록에 없는 새 고정 참조가 있으면 아무것도 쓰지 않고 Stale이다
     assert!(matches!(
         publish(&db, &active, &next, prepared.clone()).await,
         Err(Error::Stale)
@@ -409,7 +389,7 @@ async fn publishing_rechecks_the_pinned_list_under_the_active_row_lock_and_refus
     assert_eq!(
         db.store.current().await.unwrap(),
         active,
-        "활성 집합은 그대로다"
+        "active set must remain unchanged"
     );
     assert_eq!(
         db.scalar::<String>("select revision from bot_active_profiles where profile = 'personal'")
@@ -423,7 +403,6 @@ async fn publishing_rechecks_the_pinned_list_under_the_active_row_lock_and_refus
         .await,
         0
     );
-    // 다시 준비하면(그 참조를 덮으면) 게시된다
     let again = db.store.pinned_revisions(&next).await.unwrap();
     assert!(again.contains(&(personal(), Revision("r1".into()))));
     publish(&db, &active, &next, again).await.unwrap();
@@ -448,7 +427,6 @@ async fn a_plain_replace_does_not_recheck_and_a_prepared_replace_accepts_a_super
         .accept(accept("personal", "late", "hi"))
         .await
         .unwrap();
-    // 준비한 목록이 필수 목록보다 넓어도 된다
     let wide = pairs(&[("personal", "r1"), ("personal", "r2"), ("work", "r1")]);
     db.store
         .replace_prepared(
@@ -461,7 +439,6 @@ async fn a_plain_replace_does_not_recheck_and_a_prepared_replace_accepts_a_super
         )
         .await
         .unwrap();
-    // 대조 없는 `replace`는 기존 동작 그대로다(다른 곳의 시험·도구가 쓴다)
     db.store
         .replace(
             db.store.current().await.unwrap(),

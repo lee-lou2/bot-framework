@@ -1,11 +1,11 @@
-# 디자인 원칙(예시)
+# Design Principles (Example)
 
-합성 예시다. 팀의 실제 원칙으로 바꿔 쓴다.
+Synthetic example. Replace with your team's actual principles.
 
-1. 한 화면에는 주된 행동이 하나다. 나머지는 눈에 덜 띄게 둔다.
-2. 같은 것은 같게 보이고, 다르게 동작하는 것은 다르게 보인다.
-3. 상태를 모두 설계한다: 기본·불러오는 중·비어 있음·오류·비활성.
-4. 색에만 의존하지 않는다. 본문 글자 대비는 4.5:1 이상, 터치 영역은 44px 이상으로 둔다.
-5. 문구는 사용자의 말로 쓰고 행동은 동사로 적는다("저장", "삭제").
-6. 키보드만으로 모든 기능에 닿을 수 있어야 한다. 포커스가 보여야 한다.
-7. 되돌릴 수 없는 행동은 한 번 더 확인하고, 되돌릴 수 있으면 확인 대신 '실행 취소'를 준다.
+1. Each screen has one primary action; keep secondary actions visually subdued.
+2. Things that behave the same look the same; things that behave differently look different.
+3. Design every state: default, loading, empty, error, and disabled.
+4. Never rely on color alone. Maintain at least 4.5:1 body text contrast and 44px touch targets.
+5. Write copy in the user's language and label actions with verbs ("Save", "Delete").
+6. Every feature must be keyboard-accessible with visible focus indicators.
+7. Confirm irreversible actions; prefer "Undo" over confirmation dialogs when actions are reversible.

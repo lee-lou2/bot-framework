@@ -1,17 +1,13 @@
-//! egress 판정. 도구는 선언한 호스트:포트로만 나가고, 이름을 풀어 얻은 주소도 공개 주소여야 한다.
+//! Egress host allowlisting and public-IP vetting for tool HTTP/CONNECT proxies.
 //!
-//! - 허용 목록 = 도구가 선언한 호스트 ∩ 운영자가 프로필별로 정한 상한(상한이 없으면 선언 전부).
-//! - 요청마다 정확한 호스트와 포트를 대조한다(와일드카드·접미사 일치 없음).
-//! - 이름을 풀어 얻은 주소가 하나라도 사설·루프백·링크로컬 같은 비공개 주소면 그 이름 전체를 거절한다
-//!   (DNS 재바인딩·로컬 네트워크 우회). 연결은 검사한 주소에 고정한다.
-//!
-//! 프록시 서버(`CONNECT` 처리)는 이 판정 위에서 돌아간다.
+//! - Effective allowlist = tool-declared hosts ∩ operator per-profile cap (or all declared if uncapped).
+//! - Matching is exact on host and port (no wildcards or suffix matching).
+//! - Any non-public resolved address rejects the entire hostname to prevent DNS rebinding and local network bypass; connections pin to the vetted address.
 
 use crate::resolve::HostPort;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// 호스트 이름을 비교용으로 정규화한다. 소문자, 끝의 점 하나 제거. ASCII 영숫자·`.`·`-`만 허용한다
-/// (IDN은 punycode로 선언해야 한다). 빈 라벨(`a..b`)과 `-`·`.`로 시작하는 이름은 거절한다.
+/// Normalizes a hostname for comparison: lowercase, strips one trailing dot, ASCII alphanumeric/`.`/`-` only (IDNs must use punycode).
 pub fn canon_host(host: &str) -> Option<String> {
     let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
     let ok = !host.is_empty()
@@ -25,7 +21,7 @@ pub fn canon_host(host: &str) -> Option<String> {
     ok.then_some(host)
 }
 
-/// `CONNECT` 요청 대상(`host:port`)을 나눈다. 대괄호 IPv6·사용자 정보·경로·공백은 거절한다.
+/// Parses a `CONNECT` `host:port` target; rejects bracketed IPv6, userinfo, paths, and whitespace.
 pub fn parse_target(target: &str) -> Option<(String, u16)> {
     let (host, port) = target.rsplit_once(':')?;
     if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
@@ -41,7 +37,7 @@ pub struct EgressPolicy {
 }
 
 impl EgressPolicy {
-    /// 선언한 목록과 운영자 상한의 교집합. 정규화할 수 없는 선언은 버린다.
+    /// Intersects declared targets with the optional operator cap, dropping unnormalizable entries.
     pub fn new(declared: &[HostPort], cap: Option<&[HostPort]>) -> Self {
         let canon = |item: &HostPort| {
             canon_host(&item.host).map(|host| HostPort {
@@ -68,7 +64,6 @@ impl EgressPolicy {
         self.allowed.is_empty()
     }
 
-    /// 정확히 허용된 호스트와 포트인가.
     pub fn permits(&self, host: &str, port: u16) -> bool {
         canon_host(host).is_some_and(|host| {
             self.allowed
@@ -78,8 +73,7 @@ impl EgressPolicy {
     }
 }
 
-/// 공개 인터넷 주소인가. 루프백·사설·링크로컬·공유(CGNAT)·문서용·벤치마크·예약·멀티캐스트·미지정,
-/// IPv4를 품은 IPv6 형태(매핑·NAT64·6to4)는 품은 IPv4로, Teredo는 거절한다.
+/// Returns true only for globally routable public IPs; inspects embedded IPv4 in IPv6 mapped/NAT64/6to4 addresses and rejects Teredo.
 pub fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => public_v4(v4),
@@ -112,13 +106,13 @@ fn public_v6(ip: Ipv6Addr) -> bool {
         return false;
     }
     if (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0 {
-        return false; // 고유 로컬·링크로컬·사이트로컬
+        return false; // ULA, link-local, site-local
     }
     if s[0] == 0x2001 && s[1] == 0x0db8 {
-        return false; // 문서용
+        return false; // documentation
     }
     if s[0] == 0x2001 && s[1] == 0 {
-        return false; // Teredo 터널
+        return false; // Teredo
     }
     if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
         return public_v4(embedded(s[6], s[7])); // NAT64
@@ -126,7 +120,7 @@ fn public_v6(ip: Ipv6Addr) -> bool {
     if s[0] == 0x2002 {
         return public_v4(embedded(s[1], s[2])); // 6to4
     }
-    s[0..6] != [0, 0, 0, 0, 0, 0] // IPv4 호환(::a.b.c.d, 폐기됨)
+    s[0..6] != [0, 0, 0, 0, 0, 0] // deprecated IPv4-compatible (::a.b.c.d)
 }
 
 fn embedded(high: u16, low: u16) -> Ipv4Addr {
@@ -135,9 +129,8 @@ fn embedded(high: u16, low: u16) -> Ipv4Addr {
     Ipv4Addr::new(a, b, c, d)
 }
 
-/// 이름 해석 결과를 검사한다. 비어 있거나 비공개 주소가 하나라도 있으면 `None`.
-/// 운영자가 사설망을 명시적으로 열었을 때(`allow_private`)만 비공개 주소를 허용한다.
-/// 돌려주는 첫 주소에 연결을 고정한다.
+/// Vets resolved addresses and returns the first address to pin the connection to.
+/// Rejects empty results or any non-public address unless `allow_private` is set.
 pub fn vet_resolved(addrs: &[IpAddr], allow_private: bool) -> Option<IpAddr> {
     if addrs.is_empty() || (!allow_private && !addrs.iter().all(|ip| is_public(*ip))) {
         return None;
@@ -302,10 +295,9 @@ mod tests {
     fn one_private_answer_rejects_the_whole_name() {
         let public = ip("93.184.216.34");
         assert_eq!(vet_resolved(&[public], false), Some(public));
-        assert_eq!(vet_resolved(&[public, ip("10.0.0.5")], false), None); // 재바인딩
+        assert_eq!(vet_resolved(&[public, ip("10.0.0.5")], false), None); // DNS rebinding
         assert_eq!(vet_resolved(&[ip("127.0.0.1")], false), None);
         assert_eq!(vet_resolved(&[], false), None);
-        // 운영자가 사설망을 열었을 때만 허용하고 첫 주소에 고정한다
         assert_eq!(
             vet_resolved(&[ip("10.0.0.5"), public], true),
             Some(ip("10.0.0.5"))
@@ -314,7 +306,7 @@ mod tests {
 
     #[test]
     fn obfuscated_numeric_names_still_fail_on_the_resolved_address() {
-        // 숫자만의 호스트 이름은 선언할 수 있지만(영숫자 규칙), 풀린 주소가 루프백이면 거절한다
+        // Numeric-only hostnames pass syntax validation but still fail when resolved to loopback.
         let policy = EgressPolicy::new(&[hp("2130706433", 443)], None);
         assert!(policy.permits("2130706433", 443));
         assert_eq!(vet_resolved(&[ip("127.0.0.1")], false), None);

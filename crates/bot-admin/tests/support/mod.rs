@@ -1,4 +1,4 @@
-//! 시험 보조: 가짜 저장소를 실제 소켓에 올리고 날것의 HTTP/1.1로 요청한다(Host 검사까지 실제 경로로 시험한다).
+//! Test harness: serves the fake store on a real socket and sends raw HTTP/1.1 requests.
 #![allow(dead_code)]
 
 pub mod collector;
@@ -35,7 +35,7 @@ pub struct Resp {
 
 impl Resp {
     pub fn json(&self) -> Value {
-        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("JSON 아님({e}): {}", self.body))
+        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("not JSON ({e}): {}", self.body))
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
@@ -50,7 +50,6 @@ pub async fn start(fake: Fake) -> Server {
     start_with(fake, None).await
 }
 
-/// 추적 내보내기를 붙여 시작한다.
 pub async fn start_with(fake: Fake, traces: Option<Arc<bot_admin::Exporter>>) -> Server {
     start_cfg(fake, |mut cfg| {
         cfg.traces = traces;
@@ -59,13 +58,12 @@ pub async fn start_with(fake: Fake, traces: Option<Arc<bot_admin::Exporter>>) ->
     .await
 }
 
-/// 설정을 고쳐서 시작한다(훅·시간 제한 같은 선택 입력을 시험할 때).
 pub async fn start_cfg(fake: Fake, tweak: impl FnOnce(AdminConfig) -> AdminConfig) -> Server {
     let fake = Arc::new(fake);
-    let listener = bot_admin::bind("127.0.0.1:0".parse().expect("주소"), false)
+    let listener = bot_admin::bind("127.0.0.1:0".parse().expect("addr"), false)
         .await
-        .expect("바인드");
-    let addr = listener.local_addr().expect("주소");
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
     let auth = StaticTokens::new()
         .with(OPERATOR, viewer("local:owner", true))
         .with(GUEST, viewer("local:guest", false));
@@ -76,8 +74,8 @@ pub async fn start_cfg(fake: Fake, tweak: impl FnOnce(AdminConfig) -> AdminConfi
         auth: Arc::new(auth),
         profiles: Arc::new(bot_admin::fake::demo_catalog()),
     };
-    let app = router(tweak(AdminConfig::new(addr)), deps).expect("라우터");
-    // 시험용 출처 흉내: `X-Test-Peer: <IP>`가 있으면 그 주소에서 온 것으로 본다(가장 바깥 층이라 인증보다 먼저 돈다).
+    let app = router(tweak(AdminConfig::new(addr)), deps).expect("router");
+    // Outermost test-only layer overrides ConnectInfo when `X-Test-Peer` is set.
     let app = app.layer(from_fn(|mut req: Request, next: Next| async move {
         let peer = req
             .headers()
@@ -96,7 +94,7 @@ pub async fn start_cfg(fake: Fake, tweak: impl FnOnce(AdminConfig) -> AdminConfi
     Server { addr, fake }
 }
 
-/// `host`를 `None`으로 두면 서버의 실제 주소를 쓴다.
+/// Sends a raw HTTP/1.1 request; `host: None` uses `addr`.
 pub async fn raw(
     addr: SocketAddr,
     method: &str,
@@ -117,10 +115,10 @@ pub async fn raw(
     }
     req.push_str("\r\n");
     req.push_str(body.unwrap_or_default());
-    let mut s = TcpStream::connect(addr).await.expect("연결");
-    s.write_all(req.as_bytes()).await.expect("쓰기");
+    let mut s = TcpStream::connect(addr).await.expect("connect");
+    s.write_all(req.as_bytes()).await.expect("write");
     let mut out = Vec::new();
-    s.read_to_end(&mut out).await.expect("읽기");
+    s.read_to_end(&mut out).await.expect("read");
     let text = String::from_utf8_lossy(&out).into_owned();
     let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
     let mut lines = head.lines();
@@ -128,7 +126,7 @@ pub async fn raw(
         .next()
         .and_then(|l| l.split(' ').nth(1))
         .and_then(|c| c.parse().ok())
-        .expect("상태 줄");
+        .expect("status line");
     let headers = lines
         .filter_map(|l| l.split_once(':'))
         .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
@@ -156,13 +154,11 @@ pub async fn get(s: &Server, token: &str, path: &str) -> Resp {
     .await
 }
 
-/// 인증된 GET으로 CSRF 토큰을 받는다.
 pub async fn csrf(s: &Server, token: &str) -> String {
     let me = get(s, token, "/v1/admin/me").await.json();
     me["csrf"].as_str().expect("csrf").to_owned()
 }
 
-/// 올바른 CSRF 토큰·JSON 헤더를 붙여 POST한다.
 pub async fn post(s: &Server, token: &str, path: &str, body: &str) -> Resp {
     let csrf = csrf(s, token).await;
     raw(

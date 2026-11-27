@@ -1,4 +1,4 @@
-//! 시각과 난수. 시험에서 바꿔 끼울 수 있게 둘만 포트로 뺀다.
+//! Clock and CSPRNG entropy ports for deterministic testing.
 
 use std::time::SystemTime;
 
@@ -15,11 +15,10 @@ impl Clock for SystemClock {
 }
 
 pub trait Entropy: Send + Sync {
-    /// 버퍼를 예측할 수 없는 바이트로 채운다. 못 하면 false.
+    /// Fills `buf` with unpredictable bytes; returns `false` on failure.
     fn fill(&self, buf: &mut [u8]) -> bool;
 }
 
-/// 운영체제 CSPRNG(`bot_core::random`).
 pub struct OsEntropy;
 
 impl Entropy for OsEntropy {

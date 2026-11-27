@@ -1,9 +1,8 @@
-//! 슈퍼 관리자 전용 런타임 스킬·MCP 관리 도구(`skill.*`·`mcp.*`) 브로커 처리.
+//! Broker handling for super-admin live skill and MCP management tools (`skill.*`, `mcp.*`).
 //!
-//! - 모델이 호스트 파일·셸·비밀에 직접 닿지 않도록 모든 관리 호출은 이 관문을 지난다.
-//! - 호출마다 고정 판본과 현재 판본 **모두**에서 슈퍼 관리자(`super_admins`)와 스코프를 확인한다.
-//! - `mcp.add`가 승인 카드를 열 때 `secret_value`·`secret_values` 원문은 카드에 넣지 않고 가린다.
-//! - 변경이 새 판본을 즉시 활성화하면(`ManageOutcome::activated`), 완료 직전 카탈로그와 저장소의 활성 판본이 그 새 판본인지 대조한다.
+//! Enforces super-admin membership and scopes across both pinned and active revisions, redacts
+//! `mcp.add` secret values on approval cards while keeping `sealed.sha256` bound to the original
+//! canonical args, and verifies catalog + store active revision after immediate activation.
 
 use super::{
     BrokerService,
@@ -30,8 +29,7 @@ use bot_core::{
 };
 use serde_json::Value;
 
-/// 승인 카드에 비밀 평문이 남지 않도록 `mcp.add` 인자의 `secret_value`·`secret_values` 값만 가린다.
-/// 승인 해시(`sealed.sha256`)는 여전히 원본 정규 인자에 묶인다.
+/// Replaces `secret_value`/`secret_values` on `mcp.add` approval cards without altering `sealed.sha256`.
 fn scrub_card_args(tool: &str, canonical: &str) -> Option<String> {
     if tool != MCP_ADD_TOOL {
         return None;
@@ -142,7 +140,7 @@ impl BrokerService {
             card_args,
         };
 
-        // 슈퍼 관리자 확인은 재전달·복구보다 먼저, 고정 판본과 현재 판본 모두에서 본다.
+        // Check super-admin membership on both pinned and active revisions before replay or recovery.
         if !flow.snapshot.is_super_admin(&flow.ctx.principal)
             || !flow.pinned.is_super_admin(&flow.ctx.principal)
         {
@@ -340,7 +338,6 @@ impl BrokerService {
         }
     }
 
-    /// 즉시 활성화 직후 로컬 카탈로그와 저장소의 활성 판본이 방금 게시한 판본인지 확인한다.
     async fn verify_activated(&self, attempt: &Attempt, expected: &Revision) -> Result<(), Error> {
         let latest = self
             .parts

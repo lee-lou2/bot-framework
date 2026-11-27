@@ -1,10 +1,10 @@
-//! 거절 사례 표: 기본 프로필을 한 군데만 고쳐 어떤 오류 코드가 나와야 하는지 확인한다.
+//! Rejection matrix: single-mutation tests verifying expected validation error codes.
 
 use crate::support::{DELETE, Files, base, check, edit, host};
 
 type Edit<'a> = (&'a str, &'a str, &'a str);
 
-/// 호스트가 내장 도구로 예약한 정확한 ID `memory.share`를 선언하는 tools.yaml
+/// Declares the reserved built-in ID `memory.share`.
 const MEMORY_SHARE: &str = "version: 1\nserver: demo-notes\ntools:\n  - id: share\n    class: write\n    scopes: [calendar.read]\n    input: {type: object, properties: {}, additionalProperties: false}\n";
 
 const TOOLS: &str = "agents/main/skills/agenda/tools.yaml";
@@ -18,8 +18,8 @@ fn apply(edits: &[Edit]) -> Files {
 
 fn expect(name: &str, files: &Files, code: &str) {
     match check(files) {
-        Ok(_) => panic!("{name}: 거절해야 하는데 통과했어요(기대 {code})"),
-        Err(report) => assert!(report.has(code), "{name}: 기대 {code}\n{report}"),
+        Ok(_) => panic!("{name}: expected failure with {code}"),
+        Err(report) => assert!(report.has(code), "{name}: expected {code}\n{report}"),
     }
 }
 
@@ -27,12 +27,12 @@ fn expect(name: &str, files: &Files, code: &str) {
 fn rejects_files_yaml_and_schema_mistakes() {
     let cases: &[(&str, &[Edit], &str)] = &[
         (
-            "지원하지 않는 버전",
+            "unsupported version",
             &[("profile.yaml", "version: 1", "version: 2")],
             "schema",
         ),
         (
-            "알 수 없는 필드",
+            "unknown field",
             &[(
                 "profile.yaml",
                 "secrets: [calendar-reader]",
@@ -41,22 +41,22 @@ fn rejects_files_yaml_and_schema_mistakes() {
             "schema",
         ),
         (
-            "필수 필드 model 없음",
+            "missing required model",
             &[("profile.yaml", "model: assistant\n", "")],
             "schema",
         ),
         (
-            "대문자 모델",
+            "uppercase model",
             &[("profile.yaml", "model: assistant", "model: Assistant")],
             "schema",
         ),
         (
-            "연속 하이픈 이름",
+            "double hyphen id",
             &[("profile.yaml", "{id: desk,", "{id: de--sk,")],
             "schema",
         ),
         (
-            "중복 키",
+            "duplicate key",
             &[(
                 "profile.yaml",
                 "model: assistant",
@@ -65,12 +65,12 @@ fn rejects_files_yaml_and_schema_mistakes() {
             "yaml-duplicate-key",
         ),
         (
-            "앵커",
+            "anchor",
             &[("profile.yaml", "model: assistant", "model: &m assistant")],
             "yaml-anchor",
         ),
         (
-            "별칭",
+            "alias",
             &[(
                 "profile.yaml",
                 "secrets: [calendar-reader]",
@@ -79,22 +79,22 @@ fn rejects_files_yaml_and_schema_mistakes() {
             "yaml-anchor",
         ),
         (
-            "태그",
+            "tag",
             &[("profile.yaml", "model: assistant", "model: !!str assistant")],
             "yaml-tag",
         ),
         (
-            "다중 문서",
+            "multi-document YAML",
             &[("profile.yaml", "version: 1", "version: 1\n---\nversion: 1")],
             "yaml-multi-doc",
         ),
         (
-            "문법 오류",
+            "syntax error",
             &[("profile.yaml", "roles:", "roles: [")],
             "yaml-syntax",
         ),
         (
-            "이스케이프 제어 문자",
+            "escaped control character",
             &[(
                 "profile.yaml",
                 "model: assistant",
@@ -104,111 +104,111 @@ fn rejects_files_yaml_and_schema_mistakes() {
         ),
         (
             "BOM",
-            &[("rules.md", "- 답은", "\u{feff}- 답은")],
+            &[("rules.md", "- Keep", "\u{feff}- Keep")],
             "text-bom",
         ),
         (
-            "방향 전환 문자",
-            &[(AGENT, "오늘", "오\u{202e}늘")],
+            "bidi override character",
+            &[(AGENT, "Check", "Ch\u{202e}eck")],
             "text-control",
         ),
-        ("AGENT.md 없음", &[(AGENT, DELETE, "")], "missing-file"),
+        ("missing AGENT.md", &[(AGENT, DELETE, "")], "missing-file"),
         (
-            "오타 난 파일",
+            "misspelled file",
             &[("agents/main/trigger.yaml", "", "version: 1\n")],
             "unknown-file",
         ),
         (
-            "모르는 폴더",
+            "unknown directory",
             &[("extra/readme.md", "", "x")],
             "unknown-dir",
         ),
         (
-            "루트 에이전트 둘",
-            &[("agents/other/AGENT.md", "", "다른 루트")],
+            "multiple root agents",
+            &[("agents/other/AGENT.md", "", "Second root")],
             "multiple-root-agents",
         ),
         (
-            "SKILL.md 없음",
+            "missing SKILL.md",
             &[("agents/main/skills/agenda/SKILL.md", DELETE, "")],
             "missing-file",
         ),
         (
-            "내장 도구 이름 memory.share",
+            "reserved built-in tool memory.share",
             &[
-                ("agents/main/skills/memory/SKILL.md", "", "메모리 스킬"),
+                ("agents/main/skills/memory/SKILL.md", "", "Memory skill"),
                 ("agents/main/skills/memory/tools.yaml", "", MEMORY_SHARE),
             ],
             "reserved-tool",
         ),
         (
-            "스킬 이름 충돌",
-            &[("skills/agenda/SKILL.md", "", "공용 일정 스킬")],
+            "skill name conflict",
+            &[("skills/agenda/SKILL.md", "", "Shared agenda skill")],
             "skill-conflict",
         ),
         (
-            "SKILL.md allowed-tools 금지",
+            "forbidden allowed-tools in SKILL.md",
             &[(
                 "agents/main/skills/agenda/SKILL.md",
-                "일정",
-                "---\nname: agenda\nallowed-tools: Bash\n---\n일정",
+                "Use list",
+                "---\nname: agenda\nallowed-tools: Bash\n---\nUse list",
             )],
             "skill-allowed-tools",
         ),
         (
-            "SKILL.md name과 폴더 불일치",
+            "SKILL.md name mismatch",
             &[(
                 "agents/main/skills/agenda/SKILL.md",
-                "일정",
-                "---\nname: other\n---\n일정",
+                "Use list",
+                "---\nname: other\n---\nUse list",
             )],
             "skill-name-mismatch",
         ),
         (
-            "SKILL.md front matter 안 닫힘",
+            "unclosed SKILL.md front matter",
             &[(
                 "agents/main/skills/agenda/SKILL.md",
-                "일정",
-                "---\nname: agenda\n일정",
+                "Use list",
+                "---\nname: agenda\nUse list",
             )],
             "front-matter-unclosed",
         ),
         (
-            "빈 AGENT.md",
+            "empty AGENT.md",
             &[(
                 AGENT,
-                "오늘 일정을 조회하고 변경 전에는 정확한 일정을 확인한다.\n",
+                "Check today's schedule and confirm the exact event before making changes.\n",
                 "",
             )],
             "empty-file",
         ),
         (
-            "front matter 알 수 없는 필드",
-            &[(AGENT, "오늘", "---\ntools: x\n---\n오늘")],
+            "unknown front matter key",
+            &[(AGENT, "Check", "---\ntools: x\n---\nCheck")],
             "schema",
         ),
         (
-            "front matter 안 닫힘",
-            &[(AGENT, "오늘", "---\nmodel: fast\n오늘")],
+            "unclosed AGENT.md front matter",
+            &[(AGENT, "Check", "---\nmodel: fast\nCheck")],
             "front-matter-unclosed",
         ),
         (
-            "env 값이 문자열이 아님",
+            "non-string env value",
             &[("agents/main/env.yaml", "today", "[a]")],
             "schema",
         ),
         (
-            "env 예약 이름",
+            "reserved env name",
             &[("agents/main/env.yaml", "AGENDA_VIEW: today", "BOT_X: one")],
             "reserved-env",
         ),
         (
-            "지식 확장자",
+            "disallowed knowledge extension",
             &[("knowledge/data.csv", "", "a,b")],
             "bad-document",
         ),
         (
-            "기억 시드에 owner 없음",
+            "memory seed missing owner",
             &[(
                 "agents/main/memory/routine.md",
                 "---\nowner: \"local:owner\"\n---\n",
@@ -217,7 +217,7 @@ fn rejects_files_yaml_and_schema_mistakes() {
             "memory-owner-missing",
         ),
         (
-            "기억 시드 owner가 멤버 아님",
+            "memory seed unknown owner",
             &[(
                 "agents/main/memory/routine.md",
                 "local:owner",
@@ -226,7 +226,7 @@ fn rejects_files_yaml_and_schema_mistakes() {
             "memory-owner-unknown",
         ),
         (
-            "기억 시드 visibility 오류",
+            "invalid memory seed visibility",
             &[(
                 "agents/main/memory/routine.md",
                 "---\n",
@@ -245,22 +245,22 @@ fn rejects_profile_yaml_references() {
     let owner = "{identity: \"local:owner\", roles: [owner]}";
     let cases: &[(&str, &[Edit], &str)] = &[
         (
-            "id가 폴더와 다름",
+            "id mismatches folder",
             &[("profile.yaml", "id: personal", "id: other")],
             "profile-id-mismatch",
         ),
         (
-            "없는 시간대",
+            "unknown timezone",
             &[("profile.yaml", "Asia/Seoul", "Mars/Base")],
             "bad-timezone",
         ),
         (
-            "시간대는 대소문자까지 정확히",
+            "timezone case mismatch",
             &[("profile.yaml", "Asia/Seoul", "asia/seoul")],
             "bad-timezone",
         ),
         (
-            "선언하지 않은 역할",
+            "unknown role",
             &[(
                 "profile.yaml",
                 owner,
@@ -269,12 +269,12 @@ fn rejects_profile_yaml_references() {
             "unknown-role",
         ),
         (
-            "같은 멤버 두 번",
+            "duplicate member",
             &[("profile.yaml", owner, &format!("{owner}\n  - {owner}"))],
             "duplicate-member",
         ),
         (
-            "신원 모양",
+            "malformed identity",
             &[(
                 "profile.yaml",
                 "identity: \"local:owner\"",
@@ -283,7 +283,7 @@ fn rejects_profile_yaml_references() {
             "bad-identity",
         ),
         (
-            "바인딩이 없는 에이전트",
+            "binding points to unknown agent",
             &[(
                 "profile.yaml",
                 "account: owner, agent: main",
@@ -292,17 +292,17 @@ fn rejects_profile_yaml_references() {
             "unknown-agent",
         ),
         (
-            "정책의 없는 에이전트",
+            "policy points to unknown agent",
             &[("profile.yaml", "main/research:", "main/ghost:")],
             "unknown-agent",
         ),
         (
-            "approve 오타",
+            "approve scope typo",
             &[("profile.yaml", "approve: []", "approve: [calendar.delet]")],
             "unknown-scope",
         ),
         (
-            "정책 상한의 모르는 스코프",
+            "unknown policy scope",
             &[(
                 "profile.yaml",
                 "  scopes: [run, calendar.read, calendar.delete]",
@@ -311,7 +311,7 @@ fn rejects_profile_yaml_references() {
             "unknown-scope",
         ),
         (
-            "slack 채널 바인딩에 channel 없음",
+            "Slack channel binding missing channel",
             &[(
                 "profile.yaml",
                 "workspace: home, channel: planning,",
@@ -320,7 +320,7 @@ fn rejects_profile_yaml_references() {
             "schema",
         ),
         (
-            "같은 id 두 바인딩",
+            "duplicate binding id",
             &[("profile.yaml", "{id: inbox,", "{id: desk,")],
             "duplicate-binding-id",
         ),
@@ -334,17 +334,17 @@ fn rejects_profile_yaml_references() {
 fn rejects_tool_declarations() {
     let cases: &[(&str, &[Edit], &str)] = &[
         (
-            "미등록 서버",
+            "unregistered server",
             &[(TOOLS, "server: demo-agenda", "server: gone")],
             "missing-server",
         ),
         (
-            "잘못된 class",
+            "invalid class",
             &[(TOOLS, "class: irreversible", "class: dangerous")],
             "schema",
         ),
         (
-            "알 수 없는 도구 필드",
+            "unknown tool field",
             &[(
                 TOOLS,
                 "egress: [\"calendar.example:443\"]",
@@ -353,17 +353,17 @@ fn rejects_tool_declarations() {
             "schema",
         ),
         (
-            "허용하지 않은 비밀",
+            "undeclared secret",
             &[("profile.yaml", "secrets: [calendar-reader]", "secrets: []")],
             "unknown-secret",
         ),
         (
-            "포트 범위",
+            "port out of range",
             &[(TOOLS, "calendar.example:443", "calendar.example:99999")],
             "bad-egress",
         ),
         (
-            "destination 경로가 input에 없음",
+            "destination path missing from input",
             &[(
                 TOOLS,
                 "scopes: [calendar.delete]\n",
@@ -372,7 +372,7 @@ fn rejects_tool_declarations() {
             "bad-destination",
         ),
         (
-            "지원하지 않는 input 키워드",
+            "unsupported input keyword",
             &[(
                 TOOLS,
                 "{type: string, minLength: 1}",
@@ -381,7 +381,7 @@ fn rejects_tool_declarations() {
             "schema",
         ),
         (
-            "input에 type: object 없음",
+            "input missing type: object",
             &[(
                 TOOLS,
                 "input: {type: object, properties: {}, additionalProperties: false}",
@@ -390,12 +390,12 @@ fn rejects_tool_declarations() {
             "bad-input-schema",
         ),
         (
-            "도구 id 중복",
+            "duplicate tool id",
             &[(TOOLS, "  - id: find", "  - id: list")],
             "duplicate-tool",
         ),
         (
-            "scopes 비어 있음",
+            "empty scopes",
             &[(
                 TOOLS,
                 "scopes: [calendar.read]\n    secrets",
@@ -404,7 +404,7 @@ fn rejects_tool_declarations() {
             "schema",
         ),
         (
-            "read 도구에 destination",
+            "destination on read tool",
             &[(
                 TOOLS,
                 "class: read\n    scopes: [calendar.read]\n    secrets",
@@ -422,22 +422,22 @@ fn rejects_tool_declarations() {
 fn rejects_aliases_the_host_did_not_register() {
     let cases: &[(&str, &[Edit], &str)] = &[
         (
-            "허용하지 않은 모델",
+            "disallowed profile model",
             &[("profile.yaml", "model: assistant", "model: huge")],
             "model-not-allowed",
         ),
         (
-            "에이전트 모델이 허용 밖",
-            &[(AGENT, "오늘", "---\nmodel: huge\n---\n오늘")],
+            "disallowed agent model",
+            &[(AGENT, "Check", "---\nmodel: huge\n---\nCheck")],
             "model-not-allowed",
         ),
         (
-            "없는 CLI 계정",
+            "unknown CLI account",
             &[("profile.yaml", "account: owner,", "account: ghost,")],
             "unknown-account",
         ),
         (
-            "없는 Slack 워크스페이스",
+            "unknown Slack workspace",
             &[(
                 "profile.yaml",
                 "workspace: home, channel",
@@ -446,12 +446,12 @@ fn rejects_aliases_the_host_did_not_register() {
             "unknown-workspace",
         ),
         (
-            "없는 Slack 채널",
+            "unknown Slack channel",
             &[("profile.yaml", "channel: planning", "channel: nowhere")],
             "unknown-channel",
         ),
         (
-            "없는 HTTP 입구",
+            "unknown HTTP endpoint",
             &[("profile.yaml", "endpoint: reminders", "endpoint: ghost")],
             "unknown-endpoint",
         ),

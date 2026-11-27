@@ -1,9 +1,10 @@
-//! 호스트마다 설치 위치가 달라도 같은 도구 패키지와 명령은 같은 판본이 된다.
+//! Portable SHA-256 package revision hashing for installed tool servers.
+
 use crate::{id::Revision, port::Error};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-/// 운영자가 설치한 도구 서버가 호출 간 전용 상태 볼륨을 필요로 하는가.
+/// Whether an installed tool server requires a persistent state volume across calls.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerState {
@@ -12,7 +13,7 @@ pub enum ServerState {
     Required,
 }
 
-/// 설치본의 루트 아래 항목. 일반 파일의 해시는 설치본에 실제로 쓴 바이트에서 계산한다.
+/// Entry under the package root; file hashes are computed over installed bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstallEntry {
     Directory,
@@ -28,8 +29,7 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update(bytes);
 }
 
-/// command[0]은 루트 안의 실행 파일이다. 나머지 인자는 순서와 빈 문자열까지 보존한다.
-/// 엔트리에는 루트를 제외한 모든 디렉터리와 파일이 상대 경로로 들어간다.
+/// `command[0]` must reference an executable file in `entries`; `entries` holds relative paths excluding the root.
 pub fn server_revision(
     command: &[String],
     entries: &BTreeMap<String, InstallEntry>,

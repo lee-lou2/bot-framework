@@ -1,11 +1,10 @@
-//! 내장 `delegate`: 직계 자식에게만, 현재·고정 판본의 범위 안에서, 같은 단계는 같은 자식으로. 대기에 들어가면 그 시도의 세션만 거둔다.
+//! Built-in `delegate`: direct children only, bounded by both revisions, idempotent per step, parking retires only that attempt's session.
 
 use super::*;
 use crate::front::{cli::PlannedCalls, park::ParkReason};
 
 const SCOPES: [&str; 3] = ["run", "echo.use", "echo.drop"];
 
-/// `main` 아래에 직계 자식 `main/research`와 손자 `main/research/deep`, 형제 `main/ops`가 있는 판본.
 pub(super) fn family(revision: &str) -> crate::testing::SnapshotBuilder {
     snapshot("personal", revision)
         .role("owner", &SCOPES)
@@ -44,7 +43,7 @@ pub(super) fn delegate(id: &str, args: &str) -> String {
     )
 }
 
-/// ②가 남기는 기록을 흉내 낸다(위임도 같은 계획 대조를 거친다).
+/// Records the planned tool-use checkpoints normally written by the turn stream.
 pub(super) fn plan(r: &Rig, turn: u64, id: &str, input: &str) {
     r.ledger.add_step(
         "r1",
@@ -74,10 +73,9 @@ async fn the_tool_list_names_exactly_the_direct_children() {
     assert_eq!(
         tool["inputSchema"]["properties"]["agent"]["enum"],
         serde_json::json!(["main/ops", "main/research"]),
-        "손자는 보이지 않는다"
+        "grandchildren must not appear"
     );
     assert_eq!(tool["inputSchema"]["additionalProperties"], false);
-    // 자식이 없으면 도구도 없다
     let r = plain().await;
     assert!(
         !rpc(&r, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
@@ -103,7 +101,7 @@ async fn a_delegation_starts_the_child_once_parks_the_attempt_and_retires_only_i
             commands[0].instruction.as_str()
         ),
         ("cli-4-0", "main/research", "summarize the week"),
-        "단계 키는 논리 호출 ID 그대로"
+        "step key must equal the logical call ID"
     );
     assert_eq!(commands[0].parent, r.attempt);
     assert!(
@@ -113,9 +111,8 @@ async fn a_delegation_starts_the_child_once_parks_the_attempt_and_retires_only_i
             .all(|s| SCOPES.contains(&s.as_str()))
     );
     assert_eq!(r.park.seen(), [(r.attempt.clone(), ParkReason::Child)]);
-    // 대기에 들어간 시도의 세션은 거둬졌다(CLI가 모델을 더 부를 수 없다)
+    // Parked attempt's session is retired so the CLI cannot call the model again.
     assert_eq!(rpc(&r, &delegate("toolu_x", input)).await.status, 401);
-    // 같은 단계의 재전달(재개 뒤)은 새 자식을 만들지 않는다: 새 claim의 세션으로 같은 단계를 다시 보내도 저장소가 같은 자식으로 본다
     assert_eq!(r.delegation.commands().len(), 1);
 }
 
@@ -124,9 +121,9 @@ async fn only_a_direct_child_in_both_revisions_may_be_delegated_to() {
     let r = with_family().await;
     let mut n = 0;
     for (agent, word) in [
-        ("main/research/deep", "denied"), // 손자
-        ("main/ops/none", "denied"),      // 없는 에이전트
-        ("main", "denied"),               // 자기 자신
+        ("main/research/deep", "denied"), // grandchild
+        ("main/ops/none", "denied"),      // missing agent
+        ("main", "denied"),               // self
         ("other", "denied"),
     ] {
         n += 1;
@@ -135,7 +132,6 @@ async fn only_a_direct_child_in_both_revisions_may_be_delegated_to() {
         let reply = rpc(&r, &delegate(&format!("toolu_{n}"), &input)).await;
         assert!(reply.body.contains(word), "{agent}: {}", reply.body);
     }
-    // 형식이 틀린 인자
     for (i, input) in [
         r#"{"agent":"main/research"}"#,
         r#"{"agent":"main/research","instruction":""}"#,
@@ -152,7 +148,7 @@ async fn only_a_direct_child_in_both_revisions_may_be_delegated_to() {
     }
     assert!(r.delegation.commands().is_empty());
     assert!(r.park.seen().is_empty());
-    // 실행이 고정한 판본에 그 자식이 없었다면(현재 판본에서 새로 생긴 에이전트) 거절한다
+    // Refused when the child did not exist in the pinned revision.
     let pinned = snapshot("personal", "r1")
         .role("owner", &SCOPES)
         .member("local:owner", &["owner"])
@@ -176,7 +172,6 @@ async fn only_a_direct_child_in_both_revisions_may_be_delegated_to() {
 #[tokio::test]
 async fn the_child_gets_only_the_scopes_the_requester_holds_in_both_revisions() {
     let r = with_family().await;
-    // 요청자 권한은 `echo.use`만이다(접수 때 고정): 자식에게 `echo.drop`을 넘기지 못한다
     r.ledger.add_run(run_context(
         "personal",
         "r1",
@@ -190,7 +185,7 @@ async fn the_child_gets_only_the_scopes_the_requester_holds_in_both_revisions() 
     rpc(&r, &delegate("toolu_s", input)).await;
     let scopes: Vec<String> = r.delegation.commands()[0].scopes.iter().cloned().collect();
     assert_eq!(scopes, ["echo.use", "run"]);
-    // 지금 판본이 요청자의 역할에서 스코프를 거두면 그만큼 줄어든다
+    // Scopes removed from the requester's role in the current revision are dropped.
     let r = with_family().await;
     r.catalog
         .publish(family("r1").role("owner", &["run"]).build());
@@ -206,8 +201,7 @@ async fn the_child_gets_only_the_scopes_the_requester_holds_in_both_revisions() 
     );
 }
 
-/// 이전 시도가 이미 자식을 시작해 두었고(저장소에 기록) 자식이 끝나 결과가 부모 체크포인트에 들어온 상태.
-/// `scopes`는 그때 자식에게 넘긴 범위다.
+/// Records a child started with `scopes` and completed with its result checkpointed on the parent.
 async fn finished_child(r: &Rig, instruction: &str, scopes: &[&str], body: &str) {
     let command = bot_core::command::Delegate {
         parent: r.attempt.clone(),
@@ -241,9 +235,9 @@ async fn a_finished_child_returns_its_result_to_the_same_tool_use() {
         "{}",
         reply.body
     );
-    assert_eq!(r.delegation.commands().len(), 1, "다시 시작하지 않는다");
+    assert_eq!(r.delegation.commands().len(), 1, "must not restart child");
     assert!(r.park.seen().is_empty());
-    // 실패·취소한 자식은 고정 오류 단어만
+    // Failed or cancelled children expose fixed error codes only.
     let r = with_family().await;
     plan(&r, 4, "toolu_d", input);
     finished_child(
@@ -267,7 +261,7 @@ async fn a_finished_childs_result_is_hidden_when_the_revision_moved_in_the_store
     let input = r#"{"agent":"main/research","instruction":"go"}"#;
     plan(&r, 4, "toolu_d", input);
     finished_child(&r, "go", &SCOPES, r#"{"state":"succeeded","result":"x"}"#).await;
-    r.delegation.set_active("r2"); // 다른 프로세스가 새 판본을 게시했다
+    r.delegation.set_active("r2");
     let reply = rpc(&r, &delegate("toolu_d", input)).await;
     assert!(
         reply.body.contains("stale") && !reply.body.contains("\"x\""),
@@ -280,7 +274,7 @@ async fn a_finished_childs_result_is_hidden_when_the_revision_moved_in_the_store
 async fn a_stored_child_result_needs_the_original_scopes_inside_the_current_ones_and_the_same_target()
  {
     let input = r#"{"agent":"main/research","instruction":"go"}"#;
-    // 처음 넘긴 범위가 지금 계산한 범위보다 넓다(권한이 줄었다): 결과를 내주지 않는다
+    // Original child scopes exceed currently authorized scopes: withhold result.
     let r = with_family().await;
     plan(&r, 4, "toolu_d", input);
     finished_child(
@@ -296,7 +290,7 @@ async fn a_stored_child_result_needs_the_original_scopes_inside_the_current_ones
         "{}",
         reply.body
     );
-    // 같은 단계인데 지시가 달라졌다
+    // Different instruction on the same step conflicts.
     let r = with_family().await;
     plan(&r, 4, "toolu_d", input);
     finished_child(
@@ -312,7 +306,7 @@ async fn a_stored_child_result_needs_the_original_scopes_inside_the_current_ones
         "{}",
         reply.body
     );
-    // 체크포인트에는 있는데 저장소는 아직 끝나지 않았다고 한다: 결과를 지어내지 않는다
+    // Checkpoint present while delegation store reports unfinished: do not return it.
     let r = with_family().await;
     plan(&r, 4, "toolu_d", input);
     r.ledger
@@ -325,14 +319,12 @@ async fn a_stored_child_result_needs_the_original_scopes_inside_the_current_ones
 async fn delegation_needs_the_planned_call_and_a_current_session() {
     let r = with_family().await;
     let input = r#"{"agent":"main/research","instruction":"go"}"#;
-    // 계획이 없다
     assert!(
         rpc(&r, &delegate("toolu_d", input))
             .await
             .body
             .contains("unavailable")
     );
-    // 계획의 인자와 다르다
     plan(
         &r,
         4,
@@ -346,7 +338,6 @@ async fn delegation_needs_the_planned_call_and_a_current_session() {
             .contains("conflict")
     );
     assert!(r.delegation.commands().is_empty());
-    // claim이 넘어간 옛 시도
     plan(&r, 5, "toolu_f", input);
     r.ledger.bump_claim("r1");
     assert!(
@@ -363,7 +354,6 @@ async fn an_approval_or_a_hold_parks_the_attempt_and_retires_its_session_but_not
     let r = with_family().await;
     let drop = r#"{"agent":"x"}"#;
     let _ = drop;
-    // 승인이 필요한 도구 → 승인 대기
     let call = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo_drop","arguments":{},"_meta":{"claudecode/toolUseId":"toolu_g"}}}"#;
     r.ledger.add_step(
         "r1",
@@ -372,7 +362,7 @@ async fn an_approval_or_a_hold_parks_the_attempt_and_retires_its_session_but_not
     );
     r.ledger
         .add_step("r1", "cli-group-2", r#"{"seq":2,"uses":["toolu_g"]}"#);
-    // 같은 run의 다른 claim이 이미 발급받은 세션(새 워커)은 거두지 않는다
+    // A session issued for a newer claim on the same run must remain active.
     let mut newer = r.attempt.clone();
     newer.claim = Some(bot_core::id::ClaimEpoch(2));
     let other = r
@@ -386,7 +376,11 @@ async fn an_approval_or_a_hold_parks_the_attempt_and_retires_its_session_but_not
     let reply = rpc(&r, call).await;
     assert!(reply.body.contains("approval_pending"), "{}", reply.body);
     assert_eq!(r.park.seen(), [(r.attempt.clone(), ParkReason::Approval)]);
-    assert_eq!(rpc(&r, call).await.status, 401, "이 시도의 세션은 거둬졌다");
+    assert_eq!(
+        rpc(&r, call).await.status,
+        401,
+        "parked attempt session must be retired"
+    );
     let token = format!("Bearer {other}");
     let still = raw(
         r.front.addr(),
@@ -398,10 +392,9 @@ async fn an_approval_or_a_hold_parks_the_attempt_and_retires_its_session_but_not
         ),
     )
     .await;
-    assert_eq!(still.status, 200, "새 claim의 세션은 그대로다");
+    assert_eq!(still.status, 200, "newer claim session must remain active");
 }
 
-/// 위임이 거절됐고(고정 단어) 자식도 대기도 없었다.
 fn refused(r: &Rig, body: &str, word: &str) {
     assert!(body.contains(word), "{body}");
     assert!(r.delegation.commands().is_empty());
@@ -411,7 +404,7 @@ fn refused(r: &Rig, body: &str, word: &str) {
 #[tokio::test]
 async fn a_requester_without_run_in_either_revision_cannot_start_or_resume_a_delegation() {
     let input = r#"{"agent":"main/research","instruction":"go"}"#;
-    // 지금 판본에서 요청자의 역할이 `run`을 주지 않는다: 새 자식도, 저장된 자식 결과도 나가지 않는다
+    // Current revision lacks `run`: refuse both new delegation and stored child result.
     let r = with_family().await;
     r.catalog.publish(
         family("r1")
@@ -435,7 +428,7 @@ async fn a_requester_without_run_in_either_revision_cannot_start_or_resume_a_del
         "{}",
         reply.body
     );
-    // 실행이 접수 때 고정한 범위에 `run`이 없다
+    // Accepted run scopes lack `run`.
     let r = with_family().await;
     r.ledger.add_run(run_context(
         "personal",
@@ -451,7 +444,7 @@ async fn a_requester_without_run_in_either_revision_cannot_start_or_resume_a_del
         &rpc(&r, &delegate("toolu_d", input)).await.body,
         "denied",
     );
-    // 실행이 고정한 판본에서는 `run`이 없었다(지금 판본에는 있다)
+    // Pinned revision lacked `run` even though current revision grants it.
     let r = with_family().await;
     r.catalog.publish(
         family("r1")
@@ -472,7 +465,6 @@ async fn a_requester_without_run_in_either_revision_cannot_start_or_resume_a_del
 async fn a_requester_who_is_no_longer_a_member_cannot_delegate_or_read_a_stored_child_result() {
     let input = r#"{"agent":"main/research","instruction":"go"}"#;
     let r = with_family().await;
-    // 지금 판본에서 요청자가 멤버가 아니다
     let without_member = snapshot("personal", "r1")
         .role("owner", &SCOPES)
         .member("local:someone-else", &["owner"])
@@ -506,10 +498,8 @@ fn delegation_scopes_is_one_function_for_every_entry_point() {
     let full = family("r1").build();
     let ctx = run_context("personal", "r1", 1, "local:owner", "main", &SCOPES);
     let child = AgentId("main/research".into());
-    // 성공: 실행의 범위 ∩ 두 판본의 허용 범위, `run` 포함
     let scopes = delegation_scopes(&ctx, &full, &full, &child).unwrap();
     assert!(scopes.contains("run") && scopes.contains("echo.use"));
-    // 손자·없는 에이전트·자기 자신
     for other in ["main/research/deep", "main/ghost", "main"] {
         assert_eq!(
             delegation_scopes(&ctx, &full, &full, &AgentId(other.into())),
@@ -517,13 +507,11 @@ fn delegation_scopes_is_one_function_for_every_entry_point() {
             "{other}"
         );
     }
-    // 멤버가 아니다
     let outsider = run_context("personal", "r1", 1, "local:nobody", "main", &SCOPES);
     assert_eq!(
         delegation_scopes(&outsider, &full, &full, &child),
         Err(Denial::Member)
     );
-    // `run`이 없다
     let no_run = family("r1").role("owner", &["echo.use"]).build();
     assert_eq!(
         delegation_scopes(&ctx, &no_run, &full, &child),

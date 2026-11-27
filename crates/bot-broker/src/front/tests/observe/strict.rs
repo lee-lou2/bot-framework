@@ -1,8 +1,7 @@
-//! 엄격한 관측: 계획이 CLI가 실제로 보는 도구와 달라질 수 있는 모든 모양은 응답 전체를 거절한다.
+//! Strict observation tests rejecting any stream framing that could diverge from the CLI plan.
 
 use super::*;
 
-/// 응답 하나(이벤트 목록)를 흘려 보내고 CLI가 받은 글을 돌려준다.
 async fn send(r: &Rig, events: Vec<Vec<u8>>) -> String {
     stream(r, events, End::Eof).await.body
 }
@@ -64,7 +63,6 @@ async fn a_start_event_input_that_is_not_an_object_is_never_stored_as_an_empty_o
 async fn a_block_position_is_used_once_so_nothing_is_overwritten() {
     let r = plain().await;
     let cases: Vec<(&str, Vec<Vec<u8>>)> = vec![
-        // 도구 시작이 같은 위치에 두 번
         (
             "tool twice",
             vec![
@@ -73,7 +71,6 @@ async fn a_block_position_is_used_once_so_nothing_is_overwritten() {
                 block_stop(0),
             ],
         ),
-        // 끝난 도구 위치에 새 시작
         (
             "restart after stop",
             vec![
@@ -83,7 +80,6 @@ async fn a_block_position_is_used_once_so_nothing_is_overwritten() {
                 block_stop(0),
             ],
         ),
-        // 같은 위치에 글 블록과 도구 블록
         (
             "text then tool",
             [
@@ -92,7 +88,6 @@ async fn a_block_position_is_used_once_so_nothing_is_overwritten() {
             ]
             .concat(),
         ),
-        // 같은 위치의 끝이 두 번
         (
             "stop twice",
             vec![
@@ -101,7 +96,6 @@ async fn a_block_position_is_used_once_so_nothing_is_overwritten() {
                 block_stop(0),
             ],
         ),
-        // 시작 없는 끝
         ("stop alone", vec![block_stop(3)]),
     ];
     for (label, blocks) in cases {
@@ -118,17 +112,38 @@ async fn a_block_position_is_used_once_so_nothing_is_overwritten() {
 async fn deltas_outside_an_open_tool_block_and_unfinished_blocks_are_refused() {
     let r = plain().await;
     let cases: Vec<(&str, Vec<Vec<u8>>)> = vec![
-        ("delta before start", vec![json_delta(0, "{}"), block_start(0, "toolu_a", "{}"), block_stop(0)]),
-        ("delta after stop", vec![block_start(0, "toolu_a", "{}"), block_stop(0), json_delta(0, "{}")]),
+        (
+            "delta before start",
+            vec![
+                json_delta(0, "{}"),
+                block_start(0, "toolu_a", "{}"),
+                block_stop(0),
+            ],
+        ),
+        (
+            "delta after stop",
+            vec![
+                block_start(0, "toolu_a", "{}"),
+                block_stop(0),
+                json_delta(0, "{}"),
+            ],
+        ),
         (
             "input fragment on a text block",
-            [vec![raw_event(
-                "content_block_start",
-                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            )], vec![json_delta(0, "{}")], vec![block_stop(0)]]
+            [
+                vec![raw_event(
+                    "content_block_start",
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+                )],
+                vec![json_delta(0, "{}")],
+                vec![block_stop(0)],
+            ]
             .concat(),
         ),
-        ("never stopped", vec![block_start(0, "toolu_a", "{}"), json_delta(0, "{}")]),
+        (
+            "never stopped",
+            vec![block_start(0, "toolu_a", "{}"), json_delta(0, "{}")],
+        ),
         (
             "text never stopped",
             vec![raw_event(
@@ -138,9 +153,20 @@ async fn deltas_outside_an_open_tool_block_and_unfinished_blocks_are_refused() {
         ),
         (
             "both a start input and fragments",
-            vec![block_start(0, "toolu_a", r#"{"a":1}"#), json_delta(0, r#"{"a":2}"#), block_stop(0)],
+            vec![
+                block_start(0, "toolu_a", r#"{"a":1}"#),
+                json_delta(0, r#"{"a":2}"#),
+                block_stop(0),
+            ],
         ),
-        ("fragment that is not an object", vec![block_start(0, "toolu_a", "{}"), json_delta(0, "[1]"), block_stop(0)]),
+        (
+            "fragment that is not an object",
+            vec![
+                block_start(0, "toolu_a", "{}"),
+                json_delta(0, "[1]"),
+                block_stop(0),
+            ],
+        ),
     ];
     for (label, blocks) in cases {
         let mut events = vec![start("msg_1")];
@@ -156,20 +182,24 @@ async fn deltas_outside_an_open_tool_block_and_unfinished_blocks_are_refused() {
 async fn duplicate_keys_names_that_disagree_and_hidden_events_are_refused() {
     let r = plain().await;
     let cases: Vec<(&str, Vec<Vec<u8>>)> = vec![
-        // 이벤트의 중복 키
         (
             "duplicate key in an event",
             vec![
                 block_start(0, "toolu_a", "{}"),
-                raw_event("content_block_stop", r#"{"type":"content_block_stop","index":0,"index":1}"#),
+                raw_event(
+                    "content_block_stop",
+                    r#"{"type":"content_block_stop","index":0,"index":1}"#,
+                ),
             ],
         ),
-        // 도구 입력의 중복 키
         (
             "duplicate key in the tool input",
-            vec![block_start(0, "toolu_a", "{}"), json_delta(0, r#"{"a":1,"a":2}"#), block_stop(0)],
+            vec![
+                block_start(0, "toolu_a", "{}"),
+                json_delta(0, r#"{"a":1,"a":2}"#),
+                block_stop(0),
+            ],
         ),
-        // 이름과 종류가 어긋난다(CLI가 어느 쪽을 따를지 알 수 없다)
         (
             "ping hiding a block start",
             vec![
@@ -177,7 +207,10 @@ async fn duplicate_keys_names_that_disagree_and_hidden_events_are_refused() {
                     "ping",
                     r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_h","name":"echo_say","input":{}}}"#,
                 ),
-                raw_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+                raw_event(
+                    "content_block_stop",
+                    r#"{"type":"content_block_stop","index":0}"#,
+                ),
             ],
         ),
         (
@@ -187,19 +220,18 @@ async fn duplicate_keys_names_that_disagree_and_hidden_events_are_refused() {
                 r#"{"type":"ping","index":0,"content_block":{"type":"tool_use","id":"toolu_h","name":"echo_say","input":{}}}"#,
             )],
         ),
-        // 이름이 없는 이벤트
         (
             "block start without a name",
             vec![b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_h\",\"name\":\"echo_say\",\"input\":{}}}\n\n".to_vec()],
         ),
-        // 한 이벤트에 데이터·이름이 둘
         (
             "two data lines",
             vec![b"event: ping\ndata: {}\ndata: {}\n\n".to_vec()],
         ),
-        // 읽을 수 없는 데이터
-        ("data that is not json", vec![b"event: ping\ndata: not json\n\n".to_vec()]),
-        // 둘째 시작
+        (
+            "data that is not json",
+            vec![b"event: ping\ndata: not json\n\n".to_vec()],
+        ),
         ("second message start", vec![start("msg_2")]),
     ];
     for (label, blocks) in cases {
@@ -261,7 +293,6 @@ async fn a_final_event_that_looks_like_a_stop_but_is_not_one_is_never_written() 
         events.extend(tool_block(0, "toolu_a", "echo_say", &["{}"]));
         events.push(last.clone());
         let body = send(&r, events).await;
-        // 원문 이벤트는 나가지 않고(=종결로 읽힐 일이 없고) 고정 오류로 닫힌다
         assert!(
             !body.contains("message_stop") && body.contains("\"message\":\"unavailable\""),
             "{}: {body}",

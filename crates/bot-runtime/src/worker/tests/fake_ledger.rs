@@ -1,4 +1,4 @@
-//! 워커의 CLI 재개 시험에 사용하는 호출 원장.
+//! Minimal fake `CallLedger` backing worker CLI session-resume unit tests.
 
 use super::fakes::lock;
 use bot_core::{
@@ -13,14 +13,11 @@ use bot_core::{
 };
 use std::{collections::BTreeMap, sync::Mutex};
 
-/// 세션 복구가 읽는 두 가지만 가진다: 체크포인트(프런트가 쓴 응답 등)와 호출 기록. 나머지는 이 시험에서 쓰지 않는다.
 #[derive(Default)]
 pub(super) struct FakeLedger {
     pub steps: Mutex<BTreeMap<String, JsonPayload>>,
     pub calls: Mutex<BTreeMap<String, CallRecord>>,
-    /// 저장소의 활성 판본(없으면 비활성 프로필)
     pub active: Mutex<Option<Revision>>,
-    /// 켜면 읽기가 모두 일시 오류다
     pub down: std::sync::atomic::AtomicBool,
 }
 

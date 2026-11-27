@@ -18,8 +18,8 @@ fn draft() -> DeliveryDraft {
             },
         },
         answers: vec![
-            JsonPayload(r#"{"text":"첫 회신"}"#.into()),
-            JsonPayload(r#"{"text":"다음","attachments":[{"type":"text/plain","data":"b25lCnR3bw==","name":"note.txt"}]}"#.into()),
+            JsonPayload(r#"{"text":"first reply"}"#.into()),
+            JsonPayload(r#"{"text":"next","attachments":[{"type":"text/plain","data":"b25lCnR3bw==","name":"note.txt"}]}"#.into()),
         ],
     }
 }
@@ -34,15 +34,15 @@ fn the_receipt_counts_outbox_rows_even_when_a_reply_contains_an_attachment() {
 
 #[test]
 fn the_card_and_ledger_use_the_same_readable_document() {
-    let document = r#"{"activation":"set-a","answers":[{"text":"첫 회신"},{"attachments":[{"name":"note.txt","text":"one\ntwo","type":"text/plain"}],"text":"다음"}],"target":{"binding":"team","conversation":{"id":"channel-a","kind":"channel","thread":null}}}"#;
+    let document = r#"{"activation":"set-a","answers":[{"text":"first reply"},{"attachments":[{"name":"note.txt","text":"one\ntwo","type":"text/plain"}],"text":"next"}],"target":{"binding":"team","conversation":{"id":"channel-a","kind":"channel","thread":null}}}"#;
     let mut d = draft();
     assert_eq!(d.approval_json().unwrap(), document);
     let hash = d.sha256().unwrap();
     assert_eq!(
         format!("{:x}", sha2::digest::Output::<sha2::Sha256>::from(hash)),
-        "c49fd3056dff1c02c5443126db3f1ef3dcebbdd6feabbe23b78a7a0b09d7e27a"
+        "d73cd7d58786c688f9ec703ec968732c99e42fce4b98abee6c2e8cbd47f4aa45"
     );
-    d.answers[1].0 = r#"{ "attachments": [ { "name":"note.txt", "data":"b25lCnR3bw==","type":"text/plain" } ], "text":"다음" }"#.into();
+    d.answers[1].0 = r#"{ "attachments": [ { "name":"note.txt", "data":"b25lCnR3bw==","type":"text/plain" } ], "text":"next" }"#.into();
     assert_eq!(d.sha256().unwrap(), hash);
 }
 
@@ -56,7 +56,7 @@ fn recipient_mapping_thread_reply_order_and_attachment_bytes_each_bind_the_appro
         |d: &mut DeliveryDraft| d.target.conversation.kind = ConversationKind::Direct,
         |d: &mut DeliveryDraft| d.target.conversation.thread = Some("thread-a".into()),
         |d: &mut DeliveryDraft| d.answers.swap(0, 1),
-        |d: &mut DeliveryDraft| d.answers[0].0 = r#"{"text":"다른 회신"}"#.into(),
+        |d: &mut DeliveryDraft| d.answers[0].0 = r#"{"text":"other reply"}"#.into(),
         |d: &mut DeliveryDraft| d.answers[1].0 = d.answers[1].0.replace("note.txt", "other.txt"),
         |d: &mut DeliveryDraft| d.answers[1].0 = d.answers[1].0.replace("b25lCnR3bw==", "eA=="),
     ] {

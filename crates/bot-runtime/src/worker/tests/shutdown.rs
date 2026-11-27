@@ -1,5 +1,4 @@
-//! 종료 반납(워커): 종료 신호 뒤 유예가 지나도 남은 run은 실행기를 멈추고 정리(`Quiesce`)를 확인한 **뒤에만** `release_for_shutdown`으로 대기열에 돌아간다.
-//! 확인하지 못했거나 확인 입구가 없으면 반납하지 않는다. 유예 안에 끝난 run·취소 요청이 선 run은 반납하지 않는다.
+//! Worker shutdown release tests: quiesce ordering, unconfirmed cleanup refusal, and cancel precedence.
 
 use super::{fake_runs::FakeRuns, fakes::*};
 use crate::{
@@ -20,7 +19,6 @@ use std::{
 };
 use tokio::sync::watch;
 
-/// `FakeRuns`에 `release_for_shutdown` 기록과 거절을 더한 저장소.
 struct Runs {
     inner: Arc<FakeRuns>,
     released: Mutex<Vec<Attempt>>,
@@ -73,7 +71,6 @@ impl RunStore for Runs {
     }
 }
 
-/// 정리 확인 입구의 가짜: 부른 순서를 `events`에 남기고 정해 둔 결과를 낸다.
 struct Quiet {
     runs: Arc<FakeRuns>,
     result: Mutex<Option<Error>>,
@@ -89,7 +86,6 @@ impl Quiesce for Quiet {
     }
 }
 
-/// 취소 신호가 올 때까지 기다리는 CLI 모양 실행기(멈춘 순간을 `events`에 남긴다).
 struct Hanging {
     runs: Arc<FakeRuns>,
 }
@@ -112,7 +108,6 @@ impl ModelRunner for Hanging {
     }
 }
 
-/// 중단 신호를 받고도 잠시 뒤에야 돌아오는 실행기(취소 요청과 반납 신호가 모두 선 뒤에 `Cancelled`를 낸다).
 struct SlowToStop;
 
 impl ModelRunner for SlowToStop {
@@ -127,7 +122,6 @@ impl ModelRunner for SlowToStop {
     }
 }
 
-/// 한참 걸려서 도구 호출 하나를 계획하는 Step 실행기(그 사이 취소 요청과 반납 신호가 모두 선다).
 struct SlowPlan;
 
 impl ModelRunner for SlowPlan {
@@ -137,12 +131,11 @@ impl ModelRunner for SlowPlan {
     fn step(&self, _: ModelRequest) -> StepFuture<'_> {
         Box::pin(async {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            calls("해볼게요", &[("r1:0:0", "agenda.list", "{}")])
+            calls("Trying now", &[("r1:0:0", "agenda.list", "{}")])
         })
     }
 }
 
-/// 부르면 끝나지 않는 브로커(오래 걸리는 도구 호출).
 struct Stuck {
     runs: Arc<FakeRuns>,
 }
@@ -180,7 +173,6 @@ struct Setup {
     worker: Worker,
 }
 
-/// 실행기 `model`(공유 기록 `events`를 받는다)로 도는 워커. `quiesce`가 `Some`이면 그 결과를 내는 확인 입구를 붙이고, `stuck`이면 도구 호출이 끝나지 않는다.
 fn setup(
     model: impl FnOnce(&Arc<FakeRuns>) -> Arc<dyn ModelRunner>,
     quiesce: Option<Option<Error>>,
@@ -214,7 +206,6 @@ fn hanging(runs: &Arc<FakeRuns>) -> Arc<dyn ModelRunner> {
     Arc::new(Hanging { runs: runs.clone() })
 }
 
-/// 워커를 돌리다 `after` 뒤에 종료 신호를 보내고 `run`이 끝나기를 기다린다.
 async fn serve_then_stop(worker: &Worker, after: Duration) {
     let (stop, shutdown) = watch::channel(false);
     let serving = {
@@ -225,7 +216,7 @@ async fn serve_then_stop(worker: &Worker, after: Duration) {
     stop.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(10), serving)
         .await
-        .expect("종료 신호 뒤 워커가 끝난다")
+        .expect("worker should stop after shutdown")
         .unwrap();
 }
 
@@ -235,8 +226,8 @@ fn position(events: &[String], what: &str) -> Option<usize> {
 
 fn nothing_was_reported(s: &Setup) {
     let state = lock(&s.rig.runs.state);
-    assert!(state.finished.is_empty(), "결과를 쓰지 않았다");
-    assert!(state.failed.is_empty(), "실패를 보고하지 않았다");
+    assert!(state.finished.is_empty(), "must not record completion");
+    assert!(state.failed.is_empty(), "must not record failure");
 }
 
 #[tokio::test]
@@ -246,12 +237,12 @@ async fn a_run_still_going_after_the_grace_is_stopped_confirmed_and_returned_in_
     serve_then_stop(&s.worker, Duration::from_millis(80)).await;
 
     let events = s.rig.runs.events();
-    let stopped = position(&events, "model_stopped").expect("모델을 멈췄다");
-    let confirmed = position(&events, "quiesce:r1").expect("정리를 확인했다");
-    let released = position(&events, "release:r1").expect("대기열로 돌려줬다");
+    let stopped = position(&events, "model_stopped").expect("model stopped");
+    let confirmed = position(&events, "quiesce:r1").expect("quiesce confirmed");
+    let released = position(&events, "release:r1").expect("run released");
     assert!(
         stopped < confirmed && confirmed < released,
-        "프로세스를 멈추고 → 종료·세션 회수를 확인하고 → 반납한다: {events:?}"
+        "must stop -> quiesce -> release in order: {events:?}"
     );
     assert_eq!(*lock(&s.runs.released), [agent_run("r1").attempt]);
     nothing_was_reported(&s);
@@ -267,7 +258,7 @@ async fn an_unconfirmed_cleanup_releases_nothing_and_leaves_the_run_to_the_lease
     assert!(position(&events, "quiesce:r1").is_some());
     assert!(
         position(&events, "release:r1").is_none(),
-        "확인하지 못했으니 반납하지 않는다: {events:?}"
+        "unconfirmed cleanup must not release: {events:?}"
     );
     nothing_was_reported(&s);
 }
@@ -298,15 +289,15 @@ async fn a_refused_release_reports_nothing_either() {
 
 #[tokio::test]
 async fn a_run_that_finishes_within_the_grace_is_neither_confirmed_nor_released() {
-    let s = setup(
-        |_| ScriptedModel::new(vec![say("됐어요")]),
-        Some(None),
-        false,
-    );
+    let s = setup(|_| ScriptedModel::new(vec![say("Done")]), Some(None), false);
     s.rig.runs.queue(agent_run("r1"));
     serve_then_stop(&s.worker, Duration::from_millis(80)).await;
 
-    assert_eq!(lock(&s.rig.runs.state).finished.len(), 1, "정상 완료했다");
+    assert_eq!(
+        lock(&s.rig.runs.state).finished.len(),
+        1,
+        "run should finish normally"
+    );
     let events = s.rig.runs.events();
     assert!(position(&events, "quiesce:r1").is_none(), "{events:?}");
     assert!(position(&events, "release:r1").is_none(), "{events:?}");
@@ -315,7 +306,12 @@ async fn a_run_that_finishes_within_the_grace_is_neither_confirmed_nor_released(
 #[tokio::test]
 async fn a_tool_call_in_flight_is_dropped_by_the_release_signal_and_the_run_is_returned() {
     let s = setup(
-        |_| ScriptedModel::new(vec![calls("해볼게요", &[("r1:0:0", "agenda.list", "{}")])]),
+        |_| {
+            ScriptedModel::new(vec![calls(
+                "Trying now",
+                &[("r1:0:0", "agenda.list", "{}")],
+            )])
+        },
         Some(None),
         true,
     );
@@ -323,9 +319,9 @@ async fn a_tool_call_in_flight_is_dropped_by_the_release_signal_and_the_run_is_r
     serve_then_stop(&s.worker, Duration::from_millis(80)).await;
 
     let events = s.rig.runs.events();
-    let started = position(&events, "call_started:agenda.list").expect("도구 호출이 시작됐다");
-    let confirmed = position(&events, "quiesce:r1").expect("정리를 확인했다");
-    let released = position(&events, "release:r1").expect("대기열로 돌려줬다");
+    let started = position(&events, "call_started:agenda.list").expect("tool call started");
+    let confirmed = position(&events, "quiesce:r1").expect("quiesce confirmed");
+    let released = position(&events, "release:r1").expect("run released");
     assert!(started < confirmed && confirmed < released, "{events:?}");
     nothing_was_reported(&s);
 }
@@ -333,7 +329,6 @@ async fn a_tool_call_in_flight_is_dropped_by_the_release_signal_and_the_run_is_r
 #[tokio::test]
 async fn a_cancel_request_wins_over_the_release_signal() {
     let s = setup(|_| Arc::new(SlowToStop), Some(None), false);
-    // 하트비트가 취소 요청을 알렸고(모든 갱신이 취소를 돌려준다) 실행기가 아직 돌아오기 전에 반납 신호도 왔다
     for _ in 0..200 {
         s.rig.runs.renew_script(Ok(Beat {
             cancel_requested: true,
@@ -350,14 +345,13 @@ async fn a_cancel_request_wins_over_the_release_signal() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(outcome, Outcome::Cancelled, "취소가 먼저다");
+    assert_eq!(outcome, Outcome::Cancelled, "cancel must take priority");
     let events = s.rig.runs.events();
     assert!(position(&events, "release:r1").is_none(), "{events:?}");
 }
 
 #[tokio::test]
 async fn a_cancel_request_also_wins_at_the_checks_between_the_steps_of_a_run() {
-    // 실행기가 돌아온 뒤 도구 호출 앞의 중단 확인에서 두 신호가 모두 서 있다: 취소가 먼저다(도구도 시작하지 않는다)
     let s = setup(|_| Arc::new(SlowPlan), Some(None), false);
     for _ in 0..200 {
         s.rig.runs.renew_script(Ok(Beat {
@@ -375,7 +369,7 @@ async fn a_cancel_request_also_wins_at_the_checks_between_the_steps_of_a_run() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(outcome, Outcome::Cancelled, "취소가 먼저다");
+    assert_eq!(outcome, Outcome::Cancelled, "cancel must take priority");
     let events = s.rig.runs.events();
     assert!(position(&events, "release:r1").is_none(), "{events:?}");
     assert!(position(&events, "quiesce:r1").is_none(), "{events:?}");

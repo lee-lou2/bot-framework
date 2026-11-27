@@ -1,4 +1,4 @@
-//! 샌드박스·MCP 서버·비밀 보관소 가짜. 실제 프로세스 없이 메모리 파이프로 MCP stdio를 흉내 낸다.
+//! In-memory fake sandbox, MCP stdio server over duplex pipes, and profile-namespaced secret store.
 
 use crate::{lines::read_line, sandbox::*};
 use bot_core::{
@@ -19,25 +19,18 @@ use tokio::{
 
 use super::lock;
 
-/// 가짜 서버가 `tools/call`에 답하는 방식.
 pub enum Answer {
     Result(Value),
-    /// JSON-RPC 오류 코드.
     Error(i64),
-    /// 답하지 않고 연결을 연 채 둔다.
     Hang,
-    /// 연결을 닫는다.
     Close,
-    /// 먼저 줄 몇 개를 보내고(서버가 보내는 요청·알림 등) 이어서 답한다.
+    /// Emits raw JSON-RPC lines (server notifications/requests) before answering.
     Before(Vec<String>, Box<Answer>),
 }
 
-/// `tools/call`이 들어왔을 때 가짜 서버가 보는 것.
 pub struct CallCtx {
-    /// 샌드박스에 준 환경 전부.
     pub env: Vec<(String, String)>,
     pub params: Value,
-    /// 단계 원장 채널의 도구 쪽 끝(`effects: true`일 때만).
     pub effects: Option<Pipe>,
 }
 
@@ -52,7 +45,6 @@ pub struct Server {
     stall: Stall,
 }
 
-/// 서버가 입력 읽기를 멈추는 시점.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Stall {
     Never,
@@ -61,7 +53,6 @@ enum Stall {
 }
 
 impl Server {
-    /// `(이름, 입력 스키마)`를 내세우는 서버. 기본 답은 `ok` 한 줄이다.
     pub fn new(tools: &[(&str, Value)]) -> Self {
         Self {
             version: "2025-06-18".into(),
@@ -78,13 +69,11 @@ impl Server {
         }
     }
 
-    /// `tools/list`에 답한 뒤로는 입력을 읽지 않는다(큰 호출을 쓰다 막히는 상황).
     pub fn stalling_after_list(mut self) -> Self {
         self.stall = Stall::AfterList;
         self
     }
 
-    /// 아무것도 읽지 않는다(핸드셰이크가 멈춘다).
     pub fn stalling_before_initialize(mut self) -> Self {
         self.stall = Stall::BeforeInitialize;
         self
@@ -108,11 +97,9 @@ impl Server {
     }
 }
 
-/// 가짜 서버가 본 것.
 #[derive(Default)]
 pub struct Recorder {
     pub calls: Mutex<Vec<Value>>,
-    /// `tools/call` 줄의 원문(도구가 받은 바이트).
     pub raw_calls: Mutex<Vec<String>>,
     pub methods: Mutex<Vec<String>>,
     pub client_replies: Mutex<Vec<Value>>,
@@ -124,7 +111,6 @@ async fn send(write: &mut BoxWrite, value: &Value) -> bool {
     write.write_all(line.as_bytes()).await.is_ok() && write.flush().await.is_ok()
 }
 
-/// MCP 서버 한 대를 돌린다. 연결이 끊기거나 `Close` 답이면 끝난다.
 pub async fn serve_mcp(
     server: Server,
     env: Vec<(String, String)>,
@@ -214,14 +200,12 @@ struct Inner {
     reaped: Mutex<Vec<String>>,
     reap_ok: Mutex<bool>,
     spawn_fails: Mutex<bool>,
-    /// 켜면 `admit`이 모든 서버를 거절한다(상태 볼륨을 요구하는 서버를 지원하지 않는 샌드박스).
     refuse_admit: Mutex<bool>,
     effects_pipe: Mutex<bool>,
     terminate: Mutex<Terminate>,
     via_proxy: Mutex<bool>,
 }
 
-/// `Handle::terminate`가 어떻게 끝나는가.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Terminate {
     Confirmed,
@@ -229,7 +213,6 @@ pub enum Terminate {
     Hangs,
 }
 
-/// 메모리 파이프로 가짜 MCP 서버를 이어 주는 샌드박스.
 pub struct FakeSandbox {
     inner: Arc<Inner>,
 }
@@ -258,19 +241,15 @@ impl FakeSandbox {
     pub fn specs(&self) -> Vec<SandboxSpec> {
         lock(&self.inner.specs).clone()
     }
-    /// 서버가 받은 `tools/call`의 `params`들.
     pub fn calls(&self) -> Vec<Value> {
         lock(&self.inner.recorder.calls).clone()
     }
-    /// 서버가 받은 `tools/call` 줄의 원문들.
     pub fn raw_calls(&self) -> Vec<String> {
         lock(&self.inner.recorder.raw_calls).clone()
     }
-    /// 서버가 받은 메서드 이름들(순서대로).
     pub fn methods(&self) -> Vec<String> {
         lock(&self.inner.recorder.methods).clone()
     }
-    /// 서버가 보낸 요청에 클라이언트가 한 답들.
     pub fn client_replies(&self) -> Vec<Value> {
         lock(&self.inner.recorder.client_replies).clone()
     }
@@ -280,7 +259,7 @@ impl FakeSandbox {
     pub fn reaped(&self) -> Vec<String> {
         lock(&self.inner.reaped).clone()
     }
-    /// FD를 줄 수 없는 샌드박스(srt)를 흉내 낸다: 단계 원장은 프록시의 전용 주소로 받는다.
+    /// Simulates an FD-less sandbox (like `srt`) that tunnels effect callbacks through the proxy endpoint.
     pub fn set_effects_via_proxy(&self, on: bool) {
         *lock(&self.inner.via_proxy) = on;
     }
@@ -293,11 +272,9 @@ impl FakeSandbox {
     pub fn fail_spawn(&self, fail: bool) {
         *lock(&self.inner.spawn_fails) = fail;
     }
-    /// 이후 `admit`이 모든 서버를 거절한다(`false`면 다시 받는다).
     pub fn set_refuse_admit(&self, refuse: bool) {
         *lock(&self.inner.refuse_admit) = refuse;
     }
-    /// 단계 원장 채널을 주지 않는 어댑터를 흉내 낸다.
     pub fn withhold_effects_pipe(&self, withhold: bool) {
         *lock(&self.inner.effects_pipe) = !withhold;
     }
@@ -399,7 +376,7 @@ impl Sandbox for FakeSandbox {
     }
 }
 
-/// 프로필 네임스페이스로 나뉜 비밀 보관소. 다른 프로필의 값은 같은 이름이어도 보이지 않는다.
+/// Profile-namespaced secret store isolating identical names across profiles.
 #[derive(Default)]
 pub struct FakeSecrets {
     shared: Arc<SecretsState>,
@@ -412,7 +389,6 @@ struct SecretsState {
 }
 
 impl FakeSecrets {
-    /// `(프로필, 이름, 값)`들.
     pub fn new(entries: &[(&str, &str, &str)]) -> Self {
         let values = entries
             .iter()
@@ -430,7 +406,6 @@ impl FakeSecrets {
             }),
         }
     }
-    /// 값을 달라고 한 (프로필, 이름)들.
     pub fn resolved(&self) -> Vec<(String, String)> {
         lock(&self.shared.resolved).clone()
     }

@@ -16,7 +16,7 @@ fn a_read_runs_without_approval_and_a_replay_returns_the_stored_result() {
     assert_eq!(
         w.runner.jobs().len(),
         1,
-        "같은 호출 ID의 재요청은 다시 실행하지 않는다"
+        "replaying the same call ID must not re-run"
     );
     assert!(matches!(w.ledger.phase("r1", "c1"), CallPhase::Done(_)));
 }
@@ -71,7 +71,7 @@ fn a_call_without_the_scope_is_denied_recorded_and_final() {
     assert_eq!(
         w.audit.verdicts().len(),
         1,
-        "같은 거절을 다시 판정하지 않는다"
+        "must not re-evaluate a finalized denial"
     );
 }
 
@@ -179,7 +179,7 @@ fn a_cancelled_or_taken_over_run_is_stale() {
     w.ledger.bump_generation("r1");
     assert!(
         matches!(w.call("c1", "agenda.list", "{}"), Err(Error::Stale)),
-        "옛 세대"
+        "stale generation"
     );
     w.ledger.cancel("r1");
     assert!(matches!(
@@ -194,7 +194,7 @@ fn a_reply_tool_is_pinned_to_the_original_conversation() {
     let w = World::new();
     done(w.call("c1", "chat.post", "hello"));
     let job = &w.runner.jobs()[0];
-    let to = job.reply_to.as_ref().expect("원래 대화");
+    let to = job.reply_to.as_ref().expect("original conversation");
     assert_eq!((to.id.as_str(), to.thread.as_deref()), ("desk", None));
     done(w.call("c2", "agenda.list", "{}"));
     assert!(w.runner.jobs()[1].reply_to.is_none());
@@ -226,7 +226,7 @@ fn every_call_leaves_one_span_with_fixed_vocabulary_only() {
             && s.attrs.iter().all(|(k, _)| key::ALLOWED.contains(k))
     }));
     assert!(spans[0].error.is_none() && spans[1].error.is_none());
-    // 승인 nonce와 인자 원문은 스팬에 싣지 않는다
+    // Approval nonce and raw arguments must not appear in spans.
     let nonce = w.ledger.pending_approval("r1", "c2").unwrap().0;
     let dump = format!("{spans:?}");
     assert!(!dump.contains("walk") && !dump.contains(&nonce) && !dump.contains("\"event\""));
@@ -250,7 +250,7 @@ fn the_progress_origin_of_a_run_reaches_its_tool_jobs_unchanged_for_every_kind()
         let mut ctx = owner_run(&run, 1);
         ctx.origin = origin;
         w.ledger.add_run(ctx);
-        // 인자에 출처처럼 보이는 글이 있어도 출처는 원장의 값이다
+        // Run origin comes from the ledger, never from tool arguments.
         let result = w.call_on(
             &w.broker,
             &run,
@@ -267,12 +267,12 @@ fn the_progress_origin_of_a_run_reaches_its_tool_jobs_unchanged_for_every_kind()
 #[test]
 fn a_server_the_host_cannot_run_is_refused_before_the_call_is_recorded_and_the_audit_says_why() {
     let w = World::new();
-    w.runner.refuse_server("demo-agenda"); // 상태 볼륨을 요구하는데 지원하지 않는 서버
+    w.runner.refuse_server("demo-agenda"); // Server requires a state volume unsupported by the host.
     assert!(matches!(
         w.call("c1", "agenda.list", "{}"),
         Err(Error::Denied)
     ));
-    assert!(!w.ledger.has_call("r1", "c1"), "호출 기록도 만들지 않는다");
+    assert!(!w.ledger.has_call("r1", "c1"), "must not record the call");
     assert!(w.runner.jobs().is_empty());
     assert!(
         w.audit

@@ -1,4 +1,4 @@
-//! 에이전트 run의 Step 흐름: 체크포인트 순서, 재개, 승인 대기, 위임, 호출 결과 중계, 답 만들기.
+//! Agent run Step/Loop tests: checkpoint ordering, resume, approvals, delegation, memory, and limits.
 
 use super::fakes::*;
 use crate::{
@@ -15,7 +15,6 @@ use crate::{
 use bot_core::{command::*, id::*, port::Error, state::Visibility};
 use std::sync::Arc;
 
-/// 어떤 별칭에도 실행기가 없는 구성.
 struct NoModels;
 
 impl Models for NoModels {
@@ -26,7 +25,7 @@ impl Models for NoModels {
 
 fn plan(run: &str, calls: &[(&str, &str, &str)]) -> Step {
     let planned = Planned {
-        text: "찾아볼게요".into(),
+        text: "Looking it up".into(),
         calls: calls
             .iter()
             .map(|(call, tool, args)| PendingCall {
@@ -50,22 +49,20 @@ fn answer(text: &str) -> JsonPayload {
 
 #[tokio::test]
 async fn a_plain_answer_finishes_with_the_text_as_result_and_reply() {
-    let model = ScriptedModel::new(vec![say("오늘은 일정이 없어요")]);
+    let model = ScriptedModel::new(vec![say("No events today")]);
     let r = rig(model.clone());
     assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Succeeded);
     let state = lock(&r.runs.state);
     assert_eq!(state.finished.len(), 1);
-    assert_eq!(state.finished[0].result, answer("오늘은 일정이 없어요"));
-    assert_eq!(
-        state.finished[0].answers,
-        vec![answer("오늘은 일정이 없어요")]
-    );
+    assert_eq!(state.finished[0].result, answer("No events today"));
+    assert_eq!(state.finished[0].answers, vec![answer("No events today")]);
     assert!(state.steps.is_empty() && state.failed.is_empty());
     let request = &model.requests()[0];
     assert_eq!(request.attempt.run.0, "r1");
+    let expected_instructions = &snapshot().agents[&AgentId("main".into())].instructions;
     assert!(
-        request.system.contains("한국어로 짧게"),
-        "맥락이 조립돼 전달된다"
+        request.system.contains(expected_instructions.as_str()),
+        "assembled context must include agent instructions"
     );
     assert!(request.tools.iter().any(|t| t.id.0 == "agenda.list"));
 }
@@ -73,8 +70,8 @@ async fn a_plain_answer_finishes_with_the_text_as_result_and_reply() {
 #[tokio::test]
 async fn the_models_turn_is_checkpointed_before_its_calls_run_and_the_next_turn_sees_the_results() {
     let model = ScriptedModel::new(vec![
-        calls("찾아볼게요", &[("r1:0:0", "agenda.list", "{}")]),
-        say("일정이 없어요"),
+        calls("Looking it up", &[("r1:0:0", "agenda.list", "{}")]),
+        say("No events found."),
     ]);
     let r = rig(model.clone());
     r.broker.script(done(r#"{"events":[]}"#));
@@ -95,24 +92,22 @@ async fn the_models_turn_is_checkpointed_before_its_calls_run_and_the_next_turn_
 
 #[tokio::test]
 async fn resuming_continues_a_half_done_turn_with_the_same_call_ids_and_skips_finished_turns() {
-    // 호출 실행 중에 멈춘 차례: 모델을 다시 부르지 않고 같은 호출 ID로 이어 간다
     let mut ctx = agent_run("r1");
     ctx.work.steps = vec![plan("r1", &[("0:0", "agenda.list", "{}")])];
-    let model = ScriptedModel::new(vec![say("끝")]);
+    let model = ScriptedModel::new(vec![say("done")]);
     let r = rig(model.clone());
     assert_eq!(r.worker.execute(ctx).await, Outcome::Succeeded);
     assert_eq!(r.broker.calls()[0].call.0, "r1:0:0");
     assert_eq!(
         r.runs.events(),
         ["call:agenda.list", "checkpoint:end-0"],
-        "계획을 다시 적지 않는다"
+        "must not rewrite existing plan checkpoint"
     );
     assert_eq!(model.requests().len(), 1);
     assert_eq!(model.requests()[0].exchanges.len(), 1);
 
-    // 끝난 차례: 호출도 모델 재호출도 없이 다음 차례로 간다
     let finished = crate::model::Exchange {
-        text: "찾아볼게요".into(),
+        text: "Looking it up".into(),
         calls: vec![],
         state: None,
     };
@@ -124,7 +119,7 @@ async fn resuming_continues_a_half_done_turn_with_the_same_call_ids_and_skips_fi
             body: finished.to_payload(),
         },
     ];
-    let model = ScriptedModel::new(vec![say("바로 답")]);
+    let model = ScriptedModel::new(vec![say("immediate reply")]);
     let r = rig(model.clone());
     assert_eq!(r.worker.execute(ctx).await, Outcome::Succeeded);
     assert!(r.broker.calls().is_empty());
@@ -149,7 +144,7 @@ async fn a_corrupt_checkpoint_is_not_silently_accepted() {
 #[tokio::test]
 async fn an_approval_wait_parks_the_attempt_without_reporting_anything() {
     let model = ScriptedModel::new(vec![calls(
-        "지울게요",
+        "Deleting now",
         &[("r1:0:0", "agenda.delete", "{}")],
     )]);
     let r = rig(model);
@@ -161,13 +156,16 @@ async fn an_approval_wait_parks_the_attempt_without_reporting_anything() {
     assert!(state.steps.iter().any(|s| s.key == "turn-0"));
     assert!(
         !state.steps.iter().any(|s| s.key == "end-0"),
-        "끝나지 않은 차례"
+        "incomplete turn must not write end-0"
     );
 }
 
 #[tokio::test]
 async fn a_held_call_also_parks() {
-    let model = ScriptedModel::new(vec![calls("보낼게요", &[("r1:0:0", "agenda.list", "{}")])]);
+    let model = ScriptedModel::new(vec![calls(
+        "Sending now",
+        &[("r1:0:0", "agenda.list", "{}")],
+    )]);
     let r = rig(model);
     r.broker
         .script(Ok(CallResult::Held(CallId("r1:0:0".into()))));
@@ -177,8 +175,8 @@ async fn a_held_call_also_parks() {
 #[tokio::test]
 async fn a_denied_call_is_told_to_the_model_instead_of_failing_the_run() {
     let model = ScriptedModel::new(vec![
-        calls("지울게요", &[("r1:0:0", "agenda.delete", "{}")]),
-        say("권한이 없어서 못 지웠어요"),
+        calls("Deleting now", &[("r1:0:0", "agenda.delete", "{}")]),
+        say("Permission denied; could not delete"),
     ]);
     let r = rig(model.clone());
     r.broker.script(Err(Error::Denied));
@@ -187,13 +185,12 @@ async fn a_denied_call_is_told_to_the_model_instead_of_failing_the_run() {
         model.requests()[1].exchanges[0].calls[0].end,
         CallEnd::Denied
     );
-    // 알 수 없는 도구·잘못된 인자도 모델이 고칠 수 있는 결말이다
     let model = ScriptedModel::new(vec![
         calls(
-            "해볼게요",
+            "Trying now",
             &[("r2:0:0", "nope", "{}"), ("r2:0:1", "agenda.list", "{}")],
         ),
-        say("그래요"),
+        say("Understood"),
     ]);
     let r = rig(model.clone());
     r.broker.script(Err(Error::Missing));
@@ -216,7 +213,7 @@ async fn a_denied_call_is_told_to_the_model_instead_of_failing_the_run() {
 #[tokio::test]
 async fn broker_trouble_fails_the_run_with_a_fixed_code() {
     let r = rig(ScriptedModel::new(vec![calls(
-        "해볼게요",
+        "Trying now",
         &[("r1:0:0", "agenda.list", "{}")],
     )]));
     r.broker.script(Err(Error::Unavailable));
@@ -229,7 +226,7 @@ async fn broker_trouble_fails_the_run_with_a_fixed_code() {
         [Failure::Transient("broker_unavailable")]
     );
     let r = rig(ScriptedModel::new(vec![calls(
-        "해볼게요",
+        "Trying now",
         &[("r2:0:0", "agenda.list", "{}")],
     )]));
     r.broker.script(Err(Error::Conflict));
@@ -246,34 +243,41 @@ async fn broker_trouble_fails_the_run_with_a_fixed_code() {
 #[tokio::test]
 async fn a_stale_reply_is_retried_while_the_lease_lives_and_abandoned_once_it_is_lost() {
     let slow = crate::host::WorkerConfig {
-        heartbeat: std::time::Duration::from_secs(60), // 하트비트가 가짜 갱신 결과를 가로채지 않게
+        heartbeat: std::time::Duration::from_secs(60),
         ..config()
     };
     let model = ScriptedModel::new(vec![
-        calls("해볼게요", &[("r1:0:0", "agenda.list", "{}")]),
-        say("됐어요"),
+        calls("Trying now", &[("r1:0:0", "agenda.list", "{}")]),
+        say("Done"),
     ]);
     let r = rig_with(model, slow.clone());
-    r.broker.script(Err(Error::Stale)); // 판정에 쓴 판본이 바뀌었다
+    r.broker.script(Err(Error::Stale));
     r.broker.script(done("{}"));
     assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Succeeded);
-    assert_eq!(r.broker.calls().len(), 2, "같은 호출 ID로 다시 부른다");
+    assert_eq!(
+        r.broker.calls().len(),
+        2,
+        "retried call must reuse the same call ID"
+    );
     assert_eq!(r.broker.calls()[0].call, r.broker.calls()[1].call);
 
-    let model = ScriptedModel::new(vec![calls("해볼게요", &[("r2:0:0", "agenda.list", "{}")])]);
+    let model = ScriptedModel::new(vec![calls(
+        "Trying now",
+        &[("r2:0:0", "agenda.list", "{}")],
+    )]);
     let r = rig_with(model, slow);
     r.broker.script(Err(Error::Stale));
-    r.runs.renew_script(Err(Error::Stale)); // 리스를 잃었다
+    r.runs.renew_script(Err(Error::Stale));
     assert_eq!(r.worker.execute(agent_run("r2")).await, Outcome::Lost);
     let state = lock(&r.runs.state);
     assert!(
         state.finished.is_empty() && state.failed.is_empty(),
-        "잃은 뒤에는 아무것도 쓰지 않는다"
+        "lost claim must not report anything"
     );
 }
 
 fn delegate_args(agent: &str) -> String {
-    serde_json::json!({"agent": agent, "instruction": "일정 조회"}).to_string()
+    serde_json::json!({"agent": agent, "instruction": "Check schedule"}).to_string()
 }
 
 #[tokio::test]
@@ -281,7 +285,10 @@ async fn delegation_narrows_the_scopes_parks_the_parent_and_hands_the_child_resu
     let mut ctx = agent_run("r1");
     ctx.scopes = scopes(&["run", "calendar.read", "admin.x"]);
     let args = delegate_args("main/research");
-    let model = ScriptedModel::new(vec![calls("맡길게요", &[("r1:0:0", "delegate", &args)])]);
+    let model = ScriptedModel::new(vec![calls(
+        "Delegating now",
+        &[("r1:0:0", "delegate", &args)],
+    )]);
     let r = rig(model);
     assert_eq!(r.worker.execute(ctx.clone()).await, Outcome::Parked);
     let sent = lock(&r.delegation.requests).clone();
@@ -292,39 +299,36 @@ async fn delegation_narrows_the_scopes_parks_the_parent_and_hands_the_child_resu
             sent[0].child.0.as_str(),
             sent[0].instruction.as_str()
         ),
-        ("r1:0:0", "main/research", "일정 조회")
+        ("r1:0:0", "main/research", "Check schedule")
     );
     assert_eq!(
         sent[0].scopes,
         scopes(&["run", "calendar.read"]),
-        "요청 범위 ∩ 자식·프로필 상한 (admin.x는 상한 밖)"
+        "delegated scopes must intersect caller, child, and profile policy"
     );
     assert!(lock(&r.runs.state).finished.is_empty());
 
-    // 자식이 끝나 부모가 깨어났다: 위임을 다시 하지 않고 자식 결과를 모델에게 돌려준다
     let mut resumed = ctx.clone();
     resumed.work.steps = vec![
         plan("r1", &[("0:0", "delegate", &args)]),
         Step {
             key: "r1:0:0".into(),
-            body: JsonPayload(r#"{"state":"succeeded","result":{"text":"일정 없음"}}"#.into()),
+            body: JsonPayload(r#"{"state":"succeeded","result":{"text":"No events"}}"#.into()),
         },
     ];
-    let model = ScriptedModel::new(vec![say("연구 결과: 일정 없음")]);
+    let model = ScriptedModel::new(vec![say("Research result: no events")]);
     let r = rig(model.clone());
-    // 저장소가 자식의 대상·지시·부여 범위를 대조해 읽어 준 완료 결과
     lock(&r.delegation.results).insert(
         "r1:0:0".into(),
-        JsonPayload(r#"{"state":"succeeded","result":{"text":"일정 없음"}}"#.into()),
+        JsonPayload(r#"{"state":"succeeded","result":{"text":"No events"}}"#.into()),
     );
     assert_eq!(r.worker.execute(resumed).await, Outcome::Succeeded);
     assert!(lock(&r.delegation.requests).is_empty());
     assert_eq!(
         model.requests()[0].exchanges[0].calls[0].end,
-        CallEnd::Done(answer("일정 없음"))
+        CallEnd::Done(answer("No events"))
     );
 
-    // 자식이 실패·취소로 끝나도 부모 run은 이어 간다(모델이 사정을 안다)
     for (body, expected) in [
         (r#"{"state":"dead","error":"x"}"#, "child_failed"),
         (
@@ -340,7 +344,7 @@ async fn delegation_narrows_the_scopes_parks_the_parent_and_hands_the_child_resu
                 body: JsonPayload(body.into()),
             },
         ];
-        let model = ScriptedModel::new(vec![say("알겠어요")]);
+        let model = ScriptedModel::new(vec![say("Understood")]);
         let r = rig(model.clone());
         lock(&r.delegation.results).insert("r1:0:0".into(), JsonPayload(body.into()));
         assert_eq!(r.worker.execute(resumed).await, Outcome::Succeeded);
@@ -356,8 +360,8 @@ async fn only_a_direct_child_can_be_delegated_to() {
     for agent in ["main", "main/research/deep", "other"] {
         let args = delegate_args(agent);
         let model = ScriptedModel::new(vec![
-            calls("맡길게요", &[("r1:0:0", "delegate", &args)]),
-            say("안 되네요"),
+            calls("Delegating now", &[("r1:0:0", "delegate", &args)]),
+            say("Not allowed"),
         ]);
         let r = rig(model.clone());
         assert_eq!(
@@ -367,18 +371,17 @@ async fn only_a_direct_child_can_be_delegated_to() {
         );
         assert!(
             lock(&r.delegation.requests).is_empty(),
-            "{agent}: 저장소까지 가지 않는다"
+            "{agent}: must be rejected before reaching store"
         );
         assert_eq!(
             model.requests()[1].exchanges[0].calls[0].end,
             CallEnd::Failed("denied".into())
         );
     }
-    // 저장소가 거절해도 모델이 볼 결말이다
     let args = delegate_args("main/research");
     let model = ScriptedModel::new(vec![
-        calls("맡길게요", &[("r2:0:0", "delegate", &args)]),
-        say("안 되네요"),
+        calls("Delegating now", &[("r2:0:0", "delegate", &args)]),
+        say("Not allowed"),
     ]);
     let r = rig(model.clone());
     *lock(&r.delegation.error) = Some(Error::Denied);
@@ -392,22 +395,21 @@ async fn only_a_direct_child_can_be_delegated_to() {
 #[tokio::test]
 async fn memory_hits_reach_the_prompt_as_untrusted_reference_and_memory_trouble_does_not_fail_the_run()
  {
-    let model = ScriptedModel::new(vec![say("네")]);
+    let model = ScriptedModel::new(vec![say("Okay")]);
     let r = rig(model.clone());
     *lock(&r.memory.hits) = vec![MemoryHit {
         id: MemoryId("m1".into()),
         visibility: Visibility::Profile,
-        text: "우유는 저지방만 마신다".into(),
+        text: "Only drinks low-fat milk".into(),
     }];
     assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Succeeded);
-    // 기억 본문은 시스템 지침이 아니라 이번 질문 바로 앞 사용자 영역의 비신뢰 참고 자료다
     let request = &model.requests()[0];
-    assert!(!request.system.contains("우유는 저지방만 마신다"));
+    assert!(!request.system.contains("Only drinks low-fat milk"));
     let reference = &request.conversation[request.conversation.len() - 2];
     assert!(reference.text.starts_with(crate::context::REFERENCE_HEADER));
-    assert!(reference.text.contains("우유는 저지방만 마신다"));
+    assert!(reference.text.contains("Only drinks low-fat milk"));
 
-    let model = ScriptedModel::new(vec![say("네")]);
+    let model = ScriptedModel::new(vec![say("Okay")]);
     let r = rig(model.clone());
     *lock(&r.memory.fail) = true;
     assert_eq!(r.worker.execute(agent_run("r2")).await, Outcome::Succeeded);
@@ -415,16 +417,16 @@ async fn memory_hits_reach_the_prompt_as_untrusted_reference_and_memory_trouble_
 
 #[tokio::test]
 async fn previous_turns_of_the_conversation_reach_the_model() {
-    let model = ScriptedModel::new(vec![say("네")]);
+    let model = ScriptedModel::new(vec![say("Okay")]);
     let r = rig(model.clone());
     lock(&r.runs.state).history = vec![
         Turn {
             from: Some(PrincipalId("local:owner".into())),
-            text: "어제 뭐 했어".into(),
+            text: "What did I do yesterday?".into(),
         },
         Turn {
             from: None,
-            text: "산책했어요".into(),
+            text: "Went for a walk.".into(),
         },
     ];
     assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Succeeded);
@@ -433,7 +435,7 @@ async fn previous_turns_of_the_conversation_reach_the_model() {
         .iter()
         .map(|m| m.text.clone())
         .collect();
-    assert_eq!(texts[..2], ["어제 뭐 했어", "산책했어요"]);
+    assert_eq!(texts[..2], ["What did I do yesterday?", "Went for a walk."]);
 }
 
 #[tokio::test]
@@ -461,7 +463,6 @@ async fn failures_carry_only_fixed_codes_and_unknown_models_are_permanent() {
         [Failure::Permanent("unknown_model")]
     );
 
-    // 판본을 찾지 못하면 카탈로그가 아직 준비 안 됐을 수 있어 다시 시도한다
     let mut ctx = agent_run("r3");
     ctx.work.revision = Revision("gone".into());
     let r = rig(ScriptedModel::new(vec![say("x")]));
@@ -475,7 +476,7 @@ async fn failures_carry_only_fixed_codes_and_unknown_models_are_permanent() {
 #[tokio::test]
 async fn an_endless_tool_loop_stops_at_the_turn_limit() {
     let script: Vec<_> = (0..8)
-        .map(|n| calls("계속", &[(&format!("r1:{n}:0"), "agenda.list", "{}")]))
+        .map(|n| calls("continue", &[(&format!("r1:{n}:0"), "agenda.list", "{}")]))
         .collect();
     let r = rig(ScriptedModel::new(script));
     assert!(matches!(
@@ -513,7 +514,7 @@ async fn a_model_turn_without_valid_calls_is_rejected() {
 
 #[tokio::test]
 async fn long_answers_are_clipped_and_empty_ones_fail() {
-    let r = rig(ScriptedModel::new(vec![say(&"가".repeat(13_000))]));
+    let r = rig(ScriptedModel::new(vec![say(&"€".repeat(13_000))]));
     assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Succeeded);
     let sent = lock(&r.runs.state).finished[0].answers[0].0.clone();
     let text = serde_json::from_str::<serde_json::Value>(&sent).unwrap()["text"]
@@ -533,7 +534,6 @@ async fn long_answers_are_clipped_and_empty_ones_fail() {
     );
 }
 
-/// 자기 도구 순환을 가진 실행기(CLI 방식): 한 번 불리고 최종 답만 돌려준다.
 struct OneShot(&'static str);
 
 impl ModelRunner for OneShot {
@@ -555,9 +555,9 @@ impl ModelRunner for OneShot {
 
 #[tokio::test]
 async fn a_loop_runner_is_called_once_and_the_worker_does_not_drive_its_turns() {
-    let r = rig(Arc::new(OneShot("CLI가 알아서 했어요")));
+    let r = rig(Arc::new(OneShot("CLI handled everything")));
     assert_eq!(r.worker.execute(agent_run("r1")).await, Outcome::Succeeded);
     let state = lock(&r.runs.state);
-    assert_eq!(state.finished[0].result, answer("CLI가 알아서 했어요"));
+    assert_eq!(state.finished[0].result, answer("CLI handled everything"));
     assert!(state.steps.is_empty() && r.broker.calls().is_empty());
 }

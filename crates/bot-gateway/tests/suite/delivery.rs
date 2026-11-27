@@ -1,5 +1,4 @@
-//! 회신 발송 수락 시험: outbox claim → 현재 판본 확인 → begin → Slack 한 번 → settle. 숨은 재전송이 없고,
-//! 결과는 Slack가 증명한 만큼만(확정·미실행·거절·불명) 정산한다.
+//! Reply delivery acceptance tests: outbox claim, current revision check, begin, single Slack send, and settle.
 use bot_core::{
     id::{ProfileId, RunId},
     intake::PushTransportId,
@@ -17,7 +16,7 @@ use crate::support::{default_secrets, personal, secrets};
 #[tokio::test]
 async fn a_text_reply_goes_to_the_original_thread_once_and_is_confirmed() {
     let rig = rig().await;
-    to_channel(&rig, 1, json!({"text": "일정은 3건이에요"}));
+    to_channel(&rig, 1, json!({"text": "You have 3 events"}));
     assert_eq!(rig.deliverer.tick().await.unwrap(), 1);
     let calls = posts(&rig);
     assert_eq!(calls.len(), 1);
@@ -28,12 +27,10 @@ async fn a_text_reply_goes_to_the_original_thread_once_and_is_confirmed() {
         (Some("C1"), Some(THREAD))
     );
     assert_eq!(body["blocks"][0]["type"], "markdown");
-    assert_eq!(body["blocks"][0]["text"], "일정은 3건이에요");
-    assert_eq!(body["text"], "일정은 3건이에요");
+    assert_eq!(body["blocks"][0]["text"], "You have 3 events");
+    assert_eq!(body["text"], "You have 3 events");
     assert_eq!(settled(&rig), ["confirmed:C1:1700000000.000002"]);
-    // begin에는 현재 판본이 넘어갔다
     assert_eq!(rig.outbox.begun()[0].1, "personal-r1");
-    // 같은 예약은 다시 잡히지 않는다
     assert_eq!(rig.deliverer.tick().await.unwrap(), 0);
     assert_eq!(posts(&rig).len(), 1);
 }
@@ -47,23 +44,23 @@ async fn dm_replies_use_the_dm_channel_and_broadcast_mentions_are_neutralised() 
         "direct",
         "slack:home/U1",
         direct("D1"),
-        &json!({"text": "<!channel> 안녕"}).to_string(),
+        &json!({"text": "<!channel> hello"}).to_string(),
     ));
     rig.deliverer.tick().await.unwrap();
     let body = &posts(&rig)[0].body;
     assert_eq!(body["channel"], "D1");
-    assert_eq!(body["blocks"][0]["text"], "&lt;!channel> 안녕");
-    assert_eq!(body["text"], "&lt;!channel> 안녕");
+    assert_eq!(body["blocks"][0]["text"], "&lt;!channel> hello");
+    assert_eq!(body["text"], "&lt;!channel> hello");
 }
 
 #[tokio::test]
 async fn approval_cards_carry_buttons_and_a_card_that_would_be_cut_does_not() {
     let rig = rig().await;
-    let card = json!({"nonce": "n-1", "title": "일정 삭제", "lines": ["대상: 산책"]});
+    let card = json!({"nonce": "n-1", "title": "Delete event", "lines": ["Target: Walk"]});
     to_channel(
         &rig,
         1,
-        json!({"text": "승인이 필요해요", "approval": card}),
+        json!({"text": "Approval required", "approval": card}),
     );
     rig.deliverer.tick().await.unwrap();
     let blocks = posts(&rig)[0].body["blocks"].as_array().unwrap().clone();
@@ -74,8 +71,8 @@ async fn approval_cards_carry_buttons_and_a_card_that_would_be_cut_does_not() {
     assert_eq!(buttons[1]["action_id"], "bot_deny");
     assert!(buttons.iter().all(|b| b["value"] == "n-1"));
 
-    // 잘라야 하는 카드는 버튼 없이 관리 화면으로 안내한다
-    let long = json!({"nonce": "n-2", "title": "큰 변경", "lines": vec!["가".repeat(500); 7]});
+    // Oversized cards omit action buttons and direct approvers to the admin UI.
+    let long = json!({"nonce": "n-2", "title": "Large change", "lines": vec!["€".repeat(500); 7]});
     to_channel(&rig, 2, json!({"approval": long}));
     rig.deliverer.tick().await.unwrap();
     let second = &posts(&rig)[1].body;
@@ -134,10 +131,10 @@ async fn outcomes_are_settled_by_what_slack_proved_and_nothing_is_resent() {
     ] {
         let rig = rig().await;
         rig.slack.script("chat.postMessage", script);
-        to_channel(&rig, 1, json!({"text": "안녕"}));
+        to_channel(&rig, 1, json!({"text": "hello"}));
         rig.deliverer.tick().await.unwrap();
         assert_eq!(settled(&rig), [want]);
-        assert_eq!(posts(&rig).len(), 1, "{want}: 숨은 재전송이 없어야 해요");
+        assert_eq!(posts(&rig).len(), 1, "{want}: must not silently resend");
     }
 }
 
@@ -149,7 +146,7 @@ async fn a_refused_connection_is_not_sent() {
         Some("http://127.0.0.1:1/api/"),
     )
     .await;
-    to_channel(&rig, 1, json!({"text": "안녕"}));
+    to_channel(&rig, 1, json!({"text": "hello"}));
     rig.deliverer.tick().await.unwrap();
     assert_eq!(settled(&rig), ["notsent:BeforeWrite:0"]);
 }
@@ -157,7 +154,7 @@ async fn a_refused_connection_is_not_sent() {
 #[tokio::test]
 async fn a_missing_bot_token_sends_nothing() {
     let rig = rig_with(personal(), secrets(&[("personal", "app-token", "x")]), None).await;
-    to_channel(&rig, 1, json!({"text": "안녕"}));
+    to_channel(&rig, 1, json!({"text": "hello"}));
     rig.deliverer.tick().await.unwrap();
     assert_eq!(settled(&rig), ["notsent:BeforeWrite:0"]);
     assert!(rig.slack.all_calls().is_empty());
@@ -170,16 +167,16 @@ async fn a_format_rejection_falls_back_to_plain_text_once_but_never_for_cards() 
         "chat.postMessage",
         Scripted::Json(json!({"ok": false, "error": "invalid_blocks"})),
     );
-    to_channel(&rig, 1, json!({"text": "표가 깨졌어요"}));
+    to_channel(&rig, 1, json!({"text": "broken table"}));
     rig.deliverer.tick().await.unwrap();
     let calls = posts(&rig);
     assert_eq!(calls.len(), 2);
     assert!(calls[0].body.get("blocks").is_some());
     assert!(calls[1].body.get("blocks").is_none());
-    assert_eq!(calls[1].body["text"], "표가 깨졌어요");
+    assert_eq!(calls[1].body["text"], "broken table");
     assert_eq!(settled(&rig), ["confirmed:C1:1700000000.000002"]);
 
-    // 승인 카드는 버튼이 없으면 의미가 없으니 글자판으로 내리지 않고 거절한다
+    // Approval cards require buttons, so format rejections do not fall back to plain text.
     let rig = self::rig().await;
     rig.slack.script(
         "chat.postMessage",
@@ -198,7 +195,7 @@ async fn a_format_rejection_falls_back_to_plain_text_once_but_never_for_cards() 
 #[tokio::test]
 async fn replies_outside_the_original_conversation_are_rejected_before_any_slack_call() {
     let rig = rig().await;
-    let ok = json!({"text": "안녕"}).to_string();
+    let ok = json!({"text": "hello"}).to_string();
     let bad_thread = Conversation {
         thread: Some("not-a-ts".into()),
         ..channel("C1")
@@ -210,7 +207,7 @@ async fn replies_outside_the_original_conversation_are_rejected_before_any_slack
         "slack:home/U1",
         channel("C9"),
         &ok,
-    )); // 다른 채널
+    ));
     rig.outbox.push(outgoing(
         "personal",
         2,
@@ -218,7 +215,7 @@ async fn replies_outside_the_original_conversation_are_rejected_before_any_slack
         "slack:home/U1",
         direct("D1"),
         &ok,
-    )); // 채널 바인딩에 DM
+    ));
     rig.outbox.push(outgoing(
         "personal",
         3,
@@ -226,7 +223,7 @@ async fn replies_outside_the_original_conversation_are_rejected_before_any_slack
         "slack:home/U1",
         channel("C1"),
         &ok,
-    )); // DM 바인딩에 채널
+    ));
     rig.outbox.push(outgoing(
         "personal",
         4,
@@ -234,7 +231,7 @@ async fn replies_outside_the_original_conversation_are_rejected_before_any_slack
         "slack:home/U1",
         channel("C1"),
         &ok,
-    )); // 없는 바인딩
+    ));
     rig.outbox.push(outgoing(
         "personal",
         5,
@@ -242,7 +239,7 @@ async fn replies_outside_the_original_conversation_are_rejected_before_any_slack
         "slack:home/U9",
         channel("C1"),
         &ok,
-    )); // 멤버가 아님
+    ));
     rig.outbox.push(outgoing(
         "personal",
         6,
@@ -250,7 +247,7 @@ async fn replies_outside_the_original_conversation_are_rejected_before_any_slack
         "slack:home/U1",
         bad_thread,
         &ok,
-    )); // 스레드 모양
+    ));
     rig.outbox.push(outgoing(
         "personal",
         7,
@@ -272,16 +269,16 @@ async fn replies_outside_the_original_conversation_are_rejected_before_any_slack
     assert_eq!(
         rig.outbox.begun().len(),
         8,
-        "거절도 begin으로 점유를 기록한 뒤 정산한다"
+        "rejections must still record begin before settling"
     );
-    assert!(rig.slack.all_calls().is_empty(), "보내지 않았어요");
+    assert!(rig.slack.all_calls().is_empty(), "must not call Slack");
 }
 
 #[tokio::test]
 async fn a_failed_begin_sends_nothing_and_settles_nothing() {
     let rig = rig().await;
     rig.outbox.fail_begin(true);
-    to_channel(&rig, 1, json!({"text": "안녕"}));
+    to_channel(&rig, 1, json!({"text": "hello"}));
     rig.deliverer.tick().await.unwrap();
     assert!(rig.slack.all_calls().is_empty());
     assert!(settled(&rig).is_empty());
@@ -300,13 +297,11 @@ async fn an_inactive_profile_is_left_alone_and_the_current_revision_is_checked()
     ));
     rig.deliverer.tick().await.unwrap();
     assert!(rig.outbox.begun().is_empty() && settled(&rig).is_empty());
-    // 판본이 바뀌면 begin에는 새 판본이 넘어간다
     rig.catalog
         .replace([personal().revision("personal-r2").build()]);
-    to_channel(&rig, 2, json!({"text": "안녕"}));
+    to_channel(&rig, 2, json!({"text": "hello"}));
     rig.deliverer.tick().await.unwrap();
     assert_eq!(rig.outbox.begun()[0].1, "personal-r2");
-    // 주체가 멤버에서 빠지면 보내지 않는다
     rig.catalog.replace([profile("personal")
         .binding(
             "team",
@@ -318,7 +313,7 @@ async fn an_inactive_profile_is_left_alone_and_the_current_revision_is_checked()
             "main",
         )
         .build()]);
-    to_channel(&rig, 3, json!({"text": "다시"}));
+    to_channel(&rig, 3, json!({"text": "again"}));
     rig.deliverer.tick().await.unwrap();
     assert_eq!(posts(&rig).len(), 1);
     assert_eq!(settled(&rig).last().map(String::as_str), Some("rejected"));
@@ -330,7 +325,7 @@ async fn attachments_use_the_upload_flow_and_only_the_last_call_publishes() {
     to_channel(
         &rig,
         1,
-        json!({"text": "보고서예요", "attachments": [{"name": "a.txt", "type": "text/plain", "data": "aGk="}]}),
+        json!({"text": "Here is the report", "attachments": [{"name": "a.txt", "type": "text/plain", "data": "aGk="}]}),
     );
     rig.deliverer.tick().await.unwrap();
     let methods: Vec<_> = rig
@@ -356,7 +351,7 @@ async fn attachments_use_the_upload_flow_and_only_the_last_call_publishes() {
     let done = &rig.slack.calls("files.completeUploadExternal")[0].body;
     assert_eq!(done["channel_id"], "C1");
     assert_eq!(done["thread_ts"], THREAD);
-    assert_eq!(done["initial_comment"], "보고서예요");
+    assert_eq!(done["initial_comment"], "Here is the report");
     assert!(
         done["files"]
             .as_str()
@@ -365,7 +360,6 @@ async fn attachments_use_the_upload_flow_and_only_the_last_call_publishes() {
     );
     assert!(settled(&rig)[0].starts_with("confirmed:C1:F"));
 
-    // 완료 호출의 결과 분류: 429는 미실행, ok:false는 거절, 5xx는 불명
     for (script, want) in [
         (
             Scripted::Raw {
@@ -400,10 +394,9 @@ async fn attachments_use_the_upload_flow_and_only_the_last_call_publishes() {
         assert_eq!(
             rig.slack.calls("files.completeUploadExternal").len(),
             1,
-            "{want}: 다시 보내지 않는다"
+            "{want}: must not retry completion"
         );
     }
-    // 주소 받기가 막히면 아무것도 게시되지 않았으니 미실행
     let rig = self::rig().await;
     rig.slack.script(
         "files.getUploadURLExternal",
@@ -421,7 +414,7 @@ async fn attachments_use_the_upload_flow_and_only_the_last_call_publishes() {
     rig.deliverer.tick().await.unwrap();
     assert_eq!(settled(&rig), ["notsent:RateLimited:5"]);
     assert!(rig.slack.calls("files.completeUploadExternal").is_empty());
-    // 승인 카드와 첨부는 한 회신에 함께 보내지 않는다
+    // Approval cards and attachments cannot be combined in a single reply.
     let rig = self::rig().await;
     to_channel(
         &rig,
@@ -436,7 +429,7 @@ async fn attachments_use_the_upload_flow_and_only_the_last_call_publishes() {
 #[tokio::test]
 async fn split_inline_attachments_post_markdown_first_and_upload_files_to_the_same_thread() {
     let rig = rig().await;
-    let raw = "**결론**이에요.\n\n※ 상세는 첨부 파일에 있어요.\n\n<첨부 이름=\"근거.md\">\n## 표\n| 항목 | 값 |\n|---|---|\n| A | 1 |\n</첨부>";
+    let raw = "**Summary**.\n\nSee the attached file for details.\n\n<attachment name=\"evidence.md\">\n## Table\n| Item | Value |\n|---|---|\n| A | 1 |\n</attachment>";
     let (body, files) = bot_core::attachments::split(raw);
     let (packed, truncated) = bot_core::attachments::pack_answers(&files, 15);
     assert!(!truncated);
@@ -450,19 +443,17 @@ async fn split_inline_attachments_post_markdown_first_and_upload_files_to_the_sa
     );
     assert_eq!(rig.deliverer.tick().await.unwrap(), 2);
 
-    // 첫 번째 회신은 마크다운 본문(`chat.postMessage`)으로 올라가고 `<첨부>` 원문이 남지 않는다
     let posted = posts(&rig);
     assert_eq!(posted.len(), 1);
     assert_eq!(posted[0].body["thread_ts"], THREAD);
     assert_eq!(posted[0].body["blocks"][0]["type"], "markdown");
     let md = posted[0].body["blocks"][0]["text"].as_str().unwrap();
-    assert_eq!(md, "**결론**이에요.\n\n※ 상세는 첨부 파일에 있어요.");
-    assert!(!md.contains("<첨부"));
+    assert_eq!(md, "**Summary**.\n\nSee the attached file for details.");
+    assert!(!md.contains("<attachment"));
 
-    // 두 번째 회신은 같은 스레드에 별도 파일(`근거.md`)로 올라간다(`initial_comment` 없음)
     let slot = &rig.slack.calls("files.getUploadURLExternal")[0].body;
-    let expected = "## 표\n| 항목 | 값 |\n|---|---|\n| A | 1 |";
-    assert_eq!(slot["filename"], "근거.md");
+    let expected = "## Table\n| Item | Value |\n|---|---|\n| A | 1 |";
+    assert_eq!(slot["filename"], "evidence.md");
     assert_eq!(slot["length"], expected.len().to_string());
     assert_eq!(rig.slack.uploads(), [expected.as_bytes().to_vec()]);
     let done = &rig.slack.calls("files.completeUploadExternal")[0].body;
@@ -473,7 +464,7 @@ async fn split_inline_attachments_post_markdown_first_and_upload_files_to_the_sa
         done["files"]
             .as_str()
             .unwrap()
-            .contains("\"title\":\"근거.md\"")
+            .contains("\"title\":\"evidence.md\"")
     );
     assert_eq!(settled(&rig).len(), 2);
     assert!(settled(&rig).iter().all(|s| s.starts_with("confirmed:C1:")));
@@ -492,7 +483,7 @@ async fn slack_does_not_claim_another_transport_in_the_same_kind_of_conversation
             id: "C1".into(),
             thread: Some(THREAD.into()),
         },
-        r#"{"text":"다른 발송자의 회신"}"#,
+        r#"{"text":"foreign transport reply"}"#,
     );
     foreign.transport = PushTransportId::new("fixture-push").unwrap();
     rig.outbox.push(foreign);
@@ -511,7 +502,7 @@ async fn the_run_loop_delivers_and_a_deliver_signal_wakes_it() {
         tokio::spawn(async move { deliverer.run(stop).await })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
-    to_channel(&rig, 1, json!({"text": "안녕"}));
+    to_channel(&rig, 1, json!({"text": "hello"}));
     rig.deliverer
         .deliver(RunId("run-1".into()), ProfileId("personal".into()))
         .await

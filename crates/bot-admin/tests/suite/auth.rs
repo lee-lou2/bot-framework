@@ -1,4 +1,4 @@
-//! 인증 길목: Host 확인 → 실패 한도 → 비밀 비교 → 바꾸는 요청의 CSRF. 모든 경로가 같은 순서·같은 응답이다.
+//! Auth gate: Host validation, per-peer rate limiting, credential check, CSRF, and response leak scanning.
 
 use crate::support::*;
 use bot_admin::fake::Fake;
@@ -23,7 +23,7 @@ async fn unknown_hosts_and_missing_or_wrong_credentials_are_refused() {
         none.header("www-authenticate")
             .is_some_and(|v| v.starts_with("Basic"))
     );
-    // 실패 한도(5회) 안에서: 아래 3회(자격이 없는 요청은 세지 않는다).
+    // Stay under the 5-failure lockout threshold (missing credentials do not count).
     for bad in ["Bearer nope", "Basic !!!", "Token operator-secret-1"] {
         let r = raw(
             s.addr,
@@ -115,7 +115,7 @@ async fn responses_are_hardened_and_json() {
         );
         assert!(
             r.header("access-control-allow-origin").is_none(),
-            "{path}: CORS를 열지 않는다"
+            "{path}: CORS must stay disabled"
         );
     }
 }
@@ -132,7 +132,7 @@ async fn closed_without_credentials_means_no_routes() {
         auth: Arc::new(StaticTokens::new().with("", bot_admin::auth::viewer("local:owner", true))),
         profiles: Arc::new(bot_admin::fake::demo_catalog()),
     };
-    assert!(router(AdminConfig::new("127.0.0.1:1".parse().expect("주소")), deps).is_none());
+    assert!(router(AdminConfig::new("127.0.0.1:1".parse().expect("addr")), deps).is_none());
 }
 
 #[tokio::test]
@@ -150,7 +150,6 @@ async fn one_sources_failures_never_lock_out_an_operator_on_another_source() {
             401
         );
     }
-    // 실패한 출처는 맞는 비밀을 써도 잠시 막힌다.
     let same = [
         ("Authorization", "Bearer operator-secret-1"),
         ("X-Test-Peer", "203.0.113.7"),
@@ -161,7 +160,6 @@ async fn one_sources_failures_never_lock_out_an_operator_on_another_source() {
             .status,
         429
     );
-    // 다른 출처의 운영자는 그대로 조회하고 판정할 수 있다.
     let op = [
         ("Authorization", "Bearer operator-secret-1"),
         ("X-Test-Peer", "198.51.100.9"),
@@ -191,11 +189,10 @@ async fn one_sources_failures_never_lock_out_an_operator_on_another_source() {
     )
     .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    // 실제 접속(127.0.0.1)도 영향이 없다.
     assert_eq!(get(&s, OPERATOR, "/v1/admin/me").await.status, 200);
 }
 
-/// 합성 자격 값이 승인 화면 문구에 섞인 서버를 띄운다.
+/// Starts a server with a synthetic secret injected into an approval card.
 async fn leaky(
     secret: &str,
     put: impl FnOnce(&mut bot_admin::fake::Data, &str),
@@ -204,10 +201,10 @@ async fn leaky(
     use std::sync::Arc;
     let fake = Arc::new(Fake::demo());
     fake.edit(|d| put(d, secret));
-    let listener = bot_admin::bind("127.0.0.1:0".parse().expect("주소"), false)
+    let listener = bot_admin::bind("127.0.0.1:0".parse().expect("addr"), false)
         .await
-        .expect("바인드");
-    let addr = listener.local_addr().expect("주소");
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
     let deps = AdminDeps {
         read: fake.clone(),
         act: fake.clone(),
@@ -221,7 +218,7 @@ async fn leaky(
         AdminConfig::new(addr).leak_values([secret.to_owned()]),
         deps,
     )
-    .expect("라우터");
+    .expect("router");
     tokio::spawn(async move {
         let _ = bot_admin::serve(listener, app, std::future::pending()).await;
     });
@@ -231,18 +228,18 @@ async fn leaky(
 #[tokio::test]
 async fn configured_secret_values_never_appear_in_responses_even_with_json_escapes() {
     let h = [("Authorization", "Bearer operator-secret-1")];
-    // 따옴표·역슬래시·줄바꿈·탭·유니코드가 든 합성 자격 값: 직렬화하면 이스케이프돼 글자 그대로는 보이지 않는다.
+    // Synthetic secrets requiring JSON escaping (quotes, backslashes, control chars, UTF-8).
     for secret in [
         "plain-synthetic-value",
         "a\"b\\c-synthetic",
         "line1\nline2-synthetic",
         "tab\there-synthetic",
-        "한글\"값\"-synthetic",
+        "€★\"val\"-synthetic",
     ] {
         let (addr, secret) = leaky(secret, |d, s| {
             d.approvals[0]
                 .render
-                .push(("메모".into(), format!("앞 {s} 뒤")))
+                .push(("Note".into(), format!("before {s} after")))
         })
         .await;
         let r = raw(addr, "GET", "/v1/admin/approvals", None, &h, None).await;
@@ -252,14 +249,12 @@ async fn configured_secret_values_never_appear_in_responses_even_with_json_escap
             "{secret:?}"
         );
         assert!(!r.body.contains("synthetic"), "{secret:?}");
-        // 라벨(키 자리가 아닌 값) 말고 객체 키에 섞인 경우는 원장의 라벨로 흉내 낸다.
         let (addr, _) = leaky(&secret, |d, s| {
-            d.approvals[0].render.push((s.to_owned(), "값".into()))
+            d.approvals[0].render.push((s.to_owned(), "value".into()))
         })
         .await;
         let r = raw(addr, "GET", "/v1/admin/approvals", None, &h, None).await;
-        assert_eq!(r.status, 500, "라벨 자리: {secret:?}");
-        // 해시처럼 긴 값이 많은 다른 응답은 그대로 나간다.
+        assert_eq!(r.status, 500, "label position: {secret:?}");
         assert_eq!(
             raw(addr, "GET", "/v1/admin/runs/personal/r-1", None, &h, None)
                 .await
@@ -269,7 +264,7 @@ async fn configured_secret_values_never_appear_in_responses_even_with_json_escap
     }
 }
 
-/// 키를 교체한 상황: 서버가 뜬 뒤에 호스트가 살아 있는 가림 장치에 새 값을 더하면 다음 응답부터 그 값도 검사한다(시작 때 읽은 목록에 묶이지 않는다).
+/// Key rotation: secrets added to the live redactor after startup are checked on subsequent responses.
 #[tokio::test]
 async fn a_value_added_to_the_live_redactor_after_start_is_checked_from_the_next_response() {
     use bot_admin::{AdminConfig, AdminDeps, StaticTokens, router, trace::Redactor};
@@ -281,12 +276,12 @@ async fn a_value_added_to_the_live_redactor_after_start_is_checked_from_the_next
     fake.edit(|d| {
         d.approvals[0]
             .render
-            .push(("메모".into(), format!("앞 {NEW} 뒤")))
+            .push(("Note".into(), format!("before {NEW} after")))
     });
-    let listener = bot_admin::bind("127.0.0.1:0".parse().expect("주소"), false)
+    let listener = bot_admin::bind("127.0.0.1:0".parse().expect("addr"), false)
         .await
-        .expect("바인드");
-    let addr = listener.local_addr().expect("주소");
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
     let live = Redactor::new([OLD.to_owned()]);
     let deps = AdminDeps {
         read: fake.clone(),
@@ -297,14 +292,12 @@ async fn a_value_added_to_the_live_redactor_after_start_is_checked_from_the_next
         ),
         profiles: Arc::new(bot_admin::fake::demo_catalog()),
     };
-    let app = router(AdminConfig::new(addr).leak_redactor(live.clone()), deps).expect("라우터");
+    let app = router(AdminConfig::new(addr).leak_redactor(live.clone()), deps).expect("router");
     tokio::spawn(async move {
         let _ = bot_admin::serve(listener, app, std::future::pending()).await;
     });
-    // 새 값은 아직 모른다(교체 직후, 쓰이기 전): 응답이 나간다 — 대조
     let before = raw(addr, "GET", "/v1/admin/approvals", None, &h, None).await;
     assert_eq!(before.status, 200, "{}", before.body);
-    // 호스트가 새 값을 읽어 쓰기 시작하면서 가림 장치에 더한다: 같은 서버의 다음 응답부터 막힌다
     live.add(NEW);
     let after = raw(addr, "GET", "/v1/admin/approvals", None, &h, None).await;
     assert_eq!(
@@ -317,7 +310,7 @@ async fn a_value_added_to_the_live_redactor_after_start_is_checked_from_the_next
 #[tokio::test]
 async fn requests_without_any_credential_are_not_guesses_and_never_lock_anyone_out() {
     let s = start(Fake::demo()).await;
-    // 새 브라우저 세션의 첫 요청(로그인 창을 띄우는 401)이 몇 번 겹쳐도 올바른 비밀번호는 막히지 않는다.
+    // Unauthenticated browser login prompts (401) must never trigger rate limiting.
     for _ in 0..30 {
         let r = raw(s.addr, "GET", "/ui", None, &[], None).await;
         assert_eq!(r.status, 401);
@@ -329,7 +322,6 @@ async fn requests_without_any_credential_are_not_guesses_and_never_lock_anyone_o
 #[tokio::test]
 async fn unreadable_or_wrong_credentials_still_count_as_guesses() {
     let s = start(Fake::demo()).await;
-    // 헤더가 있는데 읽을 수 없거나(형식 오류) 맞지 않으면 추측이다.
     for bad in [
         "Basic !!!!",
         "Token x",

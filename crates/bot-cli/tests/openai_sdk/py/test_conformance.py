@@ -1,4 +1,4 @@
-"""적합성 검사기 자체의 시험: 고정 확인, 3.0 `nullable` 변환(형·enum·`$ref` 옆), 공식 스키마가 요구하는 필드. 서버가 필요 없다."""
+"""Offline unit tests for conformance.py: pin checks, OpenAPI 3.0 nullable conversion, and official required fields."""
 import copy
 import json
 import pathlib
@@ -57,7 +57,7 @@ class Nullable(unittest.TestCase):
         node = {"type": "string", "nullable": True}
         self.assertTrue(self.accepts(node, None) and self.accepts(node, "x"))
         self.assertFalse(self.accepts(node, 1))
-        self.assertFalse(self.accepts({"type": "string"}, None), "nullable이 없으면 null은 거절")
+        self.assertFalse(self.accepts({"type": "string"}, None), "non-nullable string must reject null")
 
     def test_a_nullable_enum_takes_null_but_no_other_value(self):
         node = {"type": "string", "enum": ["stop", "length"], "nullable": True}
@@ -77,7 +77,7 @@ class Nullable(unittest.TestCase):
 
     def test_no_3_0_only_shape_is_left_in_the_converted_official_schemas(self):
         self.assertEqual(list(conformance.leftovers(SCHEMA.components)), [])
-        self.assertGreaterEqual(sum(1 for _ in conformance.leftovers(SCHEMA.doc["components"])), 20, "원본에는 nullable이 많다 — 변환이 하나도 안 된 것이 아니다")
+        self.assertGreaterEqual(sum(1 for _ in conformance.leftovers(SCHEMA.doc["components"])), 20, "source schema must contain nullable nodes to verify conversion ran")
 
 
 class RequestNullable(unittest.TestCase):
@@ -86,7 +86,7 @@ class RequestNullable(unittest.TestCase):
         for name in ("max_tokens", "max_completion_tokens", "stop", "logprobs", "n", "seed", "temperature", "top_p", "store", "stream", "stream_options", "metadata"):
             self.assertIn(name, nullable)
         for name in ("tools", "tool_choice", "functions", "function_call", "messages", "model", "user", "response_format", "parallel_tool_calls"):
-            self.assertNotIn(name, nullable, "공식 요청 스키마에서 null을 허용하지 않는다")
+            self.assertNotIn(name, nullable, "field is not nullable in official request schema")
 
 
 class OfficialShapes(unittest.TestCase):
@@ -103,13 +103,13 @@ class OfficialShapes(unittest.TestCase):
                 self.assertTrue(SCHEMA.errors("CreateChatCompletionResponse", without(COMPLETION, *path)))
         for path in ("param", "code", "type", "message"):
             with self.subTest(error=path):
-                self.assertTrue(SCHEMA.errors("ErrorResponse", without(ERROR, "error", path)), "오류 객체는 null이어도 네 필드를 다 가진다")
+                self.assertTrue(SCHEMA.errors("ErrorResponse", without(ERROR, "error", path)), "error object requires all four fields even when null")
 
     def test_null_where_the_schema_allows_it_and_not_where_it_does_not(self):
         SCHEMA.check("CreateChatCompletionStreamResponse", {**CHUNK, "usage": None})
-        self.assertTrue(SCHEMA.errors("CreateChatCompletionResponse", {**COMPLETION, "usage": None}), "비스트리밍 usage는 null이 아니라 생략")
+        self.assertTrue(SCHEMA.errors("CreateChatCompletionResponse", {**COMPLETION, "usage": None}), "non-streaming usage must be omitted, not null")
         self.assertTrue(SCHEMA.errors("CreateChatCompletionResponse", {**COMPLETION, "object": "chat.completion.chunk"}))
-        self.assertTrue(SCHEMA.errors("CreateChatCompletionResponse", {**COMPLETION, "usage": {"prompt_tokens": 1, "completion_tokens": 1}}), "usage는 세 수를 다 가진다")
+        self.assertTrue(SCHEMA.errors("CreateChatCompletionResponse", {**COMPLETION, "usage": {"prompt_tokens": 1, "completion_tokens": 1}}), "usage requires all three token counts")
 
     def test_the_stream_finish_reason_is_a_nullable_enum(self):
         for reason in (None, "stop", "length"):

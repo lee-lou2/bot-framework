@@ -1,5 +1,4 @@
-//! OTLP/HTTP protobuf 공통 선 형식 인코더(외부 의존 없음).
-//! `trace/otlp.rs`(ExportTraceServiceRequest)와 `logs/otlp.rs`(ExportLogsServiceRequest)가 같은 기본 조각을 쓴다.
+//! Dependency-free protobuf wire encoder shared by OTLP trace and log exporters.
 
 use bot_core::trace::Val;
 
@@ -39,14 +38,13 @@ pub(crate) fn number(buf: &mut Vec<u8>, field: u32, v: u64) {
     }
 }
 
-/// 하위 메시지: 안쪽을 먼저 만들어 길이를 앞에 붙인다.
 pub(crate) fn message(buf: &mut Vec<u8>, field: u32, fill: impl FnOnce(&mut Vec<u8>)) {
     let mut inner = Vec::new();
     fill(&mut inner);
     bytes(buf, field, &inner);
 }
 
-/// `AnyValue`는 oneof라 빈 문자열·거짓·0도 설정된 값으로 그대로 싣는다.
+/// `AnyValue` is a protobuf `oneof`, so empty strings, `false`, and `0` must still be emitted.
 pub(crate) fn any(buf: &mut Vec<u8>, v: &Val) {
     match v {
         Val::Str(s) => bytes(buf, 1, s.as_bytes()),
@@ -93,7 +91,7 @@ mod tests {
             [
                 0x18, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01
             ],
-            "음수 int64는 10바이트"
+            "negative int64 encodes as 10-byte varint"
         );
     }
 
@@ -121,6 +119,6 @@ mod tests {
         assert_eq!(m, [0x12, 0x04, 0x0a, 0x02, b'h', b'i']);
         let mut e = Vec::new();
         message(&mut e, 2, |_| {});
-        assert_eq!(e, [0x12, 0x00], "빈 하위 메시지도 자리는 남는다");
+        assert_eq!(e, [0x12, 0x00], "empty submessage still emits length-0 tag");
     }
 }

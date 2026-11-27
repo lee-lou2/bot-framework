@@ -1,9 +1,7 @@
-//! 사용자 예약(`UserSchedules`)의 생성·목록·취소·후속 확인. 정의와 신원은 저장소가 만든 run에서 복원해 적는다(호출자가 소유자·대화·권한을 고르지 못한다).
-//! - 생성·취소는 `CallLedger::start`와 같은 검사(활성 판본·리스·승인 소비)를 하고 호출 완료·감사와 **한 커밋**이다.
-//! - 활성 예약은 프로필·소유자당 `MAX_ACTIVE_PER_OWNER`개(모든 에이전트 합산)이고 한도는 소유자별 어드바이저리 잠금으로 직렬화한다.
-//! - 후속 확인(`finish_with_wake`)은 신뢰 도구의 결과와 (run, 호출)당 하나뿐인 `at` 예약을 한 커밋에 남기고, 연쇄는 `MAX_WAKE_DEPTH`에서 멈춘다.
+//! User schedule creation and cancellation (`UserSchedules`), bound to stored run identity and approval-fenced commits.
 //!
-//! 발화(`due`·`advance`)는 `user_due.rs`, 목록과 후속 확인은 `user_wake.rs`다.
+//! Active schedules are capped at `MAX_ACTIVE_PER_OWNER` per `(profile, owner)` via an owner advisory lock,
+//! and chained scheduled runs stop at `MAX_WAKE_DEPTH`. Firing lives in `user_due.rs`; list/wake live in `user_wake.rs`.
 
 use crate::{
     audit::{self, OwnedEntry},
@@ -22,23 +20,21 @@ use bot_core::{
 use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
 
-/// 대화에서 예약을 만드는 내장 도구의 ID(브로커의 `schedule.create`·`schedule.cancel`과 같다).
 pub(crate) use bot_core::builtin::{CANCEL_TOOL, CREATE_TOOL};
 
 use bot_core::builtin::MAX_SCHEDULE_AHEAD_MS as MAX_AHEAD_MS;
 
-/// 호출 완료 결과에 적는 예약 ID.
 pub(crate) fn result_of(id: &str) -> String {
     json!({ "schedule": id }).to_string()
 }
 
-/// 취소 호출의 봉인된 요청 지문: 브로커가 인자 `{"id": …}`를 정규화해(JCS) SHA-256한 값.
+/// Canonical JCS SHA-256 of `{"id": ...}` matching broker approval sealing.
 pub(crate) fn cancel_hash(id: &ScheduleId) -> [u8; 32] {
     let args = json!({ "id": id.0 });
     bot_core::canon::sha256(&bot_core::canon::canonicalize(&args).unwrap_or_default())
 }
 
-/// 일반 `start`로는 시작하지 못하는 내장 도구. 승인 소비·실행·호출 완료·감사가 한 커밋인 전용 연산만 쓴다.
+/// Built-in tools that must execute through dedicated atomic store ops rather than generic `CallLedger::start`.
 pub(crate) fn dedicated_tool(tool: &str) -> bool {
     matches!(
         tool,
@@ -54,7 +50,6 @@ pub(crate) fn id_in(result: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// 검증을 마친 시각 정의: (at_ms, cron, timezone, 다음 확인 시각).
 pub(crate) struct Timed {
     at_ms: Option<i64>,
     cron: Option<String>,
@@ -90,7 +85,7 @@ pub(crate) fn timed(timing: &Timing, now: i64) -> R<Timed> {
                 at_ms: None,
                 cron: Some(expression.to_string()),
                 timezone: Some(timezone.clone()),
-                // 첫 발생은 스케줄러가 계산한다: 곧바로 확인 대상이 된다
+                // Scheduler computes the first cron occurrence, so make it immediately eligible for scan.
                 next_ms: now,
             })
         }
@@ -104,7 +99,6 @@ pub(crate) fn instruction_ok(text: &str) -> R<()> {
     Ok(())
 }
 
-/// 만든 run에서 복원한 신원.
 pub(crate) struct Origin {
     pub(crate) principal: String,
     pub(crate) agent: String,
@@ -115,9 +109,9 @@ pub(crate) struct Origin {
     pub(crate) scopes: Vec<String>,
     pub(crate) approver: Option<String>,
     pub(crate) tainted: bool,
-    /// 루트의 자동 후속 연쇄 깊이(예약으로 발화한 루트는 그 예약의 깊이)
+    /// Chained automatic wake depth inherited from the root run.
     pub(crate) depth: i16,
-    /// 루트가 예약(정적 트리거·사용자 예약·후속 확인)이 발화한 실행인가. 직접 사용자 요청이 아니다.
+    /// True when the root run was fired by a schedule rather than a direct user request.
     pub(crate) scheduled: bool,
 }
 
@@ -136,7 +130,7 @@ pub(crate) async fn origin_of(
     .fetch_one(&mut **tx)
     .await?;
     let kind: String = me.get("conv_kind");
-    // HTTP 호출자에게는 나중에 보낼 길이 없다
+    // HTTP callers have no push channel for deferred replies.
     if kind == "http" {
         return Err(Error::Denied.into());
     }
@@ -163,9 +157,8 @@ pub(crate) async fn origin_of(
     })
 }
 
-/// 시작 단계의 결과.
 pub(crate) enum Claimed {
-    /// 이미 끝난 호출의 재접수: 기록된 결과
+    /// Replay of an already-finished call with its recorded result.
     Done(String),
     Fresh {
         run: RunRow,
@@ -174,9 +167,8 @@ pub(crate) enum Claimed {
     },
 }
 
-/// `CallLedger::start`와 같은 검사(활성 판본 → 루트 run → run → 호출 → private 표지 → 승인 소비). 잠금 순서도 같다.
-/// `sealed`는 이 연산이 만든 봉인 지문이다: 호출에 기록된 지문(승인한 내용)과 다르면 승인을 소비하기 전에 `Conflict`로 멈춘다.
-/// 이미 끝난 호출도 같은 지문일 때만 기록된 결과를 돌려준다(다른 명세로 재접수해 결과만 얻지 못한다).
+/// Runs `CallLedger::start` checks (active revision -> root run -> run -> call -> private flag -> approval consumption)
+/// and verifies the sealed args digest before consuming approval or returning a replayed result.
 pub(crate) async fn claim(
     tx: &mut Tx<'_>,
     s: &StartCall,
@@ -188,7 +180,7 @@ pub(crate) async fn claim(
     let shared_flag = lock_root_shared(tx, at).await?;
     let run = fence(tx, at).await?;
     let call = lock_call(tx, at, &s.call).await?;
-    // 원장에 기록된 호출이 이 도구의 것이어야 한다(다른 도구의 호출이나 승인으로 예약을 바꾸지 못한다)
+    // Ensure the ledger call matches this exact built-in tool.
     if call.get::<String, _>("tool") != tool {
         return Err(Error::Denied.into());
     }
@@ -201,11 +193,10 @@ pub(crate) async fn claim(
         _ => return Err(Error::Conflict.into()),
     };
     if tree_flagged(tx, &run, shared_flag).await? && !s.private_recall {
-        return Err(Error::Conflict.into()); // 판정한 뒤 다른 실행이 private 기억을 조회했다
+        return Err(Error::Conflict.into()); // Another run in the tree read private memory after policy evaluation.
     }
     crate::approvals::require_presented(tx, pointer.as_ref(), s.approval.is_some()).await?;
     let approval = match &s.approval {
-        // 승인이 있으면 호출이 가리키는 승인·도구·봉인 지문과 맞는지 소비 전에 대조한다(`consume`)
         Some((expected, reasons)) => {
             crate::approvals::consume(tx, at, &s.call, expected, reasons).await?;
             Some(expected.nonce.0.clone())
@@ -219,7 +210,6 @@ pub(crate) async fn claim(
     })
 }
 
-/// 호출을 한 번에 시작해 완료한다(결과는 `{"schedule": <ID>}`).
 pub(crate) async fn finish_call(
     tx: &mut Tx<'_>,
     s: &StartCall,
@@ -253,7 +243,7 @@ pub(crate) fn done_entry(profile: &str, actor: &str, call: &str, hash: [u8; 32])
     done
 }
 
-/// 소유자별 한도를 직렬화하고 활성 예약 수를 센다.
+/// Serializes per-owner quota checks via advisory lock and enforces `MAX_ACTIVE_PER_OWNER`.
 pub(crate) async fn within_limit(tx: &mut Tx<'_>, profile: &str, owner: &str) -> R<()> {
     sqlx::query(
         "select pg_advisory_xact_lock(hashtextextended('bot.userschedule:' || $1 || ':' || $2, 0))",
@@ -275,7 +265,6 @@ pub(crate) async fn within_limit(tx: &mut Tx<'_>, profile: &str, owner: &str) ->
     Ok(())
 }
 
-/// 새 예약 한 줄.
 pub(crate) struct New<'a> {
     pub(crate) origin: &'a Origin,
     pub(crate) fire_origin: bot_core::state::RunOrigin,
@@ -331,9 +320,9 @@ pub(crate) async fn insert(tx: &mut Tx<'_>, profile: &str, n: &New<'_>) -> R<Str
     Ok(id)
 }
 
-/// 명시 목적지는 같은 프로필의 푸시 대화(direct·channel)만 받는다.
-/// 현재 호스트 등록부(`bot-gateway/src/schedule_routes.rs`)와 목적지 적재(`delivery::push_to`)는 Slack으로 한정돼 있다.
-/// 다른 푸시 어댑터로 명시 목적지를 열려면 목적지 발송 키(`dest_transport`)도 함께 저장해야 한다.
+/// Explicit destinations allow only push conversations (`direct`/`channel`).
+/// Host routing (`bot-gateway/src/schedule_routes.rs`) and `delivery::push_to` currently support Slack only;
+/// adding another push adapter will require storing a `dest_transport` key.
 pub(crate) fn destination_ok(dest: &DeliveryTarget) -> R<()> {
     ids_ok(&[&dest.binding.0, &dest.conversation.id])?;
     if dest
@@ -377,9 +366,9 @@ impl Store {
     pub(crate) async fn schedule_create(&self, s: StartCall, spec: ScheduleSpec) -> R<ScheduleId> {
         ids_ok(&[&s.owner, &s.checked_revision.0, &s.call.0])?;
         instruction_ok(&spec.instruction)?;
-        // 승인 카드가 보여 준 바로 그 명세만 만든다: 봉인 지문을 만들 수 없는 명세(없는 시간대·표현할 수 없는 시각)는 DB를 만지기 전에 거절한다
+        // Reject unsealable specs (invalid timezone or timestamp) before opening a transaction.
         let sealed = spec.seal_create()?.sha256;
-        // 다른 수신자로 나가는 답은 발화마다 동결한 초안을 소유자가 승인한 뒤 PG가 보낸다(`ScheduledReplies`): 어떤 경로로도 임의 발송하거나 원래 대화로 바꿔 보내지 않는다.
+        // Explicit-destination replies require owner approval on every occurrence via `ScheduledReplies`.
         if let Some(dest) = &spec.destination {
             destination_ok(dest)?;
         }
@@ -396,7 +385,7 @@ impl Store {
                 approval,
             } => (run, shared_flag, approval),
         };
-        // 다른 수신자에게 가는 예약은 수신자·지시문을 승인한 호출이어야 한다
+        // Explicit-destination schedules require an approved creation call.
         if spec.destination.is_some() && approval.is_none() {
             return Err(Error::Denied.into());
         }
@@ -405,7 +394,7 @@ impl Store {
             .fetch_one(&mut *tx)
             .await?;
         let timed = timed(&spec.timing, now)?;
-        // 직접 사용자 요청이 만든 예약만 깊이 0이다. 예약 실행(그 위임 자손 포함)이 만든 예약은 루트 깊이 + 1이고 후속 확인과 같은 상한을 쓴다
+        // Only direct user requests start at depth 0; scheduled runs (and their descendants) increment root depth.
         let depth = if origin.scheduled {
             origin.depth + 1
         } else {
@@ -476,7 +465,7 @@ impl Store {
             } => (run, shared_flag, approval),
         };
         let origin = origin_of(&mut tx, at, &run, shared_flag).await?;
-        // 소유자만: 없는 예약과 남의 예약은 같은 `Missing`이다(존재 여부를 알리지 않는다)
+        // Return `Missing` for both nonexistent and non-owned schedules to avoid leaking existence.
         let row = sqlx::query(
             "select owner, state from bot_user_schedules where profile = $1 and id = $2 for update",
         )
@@ -522,7 +511,6 @@ impl Store {
     }
 }
 
-/// 원래 대화(`DeliveryTarget`)로 옮긴다.
 pub(crate) fn origin_target(row: &PgRow) -> R<DeliveryTarget> {
     Ok(DeliveryTarget {
         binding: BindingId(row.get("origin_binding")),
@@ -561,7 +549,6 @@ mod tests {
     #[test]
     fn timed_rejects_non_canonical_iana_timezone_matching_bot_core() {
         let expr = Cron::parse("0 9 * * *").unwrap();
-        // 정식 IANA 이름은 허용한다
         for ok in ["UTC", "Asia/Seoul", "America/New_York"] {
             let t = Timing::Cron {
                 expression: expr.clone(),
@@ -569,7 +556,7 @@ mod tests {
             };
             assert!(timed(&t, 1_700_000_000_000).is_ok(), "{ok}");
         }
-        // bot-core의 valid_iana_timezone이 거절하는 대소문자 변형·비정식 이름은 거절한다
+        // Non-canonical casing and unknown names rejected by bot-core's `valid_iana_timezone` must fail here too.
         for bad in ["asia/seoul", "utc", "Mars/Phobos"] {
             let t = Timing::Cron {
                 expression: expr.clone(),

@@ -1,4 +1,4 @@
-//! OpenAI 호환 입구의 접수 명령(실제 리스너): 모델마다 바인딩 에이전트, 승인자·전달 설치 기록, 구판 프로세스·입구 속도 한도.
+//! OpenAI-compatible ingress admission tests: model agent routing, approval routes, stale fencing, limits, and connection slots.
 use crate::openai_support::*;
 use bot_gateway::testing::api::Fault;
 use std::sync::Arc;
@@ -6,30 +6,30 @@ use std::sync::Arc;
 #[tokio::test]
 async fn an_unknown_commit_whose_ledger_row_is_someone_elses_request_is_a_conflict_not_a_join() {
     let rig = rig().await;
-    rig.api.start_as(answer("먼저 접수된 요청의 결과"));
+    rig.api.start_as(answer("result of earlier request"));
     assert_eq!(
         chat(
             &rig,
             BUILD_KEY,
             Some("dup1"),
-            &ask("assistant", "원래 질문")
+            &ask("assistant", "original question")
         )
         .await
         .status,
         200
     );
-    // 같은 키로 다른 질문을 보냈는데 접수 결과를 알 수 없다: 조회한 작업은 다른 요청의 것이다
+    // Different payload under the same key with an unknown commit outcome must return conflict.
     rig.api.fault(Fault::UnknownNotCommitted);
     let reply = chat(
         &rig,
         BUILD_KEY,
         Some("dup1"),
-        &ask("assistant", "다른 질문"),
+        &ask("assistant", "different question"),
     )
     .await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     assert_eq!(reply.error().1, "idempotency_key_conflict");
-    assert!(!reply.body.contains("먼저 접수된"));
+    assert!(!reply.body.contains("earlier request"));
     assert_eq!(rig.api.runs(), 1);
 }
 
@@ -40,7 +40,10 @@ async fn a_stale_process_never_accepts_a_chat() {
     let reply = chat(&rig, BUILD_KEY, Some("st1"), &ask("assistant", "q")).await;
     assert_eq!(reply.status, 503, "{}", reply.body);
     assert_eq!(reply.header("retry-after"), Some("1"));
-    assert!(rig.api.accepts().is_empty(), "구판은 저장소에 쓰지 않는다");
+    assert!(
+        rig.api.accepts().is_empty(),
+        "stale process must not write to the store"
+    );
     rig.active.set(Some("set-1"));
     rig.api.start_as(answer("ok"));
     assert_eq!(
@@ -143,13 +146,11 @@ async fn each_model_runs_its_own_agent_and_the_approver_and_team_are_recorded_on
     }
     let accepts = rig.api.accepts();
     let by = |model: &str| accepts.iter().find(|a| a.model == model).unwrap();
-    // 승인 경로가 Slack이면 접수 순간 호스트가 확인한 설치(팀)와 승인자를 기록한다
     assert_eq!(by("slacked").team.as_deref(), Some("T1"));
     assert_eq!(
         by("slacked").accept.approver,
         Some(bot_core::id::PrincipalId("slack:home/U1".into()))
     );
-    // 로컬 경로는 팀이 없다. 경로가 없으면 승인자도 팀도 없다(HTTP 키 자신은 승인자가 아니다)
     assert_eq!(
         (
             by("localed").team.clone(),
@@ -164,7 +165,6 @@ async fn each_model_runs_its_own_agent_and_the_approver_and_team_are_recorded_on
         ),
         (None, None)
     );
-    // 모델마다 바인딩 에이전트를 직접 접수한다
     let agent = |model: &str| match &by(model).accept.target {
         Target::Agent { agent, .. } => agent.0.clone(),
         other => panic!("{other:?}"),
@@ -179,7 +179,7 @@ async fn each_model_runs_its_own_agent_and_the_approver_and_team_are_recorded_on
 #[tokio::test]
 async fn when_every_connection_slot_is_busy_the_next_request_gets_a_plain_openai_503_and_the_webhook_its_own()
  {
-    // 같은 리스너의 동시 대기 연결 수는 유한하다(웹훅과 한 세마포어): 자리가 다 차면 /v1은 OpenAI 형식 503, 웹훅은 옛 형식 503이다
+    // OpenAI and webhook endpoints share the listener semaphore but render their own 503 formats.
     let rig = rig_with(Setup {
         tune: Box::new(|host| {
             host.limits.per_principal_per_min = Some(10_000);
@@ -211,7 +211,6 @@ async fn when_every_connection_slot_is_busy_the_next_request_gets_a_plain_openai
             })
         })
         .collect();
-    // 256개가 모두 접수돼 기다리는 중이 될 때까지
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while rig.api.runs() < 256 && std::time::Instant::now() < until {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -219,7 +218,7 @@ async fn when_every_connection_slot_is_busy_the_next_request_gets_a_plain_openai
     assert_eq!(
         rig.api.runs(),
         256,
-        "자리를 채우는 요청이 모두 접수돼야 해요"
+        "all slot-filling requests must be admitted"
     );
     let busy = get(&rig, BUILD_KEY, "/v1/models").await;
     assert_eq!(busy.status, 503, "{}", busy.body);
@@ -237,10 +236,9 @@ async fn when_every_connection_slot_is_busy_the_next_request_gets_a_plain_openai
     assert_eq!(webhook.status, 503);
     assert!(
         webhook.json()["error"].is_string(),
-        "웹훅은 옛 형식이다: {}",
+        "webhook keeps legacy error shape: {}",
         webhook.body
     );
-    // 기다리던 요청들은 끝나면 «처리 중» 안내로 마친다(작업은 그대로)
     for handle in waiting {
         let reply = handle.await.unwrap();
         assert_eq!(reply.status, 200, "{}", reply.body);
@@ -250,20 +248,20 @@ async fn when_every_connection_slot_is_busy_the_next_request_gets_a_plain_openai
 
 #[tokio::test]
 async fn the_connection_slot_stays_taken_while_the_body_still_waits_for_its_last_check() {
-    // 한도 1: 짧은 답이라 생산자는 조각을 큐에 다 넣고 곧 끝난다. 그래도 본문이 넘기기 직전의 재확인을 기다리는 동안은 연결이 살아 있으므로 새 요청을 받으면 안 된다.
+    // Even after the producer finishes queuing chunks, the connection permit stays held until body handoff completes.
     const SLOTS: usize = 3;
     let rig = rig_with(Setup {
         connections: Some(1),
         ..tuned(3000, 5)
     })
     .await;
-    rig.api.start_as(answer("짧은 답"));
+    rig.api.start_as(answer("short reply"));
     let (active, reads) = (
         rig.active.clone(),
         Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     );
     rig.secrets.on_read(move || {
-        // 인증 한 바퀴·헤더 전 확인 한 바퀴가 지난 뒤(첫 조각을 꺼내는 확인부터) 저장소가 느려진다
+        // Delay active checks starting at the first chunk handoff (after auth and pre-header passes).
         if reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2 * SLOTS {
             active.delay(std::time::Duration::from_secs(2));
         }
@@ -277,7 +275,6 @@ async fn the_connection_slot_stays_taken_while_the_body_still_waits_for_its_last
     .await;
     assert_eq!(sse.status, 200);
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    // 생산자는 이미 끝났다(조각 3개가 큐 용량 안): 그래도 자리는 없다
     let started = std::time::Instant::now();
     let busy = get(&rig, BUILD_KEY, "/v1/models").await;
     assert_eq!(busy.status, 503, "{}", busy.body);
@@ -287,7 +284,6 @@ async fn the_connection_slot_stays_taken_while_the_body_still_waits_for_its_last
         "{:?}",
         started.elapsed()
     );
-    // 본문이 끝나면(기한이든 확인이 끝났든) 자리를 돌려준다
     let _ = sse.rest(std::time::Duration::from_secs(10)).await;
     rig.active.delay(std::time::Duration::ZERO);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;

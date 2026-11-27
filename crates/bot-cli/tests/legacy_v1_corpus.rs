@@ -1,10 +1,7 @@
-//! 구판(`417162e`) 바이너리가 실제로 수락·보관한 V1(`BOTPROFILE1`) 번들 45종 전체 회귀 코퍼스 시험.
+//! Regression corpus of 45 legacy (`417162e`) V1 (`BOTPROFILE1`) bundles verifying byte-exact restore, policy revision, and prompt assembly.
 //!
-//! 각 사례의 `(bundle_sha256, policy_sha256, prompt_sha256, prompt_len)`은 `417162e` 구판 바이너리가
-//! 실제로 만든 번들과 `context::assemble(now = UNIX_EPOCH)` 출력에서 고정한 암호 해시다.
-//! - 번들 바이트의 SHA-256이 `417162e` 실물 번들과 1비트까지 같음을 먼저 검증한 뒤 `from_bundle`로 복원한다.
-//! - 복원한 스냅숏의 `policy_revision`과 조립된 시스템 프롬프트의 SHA-256·길이가 `417162e`와 바이트 단위로
-//!   일치함을 단언한다. 앞으로 검증 규칙을 바꾸다 구판 수락 집합을 줄이면 이 시험이 즉시 잡는다.
+//! Each `(bundle_sha256, policy_sha256, prompt_sha256, prompt_len)` tuple is pinned from the `417162e` binary
+//! output with `context::assemble(now = UNIX_EPOCH)` so validation tightenings never shrink the legacy restore set.
 
 use bot_core::{
     command::{JsonPayload, Target, Work},
@@ -27,8 +24,8 @@ const KNOWN: &str =
 const POL_BASE: &str = "a4f409e28bc3c3729f8965e2a0548c59b8bd1a981e316bfb5fb2501774900fa2";
 const POL_CRON: &str = "f144d7763de40c7ffdee623a435ff13614e33a2a1faaa8f16e7446abed3322cd";
 const POL_APPR: &str = "73d1f69f3200d1f8b8f4857f6bdb3fed52792283bf4b306e28041f2bbc062dfc";
-const PROMPT_CLEAN: &str = "7f8530777bb914710a263fd6189b43297fb5de5cb66c2764703735f472f65d1f";
-const PROMPT_APPR: &str = "e6bd15d22fe7e1c5a6cfab16cb225e9e161568506fd957d92a5f173576a30167";
+const PROMPT_CLEAN: &str = "55532b821a6857a5cfa2de141229acb86e8a28aeefc317638fff5839458e9ef9";
+const PROMPT_APPR: &str = "01e6c5c895b22a07f24e1f0bd57f9800b1031b71faf3b3ad4a61c32498ee8cc1";
 
 struct Case {
     name: &'static str,
@@ -137,7 +134,7 @@ fn cron_case(name: &'static str, expr: &str, bundle_sha: &'static str) -> Case {
         bundle_sha,
         policy_sha: POL_CRON,
         prompt_sha: PROMPT_CLEAN,
-        prompt_len: 105,
+        prompt_len: 104,
     }
 }
 
@@ -187,7 +184,7 @@ fn approval_case(name: &'static str, spelling: &str, bundle_sha: &'static str) -
         bundle_sha,
         policy_sha: POL_APPR,
         prompt_sha: PROMPT_APPR,
-        prompt_len: 59,
+        prompt_len: 58,
     }
 }
 
@@ -195,224 +192,224 @@ fn corpus() -> Vec<Case> {
     let sc =
         |name, skill: Vec<u8>, b, p, len| with_file(name, "skills/memo/SKILL.md", skill, b, p, len);
     let mut cases = vec![
-        // 구판 AGENT.md 단독 `---` / `---\r`
+        // Legacy AGENT.md bare `---` / `---\r`
         with_file(
             "agent-bare",
             "agents/main/AGENT.md",
             b"---",
             "7cd419ea4a85e95ce1dc11b11d8c8d18e1818611facdf03a9d78d28249e5a374",
-            "ae6826257be5c660f50a7425639ebdbbaf9c425b5bcda28f69c0798b37cea89c",
-            95,
+            "c20f6e908d99cd93c5d63f837955617c1507923714299e892a27e5cc7e9ab102",
+            94,
         ),
         with_file(
             "agent-bare-cr",
             "agents/main/AGENT.md",
             b"---\r",
             "31bc8d17afe88df3fb043f7aeee5a35d015311e6b2a133465319c5a4faf1a484",
-            "ae6826257be5c660f50a7425639ebdbbaf9c425b5bcda28f69c0798b37cea89c",
-            95,
+            "c20f6e908d99cd93c5d63f837955617c1507923714299e892a27e5cc7e9ab102",
+            94,
         ),
-        // 구판 SKILL.md 경계 전체(28종)
+        // Legacy SKILL.md boundary cases (28 variants)
         sc(
             "clean",
             BODY.into(),
             "fecdc4bd6d311aba77dcc8b64efefa867be7add15901813fad3c86f2ce0c52d6",
             PROMPT_CLEAN,
-            105,
+            104,
         ),
         sc(
             "valid",
             KNOWN.into(),
             "17c35a92d25b31c3414269346d94e979c94e12f5c2181f864548d7e4052e88a4",
-            "7add2d312fc63a1b63a856e209f56f1538d56433f39eaadec75e77f70f688ccf",
-            153,
+            "bf57d55eebee88ce4fac8628e2d568c6c27a0970275ff477cee34d4c985184ab",
+            152,
         ),
         sc(
             "validcrlf",
             KNOWN.replace('\n', "\r\n").into(),
             "deea37a05543066e1c8d2dc73f64b5a7c7f29b95f70606eef8f03b96207e7443",
-            "836a8bd3dd9fa4cd3e13f8d35f5c266d14a7d611e94ca0bbbe4a755b1dd108d7",
-            157,
+            "f16cdb2d88d08f780f36c8c2106d914547dbece40617a4ed21e338f9ac7f60d9",
+            156,
         ),
         sc(
             "unclosed",
             format!("---\n{BODY}").into(),
             "fd4a1fe7248bf9f256ca44be09f46f0f53f4aeffb88f48740ed28a36a126b1c6",
-            "efd693c6d9c797b9fd91541edba237136f5116337ad6827d57901dc458aea269",
-            109,
+            "9bcd614b3b6403fc9c56dbb02167076424f5a195345095fff03582dfdabdb933",
+            108,
         ),
         sc(
             "bare",
             "---".into(),
             "fbdf77fc19dc355b491a34693c0127c5ab6f1ee3b81994e0ecf518094417802b",
-            "d154e838a91984320d8dc8d9449bcde6c11f9c071d325e92d6761b4284f576e5",
-            83,
+            "f096e8265b534de561997257cfa942b52a506104ff46a844b86f2c28b3f3aeed",
+            82,
         ),
         sc(
             "unknown",
             fm("retired-example: text").into(),
             "13bc2a247ee3024ef8f1aeaa6f0a2d1a6c6351ae54120cd29455b33951601415",
-            "956679006ab364efe3ed2c2328d38c199570e5b8efb1a22265739bf783a8b3d2",
-            135,
+            "7d44f4ea12fbb85c8a83dd212c8f3165d7b32ada5e016a6f5414a1295f7c91de",
+            134,
         ),
         sc(
             "wrongname",
             fm("name: elsewhere").into(),
             "852ae3c480be4eecc4f6357bee474383d8a49a761adaff610ec65d7c20a6121c",
-            "2667bfe45d84308d78a42b8d2546e07fb535a6e2ea08bc19bbfe182256762f3e",
-            129,
+            "ca19116777bcfb8c8b8da80d2a7338cf7207836e3a34e40a8136638f9fb5d328",
+            128,
         ),
         sc(
             "authority",
             fm("allowed-tools: noop").into(),
             "34c969436d1e5bbe490678d59b928a47c00a7f75d98d05760887fad04acf5c4d",
-            "bea16c08ecb664b9864b59b943c35595c956737823992b3df3717e746dc39b1d",
-            133,
+            "ed8c1326c67d67f3fa4bf06fb89e05ed5466d4a3a05f2d2121418e0e10c641e2",
+            132,
         ),
         sc(
             "case",
             fm("Allowed-Tools: noop").into(),
             "ccff6f6c6271dc4afa251af509648824dfd0487ffe373cd435f903e57beb45ea",
-            "06c4a937780a05ebe84156c7c45f915b55b4fae3bb72b798c4f7b379fecc81fa",
-            133,
+            "33be1ae5eb779ac70e95feb941f1afce34be012a736565bc0f3c387f0bd9687b",
+            132,
         ),
         sc(
             "crlf",
             fm("allowed-tools: noop").replace('\n', "\r\n").into(),
             "d9329d2f5b1ac069fa8f39b0a856c83a68bb365ee5230868feee853cd55de342",
-            "fd9975d9117e5e4c24cb008d3eec384b15fa6259ab35e8b236e05b13123277f6",
-            136,
+            "31d20cf2f84b9a550b44aaae80a0bb54f89d16049cd4a5d7ee8edc818668805b",
+            135,
         ),
         sc(
             "alias",
             fm("description: &desc words\nlicense: *desc").into(),
             "a6749c0abbb5bbbff6316c2f96f08e6e61aeae7c1d02c56d89e5b352019bf75c",
-            "97591643a6e9b8a52f132c3aebbce3ae242ee6300ddfa0ab3a7933ffa47653b3",
-            153,
+            "628de3f2182446b793c358b9760435d03ff7524f4a62964902c500375ef44f5e",
+            152,
         ),
         sc(
             "nested",
             fm("metadata:\n  allowed-tools: noop").into(),
             "b34e6a45f508b737496a65f916bce97b1b77ad976a6aac4ee74a604b87775433",
-            "822c33b2c501197623a122363009b4dc0508a142ea695a0e8c7d7eca99e5e19c",
-            145,
+            "ece7e5891efac0c103627cad202b69abf3bb8f76ff2423abea256e2f46d5ee21",
+            144,
         ),
         sc(
             "nested_obj",
             fm("metadata:\n  example:\n    allowed-tools: noop").into(),
             "3804fe8aa220332b313672658cc19f892d50f32fca1ca104de88640017ddc332",
-            "64a77025bfb402c685b5a55f24070367a86126bcc7080adca060674833588739",
-            158,
+            "ec8774fb107347d18766fc9e9b0346af527016c9e1852956771fdcc47ea852f6",
+            157,
         ),
         sc(
             "second",
             format!("{KNOWN}---\nallowed-tools: noop\n---\n").into(),
             "4eec061998c49610c2a1cbc2ffbfe7599ef79f9279aef9d02600e5ca43b0c262",
-            "5b30699cef7193a724c31dfbd1ff3aff8aa364955def59c7722e2b89d550b40b",
-            181,
+            "7abc0e24022ed2c88fbe8cb867ea64b099b9b557f1d8a43b8123a3eec30002d7",
+            180,
         ),
         sc(
             "blankdesc",
             fm("description: '   '").into(),
             "e0214504993f9e7dbe3c0e75682e1f0ac06adaac6d1805beab0d528457022436",
-            "4bcfa54a8925d85f5b7e13ba10b1f73cffd1ebdcff67067e831c4616147ab267",
-            132,
+            "a198945ea4642f01cf917f8226c7b0dd0792f34ba13365f65146fe40e2c90a41",
+            131,
         ),
         sc(
             "duped",
             fm("name: elsewhere\nname: memo").into(),
             "1c3e3aafa98aab82a5a04ee23dfe9b1466aa88e37757960bb0ee61335f90bf78",
-            "2add24d9daed285ba498ef2f3e0292d069bdaaffe29a7085579c3678315c5156",
-            140,
+            "743b8b7bb424111a9dc892f09ece8ab330e91cfa554914dec89419ed6ad6d0cf",
+            139,
         ),
         sc(
             "whitespace",
             format!("--- \nallowed-tools: noop\n---\n{BODY}").into(),
             "a9d0de128d14afd07d2f3347fee5e21d6388c05c30bbfd75e11a09e9f2dee0bc",
-            "8fb35e277494b6e68471a8dcc91582cf6e59f1ab99885377b36eb3e44bd1935d",
-            134,
+            "e88aba7aa3b51594978d68dea2137bd122c0b615e0839e191bca017ce94ec6a5",
+            133,
         ),
         sc(
             "header-name-only",
             "---\nname: memo\n---\nshaped text\n".into(),
             "b06bbf068a59d45976d072899659d192f7cd6074d7ac09952071b4de0b031869",
-            "d5b34b966c8314fc924c8e0df3abdf949bc9f4505ca2eafe819dd9616ce1b346",
-            110,
+            "495b777c395bd1601fb1e685f46dafe65f2fa91673b70cdc2106697bbeb76eae",
+            109,
         ),
         sc(
             "leading-space",
             "\n  First line. \r\n  second line.\r\n\t\r\n".into(),
             "3d57c64b41f54f86ec70324b43dce891b162f08dfd49d0612133fb01dbcaf9c2",
-            "8a69f44400ba1cd57dcb68d28f01f383a4d0571097c15fabbb57e33435e08daa",
-            108,
+            "66fba97c0daa46fcef05a882995ed7085b797136cadbdae4ca70d7448898d3a3",
+            107,
         ),
         sc(
             "delimiter-trailing-space",
             "--- \r\nordinary text\r\n".into(),
             "16b10d64c26df9bc0ccaa70e43fb11fde613edec802e6e75fc4fef69d1aaccfc",
-            "2ab8293e0f3cd718946714365cd48b7559999ac7a443333e4b38a3c567372727",
-            99,
+            "49db5537513dd463c04a6dd7c09a39f891c10a6a4e5d04c5e207228fa79d361e",
+            98,
         ),
         sc(
             "delimiter-in-body",
             "ordinary text\n---\nmore text\n".into(),
             "45580d8e533f52e9bcb5402bcb2d2d3e5a3117f7a1b5f42b533f27b992f054eb",
-            "77ca83cf6259d830ab31aa58005a26e6a4b0f615de3904f75eb6e6005856ee72",
-            107,
+            "af8dbf5ca384785c4a773f770eefea4ecfa77f479859a7f839aa92b3d16cae94",
+            106,
         ),
         sc(
             "big",
             vec![b'x'; 32_769],
             "b65410d55ae2bc4c21e5ddb8e43415c7a7f3fe6491b2bd54f23cd37850d14962",
-            "82e5b175edd7438350fe64f3fc5d73b6b00c733a020b55b2397f02da5d6ef59e",
-            32_849,
+            "ac02ddd5de3c9f364b997e6ac76c78d0f9fd5c7fdc5345d007374c9c0dc578d8",
+            32_848,
         ),
         sc(
             "exact",
             vec![b'x'; 32_768],
             "e48ff5d49cd6002e769ae1bbd8439da92fb632793302fb5dfd3dfdc8d0134007",
-            "120c911a479eb94855cab04eb2e571c4647f25af921095ec2c523232e8cb923b",
-            32_848,
+            "1cb699cefecdc9e8b0f785831383c2c7767bf648284e93f1db66e7e5673c178c",
+            32_847,
         ),
         agg_case(
             "aggeq",
             (16_000, 16_768, false),
             "547ff5e7518a389566660cdf1729479b9bdf1492354b766b09e25a48274f2961",
-            "fee423fba7b16f5d6bef1bf501294657deae720d9ff84813a63c219270843030",
-            32_983,
+            "2accc92ebe35b6cc836723060cafe581def50e38e1404d8388b16508c074a1d4",
+            32_977,
         ),
         agg_case(
             "agg",
             (16_384, 16_385, false),
             "b505cee8d969d6e6fde43b3f3f4844ac23bc745f1917d80dcd43cf6df1adefa7",
-            "a35e5da259ecdf2b018df3fb261dbbd119832fee10e0ccb1fc94e2639a5a70c6",
-            32_984,
+            "0db5ad504c35b591c05b90cb31b6ae392444321955bccd214883f5e65bdac9b3",
+            32_978,
         ),
         agg_case(
             "agginc",
             (16_384, 16_385, true),
             "2125b525c13c6be0b4827784c476f0b4a159ee8033eb4764b6aa5372738902a3",
-            "a35e5da259ecdf2b018df3fb261dbbd119832fee10e0ccb1fc94e2639a5a70c6",
-            32_984,
+            "0db5ad504c35b591c05b90cb31b6ae392444321955bccd214883f5e65bdac9b3",
+            32_978,
         ),
         with_file(
             "mixed-skills",
             "agents/main/skills/extra/SKILL.md",
             b"---\nname: extra\n---\nExtra instructions.\n",
             "a7610865cb4e37a566610982a5c90738541d9274454590a337ce74e8c143f2f9",
-            "0e482ec96c962d5d711ec02c85adeacb0ba38565a39781147dbe28517510faa7",
-            156,
+            "21977dfe2f066d3c81ad3bb93b44c02dd735cb09aedd0e6ea3555001ca88f754",
+            155,
         ),
         with_file(
             "mixed-header-removed",
             "agents/main/skills/extra/SKILL.md",
             b"Extra instructions.\n",
             "cac34bacff078a6db491f72ef0c70b97f649a907580eeddac7ce5ac84e657dca",
-            "5c17fc95c96d744f9cd143bf04dce5520737713d20d05f6b88c179b124413938",
-            136,
+            "75ca2dbad890293194a8f9b5804428b46a390ac926a62b7eb3b27001f7a9d99c",
+            135,
         ),
     ];
-    // 구판 triggers.yaml cron 변형 전체(12종: ASCII·블록·접힌·유니코드 공백)
+    // Legacy triggers.yaml cron variants (12 cases: ASCII, block, folded, Unicode whitespace)
     let crons = [
         (
             "cron-ordinary",
@@ -476,7 +473,7 @@ fn corpus() -> Vec<Case> {
         ),
     ];
     cases.extend(crons.into_iter().map(|(n, e, h)| cron_case(n, e, h)));
-    // 구판 preapproved 64쌍·128바이트 조각 + human_approval 16명·102자 경계(3종)
+    // Legacy preapproved (64 pairs, 128-byte ops) + human_approval (16 approvers, 102-char) boundaries (3 cases)
     let approvals = [
         (
             "approval-65535",
@@ -551,12 +548,16 @@ fn all_45_legacy_417162e_bundles_restore_and_assemble_byte_identical_prompts() {
     for case in &cases {
         let bundle = encode_v1(&case.files);
         let rev = revision_of(&bundle);
-        assert_eq!(rev.0, case.bundle_sha, "{}: V1 번들 SHA 불일치", case.name);
+        assert_eq!(
+            rev.0, case.bundle_sha,
+            "{}: V1 bundle SHA mismatch",
+            case.name
+        );
         let snap = from_bundle(&bundle, &id, &rev, &limits)
-            .unwrap_or_else(|e| panic!("{}: 구판 V1 번들 복원 실패: {e:?}", case.name));
+            .unwrap_or_else(|e| panic!("{}: legacy V1 bundle restore failed: {e:?}", case.name));
         assert_eq!(
             snap.policy_revision.0, case.policy_sha,
-            "{}: 정책 판본 불일치",
+            "{}: policy revision mismatch",
             case.name
         );
         let run = sample_run(id.clone(), main.clone(), snap.revision.clone());
@@ -567,17 +568,17 @@ fn all_45_legacy_417162e_bundles_restore_and_assemble_byte_identical_prompts() {
             memory: &[],
             now: UNIX_EPOCH,
         })
-        .unwrap_or_else(|e| panic!("{}: 프롬프트 조립 실패: {e:?}", case.name));
+        .unwrap_or_else(|e| panic!("{}: prompt assembly failed: {e:?}", case.name));
         assert_eq!(
             assembled.system.len(),
             case.prompt_len,
-            "{}: 프롬프트 길이 불일치",
+            "{}: prompt length mismatch",
             case.name
         );
         assert_eq!(
             revision_of(assembled.system.as_bytes()).0,
             case.prompt_sha,
-            "{}: 프롬프트 내용 불일치",
+            "{}: prompt content mismatch",
             case.name
         );
     }

@@ -1,5 +1,4 @@
-//! 사용자 예약의 목록과 자동 후속 확인(`finish_with_wake`). 후속 확인은 신뢰 도구의 결과와 (run, 호출)당 하나뿐인 `at` 예약을 한 커밋에 남기고,
-//! 연쇄는 `MAX_WAKE_DEPTH`에서 멈춘다. 목록은 본인 활성 예약의 ID·시각·조용함만 싣는다(지시문·수신자·원래 대화는 없다).
+//! User schedule listing and atomic tool-triggered follow-up scheduling (`finish_with_wake`, capped at `MAX_WAKE_DEPTH`).
 
 use crate::{
     audit::{self, OwnedEntry},
@@ -61,7 +60,7 @@ impl Store {
         match phase_of(&row)? {
             CallPhase::Started { generation, .. } if generation.0 <= at.generation.0 => {}
             CallPhase::Done(_) => {
-                // 완료한 호출의 재접수: 그 호출이 만든 후속 예약을 돌려준다
+                // Idempotent replay of a completed wake call returns the schedule it created.
                 let existing: Option<String> = sqlx::query_scalar(
                     "select id from bot_user_schedules where profile = $1 and origin_run = $2 and origin_call = $3",
                 )

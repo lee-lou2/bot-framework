@@ -1,4 +1,4 @@
-//! 인증된 어댑터가 구성한 신원과 프로필에 선언한 신원에 같은 문법을 적용한다.
+//! Principal identity grammar shared by authenticated adapters and profile declarations.
 use crate::id::{PrincipalId, is_name};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,7 +15,6 @@ impl IdentityKind {
     }
 }
 
-/// 지원하지 않거나 문법이 잘못된 신원은 None이다.
 pub fn identity_kind(identity: &str) -> Option<IdentityKind> {
     let (kind, value) = identity.split_once(':')?;
     match kind {

@@ -1,9 +1,8 @@
-//! 분류: 도구 호출의 위험 등급과 승인이 필요한 이유를 정한다.
+//! Tool risk classification and approval reason derivation.
 //!
-//! - read는 조회, write는 변경, irreversible은 되돌릴 수 없는 작업이다.
-//! - irreversible과 정책(`policy.approve`)이 지정한 write는 승인이 필수다.
-//! - 원래 대화가 아닌 수신자에게 보내는 도구(`destination: {recipient, content}`)는 irreversible로 올린다.
-//! - private 기억이 조회된 실행에서는 external 도구가 read여도 호출마다 승인이 필요하다.
+//! - `Irreversible` tools and `Write` tools matching `policy.approve` require approval.
+//! - Tools with an explicit non-reply destination (`destination: {recipient, content}`) are promoted to `Irreversible` and `external`.
+//! - Once private memory has been read in a run, every `external` tool (including reads) requires per-call approval.
 
 use bot_core::{
     profile::{Destination, Scopes, Tool},
@@ -31,9 +30,9 @@ impl Reason {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Class {
     pub risk: Risk,
-    /// 승인이 필요한 이유(정렬·중복 없음). 비어 있으면 승인이 필요 없다.
+    /// Sorted, deduplicated approval reasons; empty when no approval is required.
     pub reasons: Vec<Reason>,
-    /// 제3자에게 입력을 보내는 도구인가(선언한 external 또는 명시적 수신자).
+    /// True when the tool sends input to a third party (declared `external` or explicit destination).
     pub external: bool,
 }
 
@@ -42,7 +41,6 @@ impl Class {
         !self.reasons.is_empty()
     }
 
-    /// 원장에 저장하고 비교하는 이유 코드(정렬됨).
     pub fn codes(&self) -> Vec<String> {
         self.reasons.iter().map(|r| r.code().to_owned()).collect()
     }

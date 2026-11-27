@@ -1,11 +1,11 @@
-# 코딩 규칙(예시)
+# Coding Rules (Example)
 
-합성 예시다. 팀의 실제 규칙으로 바꿔 쓴다.
+Synthetic example. Replace with your team's actual rules.
 
-- 함수는 한 가지 일만 하고, 이름은 동사로 시작한다.
-- 오류는 삼키지 않는다. 처리하지 못하면 맥락을 붙여 호출한 쪽에 올린다.
-- 새 동작에는 시험을 함께 둔다. 버그를 고칠 때는 먼저 실패하는 시험을 만든다.
-- 비밀 값은 코드·로그·시험 데이터에 두지 않는다.
-- 입력 검증은 경계(입구)에서 한 번 한다. 안쪽 함수는 검증된 값을 믿는다.
-- 주석은 '왜'를 적는다. '무엇'은 이름과 구조로 말한다.
-- 한 변경은 한 가지 목적만 갖는다. 리뷰어가 하루 안에 읽을 크기로 나눈다.
+- Each function does one thing and starts with a verb.
+- Never swallow errors; add context and propagate anything you cannot handle.
+- Pair new behavior with tests. For bug fixes, write a failing test first.
+- Never put secrets in code, logs, or test fixtures.
+- Validate inputs once at the boundary; inner functions trust validated values.
+- Comment the "why"; let names and structure explain the "what".
+- Keep each change focused on one purpose and small enough to review within a day.

@@ -1,4 +1,4 @@
-//! 상속 조립: 규칙→AGENT.md 지침, 스킬·지식 가시성, env 병합, 모델, 스코프 상한.
+//! Inheritance assembly for agent instructions, skills, knowledge, env, model, and scope ceilings.
 use crate::{
     issue::Issues,
     model::{Agent, Built, Skill},
@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 
-/// 루트는 `Parsed.agents`의 첫 항목(부모 없음)이고, 부모가 자식보다 앞선다.
+/// Expects `parsed.agents` ordered parent-before-child with the root first.
 pub fn assemble(parsed: Parsed, issues: &mut Issues) -> Option<Built> {
     let profile = &parsed.profile;
     let mut built: BTreeMap<AgentId, Agent> = BTreeMap::new();
@@ -31,7 +31,7 @@ pub fn assemble(parsed: Parsed, issues: &mut Issues) -> Option<Built> {
                     "skill-conflict",
                     &skill.path,
                     format!(
-                        "스킬 이름 `{}`이 `{}`와 겹쳐요(에이전트 {}에서 둘 다 보여요)",
+                        "skill name `{}` conflicts with `{}` (both visible to agent {})",
                         skill.name, first.path, src.id.0
                     ),
                 );

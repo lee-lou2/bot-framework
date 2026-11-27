@@ -10,14 +10,13 @@ fn chunk(len: usize) -> Part {
 }
 
 fn broken() -> Part {
-    Err(std::io::Error::other("끊김"))
+    Err(std::io::Error::other("disconnected"))
 }
 
 fn body(parts: Vec<Part>) -> Body {
     Body::from_stream(stream::iter(parts))
 }
 
-/// 첫 조각들 뒤에 영원히 오지 않는 본문
 fn stalled(parts: Vec<Part>) -> Body {
     Body::from_stream(stream::iter(parts).chain(stream::pending()))
 }
@@ -52,12 +51,10 @@ async fn a_body_within_the_limit_is_read_whole() {
 
 #[tokio::test]
 async fn the_header_and_the_bytes_actually_received_are_both_counted() {
-    // 길이 헤더가 한도를 넘는다
     assert_eq!(
         outcome(body(vec![chunk(5)]), 10, Some(500)).await,
         Err("request_too_large")
     );
-    // 헤더는 작다고 하지만(또는 없지만) 받은 바이트가 한도를 넘는다
     assert_eq!(
         outcome(body(vec![chunk(6), chunk(6)]), 10, Some(5)).await,
         Err("request_too_large")
@@ -70,17 +67,14 @@ async fn the_header_and_the_bytes_actually_received_are_both_counted() {
 
 #[tokio::test]
 async fn a_broken_stream_keeps_its_413_once_the_overrun_is_known() {
-    // 헤더로 초과를 알았다: 이어진 읽기 오류가 413을 400으로 덮지 않는다
     assert_eq!(
         outcome(body(vec![chunk(5), broken()]), 10, Some(500)).await,
         Err("request_too_large")
     );
-    // 받은 바이트로 초과를 알았다
     assert_eq!(
         outcome(body(vec![chunk(20), broken()]), 10, None).await,
         Err("request_too_large")
     );
-    // 초과를 모르는 채 끊기면 400
     assert_eq!(
         outcome(body(vec![chunk(5), broken()]), 10, None).await,
         Err("invalid_request")
@@ -89,7 +83,6 @@ async fn a_broken_stream_keeps_its_413_once_the_overrun_is_known() {
 
 #[tokio::test]
 async fn a_slow_stream_keeps_its_413_once_the_overrun_is_known() {
-    // 초과를 알았는데 남은 본문이 느리다: 408이 아니라 413
     assert_eq!(
         outcome(stalled(vec![chunk(20)]), 10, None).await,
         Err("request_too_large")
@@ -98,7 +91,6 @@ async fn a_slow_stream_keeps_its_413_once_the_overrun_is_known() {
         outcome(stalled(vec![chunk(5)]), 10, Some(500)).await,
         Err("request_too_large")
     );
-    // 초과를 모르는 느린 본문은 408
     assert_eq!(
         outcome(stalled(vec![chunk(5)]), 10, None).await,
         Err("request_timeout")

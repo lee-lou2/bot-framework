@@ -30,8 +30,8 @@ async fn refusal_before_approval(kind: ApiKind) {
         ],
         None,
     ));
-    api.script(text(kind, "확인했어요", None));
-    let run = w.accept("refusal", "일정 정리").await;
+    api.script(text(kind, "Confirmed", None));
+    let run = w.accept("refusal", "Organize agenda").await;
     let worker = w.worker(&w.pg.store, models(kind, &api), config());
     let invalid = "select count(*) from bot_audit where action = 'call.invalid'";
     assert_eq!(worker.run_once().await, Some(Outcome::Parked));
@@ -47,7 +47,7 @@ async fn refusal_before_approval(kind: ApiKind) {
     assert_eq!(
         w.pg.scalar::<i64>(invalid).await,
         1,
-        "재개 때 앞선 거절을 다시 판정했다"
+        "resume must not re-judge a prior refusal"
     );
     let id = bot_runtime::model::call_id(&run, 0, 0);
     assert_eq!(
@@ -108,8 +108,8 @@ async fn a_step_resume_checks_the_receipt_before_replaying_a_conflicting_marker(
         ],
         None,
     ));
-    api.script(text(kind, "확인했어요", None));
-    let run = w.accept("receipt-before-marker", "일정 확인").await;
+    api.script(text(kind, "Confirmed", None));
+    let run = w.accept("receipt-before-marker", "Check agenda").await;
     let worker = w.worker(&w.pg.store, models(kind, &api), config());
     assert_eq!(worker.run_once().await, Some(Outcome::Parked));
     let call = bot_runtime::model::call_id(&run, 0, 0);
@@ -140,7 +140,7 @@ async fn a_step_resume_checks_the_receipt_before_replaying_a_conflicting_marker(
 #[tokio::test]
 async fn changing_the_active_revision_keeps_a_model_call_retryable_on_the_same_claim() {
     let Some(w) = world().await else { return };
-    let run = w.accept("call-revision", "일정 조회").await;
+    let run = w.accept("call-revision", "List agenda").await;
     let ctx = w.pg.store.claim().await.unwrap().unwrap();
     w.pg.store
         .replace(
@@ -160,11 +160,11 @@ async fn changing_the_active_revision_keeps_a_model_call_retryable_on_the_same_c
     };
     let result = w.broker.call_for_model(req.clone()).await;
     if let Ok(ModelCall::Refused(reason)) = &result {
-        panic!("판본 교체 오류를 확정 거절로 저장할 수 없다: {reason:?}");
+        panic!("revision mismatch must not become a definitive refusal: {reason:?}");
     }
     assert!(
         matches!(result, Err(Error::Stale)),
-        "카탈로그의 옛 판본을 사용한 호출은 새 판본으로 다시 판정해야 한다"
+        "call against a stale catalog revision must return Stale"
     );
     assert!(w.runner.jobs().is_empty());
     w.pg.store.renew(ctx.attempt).await.unwrap();
@@ -189,8 +189,8 @@ async fn a_refusal_that_could_not_be_saved_is_judged_again() {
         vec![call("agenda.move", json!({}))],
         None,
     ));
-    api.script(text(ApiKind::Anthropic, "확인했어요", None));
-    let run = w.accept("retry-refusal", "일정 정리").await;
+    api.script(text(ApiKind::Anthropic, "Confirmed", None));
+    let run = w.accept("retry-refusal", "Organize agenda").await;
     let worker = w.worker(&w.pg.store, models(ApiKind::Anthropic, &api), config());
     w.pg.sql("create function fail_mark() returns trigger language plpgsql as $$ begin raise sqlstate '08006'; end $$").await;
     w.pg.sql("create trigger fail_mark before insert on bot_steps for each row when (new.key like 'cli-refusal-%') execute function fail_mark()").await;

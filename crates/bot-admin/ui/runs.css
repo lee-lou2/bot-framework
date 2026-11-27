@@ -1,4 +1,4 @@
-/* 실행 탭: 목록(왼쪽)과 상세(오른쪽). 좁은 화면에서는 한 번에 하나만 보이고 «목록» 버튼으로 돌아온다. */
+/* Runs view: split list and detail layout. */
 .runs .wrap { max-width: 1280px; }
 .split { display: grid; grid-template-columns: minmax(320px, 420px) minmax(0, 1fr); gap: var(--s5); align-items: start; }
 .rl-pane, .rd-pane { min-width: 0; }

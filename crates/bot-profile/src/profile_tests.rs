@@ -1,4 +1,3 @@
-//! 바인딩의 입구 종류 해석: 스키마를 거치지 않은 값에도 알려진 `adapter`만 입구가 되고, 모르는 값은 조용히 웹훅으로 읽지 않고 거절한다.
 use super::*;
 use serde_json::json;
 
@@ -35,7 +34,7 @@ fn every_known_adapter_becomes_its_own_entrance() {
             Adapter::OpenAi { .. } => "openai",
         })
         .collect();
-    // 바인딩은 id 순서(desk · direct · gpt · inbox · team)다
+    // Ordered by binding id: desk, direct, gpt, inbox, team.
     assert_eq!(
         kinds,
         ["cli", "slack-dm", "openai", "http", "slack-channel"]
@@ -51,7 +50,6 @@ fn an_unknown_adapter_is_refused_by_name_and_never_read_as_a_webhook() {
         assert!(issues.has_errors(), "{adapter:?}");
         assert!(parts.is_none(), "{adapter:?}");
     }
-    // `model`이 있어도 알려진 입구가 아니면 OpenAI 바인딩으로 읽지 않는다
     let (parts, issues) = parsed(json!([
         {"id": "x", "adapter": "discord", "endpoint": "hooks", "model": "m", "agent": "main"},
     ]));

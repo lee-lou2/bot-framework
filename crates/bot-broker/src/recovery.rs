@@ -1,33 +1,32 @@
-//! 복구 판정: 시작한 호출의 결과를 잃은 뒤 같은 호출 ID를 다시 실행해도 되는가.
+//! Recovery planner deciding whether an interrupted call may resume, complete, or remain held.
 //!
-//! 쓰기를 다시 실행해도 되는 경우는 둘뿐이다. 이전 프로세스(자식 포함)가 끝난 것을 확인했고,
-//! 실행된 단계가 없으며 미실행이 증명됐거나, 외부 효과가 없는 읽기 도구일 때다.
-//! 증거가 없으면 보류하고 자동 재실행은 0회다. 시간이 지났다고 보류를 풀지 않는다.
+//! Never auto-resumes writes without proof that the prior process exited and no unresolved
+//! effects exist; elapsed time never clears a hold.
 
 use bot_core::{ledger::Resolution, state::Risk};
 
 #[derive(Clone, Debug)]
 pub struct Facts {
     pub class: Risk,
-    /// 도구가 단계 원장(`effects: true`)을 쓰는가.
+    /// Whether the tool uses the multi-step effect journal (`effects: true`).
     pub effects: bool,
-    /// 옛 프로세스와 그 자식이 모두 끝난 것을 감독자가 확인했는가.
+    /// Whether the supervisor confirmed the prior process tree exited.
     pub reaped: bool,
-    /// 단계 원장의 미결 단계 수. 조회하지 못했으면 `None`.
+    /// Count of unresolved effect steps (`None` if lookup failed).
     pub unresolved: Option<usize>,
-    /// 시작 뒤 수신처 영수증을 기록한 단계가 있는가.
+    /// Whether any step already recorded a downstream confirmation receipt.
     pub confirmed_step: bool,
-    /// 관리자가 기록한 판정.
+    /// Operator-recorded resolution verdict, if any.
     pub resolution: Option<Resolution>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Plan {
-    /// 같은 호출 ID로 현재 권한·승인을 거쳐 다시 실행한다.
+    /// Re-run under the same call ID after re-checking current authority and approval.
     Resume,
-    /// 수신처 영수증이 확인됐다. 실행하지 않고 그 영수증으로 완료한다.
+    /// Complete without re-running using the confirmed downstream receipt.
     Complete(String),
-    /// 보류를 유지한다(이유 코드).
+    /// Keep held with a fixed reason code.
     Hold(&'static str),
 }
 

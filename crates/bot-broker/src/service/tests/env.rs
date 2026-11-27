@@ -1,8 +1,7 @@
-//! 도구가 고른 환경 변수: 고정 판본과 현재 판본에서 이름·값이 같을 때만 시작한다.
+//! Tool-selected environment variables: execution starts only when names and values match across pinned and current revisions.
 
 use super::*;
 
-/// `agenda.list`가 `CALENDAR_NAME`을 고르는 판본. 값은 에이전트의 환경에서만 온다.
 fn picking(revision: &str, value: Option<&str>) -> SnapshotBuilder {
     let mut list = tool(Risk::Read, &["calendar.read"]);
     list.env = ["CALENDAR_NAME".to_owned()].into();
@@ -27,7 +26,6 @@ fn the_selected_value_comes_from_the_agent_environment_and_reaches_the_job() {
         w.runner.jobs()[0].env,
         [("CALENDAR_NAME".to_owned(), "personal".to_owned())]
     );
-    // 고르지 않은 도구에는 아무것도 가지 않는다
     assert!(matches!(
         w.call("c2", "agenda.update", "{}"),
         Ok(_) | Err(_)
@@ -49,12 +47,14 @@ fn a_name_the_agent_does_not_have_never_starts_the_tool() {
         Err(Error::Conflict)
     ));
     assert!(w.runner.jobs().is_empty());
-    assert!(!w.ledger.has_call("r1", "c1"), "호출 기록도 만들지 않는다");
+    assert!(
+        !w.ledger.has_call("r1", "c1"),
+        "call record must not be created"
+    );
 }
 
 #[test]
 fn a_changed_value_refuses_the_older_run_but_an_unchanged_one_still_runs() {
-    // 실행은 r1(고정)에 있고 지금 활성은 r2다
     let w = world_with(picking("r1", Some("personal")));
     w.publish(picking("r2", Some("shared-team")).build());
     assert!(matches!(
@@ -62,7 +62,7 @@ fn a_changed_value_refuses_the_older_run_but_an_unchanged_one_still_runs() {
         Err(Error::Conflict)
     ));
     assert!(w.runner.jobs().is_empty());
-    // 값이 같으면 판본이 달라도(정책 판본만 바뀌어도) 그대로 시작한다
+    // Unchanged value still runs across a revision bump (e.g. policy-only update).
     w.publish(picking("r3", Some("personal")).build());
     assert_eq!(done(w.call("c2", "agenda.list", "{}")), "{\"ok\":true}");
     assert_eq!(w.runner.jobs()[0].env[0].1, "personal");

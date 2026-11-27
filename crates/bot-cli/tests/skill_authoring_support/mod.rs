@@ -1,4 +1,5 @@
-//! `skill_authoring` 종단 시험 공용 대역: 가짜 OpenAI 상류 LLM, 가짜 읽기·쓰기 `sops`, OpenAI HTTP 클라이언트.
+//! Shared doubles for `skill_authoring` end-to-end tests: fake OpenAI upstream LLM, fake `sops`,
+//! and a minimal OpenAI HTTP client.
 #![allow(dead_code)]
 
 use serde_json::{Value, json};
@@ -18,11 +19,12 @@ use tokio::{
     task::JoinHandle,
 };
 
-/// 상류 OpenAI Chat Completions 대역이 내릴 다음 차례 대본.
 pub enum Turn {
-    /// 요청의 `tools` 배열에서 `prefix`로 시작하는 별칭을 찾아 `args`로 호출한다.
-    CallTool { prefix: String, args: Value },
-    /// 최종 답변 문자열을 돌려준다.
+    /// Invokes the first advertised tool alias starting with `prefix`.
+    CallTool {
+        prefix: String,
+        args: Value,
+    },
     Reply(String),
 }
 
@@ -118,7 +120,7 @@ async fn handle_llm(
         }
         body.extend_from_slice(&tmp[..n]);
     }
-    let req: Value = serde_json::from_slice(&body).expect("LLM 요청은 JSON");
+    let req: Value = serde_json::from_slice(&body).expect("LLM request must be JSON");
     let messages = req
         .get("messages")
         .and_then(Value::as_array)
@@ -156,7 +158,9 @@ async fn handle_llm(
                 .iter()
                 .find(|name| name.starts_with(&prefix))
                 .cloned()
-                .unwrap_or_else(|| panic!("요청 도구 목록에 `{prefix}*`가 없어요: {tool_names:?}"));
+                .unwrap_or_else(|| {
+                    panic!("no tool matching `{prefix}*` in request tools: {tool_names:?}")
+                });
             json!({
                 "id": format!("chatcmpl-{seq}"),
                 "object": "chat.completion",
@@ -201,7 +205,7 @@ async fn handle_llm(
     stream.flush().await
 }
 
-/// 읽기·`set`·`unset`을 JSON 파일에 실제로 반영하는 가짜 `sops` 스크립트.
+/// Writes an executable fake `sops` script supporting `--decrypt`, `set`, and `unset` on JSON files.
 pub fn write_fake_sops(dir: &Path) -> PathBuf {
     let path = dir.join("fake-sops");
     let script = r#"#!/usr/bin/env python3
@@ -253,7 +257,7 @@ pub async fn chat(port: u16, key: &str, model: &str, prompt: &str) -> (u16, Stri
     let addr = format!("127.0.0.1:{port}");
     let key = key.to_owned();
     tokio::task::spawn_blocking(move || {
-        let mut stream = TcpStream::connect(&addr).expect("OpenAI 입구 접속");
+        let mut stream = TcpStream::connect(&addr).expect("connect to OpenAI entrance");
         stream
             .set_read_timeout(Some(Duration::from_secs(60)))
             .unwrap();
@@ -280,7 +284,7 @@ pub async fn chat(port: u16, key: &str, model: &str, prompt: &str) -> (u16, Stri
 
 pub fn assistant_content(body: &str) -> String {
     let parsed: Value = serde_json::from_str(body)
-        .unwrap_or_else(|e| panic!("OpenAI 응답이 JSON이 아니에요({e}): {body}"));
+        .unwrap_or_else(|e| panic!("OpenAI response is not JSON ({e}): {body}"));
     parsed["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("")

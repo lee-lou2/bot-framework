@@ -1,4 +1,4 @@
-//! OpenAI 호환 HTTP 입구(실제 리스너): 경로·메서드, API 키 인증(회전·중복·보관소 장애·슬롯 제거), 모델 목록·조회와 가시성, 같은 호스트의 JWT 웹훅 회귀.
+//! OpenAI-compatible HTTP ingress tests: routing, API key auth and rotation, model visibility, and co-hosted JWT webhooks.
 use bot_gateway::testing::*;
 use serde_json::json;
 
@@ -57,7 +57,7 @@ async fn unknown_paths_and_wrong_methods_get_the_openai_error_document_before_an
 
 #[tokio::test]
 async fn an_openai_alias_is_not_a_webhook_prefix() {
-    // OpenAI 입구는 URL에 별칭이 없다: `/openai/...`는 웹훅 입구가 아니므로 웹훅 형식의 404다(인증·모델 목록에 닿지 않는다)
+    // OpenAI endpoints live under `/v1`, not `/<alias>/...`; `/openai/...` falls through to webhook 404.
     let rig = rig().await;
     let auth = bearer(BUILD_KEY);
     for path in ["/openai/models", "/openai/v1/models", "/openai/notify"] {
@@ -81,7 +81,7 @@ async fn a_missing_or_malformed_key_is_401_with_a_bearer_challenge() {
         vec![("Authorization", "Bearer short".to_owned())],
         vec![("Authorization", format!("Bearer {}", "k".repeat(300)))],
         vec![("Authorization", format!("Bearer {BUILD_KEY}-wrong"))],
-        // 표준 헤더가 둘이면 어느 쪽도 믿지 않는다(둘 다 유효한 같은 키여도)
+        // Duplicate Authorization headers are rejected even when both carry valid keys.
         vec![
             ("Authorization", format!("Bearer {BUILD_KEY}")),
             ("Authorization", format!("Bearer {BUILD_KEY}")),
@@ -90,7 +90,7 @@ async fn a_missing_or_malformed_key_is_401_with_a_bearer_challenge() {
             ("Authorization", format!("Bearer {BUILD_KEY}")),
             ("Authorization", format!("Bearer {OPS_KEY}")),
         ],
-        // 웹훅 입구의 JWT·HS256 키는 OpenAI 입구에서 인증되지 않는다(폴백 없음)
+        // Webhook JWTs and HS256 secrets never authenticate against the OpenAI entrance.
         vec![("Authorization", format!("Bearer {}", jwt("build")))],
         vec![(
             "Authorization",
@@ -144,7 +144,6 @@ async fn the_key_picks_the_subject_and_models_are_listed_sorted_with_one_stable_
         one.json(),
         json!({"id": "helper", "object": "model", "created": 1_750_000_000u64, "owned_by": "bot-framework"})
     );
-    // created는 현재 판본의 번들을 처음 보관한 시각이다: 물은 쌍은 (프로필, 현재 판본)이다
     assert!(
         rig.bundles
             .asked()
@@ -155,7 +154,6 @@ async fn the_key_picks_the_subject_and_models_are_listed_sorted_with_one_stable_
 #[tokio::test]
 async fn a_model_that_cannot_be_used_is_the_same_404_as_one_that_does_not_exist() {
     let rig = rig().await;
-    // ops는 멤버지만 run 스코프가 없다: 목록은 비고, 모든 모델이 «없음»이다
     let list = get(&rig, OPS_KEY, "/v1/models").await;
     assert_eq!(
         (list.status, list.json()),
@@ -177,7 +175,7 @@ async fn a_model_that_cannot_be_used_is_the_same_404_as_one_that_does_not_exist(
     }
     assert_eq!(
         hidden.body, missing.body,
-        "가린 모델과 없는 모델은 구별되지 않는다"
+        "hidden and nonexistent models must return identical responses"
     );
     let chat_hidden = chat(&rig, OPS_KEY, Some("k1"), &ask("assistant", "hi")).await;
     assert_eq!(chat_hidden.status, 404, "{}", chat_hidden.body);
@@ -187,7 +185,6 @@ async fn a_model_that_cannot_be_used_is_the_same_404_as_one_that_does_not_exist(
 
 #[tokio::test]
 async fn an_agent_ceiling_without_run_hides_the_model_even_from_a_runner() {
-    // helper 모델의 에이전트(side)가 run을 갖지 않으면 runner에게도 안 보인다(역할 ∩ 정책 ∩ 에이전트 상한)
     let fixture = fixture().agent("side", &["calendar.read"]);
     let rig = rig_with(Setup {
         profiles: vec![fixture],
@@ -272,14 +269,11 @@ async fn created_is_never_invented() {
 async fn rotating_a_key_in_the_store_takes_effect_on_the_next_request() {
     let rig = rig().await;
     assert_eq!(get(&rig, BUILD_KEY, "/v1/models").await.status, 200);
-    // 보관소 값을 바꾸면 옛 키는 곧바로 끊기고 새 키가 열린다(인증 캐시가 갱신을 넘어 수명을 늘리지 않는다)
     let rotated = concat!("rotated-", "0123456789", "abcdef0123", "456789abc");
     rig.secrets.set("build-key", rotated.as_bytes());
     assert_eq!(get(&rig, BUILD_KEY, "/v1/models").await.status, 401);
     assert_eq!(get(&rig, rotated, "/v1/models").await.status, 200);
-    // 같은 주체의 다른 슬롯은 영향이 없다(회전용 슬롯)
     assert_eq!(get(&rig, BUILD_NEXT_KEY, "/v1/models").await.status, 200);
-    // 값이 비었거나 키 모양이 아니면 그 슬롯으로는 아무도 인증하지 못한다
     rig.secrets.set("build-key", b"");
     assert_eq!(get(&rig, rotated, "/v1/models").await.status, 401);
     assert_eq!(get(&rig, BUILD_NEXT_KEY, "/v1/models").await.status, 200);
@@ -289,7 +283,6 @@ async fn rotating_a_key_in_the_store_takes_effect_on_the_next_request() {
 async fn a_slot_whose_value_is_gone_from_the_store_stops_only_that_key() {
     let rig = rig().await;
     rig.secrets.remove("build-key");
-    // 없는 값은 누구와도 겹칠 수 없다: 그 슬롯의 키만 끊기고 다른 슬롯·주체는 그대로다(보관소 장애와 다르다)
     assert_eq!(get(&rig, BUILD_KEY, "/v1/models").await.status, 401);
     assert_eq!(get(&rig, BUILD_NEXT_KEY, "/v1/models").await.status, 200);
     assert_eq!(get(&rig, OPS_KEY, "/v1/models").await.status, 200);
@@ -304,7 +297,6 @@ async fn one_key_value_in_two_slots_authenticates_nobody() {
     for key in [BUILD_KEY, BUILD_NEXT_KEY] {
         assert_eq!(get(&rig, key, "/v1/models").await.status, 401, "{key}");
     }
-    // 다른 주체의 키는 영향이 없다
     assert_eq!(get(&rig, OPS_KEY, "/v1/models").await.status, 200);
     rig.secrets.set("build-key-next", BUILD_NEXT_KEY.as_bytes());
     assert_eq!(get(&rig, BUILD_KEY, "/v1/models").await.status, 200);
@@ -327,7 +319,7 @@ async fn a_store_failure_closes_authentication_without_telling_a_good_key_from_a
         assert_eq!(reply.header("retry-after"), Some("1"));
     }
     assert_eq!(good.body, bad.body);
-    // 키 모양이 틀린 요청은 보관소를 읽기 전에 거절한다
+    // Syntactically invalid keys still fail with 401 before touching the secret store.
     assert_eq!(get(&rig, "short", "/v1/models").await.status, 401);
     assert_eq!(
         chat(&rig, BUILD_KEY, Some("k"), &ask("assistant", "hi"))
@@ -370,7 +362,6 @@ async fn removing_the_last_slot_of_one_subject_closes_that_key_only() {
         ..Setup::default()
     })
     .await;
-    // 프로필의 멤버·승인 매핑은 그대로이고 키 슬롯만 없다: 그 키는 401, 남은 주체는 정상
     assert_eq!(get(&rig, OPS_KEY, "/v1/models").await.status, 401);
     assert_eq!(get(&rig, BUILD_KEY, "/v1/models").await.status, 200);
 }
@@ -412,9 +403,8 @@ async fn the_jwt_webhook_on_the_same_host_keeps_its_original_wire() {
     assert_eq!(
         reply.header("x-request-id"),
         None,
-        "웹훅 응답에 OpenAI 머리가 붙지 않는다"
+        "webhook responses must not carry OpenAI headers"
     );
-    // 웹훅의 오류는 옛 문자열 모양 그대로다
     let denied = send(
         rig.addr,
         "POST",
@@ -457,7 +447,6 @@ async fn the_jwt_webhook_on_the_same_host_keeps_its_original_wire() {
     )
     .await;
     assert_eq!(status.status, 202);
-    // OpenAI 키는 웹훅 입구에서 쓸 수 없다
     let wrong = send(
         rig.addr,
         "POST",
@@ -523,7 +512,6 @@ async fn a_legacy_webhook_alias_v1_still_works_when_no_openai_entrance_exists() 
         reply.json(),
         json!({"request_id": "n1", "state": "pending"})
     );
-    // OpenAI 입구가 없으니 /v1 아래는 전부 웹훅의 몫이다(웹훅의 문자열 오류 모양이고 OpenAI 오류 문서가 아니다)
     let models = send(
         rig.addr,
         "GET",
@@ -538,7 +526,6 @@ async fn a_legacy_webhook_alias_v1_still_works_when_no_openai_entrance_exists() 
 
 #[tokio::test]
 async fn a_value_with_a_trailing_newline_in_the_store_is_the_same_key() {
-    // 보관소 파일 끝의 줄바꿈은 키의 일부가 아니다
     let rig = rig().await;
     rig.secrets
         .set("build-key", format!("{BUILD_KEY}\n").as_bytes());
@@ -550,7 +537,6 @@ async fn a_value_with_a_trailing_newline_in_the_store_is_the_same_key() {
 
 #[tokio::test]
 async fn an_entrance_nobody_uses_does_not_take_part_in_key_uniqueness() {
-    // 활성 프로필이 쓰지 않는 입구의 슬롯이 같은 자격 이름(같은 값)을 가리켜도 쓰는 입구의 키는 그대로 인증된다
     let rig = rig_with(Setup {
         tune: Box::new(|host| {
             host.http.openai.insert(

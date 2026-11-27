@@ -20,7 +20,6 @@ fn an_unknown_write_result_is_held_and_never_retried_by_itself() {
     assert!(is_held(&w.call("c1", "agenda.delete", DELETE)));
     assert!(matches!(w.ledger.phase("r1", "c1"), CallPhase::Held { .. }));
     assert!(is_held(&w.call("c1", "agenda.delete", DELETE)));
-    // 워커가 바뀌어도 판정이 없으면 계속 보류다
     w.ledger.bump_generation("r1");
     assert!(is_held(&w.call_on(
         &w.broker,
@@ -30,7 +29,7 @@ fn an_unknown_write_result_is_held_and_never_retried_by_itself() {
         "agenda.delete",
         DELETE
     )));
-    assert_eq!(w.runner.jobs().len(), 1, "자동 재실행 0건");
+    assert_eq!(w.runner.jobs().len(), 1, "must not auto-retry");
 }
 
 #[test]
@@ -41,9 +40,12 @@ fn after_an_admin_verdict_the_same_call_id_resumes_with_a_fresh_approval() {
     assert!(is_held(&w.call("c1", "agenda.delete", DELETE)));
     w.ledger.bump_generation("r1");
     w.ledger.resolve("r1", "c1", Resolution::NotExecuted);
-    // 현재 권한·새 세대의 새 승인으로 같은 호출 ID를 재개한다
     let fresh = awaiting(w.call_on(&w.broker, "r1", 2, "c1", "agenda.delete", DELETE));
-    assert_eq!(w.runner.jobs().len(), 1, "새 승인 전 재실행 0건");
+    assert_eq!(
+        w.runner.jobs().len(),
+        1,
+        "must not re-execute before fresh approval"
+    );
     w.decide(&fresh, "local:owner", true).unwrap();
     done(w.call_on(&w.broker, "r1", 2, "c1", "agenda.delete", DELETE));
     let jobs = w.runner.jobs();
@@ -60,7 +62,7 @@ fn a_started_call_left_by_a_lost_worker_waits_until_the_old_process_is_confirmed
     let w = World::new();
     w.leave_started("r1", "c1", "agenda.delete", DELETE, 1);
     w.ledger.bump_generation("r1");
-    w.runner.set_reap_ok(false); // 호스트 단절 등으로 종료를 확인하지 못한다
+    w.runner.set_reap_ok(false);
     assert!(is_held(&w.call_on(
         &w.broker,
         "r1",
@@ -142,7 +144,7 @@ fn an_admin_receipt_completes_the_call_without_running_it() {
     );
     assert!(
         w.runner.jobs().is_empty(),
-        "영수증이 있으면 실행하지 않는다"
+        "must not execute when a receipt is provided"
     );
     assert!(matches!(w.ledger.phase("r1", "c1"), CallPhase::Done(_)));
 }
@@ -166,7 +168,6 @@ fn a_multi_step_tool_resumes_only_when_no_step_is_unresolved() {
         CallPhase::Held { reason, .. } => assert_eq!(reason, "effects_unresolved"),
         other => panic!("{other:?}"),
     }
-    // 미결이 없으면(모두 확정되거나 시작 전) 같은 호출 ID로 이어 간다
     w.effects.set_unresolved(&[]);
     w.leave_started("r1", "c2", "agenda.sync", "{\"n\":2}", 2);
     w.ledger.bump_generation("r1");
@@ -185,7 +186,7 @@ fn a_tool_that_answers_with_unresolved_steps_is_not_completed() {
         CallPhase::Held { reason, .. } => assert_eq!(reason, "effects_unresolved"),
         other => panic!("{other:?}"),
     }
-    // 단계 원장을 조회하지 못해도 확인된 것이 아니다
+    // An unreadable effect journal also fails closed as held.
     let w = World::new();
     w.effects.set_unavailable(true);
     assert!(is_held(&w.call("c1", "agenda.sync", "{}")));
@@ -222,7 +223,7 @@ fn a_failure_before_sending_releases_the_call_and_a_retry_needs_a_fresh_approval
         CallPhase::Open { approval: None }
     ));
     let second = awaiting(w.call("c1", "agenda.delete", DELETE));
-    assert_ne!(second.0, first.0, "소비한 승인은 다시 쓰지 않는다");
+    assert_ne!(second.0, first.0, "consumed approval must not be reused");
     w.decide(&second, "local:owner", true).unwrap();
     done(w.call("c1", "agenda.delete", DELETE));
     assert_eq!(w.runner.jobs().len(), 2);
@@ -280,7 +281,7 @@ fn a_blocked_write_result_is_held_because_the_effect_is_unknown() {
     w.runner.script(Ran::Blocked("result_credential"));
     assert!(
         is_held(&w.call("c1", "agenda.delete", DELETE)),
-        "쓰기는 도구가 이미 실행됐다"
+        "write already executed before response was blocked"
     );
     match w.ledger.phase("r1", "c1") {
         CallPhase::Held { reason, .. } => assert_eq!(reason, "result_credential"),
@@ -292,5 +293,5 @@ fn a_blocked_write_result_is_held_because_the_effect_is_unknown() {
             .contains(&("call.blocked".into(), "result_credential".into()))
     );
     assert!(is_held(&w.call("c1", "agenda.delete", DELETE)));
-    assert_eq!(w.runner.jobs().len(), 1, "다시 실행하지 않는다");
+    assert_eq!(w.runner.jobs().len(), 1, "must not re-execute");
 }

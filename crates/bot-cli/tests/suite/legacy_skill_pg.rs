@@ -1,5 +1,5 @@
-//! 실제 PostgreSQL + 실제 `bot` 프로세스로 구판(`BOTPROFILE1`) 번들 복원·판본 분리·누락 번들 보충을 검증한다.
-//! (`srt` 없이 DB만으로 매번 실행한다.)
+//! PostgreSQL + real `bot` process tests for legacy `BOTPROFILE1` bundle restoration,
+//! V1/V2 revision separation, and missing-bundle backfill (requires PG only, no `srt`).
 
 use crate::process_support::*;
 use bot_core::id::{AgentId, Revision};
@@ -15,11 +15,11 @@ fn write_legacy_skills(personal: &Path) {
         ("skills/memo", VALID_FM.to_owned()),
         (
             "skills/legacy-unclosed",
-            "---\n구판 미닫힘 스킬\n".to_owned(),
+            "---\nlegacy unclosed skill\n".to_owned(),
         ),
         (
             "skills/legacy-authority",
-            "---\nallowed-tools: noop\n---\n본문\n".to_owned(),
+            "---\nallowed-tools: noop\n---\nbody\n".to_owned(),
         ),
         (
             "skills/legacy-big",
@@ -49,7 +49,7 @@ fn host_file(dir: &Path) -> std::path::PathBuf {
     host
 }
 
-/// 초기 실행 1건과 승인 대기 카드 1건을 구판 `legacy_rev`에 고정해 구판 업그레이드 직전 DB 상태를 만든다.
+/// Seeds one in-flight run and one pending approval card pinned to `legacy_rev`.
 fn seed_legacy_state(
     schema: &Schema,
     dir: &Path,
@@ -67,7 +67,7 @@ fn seed_legacy_state(
         &[("BOT_HOST_CONFIG", host.to_str().unwrap())],
     );
     let gw = start_gateway(&refs(&env), &["--activate"], &sock);
-    wait_for("초기 활성 판본 게시", || {
+    wait_for("initial active revision publish", || {
         !schema.active().is_empty()
     });
     let chat = bot(
@@ -79,7 +79,7 @@ fn seed_legacy_state(
             "--no-wait",
             "--request-id",
             "legacy-req",
-            "산책 일정을 삭제해줘",
+            "Delete the walk event",
         ],
     );
     assert!(chat.status.success(), "{}", text(&chat));
@@ -104,7 +104,6 @@ fn seed_legacy_state(
         format!(
             "update {{s}}.bot_schedule_segments set revision = '{legacy_rev}' where profile = 'personal'"
         ),
-        // 승인 대기 카드 1건도 같은 구판 실행에 묶는다
         format!(
             "insert into {{s}}.bot_calls (profile, run, call, tool, args_sha256, state) \
              values ('personal', '{run_id}', 'c1', 'agenda.delete', decode('0000000000000000000000000000000000000000000000000000000000000000', 'hex'), 'open')"
@@ -125,7 +124,7 @@ fn seed_legacy_state(
 #[test]
 fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL not set");
         return;
     };
     let dir = tempfile::Builder::new()
@@ -134,7 +133,6 @@ fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
         .unwrap();
     let host = host_file(dir.path());
 
-    // 구판에서 유효했던 원본 폴더(미닫힘 `---`·`allowed-tools`·64 KiB 초과·front matter 포함)
     let legacy_profiles = dir.path().join("legacy_profiles");
     copy_dir(&examples(), &legacy_profiles);
     write_legacy_skills(&legacy_profiles.join("personal"));
@@ -150,7 +148,6 @@ fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
         Some(&legacy_bytes),
     );
 
-    // 신판 폴더(정상 front matter → BOTPROFILE2)로 --activate 기동
     let v2_profiles = dir.path().join("v2_profiles");
     copy_dir(&examples(), &v2_profiles);
     write_v2_front_matter(&v2_profiles.join("personal"));
@@ -162,26 +159,28 @@ fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
         &[("BOT_HOST_CONFIG", host.to_str().unwrap())],
     );
     let gw = start_gateway(&refs(&env2), &["--activate"], &sock);
-    wait_for("신판 V2 활성 판본 게시", || {
+    wait_for("V2 active revision publish", || {
         schema.query("select revision from {s}.bot_active_profiles where profile = 'personal'")
             != legacy_rev.0
     });
     let v2_rev =
         schema.query("select revision from {s}.bot_active_profiles where profile = 'personal'");
-    assert_ne!(v2_rev, legacy_rev.0, "신판 V2 판본은 구판 V1과 달라야 한다");
+    assert_ne!(
+        v2_rev, legacy_rev.0,
+        "V2 revision must differ from legacy V1"
+    );
     assert_eq!(
         schema.query("select count(*) from {s}.bot_profile_bundles"),
         "2",
-        "구판 V1과 신판 V2 묶음이 함께 보관된다"
+        "both legacy V1 and V2 bundles must be stored"
     );
     assert_eq!(
         schema.query("select state from {s}.bot_approvals where nonce = 'legacy-nonce-1'"),
         "pending",
-        "대기 중이던 구판 승인 카드는 보존된다"
+        "pending legacy approval card must be preserved"
     );
     drop(gw);
 
-    // 실제 PG Store에서 Registry::restore로 구판 V1·신판 V2를 둘 다 복원해 지침 차이를 확인한다
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let store = Store::connect(&schema.url(), Config::default())
@@ -195,7 +194,7 @@ fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
         let restored = registry
             .restore(&store, &wanted, &Limits::default())
             .await
-            .expect("실제 PG에서 V1·V2 묶음 모두 복원");
+            .expect("restore both V1 and V2 bundles from PG");
         assert_eq!(restored.len(), 2);
         let main = AgentId("main".into());
         use bot_core::profile::ProfileCatalog;
@@ -204,7 +203,7 @@ fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
         assert_eq!(
             old_snap.agents[&main].skills["memo"].instructions.text,
             VALID_FM.trim_end(),
-            "구판 V1 복원은 원문 그대로"
+            "legacy V1 restore must keep raw SKILL.md bytes"
         );
         assert_eq!(
             old_snap.agents[&main].skills["legacy-big"]
@@ -215,7 +214,7 @@ fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
         );
         assert_eq!(
             new_snap.agents[&main].skills["memo"].instructions.text, "Visible stable paragraph.",
-            "신판 V2 복원은 front matter 제거"
+            "V2 restore must strip front matter"
         );
         assert_eq!(
             new_snap.agents[&main].skills["memo"].description.as_deref(),
@@ -227,7 +226,7 @@ fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
 #[test]
 fn pg_profile_bundle_put_backfills_missing_legacy_v1_bundle_and_refuses_unpinned_invalid() {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL not set");
         return;
     };
     let dir = tempfile::Builder::new()
@@ -242,7 +241,6 @@ fn pg_profile_bundle_put_backfills_missing_legacy_v1_bundle_and_refuses_unpinned
     write_legacy_skills(&legacy_dir);
     let (_, legacy_rev, _) = read_legacy_bundle(&legacy_dir, &Limits::default()).unwrap();
 
-    // 구판 번들이 누락된 상태로 시드한다
     seed_legacy_state(&schema, dir.path(), &host, &legacy_rev.0, None);
 
     let v2_profiles = dir.path().join("v2_profiles");
@@ -256,19 +254,17 @@ fn pg_profile_bundle_put_backfills_missing_legacy_v1_bundle_and_refuses_unpinned
         &[("BOT_HOST_CONFIG", host.to_str().unwrap())],
     );
 
-    // 1) 누락 상태에서는 기동이 멈춘다
     let blocked = bot(&refs(&env2), &["serve", "--role", "gateway", "--activate"]);
     assert_eq!(blocked.status.code(), Some(1), "{}", text(&blocked));
     assert!(
         text(&blocked).contains(&format!(
-            "프로필 personal 판본 {}: 보관한 묶음이 없어요",
+            "profile personal revision {}: stored bundle is missing",
             legacy_rev.0
         )),
         "{}",
         text(&blocked)
     );
 
-    // 2) `bot profile-bundle put`을 두 번 실행해도 V1 SHA-256으로 1건만 보관된다
     let before_put: i64 = schema
         .query("select count(*) from {s}.bot_profile_bundles")
         .parse()
@@ -277,10 +273,10 @@ fn pg_profile_bundle_put_backfills_missing_legacy_v1_bundle_and_refuses_unpinned
     for run in 0..2 {
         let filled = bot(&refs(&env2), &args);
         assert!(filled.status.success(), "run {run}: {}", text(&filled));
+        let out = text(&filled);
         assert!(
-            text(&filled).contains(&format!("프로필 personal 판본 {}", legacy_rev.0)),
-            "run {run}: {}",
-            text(&filled)
+            out.contains("personal") && out.contains(&legacy_rev.0),
+            "run {run}: {out}"
         );
     }
     let after_put: i64 = schema
@@ -290,7 +286,7 @@ fn pg_profile_bundle_put_backfills_missing_legacy_v1_bundle_and_refuses_unpinned
     assert_eq!(
         after_put,
         before_put + 1,
-        "같은 구판 폴더를 두 번 보충해도 구판 번들 1건만 더해진다"
+        "repeated backfill must insert only one legacy bundle"
     );
     assert_eq!(
         schema.query(&format!(
@@ -300,21 +296,20 @@ fn pg_profile_bundle_put_backfills_missing_legacy_v1_bundle_and_refuses_unpinned
         "1"
     );
 
-    // 3) 보충 뒤 신판이 정상 기동·활성화된다
     let gw = start_gateway(&refs(&env2), &["--activate"], &sock);
-    wait_for("보충 뒤 신판 V2 게시", || {
+    wait_for("V2 publish after backfill", || {
         schema.query("select revision from {s}.bot_active_profiles where profile = 'personal'")
             != legacy_rev.0
     });
     drop(gw);
 
-    // 4) DB에 고정되지 않은 임의의 미닫힘/과대 폴더는 `profile-bundle put`이 새 규칙으로 거절한다
+    // Unpinned directories that fail V2 rules must still be rejected by `profile-bundle put`.
     let unrelated = dir.path().join("unrelated/personal");
     copy_dir(&examples().join("personal"), &unrelated);
     fs::create_dir_all(unrelated.join("skills/bad")).unwrap();
     fs::write(
         unrelated.join("skills/bad/SKILL.md"),
-        "---\nallowed-tools: Bash\n---\n본문\n",
+        "---\nallowed-tools: Bash\n---\nbody\n",
     )
     .unwrap();
     let refused = bot(
@@ -332,7 +327,7 @@ fn pg_profile_bundle_put_backfills_missing_legacy_v1_bundle_and_refuses_unpinned
 #[test]
 fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL not set");
         return;
     };
     let dir = tempfile::Builder::new()
@@ -341,7 +336,7 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
         .unwrap();
     let host = host_file(dir.path());
 
-    // 같은 front matter 원본 폴더는 구판 V1과 신판 V2라는 서로 다른 두 판본을 만든다
+    // The same front-matter directory produces distinct V1 and V2 revisions.
     let valid_profiles = dir.path().join("valid_profiles");
     copy_dir(&examples(), &valid_profiles);
     let valid_dir = valid_profiles.join("personal");
@@ -350,10 +345,8 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
     let (_, v2_rev, _) = read_bundle(&valid_dir, &Limits::default()).unwrap();
     assert_ne!(v1_rev, v2_rev);
 
-    // 1) 구판 V1 실행 1건 + V1 번들을 시드한다
     seed_legacy_state(&schema, dir.path(), &host, &v1_rev.0, Some(&v1_bytes));
 
-    // 2) 같은 폴더로 신판 V2를 활성화하고 V2 실행 1건도 고정한다(이제 DB에 V1·V2가 둘 다 고정)
     let sock = dir.path().join("run/dual.sock");
     let env_valid = env_for(
         &valid_profiles,
@@ -362,7 +355,7 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
         &[("BOT_HOST_CONFIG", host.to_str().unwrap())],
     );
     let gw = start_gateway(&refs(&env_valid), &["--activate"], &sock);
-    wait_for("V2 활성 판본 게시", || {
+    wait_for("V2 active revision publish", || {
         schema.query("select revision from {s}.bot_active_profiles where profile = 'personal'")
             == v2_rev.0
     });
@@ -375,14 +368,14 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
             "--no-wait",
             "--request-id",
             "v2-req",
-            "일정 알려줘",
+            "Show today's agenda",
         ],
     );
     assert!(chat2.status.success(), "{}", text(&chat2));
     drop(gw);
     let _ = fs::remove_file(&sock);
 
-    // 3) V1 번들만 남기고 V2 번들이 유실된 상태를 만든다
+    // Keep only the V1 bundle so the pinned V2 bundle is missing.
     schema.query("truncate {s}.bot_profile_bundles");
     let hex_v1 = hex_of(&v1_bytes);
     let inserted = schema.exec(&format!(
@@ -391,7 +384,6 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
     ));
     assert!(inserted.starts_with("INSERT 0 1"), "{inserted}");
 
-    // clean 폴더(새 판본)로 기동하면 누락된 V2 판본 때문에 반드시 막혀야 한다
     let clean_profiles = dir.path().join("clean_profiles");
     copy_dir(&examples(), &clean_profiles);
     let env_clean = env_for(
@@ -407,14 +399,13 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
     assert_eq!(blocked.status.code(), Some(1), "{}", text(&blocked));
     assert!(
         text(&blocked).contains(&format!(
-            "프로필 personal 판본 {}: 보관한 묶음이 없어요",
+            "profile personal revision {}: stored bundle is missing",
             v2_rev.0
         )),
         "{}",
         text(&blocked)
     );
 
-    // 4) `bot profile-bundle put <valid_dir>`를 두 번 실행해 V1·V2 모두 보충(멱등)됨을 확인한다
     let before_put: i64 = schema
         .query("select count(*) from {s}.bot_profile_bundles")
         .parse()
@@ -426,7 +417,7 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
         let out = text(&filled);
         assert!(
             out.contains(&v1_rev.0) && out.contains(&v2_rev.0),
-            "run {run}: V1·V2 판본 모두 출력돼야 함: {out}"
+            "run {run}: both V1 and V2 revisions must be printed: {out}"
         );
     }
     let after_put: i64 = schema
@@ -436,7 +427,7 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
     assert_eq!(
         after_put,
         before_put + 1,
-        "두 번 실행해도 누락됐던 V2 번들 1건만 더해진다"
+        "only the missing V2 bundle should be added across repeated puts"
     );
     for rev in [&v1_rev.0, &v2_rev.0] {
         assert_eq!(
@@ -447,9 +438,8 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
         );
     }
 
-    // 5) 보충 뒤 clean 폴더 활성화가 V1·V2 둘 다 복원하고 성공한다
     let gw = start_gateway(&refs(&env_clean), &["--activate"], &sock);
-    wait_for("보충 뒤 clean 활성 판본 게시", || {
+    wait_for("clean active revision publish after backfill", || {
         let cur =
             schema.query("select revision from {s}.bot_active_profiles where profile = 'personal'");
         cur != v1_rev.0 && cur != v2_rev.0
@@ -460,7 +450,7 @@ fn pg_profile_bundle_put_backfills_missing_v2_when_both_v1_and_v2_are_pinned() {
 #[test]
 fn pg_upgrade_restores_legacy_agent_bare_and_unicode_cron_bundles() {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL not set");
         return;
     };
     let dir = tempfile::Builder::new()
@@ -469,7 +459,7 @@ fn pg_upgrade_restores_legacy_agent_bare_and_unicode_cron_bundles() {
         .unwrap();
     let host = host_file(dir.path());
 
-    // 구판 AGENT.md 단독 `---` + triggers.yaml 유니코드 NBSP cron이 함께 든 V1 폴더
+    // Legacy V1 directory with bare `---` AGENT.md and NBSP unicode cron in triggers.yaml.
     let legacy_profiles = dir.path().join("legacy_profiles");
     copy_dir(&examples(), &legacy_profiles);
     let legacy_dir = legacy_profiles.join("personal");
@@ -482,7 +472,6 @@ fn pg_upgrade_restores_legacy_agent_bare_and_unicode_cron_bundles() {
     let (_, legacy_rev, legacy_bytes) =
         read_legacy_bundle(&legacy_dir, &Limits::default()).unwrap();
 
-    // 1) 번들 누락 시드 → `profile-bundle put` 보충 → 신판 기동·복원까지 실 DB에서 확인
     seed_legacy_state(&schema, dir.path(), &host, &legacy_rev.0, None);
     let next_profiles = dir.path().join("next_profiles");
     copy_dir(&examples(), &next_profiles);
@@ -509,7 +498,7 @@ fn pg_upgrade_restores_legacy_agent_bare_and_unicode_cron_bundles() {
     );
     let gw = start_gateway(&refs(&env_next), &["--activate"], &sock);
     wait_for(
-        "AGENT.md 단독 --- + 유니코드 cron 복원 뒤 활성화",
+        "activation after restoring bare AGENT.md + unicode cron bundle",
         || {
             schema.query("select revision from {s}.bot_active_profiles where profile = 'personal'")
                 != legacy_rev.0

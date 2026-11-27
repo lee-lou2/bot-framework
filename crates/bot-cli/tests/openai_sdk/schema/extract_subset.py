@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""OpenAI 공개 OpenAPI(고정 커밋)에서 응답 적합성 시험에 필요한 스키마만 뽑아 `openai-subset.json`으로 쓴다. 원본은 4 MB라 저장소에 두지 않고, 커밋 SHA와 sha256을 `pin.json`에 고정한다.
-사용: extract_subset.py <openapi.yaml> [--write|--check]
-  (없음)  뽑은 결과의 sha256만 찍는다   --write  openai-subset.json과 pin.json의 subset_sha256을 쓴다   --check  저장소의 것과 한 글자도 다르지 않아야 한다(CI)
-원본 sha256이 pin.json과 다르면 아무것도 하지 않고 멈춘다. 필요한 것: PyYAML(시험 의존성 잠금에 있다)."""
+"""Extracts the response-conformance schema subset from a pinned OpenAI OpenAPI spec into openai-subset.json.
+Usage: extract_subset.py <openapi.yaml> [--write|--check]
+Refuses to run if the input sha256 does not match pin.json."""
 import hashlib
 import json
 import pathlib
@@ -30,7 +29,7 @@ def refs(node):
 
 
 def clean(node):
-    """시험에 쓰지 않는 설명·예시·`x-*` 확장을 걷어 낸다. 속성 이름이 `description`·`default`·`format`인 것은 지키려고 `properties` 아래 이름은 그대로 둔다."""
+    """Strips non-validation metadata and x-* extensions while preserving property names under `properties`."""
     if isinstance(node, dict):
         out = {}
         for key, value in node.items():
@@ -44,7 +43,7 @@ def clean(node):
 
 
 def request_nullable(schemas):
-    """`CreateChatCompletionRequest`의 최상위 필드 중 값이 null일 수 있는 것(자기 자신이 `nullable: true`이거나 `$ref` 대상이 그렇다). 요청에서 null은 이 필드에 한해 «보내지 않음»과 같다."""
+    """Returns top-level fields of CreateChatCompletionRequest that allow null directly or via $ref."""
     def resolve(node):
         while isinstance(node, dict) and "$ref" in node and not node.get("nullable"):
             node = schemas[node["$ref"].rsplit("/", 1)[-1]]
@@ -64,7 +63,7 @@ def request_nullable(schemas):
 def build(raw, pin):
     digest = hashlib.sha256(raw).hexdigest()
     if digest != pin["openapi"]["sha256"]:
-        sys.exit(f"원본 sha256이 고정값과 달라요: {digest} != {pin['openapi']['sha256']}")
+        sys.exit(f"source sha256 does not match pin.json: {digest} != {pin['openapi']['sha256']}")
     spec = yaml.load(raw.decode("utf-8"), Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
     schemas = spec["components"]["schemas"]
     wanted, todo = set(), list(ROOTS)
@@ -90,7 +89,7 @@ def main():
     digest = hashlib.sha256(out).hexdigest()
     if mode == "--check":
         same = SUBSET.read_bytes() == out and pin["openapi"]["subset_sha256"] == digest
-        sys.exit(0 if same else f"저장소의 openai-subset.json이 고정 원본에서 다시 뽑은 것과 달라요(새로 뽑은 sha256 {digest})")
+        sys.exit(0 if same else f"committed openai-subset.json differs from regenerated output (new sha256 {digest})")
     if mode == "--write":
         SUBSET.write_bytes(out)
         pin["openapi"]["subset_sha256"] = digest

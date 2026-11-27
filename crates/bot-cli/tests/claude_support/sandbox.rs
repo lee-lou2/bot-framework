@@ -1,5 +1,4 @@
-//! 합성 샌드박스: 가상 경로(`/bot`·`/work`)를 호스트 폴더로 옮겨 모델 CLI를 호스트 프로세스로 띄운다(Apple VM 대신, 시험 전용). 환경은 상속하지 않는다.
-//! 문(`Gate`)을 닫아 두면 CLI를 띄우기 전에 멈춘다 — 시도는 집었지만 모델 요청은 아직 안 나간 순간을 만든다.
+//! Test-only synthetic sandbox that maps guest mounts (`/bot`, `/work`) to host directories and spawns the model CLI locally without inheriting env.
 #![allow(dead_code)]
 
 use bot_core::{
@@ -17,11 +16,10 @@ use tokio::{
     sync::watch,
 };
 
-/// 모델 CLI를 띄우기 전에 서는 문. 닫으면(`hold`) 열 때(`release`)까지 `spawn`이 기다린다.
+/// Pre-spawn gate: when held, `spawn` waits until released so tests can pause between claim and model invocation.
 pub struct Gate(watch::Sender<bool>);
 
 impl Gate {
-    /// 처음에는 열려 있다.
     pub fn new() -> Self {
         Self(watch::channel(true).0)
     }
@@ -53,7 +51,6 @@ impl LocalSandbox {
     }
 }
 
-/// 값 앞부분이 가상 마운트 경로면 호스트 경로로 바꾼다.
 fn host_path(spec: &ModelSpec, value: &str) -> String {
     for mount in spec.readonly_mounts.iter().chain(spec.scratch.iter()) {
         if value == mount.guest {
@@ -66,7 +63,7 @@ fn host_path(spec: &ModelSpec, value: &str) -> String {
     value.to_owned()
 }
 
-/// CLI는 작업 폴더 경로로 프로젝트 폴더 이름을 정한다. 가상 `/bot`이 호스트의 다른 경로가 되므로, 그 이름의 폴더를 `-bot`으로 잇는다.
+/// Symlinks the host-encoded cwd project directory to `-bot` so CLI session lookups match the guest `/bot` path.
 fn link_project_dir(spec: &ModelSpec, cwd: &Path) {
     let Some(work) = &spec.scratch else {
         return;
@@ -124,7 +121,6 @@ impl Sandbox<ModelSpec> for LocalSandbox {
 
     fn spawn(&self, spec: ModelSpec) -> Reply<'_, Self::Process> {
         Box::pin(async move {
-            // 문이 닫혀 있으면 열릴 때까지 CLI를 띄우지 않는다
             let mut gate = self.gate.clone();
             let _ = gate.wait_for(|open| *open).await;
             let cwd = PathBuf::from(host_path(&spec, &spec.cwd));

@@ -1,4 +1,4 @@
-//! 관리 API와 추적 내보내기의 연결: 상태의 내보내기 구역, 실행의 추적 ID·링크, 관리 판정 스팬.
+//! Admin API and trace exporter integration: exporter status, run trace IDs/links, and admin decision spans.
 
 use crate::support::collector::{self, Collector, Mode};
 use bot_admin::{
@@ -44,11 +44,14 @@ async fn start(map: Vec<(&str, ProfileTrace)>) -> Arc<Exporter> {
         ..Options::default()
     };
     let cfg = map.into_iter().map(|(k, v)| (pid(k), v)).collect();
-    Exporter::start(cfg, None, Redactor::default(), opts).expect("시작")
+    Exporter::start(cfg, None, Redactor::default(), opts).expect("start")
 }
 
 async fn drain(e: &Exporter) {
-    assert!(e.flush(Duration::from_secs(10)).await, "큐가 비지 않았다");
+    assert!(
+        e.flush(Duration::from_secs(10)).await,
+        "queue did not drain"
+    );
 }
 
 fn raw_contains(c: &Collector, needle: &str) -> bool {
@@ -80,23 +83,22 @@ async fn the_admin_api_shows_exporter_state_trace_links_and_leaves_decision_span
     assert_eq!(
         obs["backends"][0]["origin"],
         a.addr.to_string(),
-        "출처만 보이고 경로·헤더는 없다"
+        "only origin is shown; paths and headers stay hidden"
     );
     assert_eq!(obs["backends"][0]["kind"], "otlp-http");
     assert!(!st.to_string().contains("/v1/traces"));
-    // 실행 목록: 현재 시도의 추적 ID와, 링크 틀이 있는 프로필만 링크.
     let runs = crate::support::get(&s, crate::support::OPERATOR, "/v1/admin/runs?limit=200")
         .await
         .json();
     let expect =
         |p: &str, r: &str| bot_admin::json::hex(&SpanIds::attempt(&attempt(p, r, 1)).trace);
-    for item in runs["items"].as_array().expect("목록") {
+    for item in runs["items"].as_array().expect("list") {
         let (p, r) = (
             item["profile"].as_str().expect("p"),
             item["run"].as_str().expect("r"),
         );
         if r == "r-4" {
-            continue; // 세대 2
+            continue; // generation 2
         }
         assert_eq!(
             item["trace_id"].as_str(),
@@ -108,7 +110,7 @@ async fn the_admin_api_shows_exporter_state_trace_links_and_leaves_decision_span
                 item["trace_link"].as_str(),
                 Some(format!("https://traces.example/t/{}", expect(p, r)).as_str())
             ),
-            _ => assert!(item["trace_link"].is_null(), "틀이 없으면 링크도 없다"),
+            _ => assert!(item["trace_link"].is_null(), "no template means no link"),
         }
     }
     let detail = crate::support::get(&s, crate::support::OPERATOR, "/v1/admin/runs/personal/r-2")
@@ -117,7 +119,7 @@ async fn the_admin_api_shows_exporter_state_trace_links_and_leaves_decision_span
     assert!(
         detail["lineage"][0]["trace_link"].is_string() && detail["run"]["trace_link"].is_string()
     );
-    // 승인하면 그 run 시도의 추적에 판정 스팬이 붙는다(nonce는 싣지 않는다).
+    // Approving attaches a decision span to the run attempt trace without emitting the nonce.
     let seen = bot_admin::json::hex(&bot_admin::fake::digest("c-1:agenda.delete"));
     let r = crate::support::post(
         &s,
@@ -132,7 +134,7 @@ async fn the_admin_api_shows_exporter_state_trace_links_and_leaves_decision_span
         .spans()
         .into_iter()
         .find(|x| x.name == "admin approval.decide")
-        .expect("판정 스팬");
+        .expect("decision span");
     let root = SpanIds::attempt(&attempt("personal", "r-1", 1));
     assert_eq!(
         (d.trace.as_slice(), d.parent.as_slice()),
@@ -160,7 +162,7 @@ async fn repeated_admin_decisions_on_one_call_get_distinct_span_ids() {
             .iter()
             .find(|c| c.call.0 == "c-9")
             .cloned()
-            .expect("호출");
+            .expect("call");
         d.effects.push(bot_admin::fake::effect_view(
             &call,
             "e-3",
@@ -172,7 +174,7 @@ async fn repeated_admin_decisions_on_one_call_get_distinct_span_ids() {
     let path = "/v1/admin/holds/personal/r-4/c-9/resolve";
     for effect in ["e-2", "e-3"] {
         let body = format!(
-            r#"{{"verdict":"not_executed","evidence":"수신처에 기록 없음","effect":"{effect}","hold_id":"h-{effect}"}}"#
+            r#"{{"verdict":"not_executed","evidence":"no record at recipient","effect":"{effect}","hold_id":"h-{effect}"}}"#
         );
         assert_eq!(
             crate::support::post(&s, crate::support::OPERATOR, path, &body)
@@ -190,9 +192,9 @@ async fn repeated_admin_decisions_on_one_call_get_distinct_span_ids() {
     assert_eq!(spans.len(), 2);
     assert_ne!(
         spans[0].span, spans[1].span,
-        "같은 호출의 두 판정은 서로 다른 스팬이다"
+        "two decisions on one call get distinct span IDs"
     );
-    assert_eq!(spans[0].trace, spans[1].trace, "같은 시도의 추적에 모인다");
+    assert_eq!(spans[0].trace, spans[1].trace, "same attempt trace");
     assert_eq!(spans[0].str("bot.admin.verdict"), Some("not_executed"));
 }
 
@@ -202,7 +204,7 @@ async fn a_repeated_judgment_leaves_no_second_decision_span() {
     let e = start(vec![("personal", cfg(&c, Ids::Plain))]).await;
     let s = crate::support::start_with(Fake::demo(), Some(e.clone())).await;
     let path = "/v1/admin/holds/personal/r-4/c-9/resolve";
-    let body = r#"{"verdict":"not_executed","evidence":"수신처에 기록 없음","effect":"e-2","hold_id":"h-e-2"}"#;
+    let body = r#"{"verdict":"not_executed","evidence":"no record at recipient","effect":"e-2","hold_id":"h-e-2"}"#;
     for repeated in [false, true, true] {
         let r = crate::support::post(&s, crate::support::OPERATOR, path, body).await;
         assert_eq!(
@@ -218,5 +220,9 @@ async fn a_repeated_judgment_leaves_no_second_decision_span() {
         .into_iter()
         .filter(|x| x.name == "admin hold.resolve")
         .collect();
-    assert_eq!(spans.len(), 1, "처음 적용된 판정에만 스팬이 하나 남는다");
+    assert_eq!(
+        spans.len(),
+        1,
+        "only the first applied verdict emits a span"
+    );
 }

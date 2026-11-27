@@ -1,6 +1,6 @@
-//! 호출 시작과 새 쓰기 허가에서 사전 승인과 지정한 사람의 승인 증거를 같은 잠금 안에서 확인한다.
-//! 확인에 실패하면 저장소는 아무것도 쓰지 않고 고정 사유를 돌려준다(호출을 닫는 것은 브로커의 몫이다).
-//! 잠금 순서: 활성 집합(호출자가 이미 쥠) → run → 호출 → 승인 행(공유) → 정지 행(공유) → 사용 행 → 증거 소비 → 감사 head.
+//! Verifies pre-approval grants and human-origin evidence during call start and effect write authorization.
+//!
+//! Lock order: active set (held by caller) -> run -> call -> grant (share) -> pause (share) -> usage -> evidence use -> audit head.
 
 use crate::{
     codec::*,
@@ -16,17 +16,17 @@ use bot_core::{
 use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 
-/// 시작 때 확인한 권한의 흔적(호출 행·감사에 남는다).
+/// Verified authority metadata recorded on the call row and audit trail.
 #[derive(Default)]
 pub(crate) struct Mark {
-    /// (승인 ID, 접수 때 묶은 정지 세대)
+    /// `(grant_id, bound_pause_epoch)` for pre-approved runs.
     pub grant: Option<(String, i64)>,
-    /// `팀/이벤트` — 소비한 증거의 원본 이벤트 참조
+    /// `team/event_id` for consumed human-origin evidence.
     pub evidence: Option<String>,
 }
 
 impl Mark {
-    /// 감사 판정에 덧붙이는 꼬리표. 증거 ID·승인 ID만 담고 본문은 담지 않는다.
+    /// Appends authority IDs (never payloads) to the audit verdict.
     pub(crate) fn verdict(&self, base: &str) -> String {
         match (&self.grant, &self.evidence) {
             (Some((id, _)), _) => format!("{base}:preapproved;grant={id}"),
@@ -36,12 +36,12 @@ impl Mark {
     }
 }
 
-/// 직접 호출인가: 루트 run의 `{run}:tool` 호출만이다(위임한 자식·모델이 고른 호출·다른 ID는 아니다).
+/// Direct tool invocation on a root run (`{run}:tool`); excludes delegated children and model-planned calls.
 fn direct(run: &RunRow, call: &str) -> bool {
     run.parent.is_none() && call == format!("{}:tool", run.id)
 }
 
-/// 호출을 시작하기 전의 권한 확인. `Err`는 저장소 오류, `Ok(Err(사유))`는 시작할 수 없다는 판정(상태 변경 0)이다.
+/// Validates start authority; `Ok(Err(reason))` denies without mutating state, `Err` is a store error.
 pub(crate) async fn check_start(
     tx: &mut Tx<'_>,
     run: &RunRow,
@@ -59,7 +59,7 @@ pub(crate) async fn check_start(
             .await?
             .map(|row| (row.get("grant_id"), row.get("epoch")));
     match authority {
-        // 사전 승인이 묶인 run의 직접 호출은 권한을 내지 않고는 시작하지 못한다(건너뛰는 길이 없다): 호출을 거절로 닫는다
+        // Grant-bound direct calls cannot bypass grant verification.
         None if bound.is_some() && is_direct => Ok(Err(reason::STALE)),
         None => Ok(Ok(Mark::default())),
         Some(_) if start.approval.is_some() => Err(Error::Conflict.into()),
@@ -114,7 +114,7 @@ async fn granted(
     }
 }
 
-/// 승인 행이 가리키는 트리거의 (정지 여부, 세대). 정지 행은 공유 잠금으로 읽어 정지 커밋과 직렬화한다.
+/// Reads `(paused, epoch)` with `FOR SHARE` to serialize against pause/resume commits; a missing row fails closed as paused.
 async fn pause_state(tx: &mut Tx<'_>, grant: &PgRow) -> R<(bool, i64)> {
     let row = sqlx::query(
         "select epoch, paused from bot_trigger_pause where profile = $1 and agent = $2 and trigger = $3 for share",
@@ -124,7 +124,6 @@ async fn pause_state(tx: &mut Tx<'_>, grant: &PgRow) -> R<(bool, i64)> {
     .bind(grant.get::<String, _>("trigger"))
     .fetch_optional(&mut **tx)
     .await?;
-    // 정지 행이 없으면 확인할 수 없다: 멈춘 것으로 본다
     Ok(row.map_or((true, 0), |r| (r.get("paused"), r.get("epoch"))))
 }
 
@@ -146,7 +145,7 @@ async fn human(
         return Ok(Err(reason::HUMAN_MISMATCH));
     };
     let (team, event): (String, String) = (evidence.get("team"), evidence.get("event_id"));
-    // (프로필, 팀, 이벤트)당 한 번: 같은 증거가 다른 후보·재시작의 두 번째 승인이 되지 못한다
+    // Single-use per (profile, team, event_id) so one event cannot authorize a second candidate or restart.
     let used = sqlx::query(
         "insert into bot_evidence_uses (profile, team, event_id, run, call, tool, tool_revision, args_sha256, actor)
          values ($1, $2, $3, $4, $5, $6, $7, $8, $9) on conflict do nothing",
@@ -172,7 +171,7 @@ async fn human(
     }))
 }
 
-/// 권한 없이 시작하려던 호출을 같은 트랜잭션에서 거절로 닫는다(상태 `denied`, 감사 한 줄). 호출자가 커밋한다.
+/// Closes an open call as `denied` with an audit row inside the caller's transaction.
 pub(crate) async fn deny_in(tx: &mut Tx<'_>, run: &RunRow, call: &PgRow, why: &str) -> R<()> {
     sqlx::query(
         "update bot_calls set state = 'denied', updated_ms = bot_now_ms(), finished_ms = bot_now_ms()
@@ -196,16 +195,15 @@ pub(crate) async fn deny_in(tx: &mut Tx<'_>, run: &RunRow, call: &PgRow, why: &s
     Ok(())
 }
 
-/// 새 쓰기 허가를 거절한 이유. 감사에는 고정 사유(`reason`)가, 호출자(효과 채널)에는 wire 분류(`error`)가 간다:
-/// 대상 밖·한도·정지 = denied, 철회·교체·옛 정지 세대 = stale, 형식 오류 = invalid.
+/// Reason a new pre-approved external write was refused, mapping to fixed audit reasons and wire errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Refused {
     Stale,
     Paused,
     Limit,
-    /// 정확한 (operation, target) 쌍이 허용 목록에 없다.
+    /// `(operation, target)` pair is not in the grant's allowlist.
     Target,
-    /// args가 `{operation, target, params}` 모양이 아니다.
+    /// Args do not match the exact `{operation, target, params}` object shape.
     Shape,
 }
 
@@ -228,7 +226,7 @@ impl Refused {
     }
 }
 
-/// 효과 요청 args의 모양: 정확히 `{operation, target, params}`(앞 둘은 문자열, params는 객체)이다.
+/// Requires exact `{operation: str, target: str, params: object}` shape.
 fn shape(args: &JsonPayload) -> Option<(String, String)> {
     let Ok((Value::Object(map), _)) = canonical(args) else {
         return None;
@@ -248,9 +246,7 @@ fn listed(pairs: &Value, operation: &str, target: &str) -> bool {
     })
 }
 
-/// 승인이 철회·교체됐거나 호출이 시작된 뒤 정지 세대가 바뀌었는가(낡았다). 정지 중이어도 같다: 정지는 세대를 올리므로 정지 전에 시작한 호출은 정지 중에도 옛 세대다.
-/// 정지 여부·허용 쌍·한도는 새 허가에서만 본다.
-/// 기록된 단계의 인자가 달라 충돌로 끝내기 전에 이것을 먼저 봐, 같은 유효한 승인 안에서만 `conflict`이고 철회·교체·옛 세대는 `stale`로 알린다.
+/// Returns true if the grant is inactive or the trigger's pause epoch changed since call start (checked before args conflict).
 pub(crate) async fn stale(tx: &mut Tx<'_>, grant: &str, epoch: i64) -> R<bool> {
     let row = sqlx::query(
         "select profile, agent, trigger, state from bot_grants where id = $1 for share",
@@ -264,9 +260,7 @@ pub(crate) async fn stale(tx: &mut Tx<'_>, grant: &str, epoch: i64) -> R<bool> {
     Ok(pause_state(tx, &row).await?.1 != epoch)
 }
 
-/// 사전 승인 호출의 **새** 외부 쓰기 허가(새 단계나 운영자 미실행 판정 뒤 다시 보내기)를 확인하고 오늘 사용량을 1 올린다.
-/// 호출자가 활성 집합(공유)·run·호출·효과 행을 이미 잠갔고 같은 커밋에서 효과 행과 감사를 쓴다.
-/// 어느 거절에서도 사용량은 그대로다.
+/// Authorizes a new pre-approved external write and increments today's UTC usage; caller holds active/run/call/effect locks.
 pub(crate) async fn permit_write(
     tx: &mut Tx<'_>,
     grant: &str,
@@ -295,7 +289,7 @@ pub(crate) async fn permit_write(
     }
     let (profile, agent, trigger): (String, String, String) =
         (row.get("profile"), row.get("agent"), row.get("trigger"));
-    // UTC 일 번호는 이 트랜잭션에서 한 번만 읽는다(자정 경계에서 두 문장이 다른 날을 보지 않게)
+    // Read the UTC day once in this transaction to avoid a midnight split across insert/update.
     let day: i64 = sqlx::query_scalar("select bot_now_ms() / 86400000")
         .fetch_one(&mut **tx)
         .await?;

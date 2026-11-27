@@ -73,13 +73,14 @@ def group(paths):
 
 
 def report(result, reference, new):
-    lines = [f"기준 `{reference}`를 언급하는 파일 {len(result['missing']) + len(result['both'])}개 중 `{new}`도 언급하는 파일은 {len(result['both'])}개예요."]
-    lines.append(f"빠진 곳 후보 {len(result['missing'])}개(`{reference}`만 있는 파일 — 그 입구에만 있는 기능이면 지워도 돼요):")
+    total = len(result["missing"]) + len(result["both"])
+    lines = [f"{len(result['both'])} of {total} files mentioning `{reference}` also mention `{new}`."]
+    lines.append(f"{len(result['missing'])} missing candidate(s) (mention `{reference}` only; ignore reference-only features):")
     for name, paths in group(result["missing"]).items():
         lines.append(f"  {name} ({len(paths)})")
         lines += [f"    {path}" for path in paths]
     if result["only_new"]:
-        lines.append(f"`{new}`만 있는 파일 {len(result['only_new'])}개(새로 쓴 코드):")
+        lines.append(f"{len(result['only_new'])} file(s) mentioning `{new}` only (new code):")
         lines += [f"    {path}" for path in result["only_new"]]
     return "\n".join(lines)
 
@@ -96,7 +97,7 @@ def main(argv=None):
     if not args.reference.strip() or not args.new.strip() or args.reference.lower() == args.new.lower():
         parser.error("reference and new must be two different, non-empty names")
     if not args.root.is_dir():
-        print(f"{args.root}: 폴더가 아니에요", file=sys.stderr)
+        print(f"{args.root}: not a directory", file=sys.stderr)
         return 2
     result = audit(args.root, args.reference, args.new, args.skip, args.tests)
     print(report(result, args.reference, args.new))

@@ -1,4 +1,4 @@
-//! 지정한 사람의 승인 시험 도구: Slack 채널 바인딩 `team`의 반응 트리거 `confirm`이 승인 도구를 고정 인자로 직접 부른다.
+//! Test helpers for designated-human event approvals on Slack channel reaction trigger `confirm`.
 #![allow(dead_code)]
 
 use super::*;
@@ -52,7 +52,6 @@ pub fn confirm_trigger(approvers: &[&str]) -> Trigger {
     }
 }
 
-/// 승인이 필요한 도구(되돌릴 수 없음)를 가진 프로필. `members`에 없는 사람은 멤버가 아니다.
 pub fn world(approvers: &[&str], members: &[&str]) -> Arc<Snapshot> {
     let mut notify = fake_tool(Risk::Irreversible, &["reports.post"]);
     notify.server = "reports".into();
@@ -120,7 +119,6 @@ pub fn target() -> Target {
     }
 }
 
-/// 입구가 인증한 이번 반응 이벤트의 원천.
 pub fn source(event: &str, ts: &str) -> SlackSource {
     SlackSource {
         kind: SourceKind::Reaction,
@@ -159,7 +157,6 @@ pub fn event_accept(request: &str, actor: &str) -> Accept {
 }
 
 impl Rig {
-    /// 인증된 이벤트로 접수하고 claim한다.
     pub async fn accept(
         &self,
         request: &str,

@@ -1,4 +1,4 @@
-//! 넘김(`bot/pass`) 시험 도구(pass_chain·pass_recovery가 함께 쓴다): 실제 BrokerService·PG 원장·가짜 도구 실행기와 사슬 접수 도우미.
+//! Shared `bot/pass` test helpers (used by `pass_chain` and `pass_recovery`).
 #![allow(dead_code)]
 
 use super::*;
@@ -22,11 +22,9 @@ pub const PLAIN: &str = r#"{"content":[{"text":"handled","type":"text"}],"isErro
 pub struct Rig {
     pub broker: BrokerService,
     pub runner: Arc<FakeRunner>,
-    /// 시험이 새 판본을 게시해 «접수 뒤에 권한이 바뀐» 상황을 만든다
     pub catalog: Arc<FakeCatalog>,
 }
 
-/// 프로필 `personal`의 한 판본: `owner` 역할이 `owner_scopes`를 갖는다(정책 상한은 `run`·`calendar.read`로 같다).
 pub fn world(revision: &str, owner_scopes: &[&str]) -> Arc<bot_core::profile::Snapshot> {
     let mut post = tool(Risk::Write, &["calendar.read"]);
     post.effects = true;
@@ -87,7 +85,6 @@ pub fn default_target() -> Target {
     }
 }
 
-/// 후보 이름들(도구)과 기본 대화로 사슬을 만든다. 후보 ID는 `t<위치>`다.
 pub fn chain(tools: &[&str], default: Option<Target>) -> PassChain {
     PassChain {
         candidates: tools
@@ -106,7 +103,6 @@ pub async fn accept_chain(db: &TestDb, request: &str, chain: PassChain) -> RunId
     accept_chain_scoped(db, request, chain, run_scopes()).await
 }
 
-/// 요청자의 스코프를 정해 사슬을 접수한다(`run`이 없는 요청자 등).
 pub async fn accept_chain_scoped(
     db: &TestDb,
     request: &str,
@@ -116,7 +112,6 @@ pub async fn accept_chain_scoped(
     accept_chain_at(db, request, chain, scopes, "r1").await
 }
 
-/// 활성 판본이 `revision`일 때 그 판본에 고정해 접수한다(접수는 활성 판본과 같아야 한다).
 pub async fn accept_chain_at(
     db: &TestDb,
     request: &str,
@@ -144,7 +139,7 @@ pub async fn accept_chain_at(
 pub async fn call_at(rig: &Rig, ctx: &RunContext) -> Result<CallResult, Error> {
     let pos = ctx.work.pass_pos.unwrap_or(0);
     let Target::Tool { tool, args, .. } = ctx.work.target.clone() else {
-        panic!("직접 호출 차례가 아니다");
+        panic!("not a direct tool call turn");
     };
     rig.broker
         .call(ToolCall {
@@ -178,7 +173,7 @@ pub async fn audit_actions(db: &TestDb) -> Vec<String> {
         .unwrap()
 }
 
-/// 저장소의 활성 판본 집합에서 `personal`을 이 판본으로 바꾼다(브로커 카탈로그의 `publish`와 짝이다: 호출 시작은 둘이 같은 판본이어야 한다).
+/// Updates both the broker catalog and PG active set for `personal` so `call_start` sees matching revisions.
 pub async fn activate(
     db: &TestDb,
     rig: &Rig,

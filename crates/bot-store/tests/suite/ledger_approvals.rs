@@ -36,7 +36,7 @@ async fn opening_a_new_approval_supersedes_the_old_one_and_decisions_wake_the_ru
     assert_eq!(
         state_of_run(&db, &run.attempt.run).await,
         "waiting",
-        "승인 요청은 run을 대기로 넘긴다"
+        "opening an approval parks the run"
     );
     assert_eq!(
         db.scalar::<String>("select wait_kind from bot_runs").await,
@@ -47,10 +47,9 @@ async fn opening_a_new_approval_supersedes_the_old_one_and_decisions_wake_the_ru
             runs(&db).renew(run.attempt.clone()).await,
             Err(Error::Stale)
         ),
-        "워커 리스를 놓았다"
+        "worker lease must be released"
     );
 
-    // 새 조건으로 다시 열면 이전 승인은 대체된다(여기서는 같은 세대로 재개한 뒤)
     db.sql("update bot_runs set state = 'ready', wait_kind = null, keep_generation = true")
         .await;
     let resumed = runs(&db).claim().await.unwrap().unwrap();
@@ -64,17 +63,16 @@ async fn opening_a_new_approval_supersedes_the_old_one_and_decisions_wake_the_ru
     assert_eq!(
         db.scalar::<String>("select approval from bot_calls").await,
         "n2",
-        "호출은 가장 최근 승인을 가리킨다"
+        "call must point to the latest approval"
     );
     assert!(
         matches!(
             calls(&db).decide(decision("n1", true)).await,
             Err(Error::Conflict)
         ),
-        "옛 승인은 결정할 수 없다"
+        "superseded approval cannot be decided"
     );
 
-    // 승인자 본인만 결정하고, 결정하면 기다리는 run이 같은 세대로 깨어난다
     let stranger = Decision {
         actor: PrincipalId("local:guest".into()),
         ..decision("n2", true)
@@ -98,7 +96,7 @@ async fn opening_a_new_approval_supersedes_the_old_one_and_decisions_wake_the_ru
     assert_eq!(
         db.scalar::<i32>("select attempts from bot_runs").await,
         0,
-        "승인 대기는 시도 횟수를 쓰지 않는다"
+        "approval wait must not increment retry attempts"
     );
     assert_eq!(db.store.verify().await.unwrap().first_bad, None);
 }
@@ -130,10 +128,10 @@ async fn denial_and_revocation_close_the_approval() {
     );
     assert!(
         matches!(calls(&db).start(start).await, Err(Error::Denied)),
-        "거절된 승인으로는 시작할 수 없다"
+        "denied approval cannot start a call"
     );
 
-    // 승인한 뒤 실행 전의 거절은 철회다
+    // Denying an already-approved call before start revokes it.
     calls(&db)
         .open_approval(open_approval(binding(&resumed.attempt, "c1", "n2")))
         .await
@@ -170,7 +168,7 @@ async fn start_consumes_an_approval_once_with_the_same_binding() {
     let resumed = runs(&db).claim().await.unwrap().unwrap();
     let reasons = vec!["irreversible".to_owned()];
 
-    // 인자·정책·이유가 달라졌으면 소비하지 못하고, 승인은 그대로 남는다
+    // Mismatched args, policy revision, or reasons fail without consuming the approval.
     let mut changed_args = binding(&resumed.attempt, "c1", "n1");
     changed_args.args_sha256 = [9; 32];
     let mut changed_policy = binding(&resumed.attempt, "c1", "n1");
@@ -219,7 +217,6 @@ async fn start_consumes_an_approval_once_with_the_same_binding() {
         CallPhase::Started { .. }
     ));
 
-    // 소비한 승인은 다시 쓸 수 없고, 다른 호출의 승인으로도 시작할 수 없다
     begin_call(&db, &resumed.attempt, "c2").await;
     let other_call = start_call(
         &resumed.attempt,
@@ -243,7 +240,7 @@ async fn start_consumes_an_approval_once_with_the_same_binding() {
     );
     assert!(
         matches!(calls(&db).start(again).await, Err(Error::Conflict)),
-        "소비한 승인은 다시 쓸 수 없다"
+        "consumed approval cannot be reused"
     );
     assert_eq!(db.store.verify().await.unwrap().first_bad, None);
 }
@@ -260,7 +257,7 @@ async fn a_crash_handover_invalidates_old_approvals_and_buttons() {
         .await
         .unwrap();
     calls(&db).decide(decision("n1", true)).await.unwrap();
-    // 승인된 뒤 재개한 워커가 시작하기 전에 죽었다: 인계하면 세대가 오르고 옛 승인은 무효다
+    // Crash takeover bumps generation and supersedes prior-generation approvals.
     let resumed = runs(&db).claim().await.unwrap().unwrap();
     assert_eq!(resumed.attempt.generation, Generation(1));
     let new = db.takeover(&run.attempt.run).await;
@@ -278,7 +275,7 @@ async fn a_crash_handover_invalidates_old_approvals_and_buttons() {
             calls(&db).decide(decision("n1", false)).await,
             Err(Error::Stale)
         ),
-        "옛 버튼은 거절"
+        "stale approval button must be rejected"
     );
     let start = start_call(
         &new.attempt,
@@ -290,7 +287,6 @@ async fn a_crash_handover_invalidates_old_approvals_and_buttons() {
     );
     assert!(matches!(calls(&db).start(start).await, Err(Error::Stale)));
 
-    // 새 승인은 새 세대로 한 번 열고 한 번 소비한다
     calls(&db)
         .open_approval(open_approval(binding(&new.attempt, "c1", "n2")))
         .await
@@ -329,9 +325,10 @@ async fn expired_approvals_are_closed_and_wake_the_run() {
             calls(&db).decide(decision("n1", true)).await,
             Err(Error::Stale)
         ),
-        "만료 뒤 결정은 거절"
+        "decision after expiry must be rejected"
     );
-    let resumed = runs(&db).claim().await.unwrap().unwrap(); // claim이 만료를 정리하고 깨운다
+    // Claim sweeps expired approvals and wakes the waiting run.
+    let resumed = runs(&db).claim().await.unwrap().unwrap();
     assert_resumed(&run.attempt, &resumed.attempt);
     assert_eq!(
         calls(&db)
@@ -373,7 +370,7 @@ async fn supersede_closes_the_current_approval_once() {
     assert_eq!(
         state_of_run(&db, &run.attempt.run).await,
         "ready",
-        "대기를 푼다"
+        "supersede must wake the run"
     );
     calls(&db)
         .supersede(ApprovalId("n1".into()), owner())
@@ -383,10 +380,9 @@ async fn supersede_closes_the_current_approval_once() {
         db.scalar::<i64>("select count(*) from bot_audit where action = 'approval.supersede'")
             .await,
         1,
-        "재호출은 새 감사·깨움이 없다"
+        "repeated supersede must be idempotent"
     );
 
-    // 소비한 승인은 대체할 수 없다
     let resumed = runs(&db).claim().await.unwrap().unwrap();
     calls(&db)
         .open_approval(open_approval(binding(&resumed.attempt, "c1", "n2")))
@@ -414,19 +410,18 @@ async fn approval_cards_are_queued_for_push_conversations_only() {
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // Slack 대화: 카드가 승인과 같은 커밋으로 회신 행에 쌓인다
     let dm = leased_in(&db, "dm", ConversationKind::Direct).await;
     begin_call(&db, &dm.attempt, "c1").await;
     let mut bad = open_approval(binding(&dm.attempt, "c1", "n1"));
     bad.card = JsonPayload("{}".into());
     assert!(
         matches!(calls(&db).open_approval(bad).await, Err(Error::Invalid)),
-        "브로커의 카드 형식이 아니면 받지 않는다"
+        "push conversation requires valid broker card payload"
     );
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_approvals").await,
         0,
-        "거절되면 아무것도 남지 않는다"
+        "rejected open must leave no row"
     );
     calls(&db)
         .open_approval(open_approval(binding(&dm.attempt, "c1", "n1")))
@@ -442,7 +437,6 @@ async fn approval_cards_are_queued_for_push_conversations_only() {
     let body = db.scalar::<String>("select body from bot_outbox").await;
     assert!(body.contains(r#""nonce":"n1""#));
 
-    // CLI 대화: 카드는 승인 조회로 보고 회신 행은 없다
     let cli = leased(&db, "cli").await;
     begin_call(&db, &cli.attempt, "c1").await;
     let mut card = open_approval(binding(&cli.attempt, "c1", "n2"));
@@ -486,7 +480,7 @@ async fn revocation_and_start_are_serialized() {
     match (revoked.is_ok(), started.is_ok()) {
         (true, false) => assert_eq!(approval, ApprovalState::Revoked),
         (false, true) => assert_eq!(approval, ApprovalState::Consumed),
-        other => panic!("정확히 한쪽만 이겨야 한다: {other:?} {approval:?}"),
+        other => panic!("exactly one side must win: {other:?} {approval:?}"),
     }
 }
 
@@ -503,7 +497,6 @@ async fn a_call_pointing_at_a_live_approval_cannot_start_without_presenting_it()
         .unwrap();
     calls(&db).decide(decision("n1", true)).await.unwrap();
     let resumed = runs(&db).claim().await.unwrap().unwrap();
-    // 승인이 연결돼 있는데 내지 않으면(인자를 비워 소비를 건너뛰면) 시작하지 못하고 승인은 그대로다
     let result = calls(&db)
         .start(start_call(&resumed.attempt, "c1", None))
         .await;
@@ -520,7 +513,7 @@ async fn a_call_pointing_at_a_live_approval_cannot_start_without_presenting_it()
             .state,
         ApprovalState::Approved
     );
-    // 정책이 바뀌어 승인이 대체되면 더는 필요하지 않다: 승인 없이 시작한다
+    // Once superseded (e.g., policy changed), the call may start without presenting the approval.
     calls(&db)
         .supersede(ApprovalId("n1".into()), PrincipalId("local:owner".into()))
         .await

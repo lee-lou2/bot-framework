@@ -1,5 +1,4 @@
-// 실행 탭: 실행 목록(프로필·상태 필터, 더 보기)과 상세(계보 빵부스러기·대기 사유·자식·도구 호출·효과).
-// 목록은 서버가 준 순서를 지키고, 자동 새로고침은 지금까지 불러온 만큼을 다시 받는다(더 보기로 늘린 목록이 줄지 않는다).
+// Runs view: filterable run list and detail pane (lineage, wait reason, controls, child runs, tool calls, and effects).
 (function (root) {
   "use strict";
   const D = root.BotDom, A = root.BotApi, B = root.BotLabels, { h, icon, code } = D;
@@ -11,23 +10,22 @@
     let memo = {}, dmemo = {}, body = null;
     const selKey = () => (st.sel ? st.sel.profile + "|" + st.sel.run : null);
 
-    const stateSel = h("select", { id: "run-state", "aria-label": "상태로 거르기", onchange: (e) => { st.state = e.target.value; clearList(); app.refresh(true); } }, [h("option", { value: "", text: "전체" })].concat(B.RUN_ORDER.map((s) => h("option", { value: s, text: B.RUN_STATE[s][0] }))));
+    const stateSel = h("select", { id: "run-state", "aria-label": "Filter by state", onchange: (e) => { st.state = e.target.value; clearList(); app.refresh(true); } }, [h("option", { value: "", text: "All" })].concat(B.RUN_ORDER.map((s) => h("option", { value: s, text: B.RUN_STATE[s][0] }))));
     const count = h("p", { class: "rl-count", "aria-live": "polite" });
-    const list = h("ul", { class: "rl", "aria-label": "실행 목록" });
+    const list = h("ul", { class: "rl", "aria-label": "Run list" });
     const none = h("div", { class: "rl-none" });
-    const moreBtn = h("button", { type: "button", class: "btn", text: "더 보기", onclick: () => more() });
+    const moreBtn = h("button", { type: "button", class: "btn", text: "Load more", onclick: () => more() });
     const moreBox = h("div", { class: "more" }, [moreBtn]);
-    // 상세에는 매초 바뀌는 «n초 전» 글자가 있어 live 영역으로 두지 않는다. 대신 실행을 열면 포커스가 상세로 옮겨 간다.
-    const detail = h("section", { class: "rd-pane", "aria-label": "실행 상세", tabindex: "-1" });
-    const split = h("div", { class: "split" }, [h("section", { class: "rl-pane", "aria-label": "실행" }, [count, list, none, moreBox]), detail]);
-    const head = h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "실행" }), h("p", { class: "sub", text: "대화·예약·위임으로 시작된 실행의 상태와 기록" })]), h("label", { class: "field ph-act" }, [h("span", { class: "lab", text: "상태" }), h("span", { class: "sel" }, [stateSel, h("span", { class: "sel-ic" }, [icon("down", { size: 14 })])])])]);
+    // Do not mark the detail pane aria-live because relative timestamps update every second; move focus on open instead.
+    const detail = h("section", { class: "rd-pane", "aria-label": "Run details", tabindex: "-1" });
+    const split = h("div", { class: "split" }, [h("section", { class: "rl-pane", "aria-label": "Runs" }, [count, list, none, moreBox]), detail]);
+    const head = h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "Runs" }), h("p", { class: "sub", text: "Status and history of runs started by messages, schedules, or delegations" })]), h("label", { class: "field ph-act" }, [h("span", { class: "lab", text: "State" }), h("span", { class: "sel" }, [stateSel, h("span", { class: "sel-ic" }, [icon("down", { size: 14 })])])])]);
     box.appendChild(h("div", { class: "wrap" }, [head, split]));
     box.classList.add("runs");
     renderAll();
 
     function clearList() { st.items = []; st.next = null; st.loaded = false; st.epoch++; memo = {}; D.clear(list); renderList(); }
 
-    // ---------- 불러오기 ----------
     function load(ctx) {
       const limit = D.clamp(st.items.length || PAGE, PAGE, 200), epoch = st.epoch;
       const jobs = [A.get("/v1/admin/runs" + A.q({ profile: ctx.profile, state: st.state, limit }), { signal: ctx.signal })];
@@ -57,14 +55,12 @@
       }).catch((e) => { st.busyMore = false; renderMore(); app.notice(A.explain(e)); });
     }
 
-    // ---------- 선택 ----------
     const runHash = () => (st.sel ? "runs/" + A.seg(st.sel.profile) + "/" + A.seg(st.sel.run) : "runs");
     function clearSel() {
       if (!st.sel) return;
       st.sel = null; st.detail = null; st.detailErr = null;
       renderAll();
     }
-    // quiet: 탭을 여는 쪽이 이어서 새로고침하므로 여기서는 다시 묻지 않는다.
     function open(profile, run, quiet) {
       if (st.sel && st.sel.profile === profile && st.sel.run === run) {
         app.setHash(runHash());
@@ -74,10 +70,8 @@
       app.setHash(runHash());
       renderAll();
       if (!quiet) { app.refresh(true); detail.focus({ preventScroll: true }); }
-      // 좁은 화면에서는 상세가 목록을 대신하므로 맨 위에서 시작한다.
       if (root.matchMedia && root.matchMedia("(max-width: 960px)").matches) root.scrollTo(0, 0);
     }
-    // 목록으로 돌아가면 방금 보던 행에 포커스를 돌려 준다.
     function close() {
       const was = selKey();
       st.sel = null; st.detail = null; st.detailErr = null;
@@ -86,11 +80,10 @@
       Array.prototype.forEach.call(list.children, (li) => { if (li.firstChild.getAttribute("data-run") === was) li.firstChild.focus(); });
     }
 
-    // ---------- 목록 ----------
     function meta(r) {
-      const parts = [r.principal, B.conversation(r.kind) + (r.trigger ? " " + r.trigger : ""), "세대 " + r.generation, "시도 " + r.attempts];
+      const parts = [r.principal, B.conversation(r.kind) + (r.trigger ? " " + r.trigger : ""), "gen " + r.generation, "attempt " + r.attempts];
       if (r.waiting) parts.push(B.waitingShort(r.waiting));
-      if (r.error) parts.push("오류 " + r.error);
+      if (r.error) parts.push("error " + r.error);
       return parts.join(" · ");
     }
     function row(r, multi) {
@@ -111,83 +104,82 @@
         b.classList.toggle("is-selected", on);
         if (on) b.setAttribute("aria-current", "true"); else b.removeAttribute("aria-current");
       });
-      count.textContent = st.loaded ? (st.items.length ? st.items.length + "건" + (st.next ? " 이상" : "") : "") : "";
+      count.textContent = st.loaded ? (st.items.length ? st.items.length + (st.next ? "+" : "") + " runs" : "") : "";
       D.clear(none);
       if (!st.loaded) none.appendChild(D.skeleton(4));
-      else if (!st.items.length) none.appendChild(D.empty(st.state ? "이 상태의 실행이 없습니다" : "실행이 없습니다", st.state ? "다른 상태를 고르거나 «전체»로 돌아가 보세요." : "대화나 예약이 실행되면 여기에 보입니다.", "run"));
+      else if (!st.items.length) none.appendChild(D.empty(st.state ? "No runs in this state" : "No runs yet", st.state ? "Choose another state or return to All." : "Runs started by conversations or schedules will appear here.", "run"));
       renderMore();
     }
     function renderMore() {
       moreBox.hidden = !st.next;
       moreBtn.disabled = st.busyMore;
-      moreBtn.textContent = st.busyMore ? "불러오는 중…" : "더 보기";
+      moreBtn.textContent = st.busyMore ? "Loading…" : "Load more";
     }
 
-    // ---------- 상세 ----------
     const line = (k, v) => [h("dt", { text: k }), h("dd", null, [v])];
     function section(title, n, kid) { return h("section", { class: "sec" }, [h("h3", { class: "sec-t" }, [h("span", { text: title }), n !== null ? h("em", { text: String(n) }) : null]), kid]); }
     function crumbs(d) {
       const last = d.lineage.length - 1;
-      const items = d.lineage.map((r, i) => h("li", null, [i === last ? h("span", { class: "crumb is-now", "aria-current": "page" }, [code(r.run), h("span", { text: r.agent })]) : h("button", { type: "button", class: "crumb", title: "이 실행으로 이동", onclick: () => open(r.profile, r.run) }, [code(r.run), h("span", { text: r.agent })])]));
-      return h("nav", { class: "crumbs", "aria-label": "계보(루트에서 현재까지)" }, [h("ol", null, items)]);
+      const items = d.lineage.map((r, i) => h("li", null, [i === last ? h("span", { class: "crumb is-now", "aria-current": "page" }, [code(r.run), h("span", { text: r.agent })]) : h("button", { type: "button", class: "crumb", title: "Open run", onclick: () => open(r.profile, r.run) }, [code(r.run), h("span", { text: r.agent })])]));
+      return h("nav", { class: "crumbs", "aria-label": "Lineage (root to current)" }, [h("ol", null, items)]);
     }
-    // 추적: 서버가 링크 틀을 알면 `trace_link`가 온다(웹 주소일 때만 연다). 없으면 추적 ID 앞 8자만 보인다.
+    // Only allow http/https URLs for external trace links.
     function traceNode(r) {
       if (!r.trace_id) return "-";
       let href = null;
       try { const u = new URL(r.trace_link); href = u.protocol === "https:" || u.protocol === "http:" ? u.href : null; } catch (e) { href = null; }
       const id = code(r.trace_id.slice(0, 8), r.trace_id);
-      if (!href) return h("span", null, [id, h("span", { class: "dim", text: " (추적 링크 설정 없음)" })]);
-      return h("span", { class: "trace" }, [h("a", { class: "xlink", href, target: "_blank", rel: "noreferrer noopener" }, [h("span", { text: "추적 열기" }), icon("external", { size: 12 })]), id]);
+      if (!href) return h("span", null, [id, h("span", { class: "dim", text: " (no trace link configured)" })]);
+      return h("span", { class: "trace" }, [h("a", { class: "xlink", href, target: "_blank", rel: "noreferrer noopener" }, [h("span", { text: "Open trace" }), icon("external", { size: 12 })]), id]);
     }
     function waitLine(r, rootHold) {
       const w = B.waiting(r.waiting);
       let kids = null;
       if (w) kids = [icon("pause", { size: 14 }), w];
-      else if (r.state === "retry") kids = [icon("pause", { size: 14 }), h("span", { text: "오류가 난 뒤 다시 시도할 차례를 기다리는 중입니다." })];
-      else if (r.state === "dead") kids = [icon("alert", { size: 14 }), h("span", null, ["더 시도하지 않고 멈췄습니다.", r.error ? [" 마지막 오류: ", code(r.error)] : null])];
+      else if (r.state === "retry") kids = [icon("pause", { size: 14 }), h("span", { text: "Waiting for next retry after an error." })];
+      else if (r.state === "dead") kids = [icon("alert", { size: 14 }), h("span", null, ["Stopped after exhausting retries.", r.error ? [" Last error: ", code(r.error)] : null])];
       if (!kids) return null;
       const go = r.waiting && (r.waiting.on === "approval" || (r.waiting.on === "hold" && app.me().operator && !rootHold));
-      if (go) kids.push(h("button", { type: "button", class: "btn sm", text: "승인·보류에서 보기", onclick: () => app.go("decide", { profile: r.profile }) }));
+      if (go) kids.push(h("button", { type: "button", class: "btn sm", text: "View in Approvals & Holds", onclick: () => app.go("decide", { profile: r.profile }) }));
       return h("p", { class: "rd-wait" }, kids);
     }
     function childList(d) {
-      if (!d.children.length) return h("p", { class: "sec-h", text: "자식 실행이 없습니다." });
-      return h("ul", { class: "rl rl-flat", "aria-label": "자식 실행" }, d.children.map((c) => row(c, false)));
+      if (!d.children.length) return h("p", { class: "sec-h", text: "No child runs." });
+      return h("ul", { class: "rl rl-flat", "aria-label": "Child runs" }, d.children.map((c) => row(c, false)));
     }
     function callTable(d) {
-      return D.table(["호출", "도구", "위험 등급", "상태", "원인", "인자 해시", "시작"], d.calls.map((c) => [code(c.call), code(c.tool), B.riskPill(c.risk), B.callPill(c.state), B.callError(c.error), B.hash8(c.args_sha256), D.timeEl(c.started_ms)]), { narrow: [2, 3, 4, 5], label: "도구 호출 표", emptyTitle: "도구 호출이 없습니다", emptyIcon: "tool" });
+      return D.table(["Call", "Tool", "Risk", "State", "Error", "Args hash", "Started"], d.calls.map((c) => [code(c.call), code(c.tool), B.riskPill(c.risk), B.callPill(c.state), B.callError(c.error), B.hash8(c.args_sha256), D.timeEl(c.started_ms)]), { narrow: [2, 3, 4, 5], label: "Tool calls table", emptyTitle: "No tool calls", emptyIcon: "tool" });
     }
     function effectTable(d) {
-      return D.table(["호출", "단계", "상태", "영수증", "사유", "시각"], d.effects.map((e) => ({ cls: e.state === "held" ? "is-held" : "", cells: [code(e.call), e.step, B.effectPill(e.state), e.receipt ? code(e.receipt) : "-", e.state === "held" ? B.holdReason(e.reason) : "-", D.timeEl(e.at_ms)] })), { narrow: [2], label: "효과 표", emptyTitle: "기록된 효과가 없습니다", emptyHint: "외부에 쓰는 도구를 부르면 단계별 영수증이 여기에 남습니다.", emptyIcon: "check" });
+      return D.table(["Call", "Step", "State", "Receipt", "Reason", "Time"], d.effects.map((e) => ({ cls: e.state === "held" ? "is-held" : "", cells: [code(e.call), e.step, B.effectPill(e.state), e.receipt ? code(e.receipt) : "-", e.state === "held" ? B.holdReason(e.reason) : "-", D.timeEl(e.at_ms)] })), { narrow: [2], label: "Effects table", emptyTitle: "No recorded effects", emptyHint: "Step receipts appear here when tools perform external writes.", emptyIcon: "check" });
     }
     function sections(d) {
       const r = d.run, k = (s) => s;
       const action = root.BotRunControl.offered(d, app.me().operator);
       return [
-        { key: k("head"), sig: JSON.stringify([r.run, r.state]), build: () => ({ node: h("header", { class: "rd-head" }, [h("button", { type: "button", class: "btn back", onclick: close }, [icon("back", { size: 14 }), h("span", { text: "목록" })]), h("div", { class: "rd-title" }, [h("p", { class: "ovl", text: "실행" }), h("h3", null, [code(r.run)])]), B.runPill(r.state)]) }) },
+        { key: k("head"), sig: JSON.stringify([r.run, r.state]), build: () => ({ node: h("header", { class: "rd-head" }, [h("button", { type: "button", class: "btn back", onclick: close }, [icon("back", { size: 14 }), h("span", { text: "List" })]), h("div", { class: "rd-title" }, [h("p", { class: "ovl", text: "Run" }), h("h3", null, [code(r.run)])]), B.runPill(r.state)]) }) },
         { key: k("crumbs"), sig: JSON.stringify(d.lineage.map((x) => [x.run, x.agent])), build: () => ({ node: crumbs(d) }) },
-        { key: k("wait"), sig: JSON.stringify([r.state, r.waiting, r.error, app.me().operator, action === "held"]), build: () => ({ node: waitLine(r, action === "held") || h("p", { class: "rd-wait is-none", text: "기다리는 중이 아닙니다." }) }) },
+        { key: k("wait"), sig: JSON.stringify([r.state, r.waiting, r.error, app.me().operator, action === "held"]), build: () => ({ node: waitLine(r, action === "held") || h("p", { class: "rd-wait is-none", text: "Not waiting." }) }) },
         ...(action ? [{ key: k("control"), sig: JSON.stringify([r.profile, r.run, r.state, r.generation, d.control]), build: () => ({ node: controls.mount(d, action) }) }] : []),
         { key: k("facts"), sig: JSON.stringify(r), build: () => ({ node: h("dl", { class: "facts rd-facts" }, [].concat(
-          line("프로필", r.profile), line("에이전트", code(r.agent)), line("요청 주체", code(r.principal)),
-          line("시작 방식", h("span", null, [B.conversation(r.kind), r.trigger ? [" · 트리거 ", code(r.trigger)] : null])),
-          line("세대·시도", "세대 " + r.generation + " · 시도 " + r.attempts + "회"), line("위임 단계", r.step ? code(r.step) : "-"),
-          line("만든 때", D.when(r.created_ms)), line("바뀐 때", h("span", null, [D.when(r.updated_ms), " · ", D.timeEl(r.updated_ms)])),
-          line("비공개 기억 읽음", r.private_memory_read ? "예" : "아니오"), line("마지막 오류", r.error ? code(r.error) : "-"), line("추적", traceNode(r)))) }) },
-        { key: k("children"), sig: JSON.stringify(d.children), build: () => ({ node: section("자식 실행", d.children.length, childList(d)) }) },
-        { key: k("calls"), sig: JSON.stringify(d.calls), build: () => ({ node: section("도구 호출", d.calls.length, callTable(d)) }) },
-        { key: k("effects"), sig: JSON.stringify(d.effects), build: () => ({ node: section("효과", d.effects.length, effectTable(d)) }) },
+          line("Profile", r.profile), line("Agent", code(r.agent)), line("Principal", code(r.principal)),
+          line("Origin", h("span", null, [B.conversation(r.kind), r.trigger ? [" · Trigger ", code(r.trigger)] : null])),
+          line("Gen & attempts", "Gen " + r.generation + " · " + r.attempts + (r.attempts === 1 ? " attempt" : " attempts")), line("Delegation step", r.step ? code(r.step) : "-"),
+          line("Created", D.when(r.created_ms)), line("Updated", h("span", null, [D.when(r.updated_ms), " · ", D.timeEl(r.updated_ms)])),
+          line("Private memory read", r.private_memory_read ? "Yes" : "No"), line("Last error", r.error ? code(r.error) : "-"), line("Trace", traceNode(r)))) }) },
+        { key: k("children"), sig: JSON.stringify(d.children), build: () => ({ node: section("Child runs", d.children.length, childList(d)) }) },
+        { key: k("calls"), sig: JSON.stringify(d.calls), build: () => ({ node: section("Tool calls", d.calls.length, callTable(d)) }) },
+        { key: k("effects"), sig: JSON.stringify(d.effects), build: () => ({ node: section("Effects", d.effects.length, effectTable(d)) }) },
       ];
     }
     function renderDetail() {
       const key = selKey();
       if (st.dkey !== key) { D.clear(detail); dmemo = {}; body = null; st.dkey = key; }
-      if (!key) { D.clear(detail); detail.appendChild(D.empty("실행을 고르세요", "목록에서 실행을 누르면 계보·도구 호출·효과가 보입니다.", "run")); st.dkey = null; return; }
+      if (!key) { D.clear(detail); detail.appendChild(D.empty("Select a run", "Pick a run from the list to inspect its lineage, tool calls, and effects.", "run")); st.dkey = null; return; }
       if (!st.detail) {
         D.clear(detail); dmemo = {}; body = null;
-        const back = h("button", { type: "button", class: "btn back", onclick: close }, [icon("back", { size: 14 }), h("span", { text: "목록" })]);
-        detail.appendChild(st.detailErr ? h("div", { class: "rd" }, [back, h("p", { class: "warnbox", text: A.explain(st.detailErr, { not_found: "이 실행을 찾을 수 없습니다. 볼 수 없는 실행이거나 이미 지워졌습니다." }) })]) : h("div", { class: "rd" }, [back, D.skeleton(4)]));
+        const back = h("button", { type: "button", class: "btn back", onclick: close }, [icon("back", { size: 14 }), h("span", { text: "List" })]);
+        detail.appendChild(st.detailErr ? h("div", { class: "rd" }, [back, h("p", { class: "warnbox", text: A.explain(st.detailErr, { not_found: "Run not found. It may not be visible to you or may have been removed." }) })]) : h("div", { class: "rd" }, [back, D.skeleton(4)]));
         return;
       }
       if (!body) { D.clear(detail); body = h("div", { class: "rd" }); detail.appendChild(body); }
@@ -198,7 +190,6 @@
     return {
       load,
       reset() { st.sel = null; st.detail = null; st.detailErr = null; clearList(); renderAll(); },
-      // 다른 탭에서 넘어온 요청: { profile, run, state }. run이 없으면 상세 선택을 비워 #runs와 맞춘다.
       apply(arg) {
         if (arg && arg.run) { open(arg.profile, arg.run, true); return; }
         clearSel();

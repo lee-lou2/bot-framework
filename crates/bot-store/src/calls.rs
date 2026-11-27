@@ -1,6 +1,4 @@
-//! 호출 원장(CallLedger의 호출 쪽): context·begin·start·finish.
-//! 모든 전이는 같은 트랜잭션에서 현재 소유자(세대·리스·취소 요청 없음)를 대조하고 감사 한 줄을 잇는다.
-//! 보류(held)가 되면 run은 같은 커밋으로 보류 대기로 넘어가 워커 리스를 놓는다(시도 횟수는 쓰지 않는다).
+//! Call ledger transitions (`context`, `lookup`, `begin`, `start`, `finish`) fenced by active lease, generation, and cancellation state.
 
 use crate::{
     audit::{self, Entry, OwnedEntry},
@@ -35,17 +33,15 @@ pub(crate) fn risk_from(s: &str) -> R<Risk> {
     })
 }
 
-/// 호출 원장의 소유자 확인. 없는 run은 `Missing`, 다른 프로필에만 있는 run은 `Denied`,
-/// 옛 세대·리스 만료·취소 요청은 `Stale`이다. run ID는 프로필마다 따로 쓰이므로(같은 ID가 두 프로필에 있을 수 있다) **자기 프로필의 run을 먼저** 본다:
-/// 자기 프로필에 그 run이 있으면 어느 쪽 프로필의 행을 먼저 읽었는지와 무관하게 `Stale`이다. 민감 DM 접수 기록(`private`)은 일반 호출 원장으로 접근할 수 없다(`Denied`):
-/// 전용 원장(`PrivateLedger`)만 그 상태를 바꾼다.
+/// Verifies active lease, generation, claim epoch, and no pending cancel; rejects private runs with `Denied`.
+/// Checks the caller's profile first so same-ID runs in another profile do not mask `Stale` as `Denied`.
 pub(crate) async fn fence(tx: &mut Tx<'_>, at: &Attempt) -> R<RunRow> {
     match lock_leased(tx, at).await {
         Ok(run) if run.private => Err(Error::Denied.into()),
         Ok(run) if run.cancel_requested => Err(Error::Stale.into()),
         Ok(run) => Ok(run),
         Err(Fail::Core(Error::Stale)) => {
-            // 자기 프로필 기본키 조회를 먼저 본다(정상 만료·옛 세대에서 전체 테이블 스캔을 피한다)
+            // Check caller's profile PK first to avoid a cross-profile scan on normal expiry.
             let mine: bool = sqlx::query_scalar(
                 "select exists (select 1 from bot_runs where profile = $1 and id = $2)",
             )
@@ -67,15 +63,10 @@ pub(crate) async fn fence(tx: &mut Tx<'_>, at: &Attempt) -> R<RunRow> {
     }
 }
 
-/// 결과를 기록하는 경로(호출 완료·보류, 단계 정산)의 소유자 확인. 취소 요청이 서 있어도 받는다:
-/// 취소는 **새 효과 시작**을 막을 뿐, 이미 시작한 호출의 영수증·보류 기록을 버리면 안 된다(결과 유실·이중 전송).
-/// 세대·claim 토큰·leased·리스 만료는 그대로 대조한다.
+/// Settlement lease fence (`finish`, effect recording): permits in-flight settlement even after `cancel_requested` to prevent lost receipts.
 pub(crate) async fn fence_settle(tx: &mut Tx<'_>, at: &Attempt) -> R<RunRow> {
     match fence(tx, at).await {
-        Err(Fail::Core(Error::Stale)) => {
-            // 취소 요청 때문에 거절된 것이면 취소 표시를 무시하고 다시 대조한다
-            lock_leased_ignoring_cancel(tx, at).await
-        }
+        Err(Fail::Core(Error::Stale)) => lock_leased_ignoring_cancel(tx, at).await,
         other => other,
     }
 }
@@ -126,8 +117,7 @@ pub(crate) fn record_of(row: &PgRow) -> R<CallRecord> {
     })
 }
 
-/// 위임한 자식이면 루트 run을 FOR SHARE로 잡고 그 시점의 private 플래그를 돌려준다(플래그를 바꾸는 쪽은 같은 행을 갱신하므로 서로 기다린다).
-/// 이 run이 루트면 None이다(이후 fence의 행 잠금이 같은 역할을 한다 — 같은 행을 공유→배타로 올리면 교착하기 때문이다).
+/// For delegated children, locks the root run `FOR SHARE` to read `private_memory_read`; roots return `None` to avoid shared-to-exclusive deadlock.
 pub(crate) async fn lock_root_shared(tx: &mut Tx<'_>, at: &Attempt) -> R<Option<bool>> {
     let root: Option<String> =
         sqlx::query_scalar("select root from bot_runs where profile = $1 and id = $2")
@@ -147,7 +137,6 @@ pub(crate) async fn lock_root_shared(tx: &mut Tx<'_>, at: &Attempt) -> R<Option<
     .await?)
 }
 
-/// 요청 트리의 private 기억 조회 플래그. 위임 자식은 루트를 공유 잠금으로 읽은 값(`shared_flag`)을, 루트는 자기 행의 지금 값을 쓴다.
 pub(crate) async fn tree_flagged(
     tx: &mut Tx<'_>,
     run: &RunRow,
@@ -155,7 +144,6 @@ pub(crate) async fn tree_flagged(
 ) -> R<bool> {
     Ok(match shared_flag {
         Some(flag) => flag,
-        // 이 run이 루트다: 앞에서 행 잠금을 쥐었으니 지금 값이 곧 최신이다
         None => {
             sqlx::query_scalar(
                 "select private_memory_read from bot_runs where profile = $1 and id = $2",
@@ -168,12 +156,11 @@ pub(crate) async fn tree_flagged(
     })
 }
 
-// 호출 행 잠금과 일반 조회가 같은 증거를 반환한다. 현재 claim이 run을 잠갔으므로 단계 정산과 엇갈리지 않는다.
+// Matches `lock_call` evidence; the active claim holds the run lock so step settlement cannot race.
 const CONFIRMED_STEP: &str = "case when c.state in ('started', 'held') then exists (
     select 1 from bot_effects e where e.profile = c.profile and e.run = c.run and e.call = c.call and e.state = 'confirmed'
 ) else false end as confirmed_step";
 
-/// 호출 행을 잠가 읽는다. 없으면 `Missing`.
 pub(crate) async fn lock_call(tx: &mut Tx<'_>, at: &Attempt, call: &CallId) -> R<PgRow> {
     sqlx::query(&format!(
         "select {}, {CONFIRMED_STEP} from bot_calls c where profile = $1 and run = $2 and call = $3 for update of c",
@@ -188,7 +175,6 @@ pub(crate) async fn lock_call(tx: &mut Tx<'_>, at: &Attempt, call: &CallId) -> R
 }
 
 impl Store {
-    /// 인증된 실행 맥락. 모델·도구 호출 판정은 호출자가 넘긴 값이 아니라 이 값으로 한다.
     pub(crate) async fn call_context(&self, at: &Attempt) -> R<RunContext> {
         let mut tx = self.pool.begin().await?;
         self.check_pinned(&mut tx).await?;
@@ -198,7 +184,6 @@ impl Store {
         Ok(context)
     }
 
-    /// 이 run의 기존 호출 한 건을 읽는다(없으면 `None`). 현재 일반 실행의 claim·세대·리스·취소를 확인하고, 호출 생성·승인 소비·감사는 하지 않는다.
     pub(crate) async fn call_lookup(&self, at: &Attempt, call: &CallId) -> R<Option<CallRecord>> {
         ids_ok(&[&call.0])?;
         let mut tx = self.pool.begin().await?;
@@ -217,7 +202,6 @@ impl Store {
         row.as_ref().map(record_of).transpose()
     }
 
-    /// 실행 자격과 (profile, run, key) 한 행을 같은 시점에 읽는다.
     pub(crate) async fn call_step(&self, at: &Attempt, key: &str) -> R<Option<JsonPayload>> {
         ids_ok(&[key])?;
         let row = sqlx::query(
@@ -250,8 +234,7 @@ impl Store {
         Ok(row.get::<Option<String>, _>("body").map(JsonPayload))
     }
 
-    /// 결과를 돌려주기 직전의 확인: 이 시도의 현재 일반 claim과 그 프로필의 활성 판본을 **한 문장**(같은 DB 시점)으로 읽는다. 잠금은 없다.
-    /// 프로필이 활성 집합에 없으면 `None`, 인계·만료·취소·알 수 없는 run은 `Stale`, 민감 DM 접수 기록은 `Denied`다.
+    /// Reads lease validity and the profile's active revision in one statement without locking.
     pub(crate) async fn call_active_revision(&self, at: &Attempt) -> R<Option<Revision>> {
         let row = sqlx::query(
             "select r.private, r.cancel_requested,
@@ -276,8 +259,7 @@ impl Store {
         Ok(row.get::<Option<String>, _>("active").map(Revision))
     }
 
-    /// 호출을 기록한다((run, call) 유일·멱등). 같은 호출에 도구·인자 해시가 다르면 `Conflict`.
-    /// 이미 보류(판정 전)인 호출을 다시 만나면 run을 보류 대기로 넘긴다.
+    /// Idempotently opens `(run, call)`; parks the run if an unresolved hold already exists.
     pub(crate) async fn call_begin(
         &self,
         at: &Attempt,
@@ -286,18 +268,18 @@ impl Store {
         args: [u8; 32],
     ) -> R<CallRecord> {
         ids_ok(&[&call.0, &tool.0])?;
-        // `reply:`·`private:` 접두사는 회신 발송·민감 DM 보류의 합성 ID 자리다: 도구 호출 ID로는 쓸 수 없다(판정 경로가 섞이지 않게)
+        // Reserve `reply:` and `private:` prefixes for synthetic outbox/private hold IDs.
         if call.0.starts_with("reply:") || call.0.starts_with("private:") {
             return invalid();
         }
-        // 예약 회신 호출 ID는 호스트가 소유한다: 그 도구만 쓰고, 그 도구는 그 ID로만 기록한다
+        // `DELIVER_CALL` is reserved exclusively for `DELIVER_TOOL`.
         let delivering = tool.0 == bot_core::schedule::DELIVER_TOOL;
         if delivering != (call.0 == bot_core::schedule::DELIVER_CALL) {
             return invalid();
         }
         let mut tx = self.pool.begin().await?;
         let run = fence(&mut tx, at).await?;
-        // 동결한 초안이 있고 그 승인 지문과 같은 호출만 기록한다(초안 없이·다른 내용으로 회신 호출을 열지 못한다)
+        // Require an existing frozen draft matching `args` before opening `DELIVER_TOOL`.
         if delivering {
             crate::delivery::check_begin(&mut tx, &at.profile.0, &at.run.0, &args).await?;
         }
@@ -339,13 +321,12 @@ impl Store {
         Ok(record)
     }
 
-    /// 현재 세대·취소·private 플래그와 승인을 잠금 안에서 대조하고 단 한 번 시작한다.
-    /// 사전 승인이 묶인 run의 직접 호출은 이 길로 시작할 수 없다(`call_start_with`만 시작한다).
+    /// Starts an open call under lease, revision, privacy, and approval checks; refuses grant-bound calls (use `call_start_with`).
     pub(crate) async fn call_start(&self, s: StartCall) -> R<()> {
         self.start_inner(s, None).await.map(|_| ())
     }
 
-    /// `call_start`에 사전 승인과 지정한 사람의 승인 증거를 같은 잠금 안에서 더해 확인한다. 확인에 실패하면 아무것도 쓰지 않고 고정 사유를 돌려준다.
+    /// Like `call_start`, also verifying pre-approval grant and human-evidence authority under the same lock.
     pub(crate) async fn call_start_with(
         &self,
         s: StartCall,
@@ -362,13 +343,12 @@ impl Store {
         let at = &s.attempt;
         ids_ok(&[&s.owner, &s.checked_revision.0])?;
         let mut tx = self.begin_authorized().await?;
-        // 잠금 순서: 활성 판본 → 루트 run(공유) → 이 run → 호출 → 승인 → 감사.
-        // 권한 검사에 쓴 판본이 지금도 활성이고(교체와 직렬화), 루트의 private 플래그가 판정한 값과 같은 채로 시작을 커밋한다.
+        // Lock order: active revision -> root run (FOR SHARE) -> run -> call -> approval -> audit.
         crate::active::guard_active(&mut tx, &at.profile.0, &s.checked_revision).await?;
         let shared_flag = lock_root_shared(&mut tx, at).await?;
         let run = fence(&mut tx, at).await?;
         let call = lock_call(&mut tx, at, &s.call).await?;
-        // 기억 공유·예약 생성/취소·예약 회신은 승인 소비·변경·호출 완료가 한 커밋인 전용 연산으로만 한다(시작과 변경 사이에 본문이 바뀔 수 있다)
+        // Dedicated tools commit approval consumption, state mutation, and call completion atomically.
         if crate::user_schedule::dedicated_tool(&call.get::<String, _>("tool")) {
             return Err(Error::Denied.into());
         }
@@ -377,9 +357,9 @@ impl Store {
         };
         let flagged = tree_flagged(&mut tx, &run, shared_flag).await?;
         if flagged && !s.private_recall {
-            return Err(Error::Conflict.into()); // 판정한 뒤 다른 실행이 private 기억을 조회했다
+            // Another run read private memory after policy evaluation.
+            return Err(Error::Conflict.into());
         }
-        // 사전 승인·사람 증거: 같은 잠금 안에서 승인 ID·지문·정지·증거를 확인한다(실패하면 아무것도 쓰지 않는다)
         let mark = match crate::authority::check_start(
             &mut tx,
             &run,
@@ -392,7 +372,7 @@ impl Store {
         {
             Ok(mark) => mark,
             Err(why) if authority.is_none() => {
-                // 사전 승인이 묶인 직접 호출을 권한 없이 시작하려 했다: 그 자리에서 거절로 닫는다
+                // Grant-bound direct call attempted without authority: deny immediately.
                 crate::authority::deny_in(&mut tx, &run, &call, why).await?;
                 tx.commit().await?;
                 return Err(Error::Denied.into());
@@ -402,7 +382,7 @@ impl Store {
                 return Ok(bot_core::grant::Granted::Refused(why));
             }
         };
-        // 호출에 승인이 연결돼 있으면 그 승인을 내야 시작한다(인자를 비워 승인 소비를 건너뛰지 못한다)
+        // Require the linked approval to be presented so callers cannot bypass consumption.
         crate::approvals::require_presented(&mut tx, pointer.as_ref(), s.approval.is_some())
             .await?;
         let mut verdict = "started".to_owned();
@@ -444,14 +424,12 @@ impl Store {
         Ok(bot_core::grant::Granted::Started)
     }
 
-    /// 호출을 닫는다. 열린 호출은 거절(Blocked)로만, 시작한 호출(같은 세대 또는 옛 세대)은 어느 결과로나,
-    /// 판정이 있는 보류는 영수증이면 완료·미실행이면 되돌림(또는 거절)으로만 닫는다.
+    /// Settles a call: `Open -> Blocked`, `Started -> any`, or resolved `Held -> Done/Released/Blocked`.
     pub(crate) async fn call_finish(&self, f: FinishCall) -> R<()> {
         self.call_finish_with(f, None).await
     }
 
-    /// `call_finish`와 같되 거절(`Blocked`)을 승인 경로 때문이라고 저장한다: 호출 기록의 `reason`에 닫힌 낱말을 남겨 조회(`ApiRuns::lookup`)가 도구가
-    /// 실행되지 않은 이유를 저장된 판정에서 읽게 한다. `Blocked`가 아닌 결과에는 쓸 수 없다(`Conflict`).
+    /// Like `call_finish`, persisting an `ApprovalBlock` reason code on `Blocked` calls for API run lookup.
     pub(crate) async fn call_finish_with(
         &self,
         f: FinishCall,
@@ -511,7 +489,7 @@ impl Store {
                 block.map_or_else(|| "blocked".to_owned(), |b| format!("blocked:{}", b.code())),
             ),
         };
-        // 풀려 Open으로 돌아가면 판정·시작 표지를 비워 새 시작을 받을 수 있게 한다. 보류가 되면 시작 표지는 복구용으로 남긴다
+        // Clear start/resolution markers on `Released` (`open`) so the call can restart; retain them on `held` for recovery.
         sqlx::query(
             "update bot_calls set state = $4, result = $5, reason = $6, updated_ms = bot_now_ms(),
                     finished_ms = case when $4 in ('done', 'denied') then bot_now_ms() else null end,
@@ -532,8 +510,7 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         if state == "held" {
-            // 호출을 보류하면 결과가 불명인 단계(시작했지만 영수증이 없다)도 같은 커밋에서 판정 가능한 보류로 옮긴다.
-            // 그래야 운영자 보류 목록에 단계별로 나타나고(없으면 run만 기다리고 목록은 비어 있다) 미실행·영수증으로 하나씩 판정할 수 있다.
+            // Move any `started` effect steps to `held` atomically so they appear individually in the operator hold queue.
             sqlx::query(
                 "update bot_effects set state = 'held', reason = coalesce(reason, $4), updated_ms = bot_now_ms()
                  where profile = $1 and run = $2 and call = $3 and state = 'started'",

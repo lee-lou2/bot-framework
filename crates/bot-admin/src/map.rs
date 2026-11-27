@@ -1,8 +1,4 @@
-//! 구조 지도: 검증된 프로필 스냅숏(`bot_core::profile::Snapshot`)에서 화면이 읽는 카드와 연결을 만든다.
-//! 순수·결정적·I/O 없음 — 같은 입력은 같은 `rev`다. 지침·지식 본문과 비밀 값은 읽지 않고 이름·분류·개수만 싣는다.
-//!
-//! 카드 종류 8개: profile·agent·skill·tool·trigger·binding(항목)과 scope·secret(공통 자원).
-//! 연결은 6종: delegates(위임)·uses(사용)·runs(소유)·handles(처리)·triggers(깨움)·needs(필요).
+//! Pure, deterministic profile-snapshot-to-topology-map builder exposing names, counts, and edges without instructions or secrets.
 
 use bot_core::{
     id::{AgentId, ProfileId},
@@ -68,7 +64,7 @@ impl Rel {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Card {
     pub profile: String,
-    /// 소유 에이전트 경로. 프로필 수준 카드(프로필·바인딩·스코프·비밀)는 `None`이다.
+    /// Owning agent path; `None` for profile-level cards (profile, binding, scope, secret).
     pub agent: Option<String>,
     pub kind: Kind,
     pub name: String,
@@ -77,7 +73,6 @@ pub struct Card {
     pub links: Vec<(Rel, String)>,
 }
 
-/// 카드 ID: `<에이전트>/<종류>:<이름>`(프로필 수준이면 `<종류>:<이름>`). 카드 키는 (프로필, ID)다.
 pub fn card_id(agent: Option<&str>, kind: Kind, name: &str) -> String {
     match agent {
         Some(a) => format!("{a}/{}:{name}", kind.as_str()),
@@ -122,7 +117,6 @@ impl Card {
     }
 }
 
-/// 조립 결과: 카드(구조)와 구조 버전. `rev`는 카드 전체에서 계산한다.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Map {
     pub rev: String,
@@ -142,7 +136,6 @@ fn short(s: &str) -> String {
     s.chars().take(12).collect()
 }
 
-/// 승인 요건: 되돌릴 수 없는 작업은 항상, 정책이 지정한 스코프를 쓰는 쓰기는 정책에 따라, 그 밖에는 없음.
 fn approval(s: &Snapshot, t: &Tool) -> &'static str {
     match t.class {
         Risk::Irreversible => "always",
@@ -158,7 +151,6 @@ fn destination(d: &Destination) -> String {
     }
 }
 
-/// 같은 스킬(지침 경로·도구 목록이 같음)을 부모도 보는가.
 fn inherits(s: &Snapshot, child: &AgentId, parent: &AgentId, skill: &str) -> bool {
     let get = |a: &AgentId| s.agents.get(a).and_then(|x| x.skills.get(skill));
     match (get(child), get(parent)) {
@@ -170,7 +162,7 @@ fn inherits(s: &Snapshot, child: &AgentId, parent: &AgentId, skill: &str) -> boo
     }
 }
 
-/// 이 에이전트가 보는 스킬을 실제로 정의한 조상(같은 스킬이 이어지는 가장 위 에이전트).
+/// Walks ancestors to find the highest agent defining the same inherited skill.
 fn owner(s: &Snapshot, agent: &AgentId, skill: &str) -> AgentId {
     let mut at = agent.clone();
     while let Some(parent) = s.agents.get(&at).and_then(|a| a.parent.clone()) {
@@ -182,7 +174,6 @@ fn owner(s: &Snapshot, agent: &AgentId, skill: &str) -> AgentId {
     at
 }
 
-/// 모델 실행기가 이 에이전트에 열어 준 읽기 전용 내장 도구의 이름.
 fn builtin_name(b: Builtin) -> &'static str {
     match b {
         Builtin::Read => "read",
@@ -191,11 +182,10 @@ fn builtin_name(b: Builtin) -> &'static str {
     }
 }
 
-/// 카드 요약: 에이전트가 스스로 밝힌 설명의 첫 줄(140자까지), 없으면 모델을 보인다.
 fn agent_summary(id: &str, a: &Agent) -> String {
     let line = a.description.lines().next().unwrap_or_default().trim();
     if line.is_empty() {
-        return format!("에이전트 {id}: 모델 {}", a.model);
+        return format!("Agent {id}: model {}", a.model);
     }
     line.chars().take(140).collect()
 }
@@ -221,7 +211,7 @@ fn trigger_card(s: &Snapshot, agent: &AgentId, t: &Trigger) -> Card {
         Some(&agent.0),
         Kind::Trigger,
         &t.id,
-        format!("트리거 {}: {on} {detail}", t.id),
+        format!("Trigger {}: {on} {detail}", t.id),
     )
     .fact("on", on)
     .fact("when", detail)
@@ -254,7 +244,6 @@ fn trigger_card(s: &Snapshot, agent: &AgentId, t: &Trigger) -> Card {
     }
 }
 
-/// 한 프로필의 카드.
 pub fn cards(s: &Snapshot) -> Vec<Card> {
     let p = s.id.0.as_str();
     let mut out = Vec::new();
@@ -264,7 +253,7 @@ pub fn cards(s: &Snapshot) -> Vec<Card> {
             None,
             Kind::Profile,
             p,
-            format!("프로필 {p}: 에이전트 {}개", s.agents.len()),
+            format!("Profile {p}: {} agent(s)", s.agents.len()),
         )
         .fact("revision", short(&s.revision.0))
         .fact("policy_revision", short(&s.policy_revision.0))
@@ -313,7 +302,7 @@ pub fn cards(s: &Snapshot) -> Vec<Card> {
                 Some(&id.0),
                 Kind::Skill,
                 name,
-                format!("스킬 {name}: 도구 {}개", skill.tools.len()),
+                format!("Skill {name}: {} tool(s)", skill.tools.len()),
             )
             .fact("server", server)
             .fact("tools", skill.tools.len());
@@ -346,7 +335,7 @@ pub fn cards(s: &Snapshot) -> Vec<Card> {
                 None,
                 Kind::Binding,
                 &bid.0,
-                format!("입구 {}: {adapter} → {}", bid.0, b.agent.0),
+                format!("Binding {}: {adapter} → {}", bid.0, b.agent.0),
             )
             .fact("adapter", adapter)
             .fact("detail", detail)
@@ -362,7 +351,7 @@ pub fn cards(s: &Snapshot) -> Vec<Card> {
             .map(|(k, _)| k.as_str())
             .collect();
         out.push(
-            Card::new(p, None, Kind::Scope, name, format!("스코프 {name}"))
+            Card::new(p, None, Kind::Scope, name, format!("Scope {name}"))
                 .fact("granted", s.policy.scopes.contains(*name))
                 .fact("approval", s.policy.approve.contains(*name))
                 .fact("roles", list(roles)),
@@ -375,7 +364,7 @@ pub fn cards(s: &Snapshot) -> Vec<Card> {
                 None,
                 Kind::Secret,
                 name.as_str(),
-                "비밀 이름(값은 표시하지 않는다)".to_owned(),
+                "Secret name (value hidden)".to_owned(),
             )
             .fact("declared", true),
         );
@@ -394,7 +383,7 @@ fn tool_card(s: &Snapshot, agent: &str, id: &str, t: &Tool) -> Card {
         Some(agent),
         Kind::Tool,
         id,
-        format!("도구 {id}: {class}"),
+        format!("Tool {id}: {class}"),
     )
     .fact("class", class)
     .fact("scopes", list(&t.scopes))
@@ -416,20 +405,19 @@ fn tool_card(s: &Snapshot, agent: &str, id: &str, t: &Tool) -> Card {
     c
 }
 
-/// 끊긴 연결·중복 카드. 비어 있어야 정상이다.
 pub fn problems(nodes: &[Card]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut bad = Vec::new();
     for c in nodes {
         if !seen.insert((c.profile.as_str(), c.id())) {
-            bad.push(format!("{}/{}: ID가 중복이다", c.profile, c.id()));
+            bad.push(format!("{}/{}: duplicate ID", c.profile, c.id()));
         }
     }
     for c in nodes {
         for (_, to) in &c.links {
             if !seen.contains(&(c.profile.as_str(), to.clone())) {
                 bad.push(format!(
-                    "{}/{}: 연결 대상 {to}이(가) 없다",
+                    "{}/{}: missing link target {to}",
                     c.profile,
                     c.id()
                 ));
@@ -439,14 +427,12 @@ pub fn problems(nodes: &[Card]) -> Vec<String> {
     bad
 }
 
-/// 구조 버전: 카드 직렬화의 sha256 앞 12자. 같은 구조는 입력 순서와 상관없이 같은 값이다.
 fn revision(nodes: &[Card]) -> String {
     let body: Vec<Value> = nodes.iter().map(Card::json).collect();
     let digest = Sha256::digest(serde_json::to_vec(&body).unwrap_or_default());
     crate::json::hex(&digest[..6])
 }
 
-/// 고른 프로필들의 구조를 합친다. 카드는 (프로필, ID)순으로 정규화한다.
 pub fn build(profiles: &BTreeMap<ProfileId, Arc<Snapshot>>) -> Map {
     let mut nodes: Vec<Card> = profiles.values().flat_map(|s| cards(s)).collect();
     nodes.sort_by_cached_key(|c| (c.profile.clone(), c.id()));
@@ -460,7 +446,6 @@ fn set(v: &BTreeSet<String>) -> Vec<&String> {
     v.iter().collect()
 }
 
-/// 권한 보기용: 역할·멤버·정책(이름만, 자격 값 없음).
 pub fn access(s: &Snapshot) -> Value {
     json!({
         "revision": short(&s.revision.0), "policy_revision": short(&s.policy_revision.0),

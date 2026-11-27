@@ -1,5 +1,4 @@
-//! `bot chat` — 이 사용자의 로컬 입구(유닉스 소켓)로 에이전트와 대화한다. 요청 ID는 한 번 만들어 재시도에도 같게 쓴다:
-//! 접수 직후 끊기거나 시간이 지나도 `--attach --request-id <ID>`로 같은 결과를 다시 받는다(새 접수 없음).
+//! Local CLI chat command (`bot chat`) over the user's Unix socket.
 use crate::{cli::ChatArgs, load::load_host, settings::Settings, term::plain};
 use bot_gateway::cli::{
     client::{self, Chat, Outcome, new_request_id, render},
@@ -8,7 +7,7 @@ use bot_gateway::cli::{
 use serde_json::Value;
 use std::process::ExitCode;
 
-/// 다시 시도하면 되는 실패(저장소 장애·속도 제한·기다림 초과)의 종료 코드
+/// Exit code for retryable failures (store outage, rate limit, or timeout).
 const RETRYABLE: u8 = 3;
 
 pub async fn run(settings: &Settings, args: ChatArgs) -> ExitCode {
@@ -23,7 +22,6 @@ pub async fn run(settings: &Settings, args: ChatArgs) -> ExitCode {
 
 async fn talk(settings: &Settings, args: ChatArgs) -> Result<ExitCode, String> {
     let uid = current_uid().map_err(|e| e.to_string())?;
-    // 호스트 파일이 지정돼 있으면 그 파일의 소켓 위치를 따른다(서버와 같은 규칙)
     let configured = match &settings.host_config {
         Some(_) => load_host(settings, uid)?.gateway.cli.socket,
         None => None,
@@ -38,12 +36,14 @@ async fn talk(settings: &Settings, args: ChatArgs) -> Result<ExitCode, String> {
         None => new_request_id().map_err(|e| e.to_string())?,
     };
     if !bot_gateway::inbound::valid_request_id(&request) {
-        return Err("--request-id는 1~128자의 영숫자와 . _ : - 만 쓸 수 있어요".into());
+        return Err(
+            "--request-id must be 1..=128 characters of ASCII alphanumerics and . _ : -".into(),
+        );
     }
     let on_event = |event: &Value| match event["type"].as_str() {
-        Some("accepted") => eprintln!("접수했어요 (요청 ID: {request})"),
+        Some("accepted") => eprintln!("Accepted (request ID: {request})"),
         Some("state") if event["state"] == "waiting" => {
-            eprintln!("… 승인 또는 하위 작업을 기다리고 있어요(관리 화면에서 승인할 수 있어요)");
+            eprintln!("... waiting for approval or child run (approve in the Admin UI)");
         }
         _ => {}
     };
@@ -60,7 +60,7 @@ async fn talk(settings: &Settings, args: ChatArgs) -> Result<ExitCode, String> {
         let text = args
             .text
             .clone()
-            .ok_or("보낼 글이 필요해요(예: bot chat \"오늘 일정 알려줘\")")?;
+            .ok_or("message text is required (e.g. bot chat \"Show today's agenda\")")?;
         let chat = Chat {
             profile: args.profile.clone(),
             request: request.clone(),
@@ -78,18 +78,18 @@ async fn talk(settings: &Settings, args: ChatArgs) -> Result<ExitCode, String> {
             ) =>
         {
             Err(format!(
-                "서버에 연결하지 못했어요 — bot serve가 실행 중인지 확인하세요(소켓: {})",
+                "could not connect to server — check that `bot serve` is running (socket: {})",
                 socket.display()
             ))
         }
-        // 서버를 믿을 수 없다(소켓 폴더·파일이 내 것이 아니거나 반대편이 내 계정의 서버가 아니다): 대화 글을 보내지 않았다. 다시 시도해도 같으니 재시도 코드가 아니다
+        // Peer or socket directory ownership check failed before sending; do not signal retryable.
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(format!(
-            "{error} — 대화 글을 보내지 않았어요(소켓: {})",
+            "{error} — message was not sent (socket: {})",
             socket.display()
         )),
         Err(error) => {
             eprintln!(
-                "연결이 끊겼어요({error}). 같은 요청 ID로 결과를 다시 받을 수 있어요: bot chat --attach --request-id {request}"
+                "Connection lost ({error}). Reattach with the same request ID: bot chat --attach --request-id {request}"
             );
             Ok(ExitCode::from(RETRYABLE))
         }
@@ -99,7 +99,7 @@ async fn talk(settings: &Settings, args: ChatArgs) -> Result<ExitCode, String> {
         }
         Ok(Outcome::Done { state, result }) => {
             if state == "succeeded" {
-                // 모델·도구가 만든 글: 제어 문자(ESC 시퀀스 등)는 터미널에서 명령이 되니 보이는 표기로 바꿔 찍는다
+                // Sanitize control characters from untrusted model/tool output before printing to terminal.
                 let text = result.as_ref().map(render).unwrap_or_default();
                 if !text.is_empty() {
                     println!("{}", plain(&text));
@@ -107,11 +107,11 @@ async fn talk(settings: &Settings, args: ChatArgs) -> Result<ExitCode, String> {
                 Ok(ExitCode::SUCCESS)
             } else {
                 eprintln!(
-                    "실행이 {}로 끝났어요(요청 ID: {request})",
+                    "Run {} (request ID: {request})",
                     if state == "cancelled" {
-                        "취소"
+                        "was cancelled"
                     } else {
-                        "실패"
+                        "failed"
                     }
                 );
                 Ok(ExitCode::FAILURE)
@@ -126,10 +126,10 @@ async fn talk(settings: &Settings, args: ChatArgs) -> Result<ExitCode, String> {
             let retryable = matches!(code.as_str(), "unavailable" | "rate_limited" | "timeout");
             if retryable {
                 let wait = retry_after_secs
-                    .map(|s| format!("{s}초 뒤에 "))
+                    .map(|s| format!("after {s}s, "))
                     .unwrap_or_default();
                 eprintln!(
-                    "{wait}같은 요청 ID로 다시 시도하세요: bot chat --request-id {request} …"
+                    "Retry {wait}with the same request ID: bot chat --request-id {request} ..."
                 );
                 Ok(ExitCode::from(RETRYABLE))
             } else {

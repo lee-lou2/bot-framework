@@ -1,4 +1,4 @@
-//! `mcp.remove`: MCP 서버·스킬 도구 바인딩·미사용 스코프·선택적 비밀 정리와 즉시 활성화.
+//! Live `mcp.remove` handler pruning MCP servers, tool bindings, unused scopes, and optional secrets.
 use super::{
     LiveManager,
     mcp::reject,
@@ -20,12 +20,12 @@ impl LiveManager {
     pub(super) async fn remove_mcp(&self, call: &ManageCall) -> Result<ManageOutcome, ManageError> {
         let host_path = self.require_host_path()?;
         let args: Value = serde_json::from_str(&call.args.0)
-            .map_err(|_| reject("invalid_args", "요청 인자를 읽지 못했어요"))?;
+            .map_err(|_| reject("invalid_args", "failed to parse request arguments"))?;
         let alias = args
             .get("alias")
             .and_then(Value::as_str)
             .filter(|s| is_name(s))
-            .ok_or_else(|| reject("invalid_args", "올바른 alias가 필요해요"))?;
+            .ok_or_else(|| reject("invalid_args", "a valid alias is required"))?;
         let filter_skill = args.get("skill").and_then(Value::as_str);
         let filter_agent = args.get("agent").and_then(Value::as_str);
         let delete_skill = args
@@ -42,11 +42,11 @@ impl LiveManager {
         let snapshot = set
             .profile(&call.profile)
             .cloned()
-            .ok_or_else(|| reject("unknown_profile", "활성 프로필을 찾지 못했어요"))?;
+            .ok_or_else(|| reject("unknown_profile", "active profile not found"))?;
         let host_text = fs::read_to_string(&host_path)
-            .map_err(|_| reject("io_error", "host.json을 읽지 못했어요"))?;
+            .map_err(|_| reject("io_error", "failed to read host.json"))?;
         let mut host_doc: Value = serde_json::from_str(&host_text)
-            .map_err(|_| reject("invalid_host", "host.json이 올바른 JSON이 아니에요"))?;
+            .map_err(|_| reject("invalid_host", "host.json is not valid JSON"))?;
         let in_host = host_doc
             .get("servers")
             .and_then(Value::as_object)
@@ -85,7 +85,7 @@ impl LiveManager {
         if !in_host && matched_dirs.is_empty() {
             return Err(reject(
                 "server_not_found",
-                format!("MCP 서버 `{alias}`를 찾지 못했어요"),
+                format!("MCP server `{alias}` not found"),
             ));
         }
 
@@ -136,7 +136,7 @@ impl LiveManager {
             }
             removed_host_server = true;
             let host_rendered = serde_json::to_string_pretty(&host_doc)
-                .map_err(|_| reject("invalid_host", "host.json을 직렬화하지 못했어요"))?;
+                .map_err(|_| reject("invalid_host", "failed to serialize host.json"))?;
             txn.write_file(&host_path, format!("{host_rendered}\n").as_bytes())
                 .map_err(|m| reject("io_error", m))?;
         }
@@ -168,7 +168,7 @@ impl LiveManager {
         if !drop_scopes.is_empty() || !drop_secrets.is_empty() {
             let profile_yaml_path = profile_dir.join("profile.yaml");
             let text = fs::read_to_string(&profile_yaml_path)
-                .map_err(|_| reject("io_error", "profile.yaml을 읽지 못했어요"))?;
+                .map_err(|_| reject("io_error", "failed to read profile.yaml"))?;
             let mut profile_doc =
                 bot_profile::parse_yaml("profile.yaml", &text, &Limits::default())
                     .map_err(|e| reject("invalid_profile", e.to_string()))?;

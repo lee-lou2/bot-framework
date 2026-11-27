@@ -26,7 +26,7 @@ pub(super) fn schema() -> Value {
 
 pub(super) fn decl(secrets: &[(&str, &str)], egress: &[&str], effects: bool) -> Tool {
     let mut t = crate::testing::tool(Risk::Irreversible, &["calendar.delete"]);
-    // 선언의 키 순서·공백은 서버가 내세우는 스키마와 달라도 같은 스키마다
+    // Key order and whitespace intentionally differ from `schema()` to verify canonical matching.
     t.input = JsonPayload(r#"{ "additionalProperties": false, "required": ["event"], "properties": {"event": {"type": "string"}}, "type": "object" }"#.into());
     t.revision = Revision("t1@img1".into());
     t.secrets = secrets
@@ -175,7 +175,7 @@ async fn a_declared_call_runs_in_a_fresh_sandbox_with_only_what_was_declared() {
     assert_eq!(
         spec.env,
         vec![("TOKEN".to_string(), "value-personal-1".to_string())],
-        "선언한 자격이 환경의 전부다"
+        "env must contain only declared secrets"
     );
     assert!(spec.egress.is_none() && !spec.effects);
     assert_eq!(
@@ -203,7 +203,7 @@ async fn a_sibling_tool_never_sees_another_tools_secrets() {
     assert_eq!(specs[0].env.len(), 1);
     assert!(
         specs[1].env.is_empty(),
-        "같은 서버의 다른 도구는 환경을 상속하지 않는다: {:?}",
+        "sibling tool on the same server must not inherit env: {:?}",
         specs[1].env
     );
     assert_eq!(
@@ -236,7 +236,6 @@ async fn profiles_with_the_same_secret_name_get_only_their_own_value() {
     let specs = r.sandbox.specs();
     assert_eq!(specs[0].env[0].1, "value-personal-1");
     assert_eq!(specs[1].env[0].1, "value-other-2");
-    // 값이 없는 프로필은 다른 프로필의 값으로 대신하지 않는다
     let ran = run(
         &r,
         job_for(
@@ -262,16 +261,16 @@ async fn arguments_arrive_byte_for_byte_and_meta_comes_only_from_the_host() {
     );
     assert_eq!(
         call["arguments"]["_meta"]["bot/trigger"], "schedule",
-        "모델이 쓴 출처는 arguments 안에만 있고 호스트 값을 덮지 못한다"
+        "model-supplied origin stays inside arguments and cannot override host _meta"
     );
     assert_eq!(call["name"], "delete");
     assert_eq!(
         call["arguments"]["_meta"]["bot/call-id"], "evil",
-        "모델이 만든 값은 arguments 안에만 있다"
+        "model-supplied call ID stays inside arguments"
     );
     assert!(
         r.sandbox.raw_calls()[0].contains(&format!("\"arguments\":{args},")),
-        "승인한 바이트 그대로"
+        "approved argument bytes must be forwarded verbatim"
     );
 }
 
@@ -320,7 +319,7 @@ async fn a_server_that_disagrees_with_the_declaration_is_never_called() {
         assert_eq!(
             r.sandbox.terminated().len(),
             1,
-            "{name}: 띄운 프로세스는 끝낸다"
+            "{name}: spawned process must be terminated"
         );
     }
 }
@@ -357,7 +356,6 @@ async fn a_call_survives_requests_and_notifications_sent_by_the_server() {
         )
     });
     let r = rig(server, |_| {}, |_| {});
-    // 거절 응답이 서버에 닿았는지는 mcp 시험이 연결을 열어 둔 채 확인한다(여기서는 호출이 끝까지 가는지만 본다).
     let ran = run(&r, job(decl(&[], &[], false), r#"{"event":"a"}"#)).await;
     assert_eq!(
         done_text(&ran),
@@ -369,7 +367,7 @@ async fn a_call_survives_requests_and_notifications_sent_by_the_server() {
 async fn an_image_other_than_the_approved_one_is_not_run() {
     let r = plain();
     let mut tool = decl(&[], &[], false);
-    tool.revision = Revision("t1@img0".into()); // 승인 뒤 설치가 바뀌었다
+    tool.revision = Revision("t1@img0".into());
     assert!(matches!(
         run(&r, job(tool, r#"{"event":"a"}"#)).await,
         Ran::NotSent
@@ -380,7 +378,7 @@ async fn an_image_other_than_the_approved_one_is_not_run() {
         run(&r, job(unregistered, r#"{"event":"a"}"#)).await,
         Ran::NotSent
     ));
-    assert!(r.sandbox.specs().is_empty(), "띄우지 않는다");
+    assert!(r.sandbox.specs().is_empty(), "must not spawn sandbox");
 }
 
 #[tokio::test]
@@ -422,7 +420,7 @@ async fn the_hosts_private_intake_key_is_never_resolved_for_a_tool() {
     )
     .await;
     assert!(matches!(ran, Ran::NotSent), "{ran:?}");
-    assert!(r.sandbox.specs().is_empty(), "도구를 시작하지도 않는다");
+    assert!(r.sandbox.specs().is_empty(), "must not spawn tool");
 }
 
 #[tokio::test]
@@ -444,7 +442,7 @@ async fn the_progress_origin_comes_from_the_job_for_every_kind_and_never_from_th
         assert_eq!(
             call["_meta"].as_object().unwrap().len(),
             6,
-            "{word}: 호스트 키만 있다"
+            "{word}: only host _meta keys expected"
         );
     }
 }
@@ -452,16 +450,18 @@ async fn the_progress_origin_comes_from_the_job_for_every_kind_and_never_from_th
 #[tokio::test]
 async fn a_server_the_sandbox_cannot_admit_never_gets_its_secrets_resolved_or_started() {
     let r = plain();
-    r.sandbox.set_refuse_admit(true); // 상태 볼륨을 요구하는데 지원하지 않는 샌드박스
+    r.sandbox.set_refuse_admit(true);
     let ran = run(
         &r,
         job(decl(&[("TOKEN", "reader")], &[], false), r#"{"event":"x"}"#),
     )
     .await;
     assert!(matches!(ran, Ran::NotSent), "{ran:?}");
-    assert!(r.secrets.resolved().is_empty(), "자격을 풀기 전에 거절한다");
-    assert!(r.sandbox.specs().is_empty(), "프로세스도 시작하지 않는다");
-    // 다시 받으면 그대로 돈다
+    assert!(
+        r.secrets.resolved().is_empty(),
+        "must reject before resolving secrets"
+    );
+    assert!(r.sandbox.specs().is_empty(), "must not spawn process");
     r.sandbox.set_refuse_admit(false);
     let ran = run(
         &r,

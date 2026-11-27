@@ -1,5 +1,3 @@
-//! API 직접 호출 제공자(`anthropic-api`·`openai-api`): 모양 검사(주소 규칙·키 생략은 loopback만·출력 한도)와 활성화 지문(종류·모델·기준 주소 전체·자격 이름).
-
 use super::*;
 use bot_runtime::model::{ApiKind, Effort, LimitField};
 use serde_json::json;
@@ -42,7 +40,6 @@ fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_
             effort: None,
         })
     );
-    // 로컬 서버(loopback IP 리터럴)는 `http`로도 쓰고 키(`secret`)를 생략할 수 있다
     for endpoint in [
         "http://127.0.0.1:11434/v1",
         "http://[::1]:8000/v1",
@@ -63,7 +60,6 @@ fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_
             })
         );
     }
-    // 함께 있는 별칭들을 한꺼번에 읽는다
     let all = parse_providers(&json!({
         "a": {"kind": "demo"},
         "b": {"kind": "anthropic-api", "model": "m", "endpoint": "https://h.example", "secret": "k"},
@@ -83,7 +79,6 @@ fn unsafe_destinations_missing_keys_and_odd_fields_are_refused_with_the_field_pa
         base
     };
     for (entry, needle) in [
-        // 목적지: https만, http는 loopback IP 리터럴만, 이름·사설망·자격·쿼리·조각은 거절
         (
             openai(json!({"endpoint": "http://h.example/v1"})),
             "loopback",
@@ -102,38 +97,36 @@ fn unsafe_destinations_missing_keys_and_odd_fields_are_refused_with_the_field_pa
         ),
         (
             openai(json!({"endpoint": "https://user:pw@h.example/v1"})),
-            "자격",
+            "credentials",
         ),
         (
             openai(json!({"endpoint": "https://h.example/v1?key=1"})),
-            "쿼리",
+            "queries",
         ),
         (
             openai(json!({"endpoint": "https://h.example/v1#frag"})),
-            "조각",
+            "fragments",
         ),
         (
             openai(json!({"endpoint": "https://h.example:0/v1"})),
-            "포트",
+            "port",
         ),
         (
             openai(json!({"endpoint": "https://h.example/../v1"})),
-            "경로",
+            "path",
         ),
         (openai(json!({"endpoint": "ftp://h.example"})), "https://"),
         (
             json!({"kind": "openai-api", "model": "m", "secret": "k"}),
             "endpoint",
         ),
-        // 키: loopback이 아니면 필요하고, 이름 규칙을 지켜야 한다
         (
             json!({"kind": "openai-api", "model": "m", "endpoint": "https://h.example/v1"}),
             "secret",
         ),
-        (openai(json!({"secret": "Bad Name"})), "자격 이름"),
+        (openai(json!({"secret": "Bad Name"})), "providers.a.secret"),
         (openai(json!({"secret": ""})), "secret"),
         (openai(json!({"secret": null})), "secret"),
-        // 모델·출력 한도·모르는 키
         (openai(json!({"model": ""})), "model"),
         (
             json!({"kind": "openai-api", "endpoint": "https://h.example/v1", "secret": "k"}),
@@ -144,18 +137,17 @@ fn unsafe_destinations_missing_keys_and_odd_fields_are_refused_with_the_field_pa
         (openai(json!({"max_tokens": -5})), "max_tokens"),
         (openai(json!({"max_tokens": "4096"})), "max_tokens"),
         (openai(json!({"max_tokens": 1.5})), "max_tokens"),
-        (openai(json!({"temperature": 0})), "알 수 없는 키"),
+        (openai(json!({"temperature": 0})), "unknown"),
     ] {
         let error = parsed(entry.clone()).expect_err(&entry.to_string());
-        assert!(error.contains("providers.a"), "{entry} → {error}");
-        assert!(error.contains(needle), "{entry} → {error}");
-        // 거절 사유는 입력한 값(자격이 섞여 있을 수 있다)을 되풀이하지 않는다
+        assert!(error.contains("providers.a"), "{entry} -> {error}");
+        assert!(error.contains(needle), "{entry} -> {error}");
+        // Errors must never echo credential-bearing input values.
         assert!(
             !error.contains("pw@") && !error.contains("user:"),
             "{error}"
         );
     }
-    // 알 수 없는 종류의 안내에 새 종류가 보인다
     let error = parsed(json!({"kind": "gemini-api"})).unwrap_err();
     assert!(
         error.contains("anthropic-api") && error.contains("openai-api"),
@@ -213,43 +205,40 @@ fn the_activation_fingerprint_binds_kind_model_whole_base_url_and_credential_nam
  {
     let base = api(0, "m", "https://h.example/v1", Some("key"), None);
     let print = |provider: Provider| fingerprint(&providers(provider));
-    assert_eq!(print(base.clone()), print(base.clone()), "결정적");
-    // 권한이 달라지는 것: 종류·모델·기준 주소 전체(경로 포함)·자격 이름·키 유무
+    assert_eq!(print(base.clone()), print(base.clone()), "deterministic");
     for (what, changed) in [
         (
-            "종류",
+            "kind",
             api(1, "m", "https://h.example/v1", Some("key"), None),
         ),
         (
-            "모델",
+            "model",
             api(0, "m2", "https://h.example/v1", Some("key"), None),
         ),
         (
-            "호스트",
+            "host",
             api(0, "m", "https://other.example/v1", Some("key"), None),
         ),
         (
-            "경로",
+            "path",
             api(0, "m", "https://h.example/v2", Some("key"), None),
         ),
         (
-            "포트",
+            "port",
             api(0, "m", "https://h.example:8443/v1", Some("key"), None),
         ),
         (
-            "자격 이름",
+            "secret name",
             api(0, "m", "https://h.example/v1", Some("key2"), None),
         ),
-        ("키 없음", api(0, "m", "https://h.example/v1", None, None)),
+        ("no secret", api(0, "m", "https://h.example/v1", None, None)),
     ] {
         assert_ne!(print(base.clone()), print(changed), "{what}");
     }
-    // 출력 한도는 권한이 아니다
     assert_eq!(
         print(base.clone()),
         print(api(0, "m", "https://h.example/v1", Some("key"), Some(8192)))
     );
-    // 같은 필드의 `claude-cli`·데모와도 다르다(종류가 지문에 든다)
     let cli = Provider::ClaudeCli {
         model: "m".into(),
         endpoint: "https://h.example/v1".into(),
@@ -258,7 +247,7 @@ fn the_activation_fingerprint_binds_kind_model_whole_base_url_and_credential_nam
     };
     assert_ne!(print(base.clone()), print(cli));
     assert_ne!(print(base), print(Provider::Demo));
-    // 키 없음과 빈 이름이 섞이지 않는다(표지가 들어 있다)
+    // Absent secret vs. empty name must remain distinct via tag byte.
     assert_ne!(
         print(api(1, "m", "http://127.0.0.1:1/v1", None, None)),
         print(api(1, "m", "http://127.0.0.1:1/v1", Some(""), None))
@@ -274,7 +263,6 @@ fn openai_api_takes_max_completion_tokens_or_max_tokens_but_never_both() {
             .extend(patch.as_object().unwrap().clone());
         base
     };
-    // 새 OpenAI 모델은 `max_completion_tokens`만, 호환 서버(Ollama·vLLM 등)는 대개 `max_tokens`를 받는다
     let want = |max_tokens, limit_field| {
         Provider::Api(ApiProvider {
             kind: ApiKind::OpenAi,
@@ -306,7 +294,6 @@ fn openai_api_takes_max_completion_tokens_or_max_tokens_but_never_both() {
     ] {
         assert!(parsed(openai(bad.clone())).is_err(), "{bad}");
     }
-    // Anthropic은 `max_tokens`뿐이다
     assert!(parsed(anthropic(json!({"max_completion_tokens": 100}))).is_err());
 }
 
@@ -376,8 +363,8 @@ fn effort_accepts_five_levels_on_non_demo_providers_and_refuses_bad_values() {
         json!(null),
     ] {
         let error = parsed(anthropic(json!({"effort": bad.clone()}))).unwrap_err();
-        assert!(error.contains("providers.a.effort"), "{bad} → {error}");
+        assert!(error.contains("providers.a.effort"), "{bad} -> {error}");
     }
     let error = parsed(json!({"kind": "demo", "effort": "medium"})).unwrap_err();
-    assert!(error.contains("알 수 없는 키"), "{error}");
+    assert!(error.contains("unknown"), "{error}");
 }

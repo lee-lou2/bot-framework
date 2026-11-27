@@ -1,6 +1,4 @@
-//! 트리거 선택과 입력 매핑. 식·셸·템플릿은 평가하지 않는다 — 점 경로 조회와 리터럴 동등 비교뿐이다.
-//!
-//! 봉투 JSON: `{request_id, binding, principal, conversation: {kind, id, thread}, attachments, body}`.
+//! Trigger matching and literal dotted-path input mapping without expression or template evaluation.
 use crate::{
     inbound::{Event, Inbound, kind_name},
     routes::BoundTrigger,
@@ -11,7 +9,7 @@ use bot_core::{
 };
 use serde_json::{Map, Value, json};
 
-/// 조건·입력 경로가 보는 봉투. 프로필·판본은 경로에 노출하지 않는다.
+/// Builds the condition/input envelope without exposing profile or revision identifiers.
 pub fn envelope_json(binding: &BindingId, inbound: &Inbound) -> Value {
     json!({
         "request_id": inbound.request.0,
@@ -27,13 +25,11 @@ pub fn envelope_json(binding: &BindingId, inbound: &Inbound) -> Value {
     })
 }
 
-/// 점으로 이은 객체 키 경로를 따라간다. 배열 색인·와일드카드는 없다.
 pub fn lookup<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.')
         .try_fold(value, |current, key| current.as_object()?.get(key))
 }
 
-/// 모든 조건이 리터럴과 같아야 한다. 읽을 수 없는 리터럴은 일치하지 않는 것으로 본다.
 fn conditions_hold(trigger: &Trigger, envelope: &Value) -> bool {
     trigger.conditions.iter().all(|(path, literal)| {
         serde_json::from_str::<Value>(&literal.0)
@@ -42,7 +38,6 @@ fn conditions_hold(trigger: &Trigger, envelope: &Value) -> bool {
     })
 }
 
-/// 이 사건을 받는 트리거의 `on.event` 이름. HTTP 사건은 이름이 없다.
 fn event_name(event: &Event) -> Option<&'static str> {
     match event {
         Event::Message => Some("message"),
@@ -77,8 +72,7 @@ pub fn applies(trigger: &Trigger, binding: &BindingId, event: &Event) -> bool {
     }
 }
 
-/// 같은 바인딩·사건의 후보를 order 순으로 검사해 처음 일치하는 하나만 고른다.
-/// 입력(`triggers`)은 `Routes`가 이미 order 순으로 정렬해 두었다.
+/// Returns the first matching trigger; callers pass `triggers` pre-sorted by `order` from `Routes`.
 pub fn select<'a>(
     triggers: &'a [BoundTrigger],
     binding: &BindingId,
@@ -90,7 +84,6 @@ pub fn select<'a>(
     })
 }
 
-/// `select`와 같은 규칙으로 맞는 트리거를 **모두** order 순으로 돌려준다. 첫 번째가 `select`의 답이다(넘김 후보 목록).
 pub fn select_all<'a>(
     triggers: &'a [BoundTrigger],
     binding: &BindingId,
@@ -105,8 +98,7 @@ pub fn select_all<'a>(
         .collect()
 }
 
-/// 도구 호출 인자를 만든다: 고정 args + 입력 매핑. 경로가 없거나 고정 args와 키가 겹치거나 args가 객체가 아니면 None.
-/// 키가 정렬된 컴팩트 JSON이라 같은 입력은 같은 바이트다.
+/// Merges static tool args with mapped envelope paths into canonical compact JSON; fails on key collision or missing path.
 pub fn tool_args(trigger: &Trigger, envelope: &Value) -> Option<String> {
     let TriggerTarget::Tool { args, .. } = &trigger.target else {
         return None;
@@ -124,7 +116,6 @@ pub fn tool_args(trigger: &Trigger, envelope: &Value) -> Option<String> {
     Some(Value::Object(object).to_string())
 }
 
-/// 로그에 남기는 트리거 이름(`profile/trigger`)
 pub fn label(profile: &ProfileId, trigger: &Trigger) -> String {
     format!("{}/{}", profile.0, trigger.id)
 }
@@ -191,7 +182,6 @@ mod tests {
             &with_conditions(&[("body.action", "\"cancel\""), ("body.n", "4")]),
             &env
         ));
-        // 문자열 "3"과 숫자 3은 다르다. 없는 경로·읽을 수 없는 리터럴은 일치하지 않는다
         assert!(!conditions_hold(
             &with_conditions(&[("body.n", "\"3\"")]),
             &env
@@ -233,7 +223,6 @@ mod tests {
             pick(&json!({"body": {"action": "list"}})).as_deref(),
             Some("fallback")
         );
-        // 다른 method·path·binding은 후보가 아니다
         let other = Event::Http {
             method: "GET".into(),
             path: "/agenda".into(),
@@ -250,20 +239,16 @@ mod tests {
         trigger.input.insert("event".into(), "body.event".into());
         let args = tool_args(&trigger, &env()).unwrap();
         assert_eq!(args, r#"{"dry_run":false,"event":"e-1"}"#);
-        // 값은 타입을 그대로 가져온다
         trigger.input.insert("count".into(), "body.n".into());
         assert_eq!(
             tool_args(&trigger, &env()).unwrap(),
             r#"{"count":3,"dry_run":false,"event":"e-1"}"#
         );
-        // 경로가 없으면 호출하지 않는다
         trigger.input.insert("gone".into(), "body.gone".into());
         assert!(tool_args(&trigger, &env()).is_none());
         trigger.input.remove("gone");
-        // 고정 args와 키가 겹치면 호출하지 않는다
         trigger.input.insert("dry_run".into(), "body.event".into());
         assert!(tool_args(&trigger, &env()).is_none());
-        // args가 객체가 아니거나 도구 대상이 아니면 호출하지 않는다
         let mut bad = with_conditions(&[]);
         bad.target = tool_target("agenda.delete", "[]");
         assert!(tool_args(&bad, &env()).is_none());

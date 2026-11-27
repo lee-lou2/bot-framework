@@ -1,2 +1,2 @@
-- 답은 한국어로 짧게 쓴다.
-- 일정을 바꾸거나 지우기 전에는 대상 일정을 한 번 더 확인한다.
+- Keep replies short and in English.
+- Always confirm the target event before modifying or deleting it.

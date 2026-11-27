@@ -1,23 +1,23 @@
-# 장애 대응 절차
+# Incident Runbook
 
-장애가 났을 때 사람이 따라 할 순서를 안내한다. 이 스킬은 안내만 하고 직접 실행하지 않는다.
+Guide humans step by step during an incident. This skill provides instructions only and does not execute actions directly.
 
-## 순서
-1. **감지·확인**: 무엇이 언제부터 어떻게 이상한가. 영향받는 사용자와 범위를 적는다. 추측과 확인한 사실을 나눈다.
-2. **분류**: knowledge의 `escalation`으로 심각도(SEV1~3)를 정하고 연락 순서를 따른다.
-3. **완화**: 원인보다 영향을 먼저 줄인다(기능 끄기, 트래픽 줄이기, 이전 버전으로 되돌리기).
-4. **소통**: 심각도에 맞는 주기로 한 줄 상황을 공유한다. 모르는 것은 모른다고 쓴다.
-5. **복구·확인**: 정상으로 돌아왔는지 처음에 본 지표로 다시 확인한다.
-6. **사후 정리**: 타임라인, 원인, 재발 방지 항목과 담당·기한을 남긴다. 사람을 탓하지 않는다.
+## Procedure
+1. **Detect & Confirm**: Record what broke, when it started, and who or what is affected. Separate confirmed facts from hypotheses.
+2. **Classify**: Assign severity (SEV1-SEV3) using `escalation` in knowledge and follow the contact order.
+3. **Mitigate**: Reduce user impact before chasing root cause (disable feature flag, shed traffic, roll back).
+4. **Communicate**: Share concise status updates at the cadence for the severity level. State clearly what is unknown.
+5. **Recover & Verify**: Confirm recovery using the same metrics that detected the incident.
+6. **Postmortem**: Document the timeline, root cause, and follow-up actions with owners and due dates. Keep it blameless.
 
-## 승인이 필요한 작업
-되돌릴 수 없는 작업은 사람의 승인을 받은 뒤에만 한다. 승인을 요청할 때 아래 네 가지를 먼저 적는다.
+## Actions Requiring Approval
+Irreversible actions run only after human approval. Include the required details before requesting approval:
 
-| 작업 예 | 요청에 적을 것 |
+| Example Action | Required Details |
 |---|---|
-| 이전 버전으로 롤백 | 대상 버전, 영향받는 사용자, 되돌리는 방법, 성공 확인 방법 |
-| 데이터 삭제·수정 | 대상 범위, 백업 위치, 복구 방법, 확인 쿼리 |
-| 계정 정지·권한 변경 | 대상 계정, 사유, 해제 절차 |
-| 설정·비밀 교체 | 바뀌는 항목 이름(값은 적지 않는다), 이전 값 보관 위치 |
+| Roll back to a previous version | Target version, affected users, rollback procedure, verification method |
+| Delete or modify data | Target scope, backup location, recovery procedure, verification query |
+| Suspend account or change permissions | Target account, reason, restoration steps |
+| Rotate config or secrets | Setting names being changed (never values), location of previous values |
 
-이 프로필의 도구 선언에서 `class: irreversible`인 도구는 호출할 때마다 승인 카드가 뜬다(예: `agenda.delete`). 승인 전에는 실행되지 않고, 거절되면 하지 않았다고 알린다.
+Tools declared with `class: irreversible` in this profile (such as `agenda.delete`) show an approval card on every call. They never run before approval, and if denied, inform the user that nothing was executed.

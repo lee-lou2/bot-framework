@@ -1,6 +1,5 @@
-//! 긴 호출은 전송의 기본 무응답 읽기 제한에 먼저 끊기지 않는다: 요청이 자기 제한(`WireRequest::timeout`)을 실으면 운영 전송(`ReqwestWire`)은 그 제한을 쓰고,
-//! 싣지 않은 요청은 기본 제한을 그대로 쓴다. 연결을 맺기 전의 제한은 두 경우 모두 유지된다. 서버는 루프백의 임시 소켓뿐이다(외부 서비스·실제 키 없음).
-//! 기본 제한은 시험에서 짧게(150ms) 줄인 전송으로 본다 — 운영 값(120초)을 기다리지 않는다.
+//! Per-request timeout overrides on `ReqwestWire`: explicit `WireRequest::timeout` overrides the
+//! default idle read timeout while preserving pre-connect validation and connect timeouts.
 
 use crate::mcp_http_support::closed_port;
 use bot_broker::{
@@ -18,7 +17,7 @@ use tokio::{
 const DEFAULT_READ: Duration = Duration::from_millis(150);
 const BODY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#;
 
-/// 요청을 읽은 뒤 `delay` 동안 아무것도 보내지 않다가 JSON 응답 하나를 주는 서버(`delay`가 `None`이면 끝내 답하지 않는다).
+/// Loopback server that waits `delay` after reading `{}` before replying (or hangs if `None`).
 async fn slow_server(delay: Option<Duration>) -> (u16, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -26,7 +25,6 @@ async fn slow_server(delay: Option<Duration>) -> (u16, JoinHandle<()>) {
         while let Ok((mut stream, _)) = listener.accept().await {
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
-                // 요청 머리와 본문(`{}`)을 읽는다
                 let mut seen = Vec::new();
                 while !seen.ends_with(b"{}") {
                     match stream.read(&mut buf).await {
@@ -73,16 +71,14 @@ fn request(port: u16, timeout: Option<Duration>) -> WireRequest {
 async fn a_request_with_its_own_limit_outlives_the_default_read_limit_and_one_without_does_not() {
     let (port, task) = slow_server(Some(Duration::from_millis(700))).await;
     let wire = wire();
-    // 기본 제한(150ms)만 있는 요청은 700ms 뒤에야 오는 답을 기다리지 못한다: 서버가 받았는지 모르는 `Lost`다(제한이 없었다면 답을 받았을 것이다)
     assert!(matches!(
         wire.send(request(port, None)).await,
         Err(WireFail::Lost)
     ));
-    // 자기 제한(5초)을 실은 요청은 같은 서버의 늦은 답을 받는다
     let response = wire
         .send(request(port, Some(Duration::from_secs(5))))
         .await
-        .expect("자기 제한 안에 오는 답은 받는다");
+        .expect("reply within per-request timeout must succeed");
     assert_eq!(response.status, 200);
     let mut body = response.body;
     let mut bytes = Vec::new();
@@ -100,13 +96,15 @@ async fn the_requests_own_limit_still_ends_a_server_that_never_answers() {
     let result = wire()
         .send(request(port, Some(Duration::from_millis(400))))
         .await;
-    assert!(matches!(result, Err(WireFail::Lost)), "자기 제한이 끝낸다");
+    assert!(
+        matches!(result, Err(WireFail::Lost)),
+        "per-request timeout must abort"
+    );
     assert!(
         started.elapsed() >= Duration::from_millis(350),
         "{:?}",
         started.elapsed()
     );
-    // 서버는 60초를 버틴다: 요청 자신의 제한이 없었다면 여기까지 오지 못한다(부하가 큰 환경에서도 흔들리지 않게 넉넉히 잡는다)
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "{:?}",
@@ -117,7 +115,7 @@ async fn the_requests_own_limit_still_ends_a_server_that_never_answers() {
 
 #[tokio::test]
 async fn a_long_limit_does_not_loosen_the_checks_before_the_connection() {
-    // 아무도 듣지 않는 포트: 연결을 맺기 전 실패이므로 긴 제한을 실어도 `Unreached`(요청이 서버에 닿지 않았다)다
+    // Connection refusal fails before request delivery (`Unreached`) regardless of long timeout.
     let dead = closed_port().await;
     let started = std::time::Instant::now();
     let result = wire()
@@ -129,7 +127,6 @@ async fn a_long_limit_does_not_loosen_the_checks_before_the_connection() {
         "{:?}",
         started.elapsed()
     );
-    // 비공개 주소(https)는 긴 제한이 있어도 연결 전에 거절한다
     let mut private = request(dead, Some(Duration::from_secs(900)));
     private.tls = true;
     private.host = "10.0.0.5".into();

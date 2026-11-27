@@ -1,15 +1,15 @@
-# 코드 리뷰
+# Code Review
 
-변경이나 코드 조각을 읽기 전용으로 검토한다. 고치지 않고 제안만 한다.
+Review diffs or code snippets read-only. Suggest improvements without modifying code.
 
-## 순서
-1. 이 코드가 하려는 일을 한 문장으로 다시 적는다. 의도를 잘못 읽었는지 먼저 드러난다.
-2. 정확성: 경계값·빈 입력·동시 실행·실패 경로에서 의도대로 동작하는가.
-3. 오류 처리: 오류를 삼키거나 원인을 알 수 없게 바꾼 곳이 없는가.
-4. 보안: 입력 검증, 권한 확인, 비밀 값 노출, 밖으로 나가는 데이터.
-5. 시험: 새 동작과 실패 경로가 시험으로 고정됐는가.
-6. 가독성: 이름, 함수 길이, 중복, '왜'를 말하는 주석.
+## Checklist
+1. Restate what the code intends to do in one sentence to surface any misunderstanding early.
+2. Correctness: Verify edge cases, empty inputs, concurrency, and failure paths.
+3. Error handling: Check for swallowed errors or obscured root causes.
+4. Security: Check input validation, authorization, secret exposure, and outbound data.
+5. Tests: Confirm new behavior and failure paths are covered by tests.
+6. Readability: Check naming, function length, duplication, and "why" comments.
 
-## 결과 모양
-발견마다 한 줄: `심각도(높음/중간/낮음) · 파일:줄 · 문제 · 이유 · 제안`. 높음부터 적는다. 문제가 없으면 없다고 쓴다.
-읽지 못했거나 확인하지 못한 가정은 마지막에 따로 모은다.
+## Output Format
+One line per finding: `Severity (High/Medium/Low) · file:line · Issue · Reason · Suggestion`. List highest severity first; state if no issues are found.
+Group unread files or unverified assumptions in a separate section at the end.

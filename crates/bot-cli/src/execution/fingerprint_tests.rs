@@ -1,6 +1,4 @@
-//! 활성화 지문의 고정점: 호스트 설정(`providers` 절의 JSON)이 같으면 제공자 종류마다 지문 바이트가 그대로다.
-//! 바이트 하나가 달라지면 이미 활성화된 모든 배포가 재활성화를 요구받으므로, 지문 재료를 다루는 코드를 고치기 전에 이 값을 먼저 고정한다.
-//! 입력은 호스트 설정의 JSON이라 `Provider`의 내부 모양이 바뀌어도 이 시험은 그대로다.
+//! Golden tests pinning activation fingerprint bytes per provider kind; changing any byte forces re-activation on existing deployments.
 
 use super::*;
 use serde_json::json;

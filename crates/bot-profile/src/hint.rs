@@ -1,7 +1,6 @@
-//! 오류 문구를 도우미로: 비슷한 이름 찾기(did-you-mean), 번들 스키마의 정규식을 사람 말로, YAML 파서의 영어 설명을 고칠 방법으로.
-//! 사용자가 «무엇을 어디서 어떻게 고치는지» 알 수 있어야 하므로 예시를 함께 보인다. 파일 내용·값은 싣지 않는다(이름과 허용 목록만).
+//! Actionable validation hints: edit-distance suggestions, pattern explanations, entrance conflict fixes, and YAML syntax guidance.
 
-/// 두 글자열의 편집 거리(글자 단위: 삽입·삭제·바꿈·이웃 글자 맞바꿈).
+/// Damerau-Levenshtein edit distance in Unicode scalar values.
 fn distance(a: &str, b: &str) -> usize {
     let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
     let mut rows = vec![vec![0usize; b.len() + 1]; a.len() + 1];
@@ -26,7 +25,7 @@ fn distance(a: &str, b: &str) -> usize {
     rows[a.len()][b.len()]
 }
 
-/// `input`과 가장 비슷한 후보(오타일 만큼만: 짧은 글은 한 글자, 길면 두세 글자까지). 같은 글이거나 너무 다르면 `None`.
+/// Closest candidate within typo distance (1 for len <= 3, 2 for <= 8, 3 otherwise), or `None`.
 pub fn nearest<'a>(input: &str, options: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
     let allowed = match input.chars().count() {
         0..=3 => 1,
@@ -37,7 +36,7 @@ pub fn nearest<'a>(input: &str, options: impl IntoIterator<Item = &'a str>) -> O
         .into_iter()
         .filter(|option| *option != input)
         .map(|option| (distance(input, option), option))
-        // 바뀐 글자가 긴 쪽의 절반보다 적어야 오타로 본다(한 글자짜리 이름끼리는 제안하지 않는다)
+        // Require edits to be strictly less than half the longer string (avoids 1-char false positives).
         .filter(|(d, option)| {
             *d <= allowed && d * 2 < input.chars().count().max(option.chars().count())
         })
@@ -45,84 +44,84 @@ pub fn nearest<'a>(input: &str, options: impl IntoIterator<Item = &'a str>) -> O
         .map(|(_, option)| option)
 }
 
-/// 번들 스키마가 쓰는 정규식을 «무엇을 쓸 수 있는지»로. 모르는 정규식(도구 입력 스키마의 `pattern`)은 `None`이다.
+/// Plain description for known bundled schema regexes; `None` for custom tool patterns.
 pub fn pattern_hint(pattern: &str) -> Option<&'static str> {
     let table: &[(&str, &str)] = &[
         (
             "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
-            "소문자로 시작하고 소문자·숫자·하이픈(-)만 쓸 수 있어요(하이픈을 연달아 쓰거나 끝에 둘 수 없어요). 예: `daily-report`",
+            "must start with a lowercase letter and use only lowercase letters, digits, and single hyphens (`-`); e.g. `daily-report`",
         ),
         (
             "^[a-z0-9]+(?:-[a-z0-9]+)*$",
-            "소문자·숫자·하이픈(-)만 쓸 수 있어요(앞뒤 하이픈과 연속 하이픈 `--`은 안 돼요). 예: `pdf-processing`",
+            "must use only lowercase letters, digits, and single hyphens (`-`) (no leading, trailing, or `--`); e.g. `pdf-processing`",
         ),
         (
             "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$",
-            "에이전트 이름은 소문자 이름(소문자·숫자·하이픈)을 `/`로 이은 경로예요. 예: `main/research`",
+            "agent path must be lowercase segments (letters, digits, hyphens) separated by `/`; e.g. `main/research`",
         ),
         (
             "^[a-z0-9-]{1,63}(?:/[a-z0-9-]{1,63})*$",
-            "에이전트 이름은 소문자 이름(소문자·숫자·하이픈)을 `/`로 이은 경로예요. 예: `main/research`",
+            "agent path must be lowercase segments (letters, digits, hyphens) separated by `/`; e.g. `main/research`",
         ),
         (
             "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
-            "`스킬.도구` 형식이어야 해요(둘 다 소문자·숫자·하이픈). 예: `agenda.list`",
+            "must be `<skill>.<tool>` (both lowercase letters, digits, hyphens); e.g. `agenda.list`",
         ),
         (
             "^[a-z0-9-]{1,63}\\.[a-z0-9-]{1,63}$",
-            "`스킬.도구` 형식이어야 해요(둘 다 소문자·숫자·하이픈). 예: `agenda.list`",
+            "must be `<skill>.<tool>` (both lowercase letters, digits, hyphens); e.g. `agenda.list`",
         ),
         (
             "^[A-Za-z0-9_.-]+$",
-            "서버가 내세우는 도구 이름이에요: 영문·숫자·밑줄(_)·하이픈(-)·점(.)만 쓸 수 있어요(128자 이하). 예: `get_forecast`",
+            "server tool name may only use ASCII letters, digits, `_`, `-`, and `.` (at most 128 chars); e.g. `get_forecast`",
         ),
         (
             "^[A-Z_][A-Z0-9_]*$",
-            "대문자·숫자·밑줄(_)만 쓸 수 있고 숫자로 시작할 수 없어요. 예: `CALENDAR_TOKEN`",
+            "must use only uppercase letters, digits, and `_`, and cannot start with a digit; e.g. `CALENDAR_TOKEN`",
         ),
         (
             "^[A-Za-z_][A-Za-z0-9_]*$",
-            "글자·숫자·밑줄(_)만 쓸 수 있고 숫자로 시작할 수 없어요. 예: `AGENDA_VIEW`",
+            "must use only letters, digits, and `_`, and cannot start with a digit; e.g. `AGENDA_VIEW`",
         ),
         (
             "^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$",
-            "글자·숫자·밑줄로 된 이름이고 `.`으로 하위 항목을 이을 수 있어요(숫자로 시작할 수 없어요). 예: `event.channel`",
+            "dot-separated segments of letters, digits, and `_` (cannot start with a digit); e.g. `event.channel`",
         ),
         (
             "^args\\.[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*$",
-            "`args.`로 시작하는 인자 경로여야 해요. 예: `args.to`",
+            "must be an argument path starting with `args.`; e.g. `args.to`",
         ),
         (
             "^[a-z0-9.-]+:[0-9]{1,5}$",
-            "`호스트:포트` 형식이어야 해요(호스트는 소문자·숫자·`.`·`-`, 포트는 숫자). 예: `api.example.com:443`",
+            "must be `<host>:<port>` (lowercase host with letters, digits, `.`, `-`, and numeric port); e.g. `api.example.com:443`",
         ),
         (
             "^[^\\n\\r]+$",
-            "줄바꿈 없이 한 줄이어야 하고 비어 있으면 안 돼요",
+            "must be a non-empty single line without line breaks",
         ),
         (
             "^/[^?#]*$",
-            "`/`로 시작하는 경로여야 하고 `?`·`#`은 쓸 수 없어요. 예: `/notify`",
+            "must be a path starting with `/` without `?` or `#`; e.g. `/notify`",
         ),
         (
             "^http:[a-z][a-z0-9]*(?:-[a-z0-9]+)*/[A-Za-z0-9._@+\\-]{1,128}$",
-            "`http:<입구 별칭>/<주체>` 형식의 HTTP 주체여야 해요(주체는 글자·숫자와 `.`·`_`·`@`·`+`·`-`, 128자까지). 예: `http:openai/build`",
+            "must be an HTTP principal `http:<endpoint-alias>/<subject>` (subject: letters, digits, `.`, `_`, `@`, `+`, `-`, up to 128 chars); e.g. `http:openai/build`",
         ),
         (
             "^local:[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
-            "`local:<CLI 계정 별칭>` 형식의 로컬 사람 신원이어야 해요. 예: `local:owner`",
+            "must be a local human identity `local:<cli-account-alias>`; e.g. `local:owner`",
         ),
         (
             "^slack:[a-z][a-z0-9]*(?:-[a-z0-9]+)*/[UW][A-Z0-9]{1,31}$",
-            "`slack:<워크스페이스 별칭>/<사용자 ID>` 형식이어야 해요(사용자 ID는 Slack 프로필에서 복사한 `U`나 `W`로 시작하는 대문자·숫자). 예: `slack:home/<사용자 ID>`",
+            "must be `slack:<workspace-alias>/<user-id>` (Slack user ID starting with `U` or `W`); e.g. `slack:home/U01234567`",
         ),
         (
             "^[ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]*(?:@(?:hourly|daily|midnight|weekly|monthly|yearly|annually)|[^@ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}][^ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]*(?:[ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]+[^ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]+){4})[ \\t\\r\\n\u{000b}\u{000c}\u{0085}\u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}]*$",
-            "cron은 '분 시 일 월 요일' 다섯 칸(초 칸 없음) 또는 별칭(@hourly·@daily·@midnight·@weekly·@monthly·@yearly·@annually)이어야 해요. 예: `0 9 * * *`",
+            "cron must have 5 fields ('min hour dom month dow', no seconds) or a macro (@hourly, @daily, @midnight, @weekly, @monthly, @yearly, @annually); e.g. `0 9 * * *`",
         ),
         (
             "^(?:\\.|\\.?[A-Za-z0-9_:#@+\\-]+(?:\\.[A-Za-z0-9_:#@+\\-]+)*\\.?)$",
-            "영문·숫자와 `-`·`_`·`.`·`:`·`#`·`@`·`+`만 쓴 정확한 이름이나 ID여야 해요(와일드카드·URL·공백·`..`·자격 값은 쓸 수 없어요). 예: `channel:reports`",
+            "must be an exact name or ID using ASCII letters, digits, `-`, `_`, `.`, `:`, `#`, `@`, `+` (no wildcards, URLs, whitespace, `..`, or credentials); e.g. `channel:reports`",
         ),
     ];
     table
@@ -131,119 +130,115 @@ pub fn pattern_hint(pattern: &str) -> Option<&'static str> {
         .map(|(_, text)| *text)
 }
 
-/// 한 HTTP 별칭에 웹훅 바인딩과 OpenAI 모델 바인딩이 섞였을 때 고치는 방법.
-pub const MIXED_ENDPOINT: &str = "한 별칭은 한 가지 방식만 써요. `model`이 있는 바인딩(OpenAI 호환)과 `model`이 없는 바인딩(웹훅)은 서로 다른 `endpoint` 별칭으로 나누고, 호스트 설정의 별칭 종류(`kind`)도 맞춰 주세요";
+pub const MIXED_ENDPOINT: &str = "An HTTP alias can only serve one mode. Split bindings with `model` (OpenAI-compatible) and bindings without `model` (webhook) onto separate `endpoint` aliases, and match each alias `kind` in the host config.";
 
-/// OpenAI 입구 별칭을 다른 프로필이 이미 쓸 때 고치는 방법.
-pub const OPENAI_OWNER: &str = "OpenAI 호환 입구 별칭은 활성 프로필 하나만 소유하고 그 안에서 모델을 여러 개 둘 수 있어요. 다른 프로필은 호스트 설정에 별칭을 따로 만들어 쓰거나, 모델을 한 프로필로 모아 주세요";
+pub const OPENAI_OWNER: &str = "An OpenAI-compatible endpoint alias can only be owned by one active profile, which may expose multiple models on it. Create a separate alias in the host config for another profile, or consolidate models into one profile.";
 
-/// 같은 입구를 두 바인딩이 쓸 때 고치는 방법. `key`는 `model::entrance`의 정규 문자열(`cli:owner`·`slack:home:channel:planning`·`slack:home:dm`·`http:reminders`),
-/// `across`가 참이면 서로 다른 프로필이 겹친 것이다(입구는 활성 프로필 전체에서 한 번만 쓸 수 있다).
+/// Remediation guidance when two bindings share an entrance (`across` indicates cross-profile conflict).
 pub fn entrance_fix(key: &str, across: bool) -> String {
     if key.starts_with("http:") && key.contains('/') {
-        // OpenAI 모델 바인딩(`http:<별칭>/<모델>`): 같은 별칭에서 모델 이름이 겹쳤다
-        return "같은 입구 별칭에서 공개 모델 이름은 바인딩 하나에만 연결할 수 있어요. 한쪽 바인딩을 지우거나 `model`을 다른 이름으로 바꿔 주세요".to_owned();
+        return "A public model name on the same endpoint alias can only be bound once. Remove one binding or change its `model` name.".to_owned();
     }
     let (what, field) = if key.starts_with("cli:") {
-        ("CLI 계정 별칭", "`account`")
+        ("CLI account alias", "`account`")
     } else if key.ends_with(":dm") {
-        ("Slack DM 입구(워크스페이스마다 하나예요)", "`workspace`")
+        ("Slack DM entrance (one per workspace)", "`workspace`")
     } else if key.starts_with("slack:") {
-        ("Slack 채널 별칭", "`channel`(또는 `workspace`)")
+        ("Slack channel alias", "`channel` (or `workspace`)")
     } else {
-        ("HTTP 입구 별칭", "`endpoint`")
+        ("HTTP endpoint alias", "`endpoint`")
     };
     let mut text = if across {
         format!(
-            "{what}은 활성 프로필 전체에서 바인딩 하나에만 연결할 수 있어요. 이 바인딩의 {field}를 다른 별칭으로 바꾸거나 바인딩을 지워 주세요"
+            "{what} can only be bound once across all active profiles. Change {field} to another alias or remove this binding."
         )
     } else {
         format!(
-            "{what}은 바인딩 하나에만 연결할 수 있어요. 한쪽 바인딩을 지우거나 그 {field}를 다른 별칭으로 바꿔 주세요"
+            "{what} can only be bound once. Remove one binding or change its {field} to another alias."
         )
     };
     if key.starts_with("cli:") && across {
         text.push_str(
-            ". 새 별칭은 호스트 설정의 `gateway.cli.accounts`에도 더해야 하고, 같은 OS 사용자에 연결해도 돼요(그때는 `bot chat --profile`로 프로필을 골라요)",
+            " Also add the new alias under `gateway.cli.accounts` in the host config (it may map to the same OS user; select profiles with `bot chat --profile`).",
         );
     }
     text
 }
 
-/// YAML 파서의 영어 설명을 사용자가 고칠 수 있는 한국어로(대표적인 실수만; 나머지는 원문을 괄호로 덧붙인다).
+/// Maps common YAML parser diagnostics to actionable fix hints, preserving unknown errors verbatim.
 pub fn yaml_hint(parser: &str) -> String {
     let known: &[(&str, &str)] = &[
         (
             "mapping values are not allowed",
-            "여기에는 `키: 값`을 쓸 수 없어요. 앞 줄과 들여쓰기가 맞는지, 한 줄에 `:`가 두 번 있지 않은지 확인하세요(값에 `:`가 들어가면 따옴표로 감싸세요)",
+            "`key: value` is not allowed here; check indentation against the previous line and quote values containing `:`",
         ),
         (
             "did not find expected key",
-            "이 줄의 들여쓰기가 앞 줄과 맞지 않아요. 같은 목록 안의 키는 같은 칸에서 시작해야 해요",
+            "indentation does not match the previous line; sibling keys must start in the same column",
         ),
         (
             "did not find expected '-' indicator",
-            "목록의 항목은 모두 `- `로 시작해야 해요(들여쓰기도 맞춰 주세요)",
+            "every list item must start with `- ` at the same indentation",
         ),
         (
             "':' must be followed by",
-            "`:` 뒤에는 공백 한 칸이 있어야 해요(`키: 값`). 탭 문자는 쓸 수 없어요",
+            "put a space after `:` (`key: value`); tab characters are not allowed",
         ),
         (
             "'-' must be followed by",
-            "목록 항목은 `- 값`처럼 `-` 뒤에 공백 한 칸이 있어야 해요",
+            "put a space after `-` in list items (`- value`)",
         ),
         (
             "tab",
-            "들여쓰기나 `:` 뒤에 탭 문자를 쓸 수 없어요. 공백으로 바꿔 주세요",
+            "tab characters cannot be used for indentation or after `:`; replace tabs with spaces",
         ),
         (
             "illegal placement of ':'",
-            "`:`가 잘못된 자리에 있어요. 닫지 않은 `[`나 `{`가 없는지 확인하고, 값에 `:`가 들어가면 따옴표로 감싸세요",
+            "misplaced `:`; check for unclosed `[` or `{` and quote values containing `:`",
         ),
         (
             "flow sequence, expected ',' or ']'",
-            "`[ … ]` 목록을 `]`로 닫지 않았거나 항목 사이에 `,`가 없어요",
+            "missing `,` between items or unclosed `]` in `[ ... ]` list",
         ),
         (
             "flow mapping, did not find expected ',' or '}'",
-            "`{ … }`를 `}`로 닫지 않았거나 항목 사이에 `,`가 없어요",
+            "missing `,` between entries or unclosed `}` in `{ ... }` mapping",
         ),
         (
             "quoted scalar, found unexpected end of stream",
-            "여는 따옴표(`\"` 또는 `'`)를 닫지 않았어요",
+            "unclosed quote (`\"` or `'`)",
         ),
         (
             "unexpected eof",
-            "파일이 중간에 끝났어요. 닫지 않은 따옴표나 괄호가 있는지 확인하세요",
+            "unexpected end of file; check for unclosed quotes or brackets",
         ),
         (
             "simple key expect",
-            "`키: 값` 형식이어야 해요. `:`가 빠졌는지 확인하세요",
+            "expected `key: value`; check for a missing `:`",
         ),
         (
             "block sequence entries are not allowed",
-            "여기에는 `- 항목` 목록을 쓸 수 없어요. 앞 줄의 `키:` 아래에 들여써서 적어 주세요",
+            "`- item` list is not allowed here; indent it under the parent `key:`",
         ),
         (
             "mapping keys are not allowed",
-            "여기에는 키를 쓸 수 없어요. 앞 줄과 들여쓰기가 맞는지 확인하세요",
+            "mapping key is not allowed here; check indentation against the previous line",
         ),
         (
             "invalid indentation",
-            "들여쓰기가 맞지 않아요. 같은 목록·같은 키 아래는 같은 칸 수를 써 주세요",
+            "invalid indentation; align entries under the same list or key to the same column",
         ),
         (
             "wrongly indented",
-            "들여쓰기가 맞지 않아요. 같은 목록·같은 키 아래는 같은 칸 수를 써 주세요",
+            "invalid indentation; align entries under the same list or key to the same column",
         ),
         (
             "misplaced bracket",
-            "괄호(`[` `]` `{` `}`)가 잘못된 자리에 있어요",
+            "misplaced bracket (`[`, `]`, `{`, or `}`)",
         ),
         (
             "unknown escape character",
-            "큰따옴표 안의 `\\` 뒤 글자가 잘못됐어요. 역슬래시가 필요하면 `\\\\`로 쓰거나 작은따옴표로 감싸세요",
+            "invalid `\\` escape in double quotes; use `\\\\` for a literal backslash or use single quotes",
         ),
     ];
     match known
@@ -252,7 +247,7 @@ pub fn yaml_hint(parser: &str) -> String {
         .map(|(_, text)| *text)
     {
         Some(text) => text.to_owned(),
-        None => format!("YAML 문법이 맞지 않아요(파서 설명: {parser})"),
+        None => format!("Invalid YAML syntax (parser: {parser})"),
     }
 }
 
@@ -274,14 +269,12 @@ mod tests {
             nearest("assistent", ["assistant", "fast"]),
             Some("assistant")
         );
-        // 이웃한 두 글자를 맞바꾼 오타도 한 번으로 센다
         assert_eq!(nearest("modle", ["model", "roles"]), Some("model"));
-        // 너무 다르거나 같은 글이면 제안하지 않는다
         assert_eq!(nearest("x", ["cli", "slack", "http"]), None);
         assert_eq!(
             nearest("z", ["y"]),
             None,
-            "한 글자짜리 이름끼리는 오타로 보지 않는다"
+            "single-character names must not match each other as typos"
         );
         assert_eq!(nearest("ab", ["ac"]), None);
         assert_eq!(nearest("totally-different", ["cli", "slack"]), None);
@@ -306,17 +299,17 @@ mod tests {
         assert!(seen.len() >= 10, "{seen:?}");
         for pattern in seen {
             let text = pattern_hint(&pattern)
-                .unwrap_or_else(|| panic!("패턴에 사람 말 설명이 없어요: {pattern}"));
+                .unwrap_or_else(|| panic!("missing plain description for pattern: {pattern}"));
             assert!(!text.contains('^') && !text.contains("(?:"), "{text}");
             assert!(
-                text.contains("예:") || text.contains("한 줄"),
-                "예시가 있어야 해요: {text}"
+                text.contains("e.g.") || text.contains("single line"),
+                "description must include an example: {text}"
             );
         }
         assert_eq!(
             pattern_hint("^[x-z]+$"),
             None,
-            "모르는 정규식은 설명하지 않는다"
+            "unknown custom regex must not return a hint"
         );
     }
 
@@ -337,19 +330,18 @@ mod tests {
     fn yaml_parser_messages_become_fixes_and_unknown_ones_keep_the_original() {
         let text = yaml_hint("mapping values are not allowed in this context");
         assert!(
-            text.contains("키: 값") && text.contains("들여쓰기"),
+            text.contains("key: value") && text.contains("indentation"),
             "{text}"
         );
-        assert!(yaml_hint("':' must be followed by a valid YAML whitespace").contains("공백"));
+        assert!(yaml_hint("':' must be followed by a valid YAML whitespace").contains("space"));
         assert!(yaml_hint("while parsing a flow sequence, expected ',' or ']'").contains("`]`"));
-        assert!(yaml_hint("tab cannot be used as indentation").contains("탭"));
+        assert!(yaml_hint("tab cannot be used as indentation").contains("tab"));
         let unknown = yaml_hint("some brand new parser failure");
         assert!(
             unknown.contains("some brand new parser failure"),
             "{unknown}"
         );
-        assert!(unknown.starts_with("YAML 문법이 맞지 않아요"));
-        // 영어만 남지 않는다: 알려진 설명은 모두 한국어 문장이다
+        assert!(unknown.starts_with("Invalid YAML syntax"));
         for sample in [
             "did not find expected key",
             "illegal placement of ':' indicator",
@@ -358,9 +350,7 @@ mod tests {
             "unexpected eof",
         ] {
             assert!(
-                yaml_hint(sample)
-                    .chars()
-                    .any(|c| ('가'..='힣').contains(&c)),
+                !yaml_hint(sample).starts_with("Invalid YAML syntax"),
                 "{sample}"
             );
         }

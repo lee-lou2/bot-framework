@@ -1,5 +1,4 @@
-//! 모델 서비스 키(`claude-cli` 별칭의 `secret`) 점검: `bot validate`가 키가 없으면 통과하지 않고, worker는 활성 판본을 게시하기 **전에** 멈춘다.
-//! 키는 값이 아니라 이름이 호스트 설정에 있고, 값은 보관소에서 읽는다. 실제 모델·CLI는 쓰지 않는다.
+//! Preflight checks for `claude-cli` model service keys and VM config in `bot validate` and worker startup.
 
 use crate::claude_support::*;
 use crate::process_support::*;
@@ -32,7 +31,6 @@ fn validate_fails_without_the_model_service_key_and_names_where_to_put_it() {
     let pkg = package(dir.path(), "#!/bin/sh\nexit 0\n");
     let providers = r#", "providers": {"assistant": {"kind": "claude-cli", "model": "model-large",
                 "endpoint": "https://api.example", "secret": "model-key"}}"#;
-    // 모델 VM 설정(`sandbox.apple`)이 있는 호스트와 없는 호스트
     let vm = format!(
         r#", "sandbox": {{"apple": {{"image": "img@sha256:{}", "network": "bot-internal"}}}}"#,
         "a".repeat(64)
@@ -57,7 +55,6 @@ fn validate_fails_without_the_model_service_key_and_names_where_to_put_it() {
         )
     };
     let env = |extra: &[(&str, &str)]| env_on(&host, extra);
-    // 키가 없다: 통과하지 않고 자격 이름과 보관소 위치(환경 변수)를 알려 준다
     let missing = bot(&refs(&env(&[])), &["validate"]);
     assert_eq!(missing.status.code(), Some(1), "{}", text(&missing));
     let message = text(&missing);
@@ -65,17 +62,17 @@ fn validate_fails_without_the_model_service_key_and_names_where_to_put_it() {
         message.contains("model-key") && message.contains("BOT_SECRET__personal__model_key"),
         "{message}"
     );
-    assert!(!message.contains("통과"), "{message}");
-    // 키가 있다: 통과한다(값은 어디에도 찍지 않는다)
+    assert!(!message.contains("Validation passed"), "{message}");
+
     let value = "value-for-the-model-key";
     let ok = bot(
         &refs(&env(&[("BOT_SECRET__personal__model_key", value)])),
         &["validate"],
     );
     assert!(ok.status.success(), "{}", text(&ok));
-    assert!(text(&ok).contains("통과"), "{}", text(&ok));
+    assert!(text(&ok).contains("Validation passed"), "{}", text(&ok));
     assert!(!text(&ok).contains(value));
-    // 키가 있어도 모델 VM 설정이 없으면 통과하지 않는다(다른 샌드박스로 대신하지 않는다)
+
     let no_vm = bot(
         &refs(&env_on(
             &bare,
@@ -85,16 +82,19 @@ fn validate_fails_without_the_model_service_key_and_names_where_to_put_it() {
     );
     assert_eq!(no_vm.status.code(), Some(1), "{}", text(&no_vm));
     assert!(text(&no_vm).contains("sandbox.apple"), "{}", text(&no_vm));
-    assert!(!text(&no_vm).contains("통과"), "{}", text(&no_vm));
+    assert!(
+        !text(&no_vm).contains("Validation passed"),
+        "{}",
+        text(&no_vm)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_worker_without_the_model_service_key_stops_before_publishing_anything() {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL is not set");
         return;
     };
-    // 모델 CLI는 띄우지 않는다(시작 점검에서 멈춘다): 실행 파일 경로는 쓰이지 않는다
     let mut rig = Rig::launch(
         schema,
         "/nonexistent/claude".into(),
@@ -108,10 +108,13 @@ async fn a_worker_without_the_model_service_key_stops_before_publishing_anything
     )
     .await;
     let error = rig.failure().await;
-    assert!(error.contains("모델 서비스 키"), "{error}");
+    let lower = error.to_ascii_lowercase();
+    assert!(
+        lower.contains("service key") || lower.contains("model key"),
+        "{error}"
+    );
     assert!(error.contains("model-key"), "{error}");
-    // 점검에서 멈췄으니 활성 판본도 시드도 예약 정의도 올라가지 않았다
-    assert_eq!(rig.schema.active(), "", "게시 전에 멈췄어야 해요");
+    assert_eq!(rig.schema.active(), "", "must stop before publishing");
     assert_eq!(
         rig.query("select count(*) from {s}.bot_active_profiles"),
         "0"

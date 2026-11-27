@@ -1,14 +1,15 @@
-//! HTTP 입구의 인증: HS256 서명 토큰(발급자·대상·만료 확인). 서명을 먼저 확인한 뒤에야 클레임을 읽는다.
-//! `alg`는 정확히 `HS256`만 받는다(`none`·다른 알고리즘 거절). 서명 비교는 상수 시간이다.
+//! HS256 JWT verification for HTTP webhook endpoints.
+//!
+//! Verifies the constant-time HMAC-SHA256 signature before decoding claims; accepts only `alg = "HS256"` and
+//! rejects `crit` headers.
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::Sha256;
 
-/// 시계 오차 허용(초)
 pub const LEEWAY_SECS: u64 = 30;
 pub const MAX_TOKEN_BYTES: usize = 4096;
-/// HS256 키의 최소 길이(RFC 7518: 해시 길이 이상)
+/// Minimum HS256 key length per RFC 7518.
 pub const MIN_KEY_BYTES: usize = 32;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -20,7 +21,7 @@ pub enum Reject {
     Audience,
     Expired,
     NotYet,
-    /// 남은 수명이 호스트가 허용한 최대보다 길다
+    /// Remaining token lifetime exceeds the host-configured maximum.
     TooLong,
     Subject,
 }
@@ -42,12 +43,10 @@ fn object(bytes: &[u8]) -> Option<serde_json::Map<String, Value>> {
     }
 }
 
-/// 서명이 맞으면 페이로드(JSON 객체)를 돌려준다.
 fn signed_payload(token: &str, key: &[u8]) -> Result<serde_json::Map<String, Value>, Reject> {
     if token.len() > MAX_TOKEN_BYTES {
         return Err(Reject::Malformed);
     }
-    // 정확히 세 조각: 서명 입력(헤더.페이로드)과 서명
     let (signing_input, signature) = token.rsplit_once('.').ok_or(Reject::Malformed)?;
     let (header, payload) = signing_input.split_once('.').ok_or(Reject::Malformed)?;
     if payload.contains('.') {
@@ -73,7 +72,6 @@ fn seconds(value: Option<&Value>) -> Option<f64> {
     value?.as_f64().filter(|n| n.is_finite() && *n >= 0.0)
 }
 
-/// 서명·발급자·대상·만료를 확인하고 `sub`를 돌려준다. `now`는 유닉스 초.
 pub fn verify(token: &str, key: &[u8], expect: &Expect, now: u64) -> Result<String, Reject> {
     let claims = signed_payload(token, key)?;
     if claims.get("iss").and_then(Value::as_str) != Some(expect.issuer) {
@@ -109,12 +107,11 @@ pub fn verify(token: &str, key: &[u8], expect: &Expect, now: u64) -> Result<Stri
     }
 }
 
-/// 시험·도구용: 같은 방식으로 서명한 토큰을 만든다.
 #[cfg(any(test, feature = "testing"))]
 pub fn sign(claims: &Value, key: &[u8]) -> String {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("키");
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("valid HMAC key");
     mac.update(format!("{header}.{payload}").as_bytes());
     let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
     format!("{header}.{payload}.{signature}")
@@ -142,7 +139,7 @@ mod tests {
 
     #[test]
     fn accepts_an_independent_reference_signature() {
-        // 다른 구현이 만든 기준 서명(HS256, 비밀 "your-256-bit-secret"). 비밀 검사기에 걸리지 않게 조각으로 둔다.
+        // Standard RFC/jwt.io HS256 vector split into segments to avoid secret-scanner false positives.
         let token = [
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
             "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ",
@@ -164,7 +161,6 @@ mod tests {
             verify(&sign(&claims(), KEY), KEY, &expect(), NOW).unwrap(),
             "svc"
         );
-        // aud가 배열이어도 대상이 들어 있으면 된다
         let mut many = claims();
         many["aud"] = json!(["other", "bot"]);
         assert!(verify(&sign(&many, KEY), KEY, &expect(), NOW).is_ok());
@@ -207,7 +203,7 @@ mod tests {
             c["exp"] = json!(exp);
             verify(&sign(&c, KEY), KEY, &expect(), now)
         };
-        assert!(at(NOW, NOW).is_ok(), "시계 오차 안");
+        assert!(at(NOW, NOW).is_ok(), "within clock leeway");
         assert!(at(NOW, NOW + LEEWAY_SECS - 1).is_ok());
         assert_eq!(at(NOW, NOW + LEEWAY_SECS), Err(Reject::Expired));
         let mut missing = claims();
@@ -291,7 +287,6 @@ mod tests {
         ] {
             assert!(verify(bad, KEY, &expect(), NOW).is_err(), "{bad:?}");
         }
-        // 서명을 비운 토큰은 거절
         let unsigned = good.rsplit_once('.').unwrap().0.to_string() + ".";
         assert!(verify(&unsigned, KEY, &expect(), NOW).is_err());
     }

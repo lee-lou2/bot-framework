@@ -1,5 +1,4 @@
-//! triggers.yaml 해석. 파일 안에서 정해지는 것(cron 문법·HTTP 경로·점 경로·id 중복)만 여기서 보고,
-//! 바인딩·도구·주체 참조는 resolve가 맡는다.
+//! Parsing and local validation of `triggers.yaml` (cross-file references are checked in `resolve`).
 use crate::{
     issue::Issues,
     limits::Limits,
@@ -13,7 +12,7 @@ use bot_core::{
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// 이벤트 봉투의 최상위 이름. `match`·`input`의 점 경로는 여기서 시작한다.
+/// Valid top-level roots for dotted envelope paths in `match` and `input`.
 pub const ENVELOPE_ROOTS: &[&str] = &[
     "request_id",
     "binding",
@@ -33,7 +32,7 @@ pub fn parse(value: &Value, path: &str, limits: &Limits, issues: &mut Issues) ->
             "too-many",
             path,
             "/triggers",
-            format!("트리거가 너무 많아요(최대 {})", limits.max_triggers),
+            format!("too many triggers (max {})", limits.max_triggers),
         );
         return Vec::new();
     }
@@ -52,7 +51,7 @@ pub fn parse(value: &Value, path: &str, limits: &Limits, issues: &mut Issues) ->
                 "duplicate-trigger-id",
                 path,
                 format!("{at}/id"),
-                format!("트리거 id가 겹쳐요: {}", trigger.id),
+                format!("duplicate trigger id: {}", trigger.id),
             );
             continue;
         }
@@ -84,7 +83,7 @@ fn parse_one(
             "sync-needs-tool",
             path,
             format!("{at}/response"),
-            "동기 응답(`sync`)은 도구 결과를 그대로 돌려주므로 target이 도구여야 해요",
+            "synchronous response (`sync`) returns a tool result directly and requires a tool target",
         );
     }
     let identity = |key: &str, issues: &mut Issues| -> Option<PrincipalId> {
@@ -94,7 +93,7 @@ fn parse_one(
                 "bad-identity",
                 path,
                 format!("{at}/{key}"),
-                format!("신원은 `<종류>:<이름>` 모양이어야 해요: {who}"),
+                format!("identity must have the form `<kind>:<name>`: {who}"),
             );
         }
         Some(PrincipalId(who.to_owned()))
@@ -159,7 +158,14 @@ fn parse_source(
     if let Some(http) = on.get("http").and_then(Value::as_object) {
         let route = text(http, "path");
         if !http_path_ok(route) {
-            issues.error_at("bad-http-path", path, format!("{at}/http/path"), format!("HTTP 경로가 올바르지 않아요(`/`로 시작, 빈 구간·`.`·`..`·공백 금지, 256자 이하): {route}"));
+            issues.error_at(
+                "bad-http-path",
+                path,
+                format!("{at}/http/path"),
+                format!(
+                    "invalid HTTP path (must start with `/`, no empty segments, `.`, `..`, or whitespace, max 256 bytes): {route}"
+                ),
+            );
             return None;
         }
         return Some(Source::Http {
@@ -178,7 +184,7 @@ fn parse_source(
                 "unsupported-event",
                 path,
                 format!("{at}/event"),
-                format!("지원하는 이벤트는 `message`·`thread-reply`·`reaction`이에요: {event}"),
+                format!("supported events are `message`, `thread-reply`, and `reaction`: {event}"),
             );
             None
         }
@@ -220,8 +226,8 @@ fn path_of(dotted: &str, path: &str, at: &str, issues: &mut Issues) -> String {
             path,
             at,
             format!(
-                "봉투 경로는 {}로 시작해요: {dotted}",
-                ENVELOPE_ROOTS.join("·")
+                "envelope path must start with one of {}: {dotted}",
+                ENVELOPE_ROOTS.join(", ")
             ),
         );
     }
@@ -274,7 +280,7 @@ mod tests {
     fn parses_the_three_source_kinds() {
         let (out, codes) = run(json!({"version": 1, "triggers": [
             {"id": "morning", "on": {"cron": "0 9 * * *"}, "principal": "service:morning", "target": {"tool": "agenda.list", "args": {}}},
-            {"id": "chat", "on": {"event": "message", "binding": "team"}, "target": {"instruction": "요약"}},
+            {"id": "chat", "on": {"event": "message", "binding": "team"}, "target": {"instruction": "summarize"}},
             {"id": "cancel", "on": {"http": {"method": "POST", "path": "/agenda"}, "binding": "inbox"}, "order": 10,
              "match": {"body.action": "cancel"}, "input": {"event": "body.event"}, "target": {"tool": "agenda.delete"}, "response": {"mode": "accepted"}}
         ]}));
@@ -319,7 +325,7 @@ mod tests {
             run(base(json!({"on": {"event": "edited", "binding": "b"}}))).1,
             ["unsupported-event"]
         );
-        // 스레드 답글·반응은 지원하는 사건이다(바인딩의 `events`와 맞는지는 resolve가 본다)
+        // `thread-reply` and `reaction` are parsed locally; binding `events` compatibility is checked in `resolve`.
         for event in ["thread-reply", "reaction"] {
             assert!(
                 run(base(json!({"on": {"event": event, "binding": "b"}})))

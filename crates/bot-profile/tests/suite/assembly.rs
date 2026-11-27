@@ -1,9 +1,8 @@
-//! 상속 조립: 지침·env·모델·스코프 상속, 스킬·지식 가시성, 기억 시드, 트리거 소유.
+//! Inheritance assembly tests: instructions, env, model, scopes, skill/knowledge visibility, memory seeds, and trigger ownership.
 
 use crate::support::{Files, agent, append, edit, family, snapshot};
 use bot_core::{profile::Skill, state::Visibility};
 
-/// `<dir>/skills/<name>/{SKILL.md,tools.yaml}`. 도구 하나(`<name>.ping`).
 fn skill(files: Files, dir: &str, name: &str) -> Files {
     let tools = "version: 1\nserver: demo-notes\ntools:\n  - id: ping\n    class: read\n    scopes: [calendar.read]\n    input: {type: object, properties: {}, additionalProperties: false}\n".to_owned();
     let root = if dir.is_empty() {
@@ -15,7 +14,7 @@ fn skill(files: Files, dir: &str, name: &str) -> Files {
         files,
         &format!("{root}skills/{name}/SKILL.md"),
         "",
-        &format!("{name} 스킬 안내\n"),
+        &format!("{name} skill guide\n"),
     );
     edit(
         files,
@@ -47,8 +46,8 @@ fn inherits_instructions_env_model_and_scopes() {
     files = edit(
         files,
         "agents/main/agents/research/AGENT.md",
-        "부모가",
-        "---\nmodel: fast\n---\n부모가",
+        "Handle",
+        "---\nmodel: fast\n---\nHandle",
     );
     files = edit(
         files,
@@ -65,17 +64,20 @@ fn inherits_instructions_env_model_and_scopes() {
     );
     assert_eq!(
         main.instructions,
-        "- 답은 한국어로 짧게 쓴다.\n\n오늘 일정을 조회하고 변경 전에는 정확한 일정을 확인한다."
+        "- Keep answers brief and in English.\n\nCheck today's schedule and confirm the exact event before making changes."
     );
     assert!(
         deep.instructions.starts_with(&main.instructions),
-        "자식은 부모 지침 뒤에 이어 붙는다"
+        "child instructions append after parent instructions"
     );
-    assert!(deep.instructions.ends_with("깊이 파고든다."));
+    assert!(deep.instructions.ends_with("Dig deeper."));
     assert_eq!(
-        other.instructions.matches("부모가 맡긴").count(),
+        other
+            .instructions
+            .matches("Handle schedule lookups")
+            .count(),
         0,
-        "형제의 지침은 섞이지 않는다"
+        "sibling instructions must not leak"
     );
     let env = |a: &bot_core::profile::Agent| {
         a.env
@@ -87,7 +89,7 @@ fn inherits_instructions_env_model_and_scopes() {
     assert_eq!(
         env(research),
         ["A=root", "B=child", "C=child"],
-        "자식 값이 우선"
+        "child env overrides parent"
     );
     assert_eq!(env(deep), env(research));
     assert_eq!(env(other), env(main));
@@ -106,12 +108,12 @@ fn inherits_instructions_env_model_and_scopes() {
     assert_eq!(
         scopes(deep),
         ["calendar.read"],
-        "부모 상한 ∩ 자기 제한(부모보다 넓게 적어도 넓어지지 않는다)"
+        "child scopes are intersected with parent ceiling"
     );
     assert_eq!(
         scopes(other),
         scopes(main),
-        "policy.agents에 없으면 부모 상한을 그대로"
+        "omitted policy.agents entries inherit parent ceiling"
     );
 }
 
@@ -125,13 +127,13 @@ fn skills_and_knowledge_are_visible_only_from_ancestors_and_self() {
         files,
         "agents/main/agents/research/knowledge/own.md",
         "",
-        "연구 메모\n",
+        "Research notes\n",
     );
     files = edit(
         files,
         "agents/main/agents/other/knowledge/mail.md",
         "",
-        "메일 규칙\n",
+        "Mail rules\n",
     );
     let snap = snapshot(&files);
     let seen = |id: &str| {
@@ -200,7 +202,7 @@ fn memory_seeds_stay_with_their_agent() {
         files,
         "agents/main/agents/research/memory/note.md",
         "",
-        "---\nowner: \"local:owner\"\nvisibility: profile\n---\n연구 방향\n",
+        "---\nowner: \"local:owner\"\nvisibility: profile\n---\nResearch direction\n",
     );
     let snap = snapshot(&files);
     let main = &snap.agents[&agent("main")];
@@ -210,7 +212,7 @@ fn memory_seeds_stay_with_their_agent() {
             main.memory_seeds[0].visibility,
             main.memory_seeds[0].document.text.as_str()
         ),
-        (Visibility::Private, "아침에 일정을 확인한다.")
+        (Visibility::Private, "Check the schedule every morning.")
     );
     assert_eq!(
         main.memory_seeds[0].document.relative_path,

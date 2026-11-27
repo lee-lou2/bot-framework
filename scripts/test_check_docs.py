@@ -24,10 +24,10 @@ contracts = load("check_contracts", ".github/scripts/check_contracts.py")
 GOOD = {
     "Cargo.toml": '[workspace]\nmembers = ["crates/bot-core", "crates/bot-cli"]\n',
     "README.md": "# demo\n",
-    "AGENTS.md": "# agents\n\n| 크레이트 | 책임 |\n|---|---|\n| `bot-core` | 어휘 |\n| `bot-cli` | 바이너리 |\n\n읽기: `crates/bot-core/src/lib.rs`\n",
-    "docs/architecture.md": "# 구조\n\n## 크레이트\n\n| 크레이트 | 책임 |\n|---|---|\n| bot-core | 어휘 |\n| bot-cli | 바이너리 |\n",
-    "docs/admin.md": "# 관리\n\n`GET /v1/admin/me`\n",
-    "docs/guide.md": "# 안내\n\n설정 `agent_name`·`nested_key`·`version`·`kind`·`model`·`gateway`·`root`·`tool_call_max_secs`·`team_id`·`renamed_key`, 명령 `bot validate`·`bot add skill`, 플래그 `--check-db`, 도구 `memory.share`.\n",
+    "AGENTS.md": "# agents\n\n| Crate | Responsibility |\n|---|---|\n| `bot-core` | Vocabulary |\n| `bot-cli` | Binary |\n\nRead: `crates/bot-core/src/lib.rs`\n",
+    "docs/architecture.md": "# Architecture\n\n## Crates\n\n| Crate | Responsibility |\n|---|---|\n| bot-core | Vocabulary |\n| bot-cli | Binary |\n",
+    "docs/admin.md": "# Admin\n\n`GET /v1/admin/me`\n",
+    "docs/guide.md": "# Guide\n\nSettings `agent_name`, `nested_key`, `version`, `kind`, `model`, `gateway`, `root`, `tool_call_max_secs`, `team_id`, `renamed_key`, commands `bot validate`, `bot add skill`, flag `--check-db`, tool `memory.share`.\n",
     "schemas/v1/profile.schema.json": '{"properties": {"agent_name": {"properties": {"nested_key": {}}}}}',
     "crates/bot-core/src/lib.rs": "//! core\n",
     "crates/bot-cli/src/host.rs": 'let version = top.remove("version");\nlet gateway = top.remove("gateway");\n#[cfg(test)]\nmod tests { let x = top.remove("only_in_tests"); }\n',
@@ -100,14 +100,14 @@ class Names(unittest.TestCase):
             docs.check(repo.root)
 
     def test_a_name_counts_only_as_a_whole_token(self):
-        self.assertTrue(docs.mentioned("pass", "`pass`는 넘긴다"))
+        self.assertTrue(docs.mentioned("pass", "`pass`€ forwards"))
         self.assertFalse(docs.mentioned("private", "private_pass"))
         self.assertFalse(docs.mentioned("pass", "bypass"))
         self.assertFalse(docs.mentioned("a", "a-b"))
         self.assertTrue(docs.mentioned("a.b", "x a.b y"))
 
     def test_an_undocumented_schema_property_is_named_with_its_schema(self):
-        with Repo({"docs/guide.md": GOOD["docs/guide.md"].replace("`nested_key`·", "")}) as repo:
+        with Repo({"docs/guide.md": GOOD["docs/guide.md"].replace("`nested_key`, ", "")}) as repo:
             self.assertEqual([(k, t) for k, t, _ in repo.problems()], [("schema", "nested_key")])
             self.assertIn("profile.schema.json", repo.messages()[0])
 
@@ -138,7 +138,7 @@ class Names(unittest.TestCase):
             self.assertEqual([(k, t) for k, t, _ in repo.problems()], [("host", "secret_name")])
 
     def test_a_host_key_must_be_written_as_code_not_only_as_a_word_in_prose(self):
-        prose = GOOD["docs/guide.md"].replace("`gateway`", "gateway") + "\n(gateway는 문장 속에서만 나온다)\n"
+        prose = GOOD["docs/guide.md"].replace("`gateway`", "gateway") + "\n(gateway appears only in prose)\n"
         with Repo({"docs/guide.md": prose}) as repo:
             self.assertEqual([(k, t) for k, t, _ in repo.problems()], [("host", "gateway")])
             self.assertIn("written as code", repo.messages()[0])
@@ -170,9 +170,9 @@ class Names(unittest.TestCase):
             self.assertEqual([(k, t) for k, t, _ in repo.problems()], [("tool", "schedule.deliver")])
 
     def test_the_crate_tables_must_list_exactly_the_workspace_members(self):
-        with Repo({"docs/architecture.md": GOOD["docs/architecture.md"].replace("| bot-cli | 바이너리 |\n", "| bot-ghost | 없음 |\n")}) as repo:
+        with Repo({"docs/architecture.md": GOOD["docs/architecture.md"].replace("| bot-cli | Binary |\n", "| bot-ghost | Missing |\n")}) as repo:
             self.assertEqual(sorted(t for k, t, _ in repo.problems() if k == "crate"), ["bot-cli", "bot-ghost"])
-        with Repo({"AGENTS.md": GOOD["AGENTS.md"].replace("| `bot-core` | 어휘 |\n", "")}) as repo:
+        with Repo({"AGENTS.md": GOOD["AGENTS.md"].replace("| `bot-core` | Vocabulary |\n", "")}) as repo:
             self.assertEqual([t for k, t, _ in repo.problems() if k == "crate"], ["bot-core"])
         # a name with several hyphens or digits is read whole
         with Repo({"AGENTS.md": GOOD["AGENTS.md"] + "| `bot-two-words2` | x |\n"}) as repo:
@@ -181,14 +181,15 @@ class Names(unittest.TestCase):
 
 class Paths(unittest.TestCase):
     def test_github_anchors(self):
-        self.assertEqual(docs.slug("Claude Code가 브로커에 연결하는 방법"), "claude-code가-브로커에-연결하는-방법")
-        self.assertEqual(docs.slug("원격 도구 서버(Streamable HTTP)"), "원격-도구-서버streamable-http")
+        self.assertEqual(docs.slug("How Claude Code connects to the broker"), "how-claude-code-connects-to-the-broker")
+        self.assertEqual(docs.slug("Remote tool server(Streamable HTTP)"), "remote-tool-serverstreamable-http")
+        self.assertEqual(docs.slug("Café résumé (UTF-8)"), "café-résumé-utf-8")
         self.assertEqual(docs.anchors("# A\n## A\n```\n# not a heading\n```\n"), {"a", "a-1"})
 
     def test_paths_links_and_anchors_that_point_at_nothing_are_reported(self):
         text = (
-            "# 안내\n\n`crates/bot-core/src/lib.rs` `crates/nope.rs` `crates/bot-core/src/{lib,gone}.rs` `crates/bot-core/src/lib.rs:12` `crates/<x>/y` `docs/*.md`\n"
-            "[a](admin.md#관리) [b](missing.md) [c](admin.md#nowhere) [d](#안내) [e](https://example.com/x#y)\n"
+            "# Guide\n\n`crates/bot-core/src/lib.rs` `crates/nope.rs` `crates/bot-core/src/{lib,gone}.rs` `crates/bot-core/src/lib.rs:12` `crates/<x>/y` `docs/*.md`\n"
+            "[a](admin.md#admin) [b](missing.md) [c](admin.md#nowhere) [d](#guide) [e](https://example.com/x#y)\n"
         )
         with Repo({"docs/guide.md": GOOD["docs/guide.md"] + text}) as repo:
             found = sorted(message.split(": ", 1)[1] for _, _, message in repo.problems())
@@ -223,7 +224,7 @@ class Exceptions(unittest.TestCase):
         self.assertEqual(len(kept), 2)
 
     def test_check_raises_one_error_listing_every_problem(self):
-        with Repo({"docs/guide.md": "# 안내\n"}) as repo, self.assertRaises(ValueError) as caught:
+        with Repo({"docs/guide.md": "# Guide\n"}) as repo, self.assertRaises(ValueError) as caught:
             docs.check(repo.root)
         self.assertGreater(len(str(caught.exception).splitlines()), 3)
 
@@ -247,7 +248,7 @@ class Repository(unittest.TestCase):
             if path.name == "tests.rs" or path.name.endswith("_tests.rs") or "tests" in path.parts:
                 continue
             text = docs.non_test_text(path.read_text(encoding="utf-8"))
-            if "알 수 없는 키" in text or "deny_unknown_fields" in text:
+            if "unknown key" in text.lower() or "unknown top-level key" in text.lower() or "deny_unknown_fields" in text:
                 rejecting.add(str(path.relative_to(ROOT)))
         self.assertEqual(sorted(rejecting - registered), [])
         for relative in registered:

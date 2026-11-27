@@ -1,12 +1,12 @@
-# 장애 심각도와 연락 순서(예시)
+# Incident Severity and Escalation Order (Example)
 
-합성 예시다. 팀의 실제 기준으로 바꿔 쓴다.
+Synthetic example. Replace with your team's actual policy.
 
-| 단계 | 기준 | 첫 대응 | 연락 순서 |
+| Level | Criteria | Initial Response | Escalation Order |
 |---|---|---|---|
-| SEV1 | 서비스 전체 중단, 데이터 손실 | 바로 완화한다. 15분마다 상황을 공유한다 | 운영 → 리드 → 팀 전체 |
-| SEV2 | 핵심 기능 일부 저하 | 1시간 안에 완화한다 | 운영 → 리드 |
-| SEV3 | 불편하지만 우회할 수 있음 | 영업일 안에 처리한다 | 운영 담당 |
+| SEV1 | Full outage or data loss | Mitigate immediately; post updates every 15 minutes | Ops -> Lead -> Entire team |
+| SEV2 | Partial degradation of core features | Mitigate within 1 hour | Ops -> Lead |
+| SEV3 | Inconvenience with a workaround | Resolve within business hours | Ops |
 
-- 심각도가 애매하면 한 단계 높게 잡고, 상황이 정리되면 내린다.
-- 되돌릴 수 없는 조치(롤백·데이터 삭제·계정 정지)는 심각도와 상관없이 사람의 승인을 먼저 받는다.
+- When severity is unclear, classify one level higher and downgrade once stabilized.
+- Irreversible actions (rollbacks, data deletion, account suspension) require human approval regardless of severity.

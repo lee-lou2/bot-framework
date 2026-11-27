@@ -1,4 +1,4 @@
 ---
 owner: "local:team"
 ---
-이번 분기 우선순위(예시): 1) 온보딩 단순화 2) 알림 정확도 3) 검색 속도. 새 요청은 이 세 가지와 얼마나 관련 있는지로 먼저 거른다.
+Quarterly priorities (example): 1) Simplify onboarding 2) Notification accuracy 3) Search speed. Evaluate new requests against these three first.

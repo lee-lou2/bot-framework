@@ -1,20 +1,20 @@
-//! 명시 목적지 예약의 최종 회신 묶음(`schedule.deliver`): 호출 상수와 승인 카드에 보이는 초안 문서, 수신 경로의 봉인.
+//! Scheduled explicit-destination delivery (`schedule.deliver`): constants, approval draft rendering, and route sealing.
 
 use super::{DeliveryDraft, DeliveryTarget};
 use crate::{canon, command::JsonPayload, id::is_name, port::Error, state::ConversationKind};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
-/// 한 예약 실행에서 최종 회신 묶음은 하나다. 이 호출 ID는 호스트가 소유한다.
+/// Host-owned call ID; at most one final delivery bundle per scheduled run.
 pub const DELIVER_CALL: &str = "schedule-deliver";
 pub use crate::builtin::{DELIVER_TOOL, REVISION as DELIVER_REVISION};
-pub const DELIVERY_CARD_LABEL: &str = "전송 초안";
+pub const DELIVERY_CARD_LABEL: &str = "Delivery draft";
 
-// 게이트웨이 카드 전체가 20줄, 줄마다 500바이트다. 실제 렌더러는 머리줄도 함께 센다.
+// Gateway cards allow 20 lines x 500 bytes; the renderer also counts header lines.
 const CARD_CAPACITY: usize = 20 * 500;
 
 impl DeliveryTarget {
-    /// 예약 생성과 실제 발송에 같은 방식으로 수신 경로를 묶는다.
+    /// Canonical target representation shared by schedule creation and delivery.
     pub(super) fn approval_target(&self) -> Result<Value, Error> {
         let conversation = &self.conversation;
         let kind = match conversation.kind {
@@ -37,14 +37,13 @@ impl DeliveryTarget {
 }
 
 impl DeliveryDraft {
-    /// outbox 등록 커밋에 저장할 영수증. 답 하나가 대기열 한 건이며 첨부는 그 답에 포함된다.
-    /// 재조회는 이때 저장한 바이트를 반환한다.
+    /// Receipt committed on outbox enqueue (one row per answer, attachments included); replayed verbatim on retry.
     pub fn queued_receipt(&self) -> JsonPayload {
         JsonPayload(json!({ "queued": self.answers.len() }).to_string())
     }
 
-    /// 승인자에게 보여 주고 원장이 검증하는 같은 문서. 답·첨부 순서와 줄바꿈을 보존한다.
-    /// text/plain의 data만 UTF-8 원문으로 풀어 text로 표시하므로 승인 내용에서 발송 바이트를 복원할 수 있다.
+    /// Canonical JSON shown to the approver and verified by the ledger, preserving answer/attachment order and newlines.
+    /// Decodes `text/plain` attachment `data` into UTF-8 `text` so sent bytes are reconstructible from what was approved.
     pub fn approval_json(&self) -> Result<String, Error> {
         if !identifier(&self.activation.0) || self.answers.is_empty() {
             return Err(Error::Invalid);
@@ -53,7 +52,7 @@ impl DeliveryDraft {
         let mut answers = Vec::new();
         let mut remaining = CARD_CAPACITY;
         for answer in &self.answers {
-            // JSON 공백·이스케이프·base64를 허용하되 카드에 담지 못할 큰 입력은 파싱 전에 멈춘다.
+            // Reject oversized raw payloads before parsing while allowing JSON whitespace/escapes/base64.
             if answer.0.len() > 8 * CARD_CAPACITY {
                 return Err(Error::Invalid);
             }
@@ -73,7 +72,7 @@ impl DeliveryDraft {
             .ok_or(Error::Invalid)
     }
 
-    /// begin·승인·enqueue 모두 이 지문을 사용한다. 해시 입력은 approval_json()의 UTF-8 바이트다.
+    /// Digest shared by `begin`, approval, and `enqueue`, hashed over `approval_json()` UTF-8 bytes.
     pub fn sha256(&self) -> Result<[u8; 32], Error> {
         Ok(canon::sha256(&self.approval_json()?))
     }

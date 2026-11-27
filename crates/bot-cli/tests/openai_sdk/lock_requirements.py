@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""requirements.lock.txt를 다시 만든다: 고정한 최상위 패키지(openai·jsonschema·PyYAML)를 임시 venv에 설치해 닫힘을 풀고, 각 패키지의 CPython 3.12 휠(CI의
-Linux x86_64·로컬 macOS arm64)과 순수 파이썬 휠의 sha256을 PyPI JSON에서 읽어 `--hash`로 적는다. 올릴 때만 돌린다(네트워크 필요).
-사용: python3 lock_requirements.py > requirements.lock.txt   (PyYAML은 공식 스키마 뽑기·검증에만 쓴다)"""
+"""Regenerates requirements.lock.txt by resolving pinned top-level packages in a temp venv and fetching PyPI sha256 wheel hashes for CPython 3.12 (Linux x86_64, macOS arm64) and pure-Python wheels.
+Usage: python3 lock_requirements.py > requirements.lock.txt"""
 import json
 import re
 import subprocess
@@ -29,15 +28,15 @@ def main():
         python = f"{folder}/bin/python"
         subprocess.run([python, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *TOP], check=True)
         listed = json.loads(subprocess.run([python, "-m", "pip", "list", "--format=json"], check=True, capture_output=True, text=True).stdout)
-    print("# 공식 openai SDK(Python) 시험 환경: 정확 판본 + 해시. 설치: pip install --require-hashes --no-deps -r requirements.lock.txt")
-    print("# CPython 3.12의 Linux x86_64·macOS arm64 휠만 허용한다. 다시 만들기: python3 lock_requirements.py > requirements.lock.txt")
+    print("# Official openai Python SDK test environment: exact versions + hashes. Install: pip install --require-hashes --no-deps -r requirements.lock.txt")
+    print("# Allows CPython 3.12 Linux x86_64 and macOS arm64 wheels only. Regenerate: python3 lock_requirements.py > requirements.lock.txt")
     for item in sorted(listed, key=lambda i: i["name"].lower()):
         name, version = item["name"], item["version"]
         if name.lower() in ("pip", "setuptools", "wheel"):
             continue
         files = [f for f in pypi(name, version)["urls"] if f["packagetype"] == "bdist_wheel" and not f["yanked"] and WHEELS.search(f["filename"])]
         if not files:
-            raise SystemExit(f"{name}=={version}: 쓸 수 있는 휠이 없다")
+            raise SystemExit(f"{name}=={version}: no compatible wheel found")
         hashes = sorted({f["digests"]["sha256"] for f in files})
         print(f"{name.lower().replace('_', '-')}=={version} \\")
         print(" \\\n".join(f"    --hash=sha256:{h}" for h in hashes))

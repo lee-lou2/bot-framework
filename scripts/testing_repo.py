@@ -86,9 +86,7 @@ class Repo:
 
     def gate(self, *args, env=None, drop=("BOT_PRIVATE_TERMS_FILE", "BOT_TEST_DATABASE_URL", "BOT_TEST_REQUIRE_DB")):
         merged = self.env(env)
-        # 시험을 돌리는 사람의 환경이 새지 않게: 관문이 읽는 `RELEASE_CHECK_*`·`BOT_*` 변수는 시험이 명시한 것만 남긴다
-        # (예: 리허설에서 `RELEASE_CHECK_REFS`를 준 채 돌리면 임시 저장소의 이력 검사가 엉뚱한 참조를 보던 일)
-        # (`RELEASE_CHECK_IN_SELFTEST`는 시험이 시험을 다시 부르는 순환을 막는 표지라 그대로 둔다)
+        # Strip caller RELEASE_CHECK_* and BOT_* env vars unless explicitly passed (keep RELEASE_CHECK_IN_SELFTEST to prevent recursive selftest).
         for name in [*drop, *(n for n in merged if n.startswith(("RELEASE_CHECK_", "BOT_")))]:
             if name == "RELEASE_CHECK_IN_SELFTEST":
                 continue

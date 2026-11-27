@@ -1,7 +1,5 @@
-//! 가짜 저장소: `AdminRead`·`AdminAct`·`Broker::decide`를 메모리로 구현한다(시험·데모·다른 크레이트의 시험용).
-//! 실제 저장소와 같은 범위 규칙을 흉내 낸다: 운영자는 전체, 그 밖의 주체는 자기 요청과 자기 승인만 보고,
-//! 운영자 전용 조회는 거절하며, 보이지 않는 대상은 존재 여부를 숨기려고 `Missing`으로 답한다.
-//! 감사는 판정과 같은 락 안에서 해시 체인에 잇는다.
+//! In-memory fake store implementing `AdminRead`, `AdminAct`, and `Broker::decide` for tests and demos.
+//! Mirrors real store visibility rules: invisible objects return `Missing` and audit entries chain under the same lock.
 
 use bot_core::{admin::*, id::*, port::Error, state::*};
 use sha2::{Digest, Sha256};
@@ -18,15 +16,13 @@ pub struct Decision {
     pub allow: bool,
 }
 
-/// 가짜 저장소가 가진 호출. 실제 저장소처럼 프로필이 키의 일부다: 같은 run·호출 ID를 다른 프로필이 써도 섞이지 않는다.
-/// `Deref`로 `CallView`처럼 읽는다(`call_view`가 run의 프로필을 따라 만든다).
+/// Profile-scoped call record matching the real store's `(profile, run, call)` key.
 #[derive(Clone, Debug)]
 pub struct OwnedCall {
     pub profile: ProfileId,
     pub view: CallView,
 }
 
-/// 가짜 저장소가 가진 효과 단계(프로필이 키의 일부). `effect_view`가 호출의 프로필을 따라 만든다.
 #[derive(Clone, Debug)]
 pub struct OwnedEffect {
     pub profile: ProfileId,
@@ -51,7 +47,7 @@ macro_rules! view_deref {
 view_deref!(OwnedCall, CallView);
 view_deref!(OwnedEffect, EffectView);
 
-/// 사전 승인 한 행과 마지막 전환 기록(직전 세대·정지 여부·승인 ID).
+/// Preapproval row paired with its last transition `(prev_epoch, paused, grant_id)` for `decide_pause`.
 pub type FakePreapproval = (bot_core::grant::PreapprovalRow, Option<(i64, bool, String)>);
 
 #[derive(Default)]
@@ -65,24 +61,20 @@ pub struct Data {
     pub decisions: Vec<Decision>,
     pub resolutions: Vec<Resolution>,
     resolved: Vec<HoldKey>,
-    /// 끝난 판정의 기록: 보류 식별자·대상·운영자·판정 종류와 영수증/증거의 **지문**(원문은 보존하지 않는다).
-    /// 같은 식별자로 같은 운영자·같은 판정이 다시 오면 새로 적용하지 않고 `Repeated`다.
+    /// Settled holds store only the verdict kind and receipt/evidence digest (never raw text) for idempotent repeat detection.
     settled: Vec<Settled>,
     next_hold: u64,
-    /// 사전 승인 행과 정지 판정에 필요한 마지막 전환 기록(`bot_core::grant::decide_pause`).
     pub preapprovals: Vec<FakePreapproval>,
-    /// 정지·재개로 쓴 감사 줄 수(중복 재전달은 늘지 않는다).
     pub pause_audits: u64,
 }
 
-/// 열린 보류를 가리키는 키. 구판 데이터는 같은 프로필·run·호출 ID 아래 도구와 회신을 따로 보류할 수 있어 종류까지 넣는다.
+/// Open-hold key including `HoldKind` so legacy tool and reply holds sharing a `call_id` stay distinct.
 pub type HoldKey = (ProfileId, RunId, CallId, HoldKind);
 
 pub fn hold_key(h: &HoldView) -> HoldKey {
     (h.profile.clone(), h.run.clone(), h.call.clone(), h.kind)
 }
 
-/// 적용된 판정의 기록: 영수증·증거의 원문은 보존하지 않고 종류와 지문만 남긴다(실제 저장소와 같다).
 #[derive(Clone, Debug)]
 pub struct Resolution {
     pub actor: PrincipalId,
@@ -101,7 +93,6 @@ struct Settled {
     verdict: (&'static str, [u8; 32]),
 }
 
-/// 판정 종류와 입력 글의 지문. 같은 종류·같은 글이어야 «같은 판정»이다.
 pub(crate) fn verdict_print(v: &HoldVerdict) -> (&'static str, [u8; 32]) {
     match v {
         HoldVerdict::Confirmed { receipt } => ("confirmed", digest(receipt)),
@@ -112,9 +103,9 @@ pub(crate) fn verdict_print(v: &HoldVerdict) -> (&'static str, [u8; 32]) {
 #[derive(Default)]
 pub struct Fake {
     data: Mutex<Data>,
-    /// 경합 시험용: 다음 `n`번의 승인 조회는 모두 모일 때까지 기다린 뒤 돌려준다(읽은 값은 기다리기 전의 것).
+    /// Concurrency test hook: holds the next `n` approval reads at a barrier before returning.
     gate: Mutex<Option<(std::sync::Arc<tokio::sync::Barrier>, usize)>>,
-    /// 시험용: 참이면 소유자 전용 카드 본문도 모든 조회자에게 돌려준다(관리 API가 스스로 막는지 보려는 «새는 저장소»).
+    /// Defense-in-depth test hook: when true, returns owner-only card bodies to all viewers.
     leaky: std::sync::atomic::AtomicBool,
 }
 
@@ -202,7 +193,6 @@ pub fn effect_view(
         step: step.to_owned(),
         state,
         resolution: None,
-        // 판정할 수 있는(보류) 단계만 보류 식별자를 가진다. 시험이 정하기 쉽게 효과 ID에서 만든다.
         hold_id: (state == EffectState::Held).then(|| HoldId(format!("h-{effect}"))),
         receipt: receipt.map(str::to_owned),
         reason: (state == EffectState::Held).then(|| "outcome_unknown".to_owned()),
@@ -233,8 +223,8 @@ pub fn approval_view(call: &CallView, run: &RunView, nonce: &str, approver: &str
         expires_at: SystemTime::now() + Duration::from_secs(900),
         state: ApprovalState::Pending,
         render: vec![
-            ("대상".to_owned(), "synthetic-event".to_owned()),
-            ("변경".to_owned(), "삭제".to_owned()),
+            ("Target".to_owned(), "synthetic-event".to_owned()),
+            ("Action".to_owned(), "delete".to_owned()),
         ],
         decided_by: None,
         decided_at: None,
@@ -260,15 +250,12 @@ fn entry_hash(
 }
 
 impl Data {
-    /// 새 보류 식별자를 발급한다(저장소가 보류에 들어갈 때마다 새로 발급한다).
     pub fn issue_hold(&mut self) -> HoldId {
         self.next_hold += 1;
         HoldId(format!("h-new-{}", self.next_hold))
     }
 
-    /// 같은 대상이 다시 보류된 것을 흉내 낸다: 새 식별자를 받아 열린 보류가 되고 run은 다시 기다린다.
-    /// `effect`를 지정하면 그 단계가, 생략하면 호출 전체가 새 보류가 된다. 새 식별자를 돌려준다.
-    /// 호출 ID가 하나뿐인 시험을 위한 줄임이다: 그 호출 ID를 가진 첫 보류를 다시 보류시킨다(같은 ID가 여럿이면 `rehold_hold`).
+    /// Re-holds the first hold matching `call` with a fresh `HoldId`; use `rehold_hold` when multiple holds share a call ID.
     pub fn rehold(&mut self, call: &str, effect: Option<&str>) -> HoldId {
         match self.holds.iter().find(|h| h.call.0 == call).map(hold_key) {
             Some(key) => self.rehold_hold(&key, effect),
@@ -276,7 +263,6 @@ impl Data {
         }
     }
 
-    /// `rehold`의 정확한 형태: 프로필·run·호출·종류로 보류를 가리킨다.
     pub fn rehold_hold(&mut self, key: &HoldKey, effect: Option<&str>) -> HoldId {
         let new = self.issue_hold();
         let (profile, run, call, _) = key;
@@ -302,8 +288,7 @@ impl Data {
         new
     }
 
-    /// 일꾼이 판정된 단계를 다시 시작한 것을 흉내 낸다: 새로 시작한 단계가 되어 «미실행 판정 뒤 재개 대기» 표지가 사라진다.
-    /// 효과 ID는 프로필 안에서만 유일하다(실제 저장소의 키는 프로필+ID).
+    /// Simulates a worker restarting a previously resolved effect step, clearing its `NotExecuted` marker.
     pub fn restart_effect(&mut self, profile: &str, effect: &str) {
         if let Some(e) = self
             .effects
@@ -314,8 +299,6 @@ impl Data {
         }
     }
 
-    /// 이 보류의 현재 단계들(효과 원장에서 읽는다). 도구 보류만 단계를 가지고(회신·민감 DM은 호출 단위 보류다),
-    /// 같은 run·호출 ID를 쓰는 다른 프로필·다른 run의 단계는 섞이지 않는다(키는 프로필+run+호출).
     pub fn steps_of(&self, h: &HoldView) -> Vec<EffectView> {
         if h.kind != HoldKind::Tool {
             return Vec::new();
@@ -327,8 +310,6 @@ impl Data {
             .collect()
     }
 
-    /// 보류가 열려 있는가. 판정 전의 호출 단위 발생이나 미결 단계가 있으면 열려 있다.
-    /// 같은 호출 ID의 다른 보류(다른 run, 같은 호출의 회신)는 이 보류의 상태에 영향을 주지 않는다.
     pub fn hold_open(&self, h: &HoldView) -> bool {
         let steps = self.steps_of(h);
         if steps.is_empty() || h.hold_id.is_some() {
@@ -338,7 +319,6 @@ impl Data {
         }
     }
 
-    /// 감사 한 줄을 체인 끝에 잇는다.
     pub fn log(
         &mut self,
         profile: Option<&ProfileId>,
@@ -384,9 +364,7 @@ fn operator(v: &Viewer) -> Result<(), Error> {
     }
 }
 
-/// 쪽 나누기: 커서는 마지막으로 돌려준 행의 **정렬 키**다(행 번호가 아니다). 키는 영을 채운 숫자와 식별자를 `:`로 이어
-/// 사전순이 곧 정렬 순서이고, 다음 쪽은 그 키보다 뒤의 행이다. 쪽 사이에 행이 바뀌거나 처리돼도 빠지거나 겹치지 않는다
-/// (바뀐 행이 커서보다 앞으로 옮겨 가면 이미 지나간 쪽의 일이다). 실제 저장소도 같은 방식을 따른다.
+/// Keyset pagination over zero-padded lexicographic sort keys so mid-pagination updates never skip or duplicate rows.
 fn paged<T: Clone>(mut rows: Vec<(String, T)>, page: &Page) -> Listing<T> {
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     let limit = page.limit.clamp(1, 200) as usize;
@@ -399,7 +377,6 @@ fn paged<T: Clone>(mut rows: Vec<(String, T)>, page: &Page) -> Listing<T> {
     Listing { items, next }
 }
 
-/// 시각을 영 채운 20자리로(사전순 = 숫자순). 내림차순 정렬이 필요하면 `u64::MAX - ms`를 넣는다.
 pub(crate) fn ms_key(t: SystemTime) -> u64 {
     u64::try_from(crate::json::ms(t).max(0)).unwrap_or(0)
 }
@@ -409,7 +386,6 @@ impl Fake {
         Self::default()
     }
 
-    /// 다음 `n`번의 `approval` 조회가 서로를 기다리게 한다. 두 요청이 모두 같은 상태를 읽은 뒤에야 판정으로 넘어간다.
     pub fn gate_approvals(&self, n: usize) {
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n));
         *self.gate.lock().unwrap_or_else(|e| e.into_inner()) = Some((barrier, n));
@@ -426,12 +402,10 @@ impl Fake {
         }
     }
 
-    /// 소유자 전용 카드 본문을 거르지 않는 «새는 저장소»로 만든다(방어 시험용).
     pub fn leak_bodies(&self, on: bool) {
         self.leaky.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 조회자에게 보이는 모양: 소유자 전용 카드의 본문은 소유자가 아니면 비운다. 실제 저장소도 같은 규칙을 따른다.
     fn scoped(&self, viewer: &Viewer, mut a: ApprovalView) -> ApprovalView {
         let leaky = self.leaky.load(std::sync::atomic::Ordering::Relaxed);
         if !leaky && !crate::json::body_visible(&a, viewer) {
@@ -456,14 +430,12 @@ impl Fake {
         self.lock().resolutions.clone()
     }
 
-    /// 감사 한 줄의 해시를 바꿔 변조를 흉내 낸다.
     pub fn tamper_audit(&self, seq: u64) {
         if let Some(e) = self.lock().audit.iter_mut().find(|e| e.seq == seq) {
             e.hash[0] ^= 0xff;
         }
     }
 
-    /// 데모·시험용 합성 데이터: 프로필 personal(승인 대기·위임 자식·예약·보류·dead)과 프로필 work.
     pub fn demo() -> Self {
         let fake = Self::new();
         fake.edit(|d| {
@@ -518,7 +490,7 @@ impl Fake {
             d.approvals
                 .push(approval_view(&del, &root, "ap-1", "local:owner"));
             d.holds.push(HoldView {
-                // 여러 단계의 묶음은 식별자가 없다: 판정할 수 있는 각 단계가 자기 식별자를 가진다.
+                // Multi-step holds carry no call-level `hold_id`; each resolvable step carries its own.
                 hold_id: None,
                 kind: HoldKind::Tool,
                 profile: held.profile.clone(),
@@ -548,7 +520,6 @@ impl Fake {
                     None,
                 )
             };
-            // 동작 중 3/24와 정지됨 0/8(중첩 에이전트 ID `main/developer`는 경로에서 한 조각으로 인코딩해 온다)
             d.preapprovals.extend([
                 row("main", "notify", "g-demo-notify", 0, false, 3, 24),
                 row("main/developer", "digest", "g-demo-digest", 1, true, 0, 8),

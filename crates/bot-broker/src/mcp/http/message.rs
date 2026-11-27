@@ -1,11 +1,9 @@
-//! 응답 한 건에서 읽는 JSON-RPC 메시지와 그 해석(상태·본문 모양·오류 코드). 판본 협상과 요청 순서는 `http`가 한다.
+//! JSON-RPC message extraction, secret scanning, and status mapping for HTTP MCP responses.
 use crate::{guard::contains_bytes, json::parse, mcp::McpError, model::ChunkSource};
 use serde_json::Value;
 
-/// 오류 응답 본문에서 JSON-RPC 오류를 찾으려고 읽는 한도.
 const MAX_ERROR_BODY: usize = 64 << 10;
 
-/// 응답에서 읽은 JSON-RPC 메시지.
 pub(super) enum Message {
     Result(Value),
     Error { code: i64, data: Option<Value> },
@@ -27,7 +25,7 @@ pub(super) fn media_type(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// 보이는 ASCII만으로 이뤄진 1~512자(세션 ID가 머리에 그대로 실려도 안전한 모양).
+/// Validates 1..=512 visible ASCII bytes safe to echo in HTTP headers.
 pub(super) fn session_ok(text: &str) -> bool {
     (1..=512).contains(&text.len()) && text.bytes().all(|b| (0x21..=0x7e).contains(&b))
 }
@@ -48,12 +46,11 @@ pub(super) async fn read_all(body: &mut dyn ChunkSource, max: usize) -> Result<V
     }
 }
 
-/// 원문 바이트에 자격이 들어 있는가.
 pub(super) fn holds_bytes(raw: &[u8], secret: Option<&str>) -> bool {
     secret.is_some_and(|secret| contains_bytes(raw, secret.as_bytes()))
 }
 
-/// 해석한 값 안의 모든 글(키·값)과 숫자 표기에 자격이 들어 있는가(JSON 이스케이프를 푼 글까지 본다. 원문 검사와 함께 쓴다).
+/// Scans decoded strings, keys, and numbers to catch JSON-escaped secrets alongside `holds_bytes`.
 pub(super) fn holds(value: &Value, secret: Option<&str>) -> bool {
     let Some(secret) = secret else {
         return false;
@@ -72,8 +69,7 @@ pub(super) fn holds(value: &Value, secret: Option<&str>) -> bool {
     walk(value, secret.as_bytes())
 }
 
-/// 비 2xx 응답 본문에서 **이 요청의** JSON-RPC 오류를 찾는다(요청 번호가 같거나 `null`일 때만. 없거나 읽을 수 없거나 다른 요청의 것이면 `Empty`).
-/// 자격이 섞여 있으면 `Exposed`다.
+/// Extracts a matching JSON-RPC error (`id` equal or `null`) from a non-2xx body; fails with `Exposed` if `secret` appears.
 pub(super) async fn error_message(
     body: &mut dyn ChunkSource,
     id: u64,
@@ -109,7 +105,7 @@ pub(super) async fn error_message(
     })
 }
 
-/// JSON-RPC 응답 하나를 읽는다. 우리 요청의 응답이 아니면 `None`(건너뛴다). 응답이 아닌 모양은 프로토콜 위반이다.
+/// Parses one JSON-RPC response; returns `Ok(None)` for unrelated request IDs.
 pub(super) fn response_message(value: &Value, id: u64) -> Result<Option<Message>, McpError> {
     let obj = value.as_object().ok_or(McpError::Protocol)?;
     if obj.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || obj.contains_key("method") {
@@ -137,7 +133,7 @@ pub(super) fn listed(value: Option<&Value>) -> Vec<&str> {
         .unwrap_or_default()
 }
 
-/// 성공 응답을 결과로, 그 밖을 오류로 바꾼다. 결과 종류는 `complete`(없으면 구판 서버)만 받는다.
+/// Accepts only `complete` (or omitted, for older servers) `resultType` on 2xx responses.
 pub(super) fn finish(answer: Answer) -> Result<Value, McpError> {
     let ok = (200..300).contains(&answer.status);
     match answer.message {

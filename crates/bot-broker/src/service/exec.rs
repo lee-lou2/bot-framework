@@ -1,7 +1,7 @@
-//! 호출 시작 커밋 뒤 도구 실행·결과 정산과 옛 세대 호출의 복구 판정(`execute`·`recover`).
+//! Post-commit tool execution, outcome settlement, and prior-generation call recovery.
 //!
-//! 시작이 원장에 커밋된 뒤에만 실행기를 부르고, 결과를 돌려주기 직전 `still_current`로 활성 판본을 다시 확인한다.
-//! 인가·속도 제한·승인 카드 개시는 앞 단계(`call`·`gate`) 몫이며, 복구 규칙 자체는 `recovery`가 정한다.
+//! Invokes the runner only after `start` commits to the ledger, and re-verifies `still_current`
+//! as the last `await` before returning any result to the caller.
 
 use super::{BrokerService, call::Flow};
 use crate::{
@@ -19,17 +19,14 @@ use bot_core::{
     state::*,
 };
 
-/// 복구 판정의 결과.
 pub(super) enum Recovered {
-    /// 이 결과로 끝난다(영수증으로 완료했거나 보류를 유지한다).
     Finished(CallResult),
-    /// 미실행이 입증돼 호출이 `Open`으로 돌아왔다. 이어서 현재 권한·승인을 거친다.
+    /// Non-execution proved and call returned to `Open`; continue with current policy/approval checks.
     Open,
 }
 
 impl BrokerService {
-    /// 판정에 쓴 판본이 이 프로세스의 카탈로그에서 아직 활성인가(시작 직전의 값싼 확인. 원장이 `checked_revision`으로 같은
-    /// 잠금에서 한 번 더 닫는다).
+    /// Cheap pre-start check against the local catalog (the ledger enforces `checked_revision` atomically under lock).
     pub(super) fn still_current_local(&self, flow: &Flow) -> Result<(), Error> {
         self.revision_local(&flow.attempt, &flow.snapshot)
     }
@@ -48,8 +45,8 @@ impl BrokerService {
         Ok(())
     }
 
-    /// 결과를 돌려주기 직전의 확인: 이 프로세스의 카탈로그와, 저장소가 같은 시점에서 보는 활성 판본·현재 claim을 모두 본다
-    /// (다른 프로세스가 새 판본을 게시했거나 claim이 넘어갔으면 결과를 숨긴다). 결과를 돌려주기 전 마지막 `await`여야 한다.
+    /// Must remain the last `await` before returning results: verifies both the local catalog and the store's
+    /// active revision and current claim so stale or superseded attempts never observe tool output.
     pub(super) async fn still_current(&self, flow: &Flow) -> Result<(), Error> {
         self.revision_current(&flow.attempt, &flow.snapshot).await
     }
@@ -78,7 +75,6 @@ impl BrokerService {
             .await
     }
 
-    /// 시작을 커밋한 뒤에만 실행기를 부르고, 결과 종류에 따라 호출을 닫는다.
     pub(super) async fn execute(
         &self,
         flow: &Flow,
@@ -90,9 +86,6 @@ impl BrokerService {
             "{}.{}.{}",
             flow.attempt.run.0, flow.attempt.generation.0, flow.call.0
         );
-        // 판정에 쓴 판본이 아직 활성인지 시작 직전에 다시 본다. 판정과 시작 사이에 철회됐으면 시작하지 않고
-        // (같은 호출 ID로 다시 들어오면 새 판본으로 다시 판정한다) 실행기도 부르지 않는다.
-        // 재확인과 커밋 사이의 틈은 원장이 `checked_revision`으로 같은 잠금에서 닫는다.
         self.still_current_local(flow)?;
         let start = StartCall {
             checked_revision: flow.snapshot.revision.clone(),
@@ -106,7 +99,6 @@ impl BrokerService {
         };
         match authority {
             None => self.parts.ledger.start(start).await?,
-            // 사전 승인·사람 증거는 시작 커밋 안에서 한 번 더 확인한다. 어긋나면 시작하지 않고 고정 사유로 닫는다
             Some(authority) => match self.parts.ledger.start_with(start, authority).await? {
                 bot_core::grant::Granted::Started => {}
                 bot_core::grant::Granted::Refused(why) => return self.deny(flow, why).await,
@@ -125,7 +117,6 @@ impl BrokerService {
             reply_to,
             owner,
         };
-        // 시작 뒤 실행기 자체가 실패하면 보냈는지 알 수 없다.
         let ran = self
             .parts
             .runner
@@ -139,31 +130,30 @@ impl BrokerService {
                         .await?;
                     return Ok(CallResult::Held(flow.call.clone()));
                 }
-                // «처리하지 않음» 표식(`_meta["bot/pass"]`)은 늘 떼어 낸다. 직접 트리거의 현재 후보 호출이면 해석해 넘기고, 그 밖의 호출은 표식이 없던 것과 같다.
+                // Always strip `_meta["bot/pass"]`; honor it only on the current direct-trigger candidate.
                 let (payload, marker) = super::pass::split(&payload);
                 if let (Some(marker), Some(pos)) = (marker, Self::pass_position(flow)) {
                     return self
                         .finish_with_pass(flow, class, payload, marker, pos)
                         .await;
                 }
-                // 모델이 보는 결과에서 후속 확인 요청(`_meta["bot/wake"]`)은 늘 떼어 낸다. 요청이 있으면 결과와 한 커밋으로 예약한다.
+                // Always strip `_meta["bot/wake"]`; commit any wake atomically with call completion.
                 let extracted = super::wake::extract(&payload, self.parts.clock.now());
                 if extracted.request.is_some() {
                     return self.finish_with_wake(flow, extracted).await;
                 }
                 self.finish(flow, Outcome::Done(payload.clone())).await?;
-                // 결과는 먼저 원장에 보존했다. 마지막 await 직후에도 판정에 쓴 판본이 활성일 때만 호출자에게 돌려준다.
                 self.still_current(flow).await?;
                 Ok(CallResult::Done(payload))
             }
-            // 서버가 실행 전에 확정적으로 거절했다: 외부 효과가 없고, 모델은 고정 오류 결과를 본다.
+            // Server rejected before execution: no external side effects; model sees a fixed error payload.
             Ran::Rejected => {
                 let payload = JsonPayload(crate::mcp::error_payload());
                 self.finish(flow, Outcome::Done(payload.clone())).await?;
                 self.still_current(flow).await?;
                 Ok(CallResult::Done(payload))
             }
-            // 보내기 전에 이쪽이 확정적으로 거절했다(도구 정의 불일치 등): 외부 효과가 없고 호출은 거절로 닫힌다. 고정 코드를 감사에 남긴다.
+            // Broker refused before dispatch (e.g. tool definition mismatch): no side effects; close as denied.
             Ran::Refused(why) => {
                 self.note(
                     &flow.attempt.profile,
@@ -181,7 +171,7 @@ impl BrokerService {
                 self.finish(flow, Outcome::Released).await?;
                 Err(Error::Unavailable)
             }
-            // 읽기는 반복해도 안전하다고 선언한 도구다. 쓰기는 보냈는지 모르므로 멈춘다.
+            // Reads are declared idempotent; writes with unknown delivery must be held.
             Ran::Unknown(_) if class.risk == Risk::Read => {
                 self.finish(flow, Outcome::Released).await?;
                 Err(Error::Unavailable)
@@ -190,7 +180,7 @@ impl BrokerService {
                 self.finish(flow, Outcome::Held(why.into())).await?;
                 Ok(CallResult::Held(flow.call.clone()))
             }
-            // 결과를 막았어도 도구는 실행됐다. 읽기는 외부 효과가 없으므로 거절로 닫지만, 쓰기는 효과가 불명이므로 보류한다.
+            // Output was blocked after execution: deny reads (no external effect) but hold writes (unknown effect).
             Ran::Blocked(why) => {
                 self.note(
                     &flow.attempt.profile,
@@ -211,7 +201,6 @@ impl BrokerService {
         }
     }
 
-    /// 단계 원장에 미결 단계가 없는가. 조회하지 못하면 확인된 것이 아니다.
     async fn steps_settled(&self, flow: &Flow) -> bool {
         self.parts
             .effects
@@ -220,12 +209,11 @@ impl BrokerService {
             .is_ok_and(|steps| steps.is_empty())
     }
 
-    /// 옛 시도가 시작했거나 멈춘 호출을 같은 호출 ID로 다시 실행해도 되는지 판정한다.
-    /// 다시 실행해도 되면 호출을 `Open`으로 되돌린다(미실행 입증). 관리자 판정(`Held`의 `resolution`)은
-    /// 옛 도구 종료와 수신처 미실행 증거 확인을 포함하므로 프로세스를 다시 확인하지 않는다.
+    /// Evaluates whether a started or held call from an earlier attempt can safely resume or settle.
+    /// Admin resolutions on `Held` already assert prior termination and non-execution, skipping `reap`.
     pub(super) async fn recover(&self, flow: &Flow, phase: &CallPhase) -> Result<Recovered, Error> {
         let (reaped, resolution, started, confirmed_step) = match phase {
-            // 원격 서버로 간 호출은 연결을 닫아도 원격 실행이 계속될 수 있어 `reap` 성공이 «끝났다»의 증명이 아니다(`reap_proves_end`)
+            // Closing a connection to a remote server does not prove remote execution stopped (`reap_proves_end`).
             CallPhase::Started {
                 owner,
                 confirmed_step,
@@ -271,7 +259,6 @@ impl BrokerService {
             Plan::Complete(receipt) => {
                 let payload = JsonPayload(format!("{{\"receipt\":{}}}", json_quote(&receipt)));
                 self.finish(flow, Outcome::Done(payload.clone())).await?;
-                // 영수증은 먼저 원장에 보존했다. 마지막 await 직후에도 판본이 활성일 때만 돌려준다.
                 self.still_current(flow).await?;
                 Ok(Recovered::Finished(CallResult::Done(payload)))
             }

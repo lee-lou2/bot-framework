@@ -126,7 +126,7 @@ async fn every_error_has_the_four_openai_fields_and_the_documented_status() {
             (status, Some(kind), Some(code))
         );
         let error = body["error"].as_object().unwrap();
-        assert_eq!(error.len(), 4, "message·type·param·code만: {body}");
+        assert_eq!(error.len(), 4, "only message, type, param, code: {body}");
         assert!(error["message"].as_str().is_some_and(|m| !m.is_empty()));
         assert!(error.contains_key("param"));
         assert_eq!(header(&response, "content-type"), Some("application/json"));
@@ -136,7 +136,6 @@ async fn every_error_has_the_four_openai_fields_and_the_documented_status() {
 
 #[tokio::test]
 async fn retry_hints_are_set_only_where_resending_cannot_start_a_second_run() {
-    // 접수 전 한도·장애: SDK가 기다렸다 다시 보내도 된다(Retry-After는 올림, 최소 1초)
     let (_, _, limited) = read(&Failure::rate_limited(Duration::from_millis(1500))).await;
     assert_eq!(header(&limited, "retry-after"), Some("2"));
     let (_, _, tiny) = read(&Failure::rate_limited(Duration::from_millis(10))).await;
@@ -144,7 +143,6 @@ async fn retry_hints_are_set_only_where_resending_cannot_start_a_second_run() {
     let (_, _, unavailable) = read(&Failure::unavailable()).await;
     assert_eq!(header(&unavailable, "retry-after"), Some("1"));
     assert_eq!(header(&unavailable, "x-should-retry"), None);
-    // 접수 뒤의 불명·실패·취소: 다시 보내지 않게 한다
     for failure in [
         Failure::outcome_unknown(),
         Failure::run_failed(),
@@ -155,7 +153,6 @@ async fn retry_hints_are_set_only_where_resending_cannot_start_a_second_run() {
         assert_eq!(header(&response, "x-should-retry"), Some("false"));
         assert_eq!(header(&response, "retry-after"), None);
     }
-    // 그 밖의 오류는 재시도 표지가 없다
     for failure in [
         Failure::invalid("x"),
         Failure::access_denied(),
@@ -192,7 +189,7 @@ fn the_sse_error_event_is_one_json_line_and_a_blank_line() {
 #[test]
 fn messages_never_echo_inputs_or_internals() {
     for failure in [
-        Failure::invalid("요청 본문이 JSON이 아니에요"),
+        Failure::invalid("request body is not valid JSON"),
         Failure::unsupported("tools"),
         Failure::idempotency_conflict(),
         Failure::idempotency_required(),

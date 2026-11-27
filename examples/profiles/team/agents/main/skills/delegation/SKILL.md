@@ -1,23 +1,23 @@
 ---
 name: delegation
-description: 요청의 성격에 따라 어떤 하위 에이전트에게 맡길지 정한다
+description: Choose which sub-agent should handle a request based on its domain
 ---
-# 위임: 누구에게 맡길까
+# Delegation: Who Owns What
 
-요청 한 건은 한 에이전트에게 맡기고, 여러 영역에 걸치면 영역별로 나눠 각각 맡긴다. 맡길 수 있는 것은 직계 자식뿐이다.
+Assign a single-domain request to one sub-agent; split multi-domain requests across specialists. You may delegate only to direct children.
 
-| 요청의 성격 | 맡길 에이전트 |
+| Request Domain | Sub-Agent |
 |---|---|
-| 코드 설명, 코드 리뷰, 버그 원인 분석 | `main/developer` |
-| 화면·흐름·문구 리뷰, 디자인 원칙, 접근성 | `main/designer` |
-| 요구사항 정리, 일정·우선순위, 예약 알림 | `main/pm` |
-| 상태 점검, 장애 대응 절차, 운영 작업 | `main/ops` |
+| Code explanation, code review, bug root-cause analysis | `main/developer` |
+| UI/UX review, design principles, accessibility | `main/designer` |
+| Requirements specs, schedule/priorities, reminders | `main/pm` |
+| Health checks, incident runbooks, operations | `main/ops` |
 
-## 맡길 때
-- 지시 한 번에 목표·배경·원하는 결과의 모양(표, 목록, 한 문단)을 적는다. 하위 에이전트는 이 대화 전체를 모른다.
-- 근거가 되는 자료(파일 경로, 화면 이름, 일정 ID)를 함께 넘긴다.
-- 위험한 작업을 시키기 전에 그 에이전트에게 권한이 있는지 본다. 권한 상한은 profile.yaml의 `policy.agents`에 있다.
+## When Delegating
+- Include goal, context, and desired output format (table, list, paragraph) in one prompt; sub-agents do not see the full conversation.
+- Pass supporting references (file paths, screen names, event IDs).
+- Check the sub-agent's permission ceiling in `profile.yaml` (`policy.agents`) before assigning sensitive tasks.
 
-## 받은 뒤
-- 결과를 그대로 붙이지 않는다. 결론, 근거, 다음 행동 순으로 합치고 어느 에이전트의 말인지 밝힌다.
-- 서로 다른 결론이 나오면 감추지 말고 차이를 그대로 보여 준다.
+## After Receiving Results
+- Do not paste outputs verbatim. Merge them into Conclusion, Evidence, and Next Actions, citing each agent.
+- Surface conflicting conclusions openly rather than hiding them.

@@ -1,6 +1,4 @@
-//! 예시 도구 서버(`examples/servers/demo-agenda`)를 MCP로 직접 주고받아 확인한다:
-//! 도구 이름·입력 스키마가 예시 프로필의 tools.yaml과 같고, `delete`는 합성 ID만 받아 가상 영수증을 돌려주며
-//! 아무것도 저장하지 않는다. python3가 없으면 건너뛴다(공개 CI에는 있다).
+//! Direct MCP protocol tests for `examples/servers/demo-agenda` against the example `tools.yaml` contract.
 
 use crate::support::Temp;
 use bot_core::id::{AgentId, ProfileId};
@@ -36,7 +34,7 @@ struct Server {
 }
 
 impl Server {
-    /// `clean_env`: 환경을 비우고(PATH만 남김) C 로캘로 돌린다 — 호출별 빈 환경을 흉내 낸다.
+    /// When `clean_env` is true, clears the environment (keeping only `PATH` and `LC_ALL=C`) to emulate sandboxed per-call execution.
     fn start(dir: &Path, clean_env: bool) -> Self {
         let mut command = Command::new(server_path());
         command
@@ -51,7 +49,7 @@ impl Server {
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .env("LC_ALL", "C");
         }
-        let mut child = command.spawn().expect("서버를 시작하지 못했어요");
+        let mut child = command.spawn().expect("failed to start demo-agenda server");
         let out = child.stdout.take().expect("stdout");
         let (tx, lines) = mpsc::channel();
         thread::spawn(move || {
@@ -72,8 +70,8 @@ impl Server {
 
     fn send_raw(&mut self, text: &str) {
         let stdin = self.stdin.as_mut().expect("stdin");
-        stdin.write_all(text.as_bytes()).expect("쓰기");
-        stdin.write_all(b"\n").expect("쓰기");
+        stdin.write_all(text.as_bytes()).expect("write");
+        stdin.write_all(b"\n").expect("write");
         stdin.flush().expect("flush");
     }
 
@@ -81,8 +79,8 @@ impl Server {
         let line = self
             .lines
             .recv_timeout(Duration::from_secs(10))
-            .expect("10초 안에 답이 없어요");
-        serde_json::from_str(&line).unwrap_or_else(|e| panic!("JSON이 아니에요({e}): {line}"))
+            .expect("no response within 10s");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("invalid JSON ({e}): {line}"))
     }
 
     fn ask(&mut self, method: &str, params: Value) -> Value {
@@ -92,7 +90,7 @@ impl Server {
             &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string(),
         );
         let answer = self.recv();
-        assert_eq!(answer["id"], id, "요청과 같은 id로 답해야 해요: {answer}");
+        assert_eq!(answer["id"], id, "response id mismatch: {answer}");
         assert_eq!(answer["jsonrpc"], "2.0");
         answer
     }
@@ -105,7 +103,6 @@ impl Server {
         self.ask("tools/call", params)
     }
 
-    /// 호스트가 넣는 `_meta` 전부(profile-id·run-id·call-id·generation)로 부른다.
     fn call_logical(
         &mut self,
         arguments: Value,
@@ -150,18 +147,17 @@ impl Drop for Server {
     }
 }
 
-/// 결과의 첫 글 조각을 JSON으로 읽는다.
 fn payload(result: &Value) -> Value {
     let text = result["result"]["content"][0]["text"]
         .as_str()
-        .unwrap_or_else(|| panic!("글 결과가 아니에요: {result}"));
-    serde_json::from_str(text).unwrap_or_else(|e| panic!("결과 글이 JSON이 아니에요({e}): {text}"))
+        .unwrap_or_else(|| panic!("expected text content: {result}"));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("content is not JSON ({e}): {text}"))
 }
 
 #[test]
 fn tool_names_and_input_schemas_equal_the_example_tools_yaml() {
     if !python_available() {
-        eprintln!("python3가 없어 건너뜀");
+        eprintln!("skipping: python3 unavailable");
         return;
     }
     let set = load(
@@ -169,7 +165,7 @@ fn tool_names_and_input_schemas_equal_the_example_tools_yaml() {
         &HostCatalog::demo(),
         &Limits::default(),
     )
-    .unwrap_or_else(|r| panic!("예시 프로필 검증 실패:\n{r}"));
+    .unwrap_or_else(|r| panic!("example profile validation failed:\n{r}"));
     let snap = set.profile(&ProfileId("personal".into())).unwrap();
     let agenda = &snap.agents[&AgentId("main".into())].skills["agenda"];
     let declared: std::collections::BTreeMap<String, Value> = agenda
@@ -178,11 +174,11 @@ fn tool_names_and_input_schemas_equal_the_example_tools_yaml() {
         .map(|(id, tool)| {
             let name =
                 id.0.strip_prefix("agenda.")
-                    .expect("agenda.<도구>")
+                    .expect("agenda.<tool>")
                     .to_owned();
             (
                 name,
-                serde_json::from_str(&tool.input.0).expect("입력 스키마 JSON"),
+                serde_json::from_str(&tool.input.0).expect("input schema JSON"),
             )
         })
         .collect();
@@ -196,7 +192,7 @@ fn tool_names_and_input_schemas_equal_the_example_tools_yaml() {
     let listed = server.ask("tools/list", json!({}));
     let advertised: std::collections::BTreeMap<String, Value> = listed["result"]["tools"]
         .as_array()
-        .expect("tools 배열")
+        .expect("tools array")
         .iter()
         .map(|t| {
             (
@@ -208,12 +204,12 @@ fn tool_names_and_input_schemas_equal_the_example_tools_yaml() {
     assert_eq!(
         advertised.keys().collect::<Vec<_>>(),
         declared.keys().collect::<Vec<_>>(),
-        "서버가 광고하는 도구와 선언한 도구가 같아야 해요"
+        "advertised tools must match declared tools"
     );
     for (name, schema) in &declared {
         assert_eq!(
             &advertised[name], schema,
-            "{name}의 입력 스키마가 tools.yaml과 달라요"
+            "input schema mismatch for {name}"
         );
     }
 }
@@ -221,7 +217,7 @@ fn tool_names_and_input_schemas_equal_the_example_tools_yaml() {
 #[test]
 fn delete_is_a_simulation_and_nothing_is_stored() {
     if !python_available() {
-        eprintln!("python3가 없어 건너뜀");
+        eprintln!("skipping: python3 unavailable");
         return;
     }
     let dir = Temp::new("demo-simulation");
@@ -233,12 +229,11 @@ fn delete_is_a_simulation_and_nothing_is_stored() {
     assert!(
         events
             .iter()
-            .any(|e| e["id"] == "e-walk" && e["title"] == "산책"),
+            .any(|e| e["id"] == "e-walk" && e["title"] == "Walk"),
         "{before}"
     );
     assert_eq!(before["simulated"], true);
 
-    // 합성 ID 하나: 가상 영수증, 영구 삭제라고 하지 않는다
     let first = server.call("delete", json!({"event": "e-walk"}), Some("c-17"));
     assert_eq!(first["result"]["isError"], false, "{first}");
     let receipt = payload(&first);
@@ -251,52 +246,55 @@ fn delete_is_a_simulation_and_nothing_is_stored() {
     );
     assert_eq!(
         (receipt["event"].as_str(), receipt["title"].as_str()),
-        (Some("e-walk"), Some("산책"))
+        (Some("e-walk"), Some("Walk"))
     );
-    let id = receipt["receipt"].as_str().expect("영수증 ID");
+    let id = receipt["receipt"].as_str().expect("receipt ID");
     assert!(id.starts_with("sim-") && id.len() == 16, "{id}");
     let message = receipt["message"].as_str().unwrap();
+    let lower = message.to_lowercase();
     assert!(
-        message.contains("가상 삭제 영수증") && message.contains("영구 삭제 아님"),
+        (lower.contains("simulat") || lower.contains("virtual"))
+            && lower.contains("receipt")
+            && (lower.contains("not permanently")
+                || lower.contains("not deleted")
+                || lower.contains("not actually")),
         "{message}"
     );
 
-    // 같은 호출 ID는 같은 영수증, 다른 호출 ID는 다른 영수증
     let again = payload(&server.call("delete", json!({"event": "e-walk"}), Some("c-17")));
     assert_eq!(again["receipt"], receipt["receipt"]);
     let other = payload(&server.call("delete", json!({"event": "e-walk"}), Some("c-18")));
     assert_ne!(other["receipt"], receipt["receipt"]);
 
-    // 논리 호출 = profile-id·run-id·call-id 셋. 세대는 재시도·인계마다 바뀌므로 영수증에 영향이 없고,
-    // call-id(run 안의 위치)가 같아도 run이나 profile이 다르면 영수증이 구별된다
+    // Logical call identity is (profile-id, run-id, call-id); generation changes on retries/handovers and is excluded.
     let walk = json!({"event": "e-walk"});
     let first = ("personal", "r-1", "cli-1-0", 1);
     let base = payload(&server.call_logical(walk.clone(), first))["receipt"].clone();
     assert!(base.as_str().is_some_and(|r| r.starts_with("sim-")));
     for (same, why) in [
-        (("personal", "r-1", "cli-1-0", 1), "같은 호출 재전송"),
-        (("personal", "r-1", "cli-1-0", 7), "세대가 다른 인계·재시도"),
+        (("personal", "r-1", "cli-1-0", 1), "identical replay"),
+        (
+            ("personal", "r-1", "cli-1-0", 7),
+            "retry/handover generation",
+        ),
     ] {
         let again = payload(&server.call_logical(walk.clone(), same))["receipt"].clone();
-        assert_eq!(again, base, "{why}는 같은 영수증이어야 해요");
+        assert_eq!(again, base, "{why} must keep the same receipt");
     }
     for (different, why) in [
-        (("personal", "r-2", "cli-1-0", 1), "다른 run의 첫 호출"),
-        (("other", "r-1", "cli-1-0", 1), "다른 프로필"),
-        (("personal", "r-1", "cli-1-1", 1), "같은 run의 다음 호출"),
+        (("personal", "r-2", "cli-1-0", 1), "different run"),
+        (("other", "r-1", "cli-1-0", 1), "different profile"),
+        (("personal", "r-1", "cli-1-1", 1), "next call in same run"),
     ] {
         let other = payload(&server.call_logical(walk.clone(), different))["receipt"].clone();
-        assert_ne!(other, base, "{why}는 구별되어야 해요");
+        assert_ne!(other, base, "{why} must produce a distinct receipt");
     }
-    // 같은 논리 호출이라도 지우는 대상이 다르면 다른 영수증
     let other_event =
         payload(&server.call_logical(json!({"event": "e-meet"}), first))["receipt"].clone();
     assert_ne!(other_event, base);
 
-    // 지운 척했어도 목록은 그대로(저장하지 않는다)
     assert_eq!(payload(&server.call("list", json!({}), None)), before);
 
-    // 합성 ID가 아니거나 인자가 틀리면 도구 오류
     for (name, args) in [
         ("delete", json!({"event": "nope"})),
         ("delete", json!({"event": 5})),
@@ -314,10 +312,9 @@ fn delete_is_a_simulation_and_nothing_is_stored() {
     assert_eq!(
         server.call("list", json!([]), None)["result"]["isError"],
         true,
-        "arguments는 객체여야 해요"
+        "arguments must be an object"
     );
 
-    // 프로토콜 오류
     assert_eq!(
         server.call("no-such-tool", json!({}), None)["error"]["code"],
         -32602
@@ -328,18 +325,17 @@ fn delete_is_a_simulation_and_nothing_is_stored() {
     );
     assert_eq!(server.ask("ping", json!({}))["result"], json!({}));
 
-    // 깨진 줄·너무 긴 줄 뒤에도 서버는 계속 답한다
+    // Server stays responsive after malformed or oversized lines.
     server.send_raw("{not json");
     assert_eq!(server.recv()["error"]["code"], -32700);
     server.send_raw(&"x".repeat(1_500_000));
     assert_eq!(server.recv()["error"]["code"], -32600);
     assert_eq!(server.ask("ping", json!({}))["result"], json!({}));
 
-    // 호출별 빈 작업 공간: 아무 파일도 만들지 않았다
     assert_eq!(
         std::fs::read_dir(dir.path()).unwrap().count(),
         0,
-        "작업 공간에 흔적을 남기면 안 돼요"
+        "server must not write any files into the workspace"
     );
 }
 
@@ -347,12 +343,12 @@ fn delete_is_a_simulation_and_nothing_is_stored() {
 fn is_an_executable_standalone_script_with_a_usage_message() {
     let path = server_path();
     let mode = std::fs::metadata(&path)
-        .expect("서버 파일")
+        .expect("server file")
         .permissions()
         .mode();
     assert!(
         mode & 0o111 != 0,
-        "실행 비트가 있어야 해요(설치본 command[0]): {mode:o}"
+        "server script must be executable: {mode:o}"
     );
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.starts_with("#!/usr/bin/env python3\n"));
@@ -366,7 +362,7 @@ fn is_an_executable_standalone_script_with_a_usage_message() {
     ] {
         assert!(
             !text.contains(banned),
-            "외부 접속·환경·파일 접근이 없어야 해요: {banned}"
+            "demo server must not use network, env, or file I/O: {banned}"
         );
     }
     if !python_available() {
@@ -377,13 +373,13 @@ fn is_an_executable_standalone_script_with_a_usage_message() {
         .arg("--bogus")
         .current_dir(dir.path())
         .output()
-        .expect("실행");
+        .expect("spawn server");
     assert_eq!(bad.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&bad.stderr).contains("--stdio"));
     let help = Command::new(&path)
         .arg("--help")
         .current_dir(dir.path())
         .output()
-        .expect("실행");
+        .expect("spawn server");
     assert_eq!(help.status.code(), Some(0));
 }

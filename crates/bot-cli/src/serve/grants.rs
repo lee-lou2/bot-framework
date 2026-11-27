@@ -1,13 +1,11 @@
-//! 사전 승인(`preapproved`)을 선언한 정적 트리거의 승인 범위 계산. 활성화(`Publication::of`)가 쓰고, 호출 시작(브로커)은 같은 함수
-//! (`bot_broker::preapproval::grant_spec`)로 다시 계산해 저장소의 승인 지문과 대조한다.
+//! Pre-approval grant calculation for static triggers at activation, matching `bot_broker::preapproval::grant_spec`.
 
 use bot_core::{grant::GrantSpec, id::Revision};
 use bot_profile::ProfileSet;
 use bot_runtime::scheduler::schedule_set;
 use std::collections::BTreeMap;
 
-/// 사전 승인을 선언한 트리거마다 승인 범위(지문 재료)를 계산한다. 설치한 서버 판본·선택 환경·주체 스코프를 확정할 수 없으면 활성화를 거절한다
-/// (`preapproval_unenforceable`). 호출 시작(브로커)이 같은 함수(`bot_broker::preapproval::grant_spec`)로 다시 계산해 저장소 판정과 대조한다.
+/// Computes `GrantSpec` per pre-approved trigger; rejects activation with `preapproval_unenforceable` if any input is indeterminate.
 pub(super) fn grants_of(
     set: &ProfileSet,
     revisions: &BTreeMap<String, Revision>,
@@ -22,15 +20,15 @@ pub(super) fn grants_of(
                 let fail = |why: &str| format!("{UNENFORCEABLE}: {at} — {why}");
                 let bot_core::profile::TriggerTarget::Tool { tool: id, .. } = &trigger.target
                 else {
-                    return Err(fail("고정 도구 트리거가 아니에요"));
+                    return Err(fail("not a fixed tool trigger"));
                 };
                 let tool = bot_broker::resolve::find_tool(snapshot, agent_id, id)
-                    .ok_or_else(|| fail("도구를 찾을 수 없어요"))?;
+                    .ok_or_else(|| fail("tool not found"))?;
                 let image = revisions
                     .get(&tool.server)
-                    .ok_or_else(|| fail("도구 서버의 설치 판본을 확정할 수 없어요"))?;
+                    .ok_or_else(|| fail("installed server revision cannot be determined"))?;
                 let env = bot_broker::resolve::selected_env(tool, agent_id, snapshot, snapshot)
-                    .ok_or_else(|| fail("도구가 고른 환경 값을 확정할 수 없어요"))?;
+                    .ok_or_else(|| fail("selected tool env values cannot be determined"))?;
                 let scopes = scheduled
                     .iter()
                     .find(|s| {
@@ -38,12 +36,12 @@ pub(super) fn grants_of(
                             && matches!(&s.target, bot_core::command::Target::Tool { agent, .. } if agent == agent_id)
                     })
                     .map(|s| s.scopes.clone())
-                    .ok_or_else(|| fail("정적 예약 정의를 만들 수 없어요"))?;
+                    .ok_or_else(|| fail("static schedule entry could not be built"))?;
                 let spec = bot_broker::preapproval::grant_spec(
                     snapshot, agent_id, trigger, &scopes, &image.0, &env,
                 )
                 .ok_or_else(|| {
-                    fail("쓰기 경유(effects 도구)·고정 인자·cron 주체를 보증할 수 없어요")
+                    fail("cannot guarantee write mediation (effects tool), fixed args, and cron principal")
                 })?;
                 grants.push(spec);
             }
@@ -54,11 +52,9 @@ pub(super) fn grants_of(
 
 #[cfg(test)]
 pub(super) mod fixture {
-    //! 사전 승인 시험이 함께 쓰는 프로필: 예시 `personal`에 `effects` 도구(`agenda.notify`)와 사전 승인한 cron 트리거를 더해 읽는다.
     use bot_profile::{HostCatalog, Limits, ProfileSet, Registry};
     use std::{path::Path, sync::Arc};
 
-    /// `preapproved`를 선언한 cron 트리거 `notify`(허용 쌍 하나, 하루 3회).
     pub const NOTIFY: &str = "  - id: notify\n    \"on\": {cron: \"0 9 * * *\"}\n    principal: \"service:morning\"\n    target: {tool: agenda.notify, args: {}}\n    preapproved:\n      max_per_day: 3\n      targets:\n        - {operation: post, target: \"channel:reports\"}\n";
 
     fn copy(from: &Path, to: &Path) {
@@ -74,7 +70,6 @@ pub(super) mod fixture {
         }
     }
 
-    /// 예시 프로필을 `root/personal`에 복사하고 도구와 `extra_trigger`를 더한 뒤 `registry`로 읽는다.
     pub fn load_into(registry: &Registry, root: &Path, extra_trigger: &str) -> Arc<ProfileSet> {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/profiles/personal");
         let dir = root.join("personal");
@@ -131,22 +126,19 @@ mod tests {
         );
         let line = spec.scope_line();
         assert!(
-            line.contains("post→channel:reports") && line.contains("하루 최대 3회"),
+            line.contains("post→channel:reports") && line.contains("max 3/day"),
             "{line}"
         );
-        // 같은 입력은 같은 지문이고 설치 판본이 다르면 다른 지문이다(재활성화 때 새 ID)
         assert_eq!(grants, grants_of(&set, &revisions("img-1")).unwrap());
         assert_ne!(
             spec.fingerprint,
             grants_of(&set, &revisions("img-2")).unwrap()[0].fingerprint
         );
-        // 설치 판본을 확정할 수 없으면 활성화를 거절한다(preapproval_unenforceable)
         let none = grants_of(&set, &BTreeMap::new()).unwrap_err();
         assert!(
             none.starts_with("preapproval_unenforceable:") && none.contains("personal/main/notify"),
             "{none}"
         );
-        // 선언이 없는 프로필은 승인이 없다
         let plain = std::env::temp_dir().join(format!("bot-grants-plain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&plain);
         assert!(
@@ -175,7 +167,10 @@ mod tests {
         assert_eq!((explicit.grants.len(), unissued), (1, 0));
         let (plain, unissued) = publication().for_run(false);
         assert_eq!((plain.grants.len(), unissued), (0, 1));
-        assert_eq!(plain.revision, explicit.revision, "판본은 그대로다");
+        assert_eq!(
+            plain.revision, explicit.revision,
+            "revision must not change"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

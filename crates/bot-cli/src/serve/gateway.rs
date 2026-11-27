@@ -1,11 +1,6 @@
-//! gateway 역할: 입구(CLI 소켓·HTTP·Slack)와 회신 발송을 한 프로세스에서 연다. 프로필에 바인딩이 있는 입구만 연다.
-//!
-//! 시작은 두 단계다. `prepare`가 모든 점검(입구 표·자격·Slack 설치)을 끝내고 리스너를 확보하되 아무것도 열지 않는다.
-//! 호출자가 활성 판본·시드를 확정한 뒤에만 `Prepared::open`이 접수를 연다 — 점검이나 리스너 확보가 실패하면 저장소의
-//! 운영 판본은 그대로다(떠 있는 게이트웨이가 소켓을 쓰는 중에 `--activate`가 실패해도 판본이 바뀌지 않는다).
-//!
-//! 이 프로세스는 평소 도구를 실행하지 않는다 — 단 민감 DM 트리거가 있는 프로필이 있으면 `PrivateGate`가 지정한 도구를 이 프로세스의 srt 샌드박스에서 실행한다.
-//! 구판 프로세스 닫기(`ActiveSet`)는 붙어 있어 저장소의 활성 집합과 다르면 접수·결과·승인 결정을 일시 실패로 닫는다.
+//! Gateway role wiring: prepares CLI, HTTP/OpenAI, and Slack listeners before activation, then opens ingress.
+// Two-phase startup (`prepare` then `open`) ensures listener/credential/Slack validation failures leave
+// the published active revision untouched.
 use super::{runner, watched::Watched};
 use crate::{
     host::HostFile,
@@ -49,22 +44,17 @@ pub struct Deps {
     pub host: Arc<HostFile>,
     pub registry: Arc<Registry>,
     pub store: Arc<Store>,
-    /// 가림 장치를 거치는 보관소(`Observe.secrets`)만 받는다 — 날 보관소는 넘길 수 없다
+    /// Redaction-watched secret store (`Observe.secrets`); raw stores must never be passed to roles.
     pub secrets: Arc<Watched>,
     pub uid: u32,
     pub stop: CancellationToken,
-    /// 승인 결정을 맡길 브로커(설치 판본을 알면 실제 브로커, 모르면 결정을 맡기지 않는 것)
     pub decisions: Arc<dyn Broker>,
-    /// 접수·회신·승인 스팬을 보낼 곳(호스트에 설정한 수집기, 없으면 아무것도 내보내지 않는다)
     pub tracer: Arc<dyn Tracer>,
-    /// 가짜 Slack 서버 주소(시험 전용, 운영 빌드에는 포함하지 않는다)
     #[cfg(any(test, feature = "testing"))]
     pub slack_base: Option<String>,
-    /// 이 프로세스의 활성화 판본 확인(접수·결과·민감 DM 원격 도구 요청 직전에 다시 확인한다)
     pub active: Arc<dyn ActiveCheck>,
 }
 
-/// 민감 트리거가 없는 호스트의 자리. 민감 접수가 올 수 없으므로 받지 않는다(ack하지 않아 Slack이 다시 보낸다).
 struct UnwiredPrivate;
 
 impl PrivateIntake for UnwiredPrivate {
@@ -73,9 +63,7 @@ impl PrivateIntake for UnwiredPrivate {
     }
 }
 
-/// 민감 DM 접수(`PrivateGate`): 민감 트리거가 있는 프로필이 하나라도 있으면 전용 원장(저장소)·도구 실행기(이 프로세스의 srt 샌드박스)·프로필별
-/// 지문 키(`private-intake`)로 연다. 본문은 이 프로세스의 메모리와 지정한 도구에만 가고 저장소에는 접수 키와 HMAC 지문만 남는다.
-/// 없으면 도구도 srt도 필요 없다. 도구 설치본의 사용 잠금은 접수 입구와 **같은 수명**으로 쥔다(`Held`).
+/// Wires `PrivateGate` when any profile declares private DM triggers, holding tool install locks for ingress lifetime.
 async fn private_intake(deps: &Deps) -> Result<Arc<dyn PrivateIntake>, String> {
     if !deps
         .registry
@@ -112,8 +100,7 @@ async fn private_intake(deps: &Deps) -> Result<Arc<dyn PrivateIntake>, String> {
     }))
 }
 
-/// 민감 접수 입구와 그 도구 설치본의 사용 잠금. 접수 입구(`Ingress`)를 쥔 처리가 하나라도 남아 있는 동안(진행 중인 마지막 호출까지) 잠금이 풀리지 않는다 —
-/// 어긋난 설치본을 복구하려는 다른 기동이 실행 중인 도구의 파일을 지우지 못한다.
+/// Keeps tool install shared locks alive as long as `Ingress` handles in-flight private DM calls.
 struct Held {
     gate: PrivateGate,
     _runner: runner::LiveRunner,
@@ -125,7 +112,6 @@ impl PrivateIntake for Held {
     }
 }
 
-/// 점검을 마치고 리스너를 확보한 gateway. `open` 전에는 아무 요청도 받지 않는다.
 pub struct Prepared {
     ingress: Arc<Ingress>,
     store: Arc<Store>,
@@ -136,7 +122,6 @@ pub struct Prepared {
     http: Option<TcpListener>,
 }
 
-/// 점검하고 리스너를 확보한다. 하나라도 실패하면 Err — 아직 아무것도 열리지 않았고 저장소도 건드리지 않았다.
 pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     let private = private_intake(deps).await?;
     let ingress = Arc::new(
@@ -164,7 +149,6 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         snapshots.push(snapshot.clone());
     }
     drop(routes);
-    // 입구가 쓰는 자격은 열기 전에 모두 있어야 하고(없으면 이름과 환경 변수명을 알린다) HTTP 키는 하한 이상이어야 한다
     problems.extend(weak_openai_keys(&*deps.secrets, &snapshots, &deps.host.gateway).await);
     for snapshot in snapshots {
         let names = entrance_secrets(&snapshot, &deps.host.gateway);
@@ -176,7 +160,6 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     if !problems.is_empty() {
         return Err(problems.join("\n"));
     }
-    // Slack 설치 검사(토큰·팀·앱 중복)도 열기 전에 끝낸다
     let slack_gateway = if slack {
         #[cfg(any(test, feature = "testing"))]
         let slack_base = deps.slack_base.as_deref();
@@ -190,9 +173,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
                 deps.secrets.clone(),
                 SlackApi::new(slack_base),
             )
-            // 봇이 참여한 스레드의 증거(Slack `thread_reply` 이벤트용)는 같은 저장소에 둔다
             .with_threads(deps.store.clone() as Arc<dyn BotThreads>)
-            // Slack 진행 상태(👀/✅ · `chat.startStream`)와 스레드 중단(버튼 · "중단해줘")
             .with_ux(
                 deps.store.clone() as Arc<dyn RunStore>,
                 deps.store.clone() as Arc<dyn RunAdmin>,
@@ -213,8 +194,8 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
             deps.uid,
         )?;
         let listener = socket::bind(&path, deps.uid)
-            .map_err(|e| format!("CLI 소켓을 열지 못했어요({}): {e}", path.display()))?;
-        eprintln!("게이트웨이: CLI 소켓 {}", path.display());
+            .map_err(|e| format!("failed to bind CLI socket ({}): {e}", path.display()))?;
+        eprintln!("gateway: CLI socket {}", path.display());
         Some(listener)
     } else {
         None
@@ -223,14 +204,14 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         let addr = deps.host.gateway.listen();
         let listener = TcpListener::bind(addr)
             .await
-            .map_err(|e| format!("HTTP 입구를 열지 못했어요({addr}): {e}"))?;
-        eprintln!("게이트웨이: HTTP {addr}");
+            .map_err(|e| format!("failed to bind HTTP gateway ({addr}): {e}"))?;
+        eprintln!("gateway: HTTP {addr}");
         Some(listener)
     } else {
         None
     };
     if !(cli || http || slack) {
-        eprintln!("게이트웨이: 연결된 입구가 없어요(프로필에 바인딩이 없어요)");
+        eprintln!("gateway: no ingress bound (profiles define no bindings)");
     }
     Ok(Prepared {
         ingress,
@@ -244,7 +225,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
 }
 
 impl Prepared {
-    /// 접수를 연다. 활성 판본·시드를 확정한 뒤에 부른다. 이 안에서는 실패할 일이 없다.
+    /// Starts serving ingress; call only after active revision and seeds are committed.
     pub fn open(self, tasks: &mut JoinSet<Result<(), String>>) {
         let Self {
             ingress,
@@ -279,7 +260,7 @@ impl Prepared {
                 gateway
                     .serve(listener, stop)
                     .await
-                    .map_err(|e| format!("HTTP 입구가 멈췄어요: {e}"))
+                    .map_err(|e| format!("HTTP gateway stopped: {e}"))
             });
         }
         if let Some(gateway) = slack {
@@ -288,7 +269,6 @@ impl Prepared {
                 ingress.clone(),
                 Arc::new(gateway.sender()),
             );
-            // 채널에서 시작한 예약의 승인 카드는 소유자 DM으로 전달한다(같은 설치·같은 저장소 핸들)
             let cards = CardDeliverer::new(store as Arc<dyn CardOutbox>, ingress, gateway.sender());
             tasks.spawn({
                 let stop = stop.clone();

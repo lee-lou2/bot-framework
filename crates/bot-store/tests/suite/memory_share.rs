@@ -1,5 +1,4 @@
-//! 기억 공유(PG): 카드는 `preview` 한 번의 본문으로 만들고, 승인 인자 해시는 {id, 본문 SHA-256}의 지문이다.
-//! `share`가 활성 판본·리스·소유자·본문 지문을 확인하고 승인 소비·가시성 변경·호출 완료·감사를 한 커밋으로 한다.
+//! Memory sharing (PG): `preview` returns exact body hash, and `share` atomically checks revision, lease, owner, and body hash before consuming approval and promoting visibility.
 
 use crate::support::*;
 use bot_core::{
@@ -17,7 +16,6 @@ fn fingerprint(id: &MemoryId, body: &str) -> [u8; 32] {
     memory_share_hash(id, &Sha256::digest(body.as_bytes()).into())
 }
 
-/// 공유 호출(memory.share)의 승인까지 받은 뒤 같은 세대로 재개한 attempt. 호출·승인의 해시는 카드에 보인 본문의 지문이다.
 async fn approved_share(
     db: &TestDb,
     run: &RunContext,
@@ -100,14 +98,14 @@ async fn preview_returns_one_visible_item_with_the_exact_body_hash() {
         return;
     };
     let cli = run_in(&db, "cli", OWNER, ConversationKind::Cli).await;
-    let body = "  공용으로 쓸 메모\n두 번째 줄  ";
+    let body = "  shared note\nsecond line  ";
     let id = create(&db, &cli, body).await;
     assert!(!flag(&db, &cli).await);
     let shown = memories(&db)
         .preview(cli.attempt.clone(), id.clone())
         .await
         .unwrap();
-    assert_eq!(shown.text, body, "공백을 지우지 않은 본문 그대로");
+    assert_eq!(shown.text, body, "body must preserve exact whitespace");
     assert_eq!(
         shown.sha256,
         <[u8; 32]>::from(Sha256::digest(body.as_bytes()))
@@ -115,7 +113,7 @@ async fn preview_returns_one_visible_item_with_the_exact_body_hash() {
     assert_eq!(shown.visibility, Visibility::Private);
     assert!(
         flag(&db, &cli).await,
-        "private 본문이 나가기 전에 플래그를 세운다"
+        "private recall flag must be raised before returning private body"
     );
     assert!(matches!(
         memories(&db)
@@ -124,7 +122,6 @@ async fn preview_returns_one_visible_item_with_the_exact_body_hash() {
         Err(Error::Missing)
     ));
 
-    // 남의 private은 보이지 않는다(없는 것과 같다)
     let guest = run_in(&db, "guest", GUEST, ConversationKind::Direct).await;
     assert!(matches!(
         memories(&db).preview(guest.attempt.clone(), id).await,
@@ -139,9 +136,9 @@ async fn sharing_commits_approval_visibility_call_and_audit_in_one_step() {
         return;
     };
     let cli = run_in(&db, "cli", OWNER, ConversationKind::Cli).await;
-    let body = "공용으로 쓸 메모";
+    let body = "shared note";
     let id = create(&db, &cli, body).await;
-    let other = create(&db, &cli, "다른 메모").await;
+    let other = create(&db, &cli, "other note").await;
     let resumed = approved_share(&db, &cli, &id, body, "n1").await;
     assert_eq!(visibility(&db, &id).await, "private");
 
@@ -156,7 +153,7 @@ async fn sharing_commits_approval_visibility_call_and_audit_in_one_step() {
         db.scalar::<String>("select state || ':' || result from bot_calls")
             .await,
         format!(r#"done:{{"id":"{}"}}"#, id.0),
-        "호출 결과에는 ID만 남는다"
+        "call result records only the memory ID"
     );
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'memory.share'")
@@ -164,20 +161,19 @@ async fn sharing_commits_approval_visibility_call_and_audit_in_one_step() {
         1
     );
 
-    // 완료한 호출의 재접수는 다시 공유하지 않는다(그 사이 private으로 돌아갔어도 그대로)
-    edit(&db, &resumed, &id, "고친 내용").await;
+    // Replaying a completed share call returns the receipt without re-sharing after an edit.
+    edit(&db, &resumed, &id, "edited text").await;
     assert_eq!(visibility(&db, &id).await, "private");
     assert_eq!(
         share(share_start(&resumed, &id, body, "n1")).await.unwrap(),
         id
     );
-    assert_eq!(visibility(&db, &id).await, "private", "재공유 0");
+    assert_eq!(visibility(&db, &id).await, "private", "must not re-share");
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'memory.share'")
             .await,
         1
     );
-    // 같은 호출을 다른 기억으로 완료할 수는 없다
     assert!(matches!(
         memories(&db)
             .share(share_start(&resumed, &id, body, "n1"), other)
@@ -193,7 +189,7 @@ async fn a_shared_item_is_visible_to_others_until_it_is_edited() {
         return;
     };
     let cli = run_in(&db, "cli", OWNER, ConversationKind::Cli).await;
-    let body = "공용으로 쓸 메모";
+    let body = "shared note";
     let id = create(&db, &cli, body).await;
     let resumed = approved_share(&db, &cli, &id, body, "n1").await;
     memories(&db)
@@ -204,15 +200,15 @@ async fn a_shared_item_is_visible_to_others_until_it_is_edited() {
     assert_eq!(texts(&db, &guest, "").await, [body]);
     assert!(
         !flag(&db, &guest).await,
-        "profile 기억은 private 플래그를 세우지 않는다"
+        "profile-shared memory must not raise private recall flag"
     );
     let shown = memories(&db)
         .preview(guest.attempt.clone(), id.clone())
         .await
         .unwrap();
     assert_eq!(shown.visibility, Visibility::Profile);
-    // 공유한 기억을 고치면 다시 private이 되어 새 승인을 받아야 한다
-    edit(&db, &resumed, &id, "내용 바꿈").await;
+    // Editing a shared memory reverts visibility to private, requiring fresh approval.
+    edit(&db, &resumed, &id, "updated body").await;
     assert_eq!(visibility(&db, &id).await, "private");
 }
 
@@ -222,11 +218,10 @@ async fn a_changed_body_conflicts_and_leaves_the_approval_unconsumed() {
         return;
     };
     let cli = run_in(&db, "cli", OWNER, ConversationKind::Cli).await;
-    let id = create(&db, &cli, "처음 내용").await;
-    let resumed = approved_share(&db, &cli, &id, "처음 내용", "n1").await;
-    // 카드를 본 뒤 본문이 바뀌었다
-    edit(&db, &resumed, &id, "몰래 바꾼 내용").await;
-    let start = || share_start(&resumed, &id, "처음 내용", "n1");
+    let id = create(&db, &cli, "initial content").await;
+    let resumed = approved_share(&db, &cli, &id, "initial content", "n1").await;
+    edit(&db, &resumed, &id, "silently modified").await;
+    let start = || share_start(&resumed, &id, "initial content", "n1");
     assert!(matches!(
         memories(&db).share(start(), id.clone()).await,
         Err(Error::Conflict)
@@ -234,15 +229,15 @@ async fn a_changed_body_conflicts_and_leaves_the_approval_unconsumed() {
     assert_eq!(
         approval_state(&db, "n1").await,
         "approved",
-        "승인은 소비되지 않는다"
+        "approval must remain unconsumed"
     );
     assert_eq!(visibility(&db, &id).await, "private");
     assert_eq!(
         db.scalar::<String>("select state from bot_calls").await,
         "open"
     );
-    // 본문이 카드에 보인 것과 같아지면 승인한 내용이다(시각이 아니라 본문 지문으로 대조한다)
-    edit(&db, &resumed, &id, "처음 내용").await;
+    // Matching is by body fingerprint rather than timestamp, so restoring the exact text succeeds.
+    edit(&db, &resumed, &id, "initial content").await;
     memories(&db).share(start(), id.clone()).await.unwrap();
     assert_eq!(visibility(&db, &id).await, "profile");
 }
@@ -253,7 +248,7 @@ async fn the_generic_start_refuses_the_share_tool_and_a_share_needs_the_owners_o
         return;
     };
     let cli = run_in(&db, "cli", OWNER, ConversationKind::Cli).await;
-    let body = "소유자의 메모";
+    let body = "owner note";
     let id = create(&db, &cli, body).await;
     let resumed = approved_share(&db, &cli, &id, body, "n1").await;
     assert!(matches!(
@@ -263,14 +258,12 @@ async fn the_generic_start_refuses_the_share_tool_and_a_share_needs_the_owners_o
         Err(Error::Denied)
     ));
     assert_eq!(approval_state(&db, "n1").await, "approved");
-    // 승인 없이는 공유하지 못한다
     let mut bare = share_start(&resumed, &id, body, "n1");
     bare.approval = None;
     assert!(matches!(
         memories(&db).share(bare, id.clone()).await,
         Err(Error::Denied)
     ));
-    // 다른 사용자는 남의 기억을 공유하지 못한다
     let guest = run_in(&db, "guest", GUEST, ConversationKind::Direct).await;
     let hash = fingerprint(&id, body);
     calls(&db)
@@ -318,7 +311,7 @@ async fn a_replaced_active_revision_refuses_the_share_before_consuming_the_appro
         return;
     };
     let cli = run_in(&db, "cli", OWNER, ConversationKind::Cli).await;
-    let body = "판본 교체 전에 본 카드";
+    let body = "card shown before revision swap";
     let id = create(&db, &cli, body).await;
     let resumed = approved_share(&db, &cli, &id, body, "n1").await;
     db.store
@@ -350,17 +343,16 @@ async fn an_edit_racing_the_share_wins_when_it_commits_first() {
         return;
     };
     let cli = run_in(&db, "cli", OWNER, ConversationKind::Cli).await;
-    let body = "경합 전의 본문";
+    let body = "body before race";
     let id = create(&db, &cli, body).await;
     let resumed = approved_share(&db, &cli, &id, body, "n1").await;
-    // 다른 쪽이 본문을 고치는 트랜잭션을 쥐고 있는 동안 공유가 들어온다
     let mut connection = db.raw().await;
     let mut editing = sqlx::Connection::begin(&mut connection).await.unwrap();
     let writer: i32 = sqlx::query_scalar("select pg_backend_pid()")
         .fetch_one(&mut *editing)
         .await
         .unwrap();
-    sqlx::query("update bot_memories set body = '경합 중에 바뀐 본문' where id = $1")
+    sqlx::query("update bot_memories set body = 'body changed mid-race' where id = $1")
         .bind(&id.0)
         .execute(&mut *editing)
         .await
@@ -380,12 +372,12 @@ async fn an_edit_racing_the_share_wins_when_it_commits_first() {
             if waiting {
                 break;
             }
-            assert!(!sharing.is_finished(), "공유가 편집보다 먼저 끝났다");
+            assert!(!sharing.is_finished(), "share finished before edit committed");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("공유가 기억 행의 편집을 기다려야 한다");
+    .expect("share must wait on the locked memory row");
     editing.commit().await.unwrap();
     assert!(matches!(sharing.await.unwrap(), Err(Error::Conflict)));
     assert_eq!(approval_state(&db, "n1").await, "approved");

@@ -1,5 +1,4 @@
-//! 설치 폴더를 읽는 부분: 폴더를 한 번 훑으며 항목 표(상대 경로 → 폴더·파일[실행 비트·해시])를 만들고, 설치본이 있으면 같은 바이트를
-//! 복사한다. 링크·특수 파일·UTF-8이 아닌 이름은 거절하고, 항목 수·바이트·깊이·경로 길이에 상한을 둔다.
+//! Single-pass directory tree walker that hashes server packages and optionally copies them read-only.
 use super::relative_ok;
 use bot_core::install::InstallEntry;
 use sha2::{Digest, Sha256};
@@ -11,29 +10,27 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// 한 설치본이 가질 수 있는 항목 수·바이트·깊이·경로 길이의 상한(코드 전용 폴더가 데이터 폴더로 잘못 지정된 경우를 막는다)
+// Safeguards against accidentally pointing a code-only server root at a large data directory.
 const MAX_ENTRIES: usize = 50_000;
 const MAX_BYTES: u64 = 1 << 30;
 const MAX_DEPTH: usize = 32;
 const MAX_PATH_BYTES: usize = 1024;
 
-/// 읽는 중 쌓이는 상태
 struct Walk {
     entries: BTreeMap<String, InstallEntry>,
     bytes: u64,
-    /// 설치본에 만든 폴더(권한을 잠글 때 아래에서부터 쓴다)
+    // Created directories locked bottom-up after copying completes.
     dirs: Vec<PathBuf>,
-    /// 있으면 모든 폴더·파일이 이 사용자 소유이고 누구도 쓸 수 없어야 한다(이미 있는 설치본을 다시 쓰기 전의 확인)
+    // When set, every entry must be owned by this UID and have no write bits (reuse audit).
     owner: Option<u32>,
 }
 
-/// 설치본의 폴더·파일은 설치한 사용자 소유이고 읽기 전용(쓰기 비트 없음)이어야 다시 쓸 수 있다.
 fn audit(rel: &str, meta: &Metadata, uid: u32) -> Result<(), String> {
     if meta.uid() == uid && meta.mode() & 0o222 == 0 {
         Ok(())
     } else {
         Err(format!(
-            "{rel}: 소유자·쓰기 권한이 설치본 규칙(본인 소유·읽기 전용)과 달라요"
+            "{rel}: owner or write permissions violate install rules (must be owned by current user and read-only)"
         ))
     }
 }
@@ -52,7 +49,7 @@ impl Walk {
     ) -> Result<(), String> {
         if depth > MAX_DEPTH {
             return Err(format!(
-                "{}: 폴더가 너무 깊어요(최대 {MAX_DEPTH})",
+                "{}: directory nesting too deep (max {MAX_DEPTH})",
                 dir.display()
             ));
         }
@@ -64,7 +61,10 @@ impl Walk {
         names.sort();
         for name in names {
             let text = name.to_str().ok_or_else(|| {
-                format!("{}: UTF-8이 아닌 이름은 설치할 수 없어요", dir.display())
+                format!(
+                    "{}: non-UTF-8 entry name cannot be installed",
+                    dir.display()
+                )
             })?;
             let rel_path = if rel.is_empty() {
                 text.to_owned()
@@ -72,11 +72,11 @@ impl Walk {
                 format!("{rel}/{text}")
             };
             if rel_path.len() > MAX_PATH_BYTES || !relative_ok(&rel_path) {
-                return Err(format!("{rel_path}: 경로가 올바르지 않거나 너무 길어요"));
+                return Err(format!("{rel_path}: invalid or overly long path"));
             }
             if self.entries.len() >= MAX_ENTRIES {
                 return Err(format!(
-                    "항목이 너무 많아요(최대 {MAX_ENTRIES}) — 코드 전용 폴더인지 확인하세요"
+                    "too many entries (max {MAX_ENTRIES}) — verify this is a code-only directory"
                 ));
             }
             let path = dir.join(&name);
@@ -107,13 +107,14 @@ impl Walk {
                 let entry = self.file(&path, &meta, out.map(|o| o.join(&name)).as_deref())?;
                 self.entries.insert(rel_path, entry);
             } else {
-                return Err(format!("{rel_path}: 링크·특수 파일은 설치할 수 없어요"));
+                return Err(format!(
+                    "{rel_path}: symlinks and special files cannot be installed"
+                ));
             }
         }
         Ok(())
     }
 
-    /// 일반 파일 하나를 읽어 해시를 계산하고, 설치본이 있으면 같은 바이트를 쓴다.
     fn file(
         &mut self,
         path: &Path,
@@ -121,10 +122,10 @@ impl Walk {
         out: Option<&Path>,
     ) -> Result<InstallEntry, String> {
         let mut input = File::open(path).map_err(|e| io(path, e))?;
-        // 열기 전에 본 그 파일이어야 한다(그 사이 링크·다른 파일로 바뀌지 않았는지)
+        // Verify the opened fd matches the lstat'd inode to prevent TOCTOU symlink swaps.
         let opened = input.metadata().map_err(|e| io(path, e))?;
         if !opened.is_file() || (opened.dev(), opened.ino()) != (seen.dev(), seen.ino()) {
-            return Err(format!("{}: 읽는 사이에 바뀌었어요", path.display()));
+            return Err(format!("{}: changed while reading", path.display()));
         }
         let executable = seen.mode() & 0o111 != 0;
         let mut output = match out {
@@ -148,7 +149,7 @@ impl Walk {
             self.bytes += n as u64;
             if self.bytes > MAX_BYTES {
                 return Err(format!(
-                    "{}: 설치 크기가 너무 커요(최대 {} MiB) — 코드 전용 폴더인지 확인하세요",
+                    "{}: package exceeds max install size ({} MiB) — verify this is a code-only directory",
                     path.display(),
                     MAX_BYTES >> 20
                 ));
@@ -172,7 +173,6 @@ impl Walk {
     }
 }
 
-/// 폴더 아래를 모두 읽어 항목 표를 만든다. `out`이 있으면 같은 바이트를 그 폴더에 복사한다.
 pub(super) fn walk(
     root: &Path,
     out: Option<&Path>,
@@ -180,10 +180,13 @@ pub(super) fn walk(
 ) -> Result<(BTreeMap<String, InstallEntry>, Vec<PathBuf>), String> {
     let meta = std::fs::symlink_metadata(root).map_err(|e| io(root, e))?;
     if !meta.is_dir() {
-        return Err(format!("{}: 링크가 아닌 폴더여야 해요", root.display()));
+        return Err(format!(
+            "{}: must be a real directory, not a symlink",
+            root.display()
+        ));
     }
     if let Some(uid) = owner {
-        audit("(설치본 루트)", &meta, uid)?;
+        audit("(install root)", &meta, uid)?;
     }
     let mut state = Walk {
         entries: BTreeMap::new(),

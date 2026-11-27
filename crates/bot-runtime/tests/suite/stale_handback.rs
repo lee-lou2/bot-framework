@@ -1,7 +1,5 @@
-//! 구판 워커가 물러날 때(`Flow::Lost`)의 조건부 반납(실제 PG): 예약 발화 run을 집은 직후 활성 집합이 교체돼 회신 초안 조회가 `Stale`이 되면 워커는 물러나는데,
-//! 그때 run을 `leased`로 남겨 두면 리스가 끝나길 기다려야 이어진다(그 만료는 활성 집합이 바뀌어 생긴 것이라 인계가 시도를 쓰지 않는다 — 리스 인계의
-//! 활성 집합 비교). 물러나기 전에 저장소에 조건부 반납을 청하면 리스 만료를 기다리지 않고 바로 대기열로 돌아가 새 판본의 워커가 시도를 쓰지 않고 이어 간다.
-//! 이미 인계된 claim과 현재 판본의 워커는 건드리지 않는다.
+//! PostgreSQL tests for conditional handback (`release_stale`) when a worker steps back after activation replacement.
+//! Handback immediately returns the run to `ready` with zero attempts spent, while leaving current-activation or already-taken-over claims untouched.
 
 use crate::support::*;
 use bot_core::{
@@ -23,7 +21,6 @@ fn rev(value: &str) -> Revision {
     Revision(value.into())
 }
 
-/// 조건부 반납을 저장소의 구판 반납 함수에 잇는다(운영 호스트의 연결과 같다)
 struct ToStore(Arc<Store>);
 
 impl Handback for ToStore {
@@ -32,7 +29,7 @@ impl Handback for ToStore {
     }
 }
 
-/// 초안을 읽기 직전에 다른 프로세스가 활성 집합을 교체한 상황(집은 직후 교체)을 흉내 낸다. 그다음의 읽기는 고정한 집합이 옛것이라 `Stale`이다.
+/// Replaces the active set right before reading the delivery draft so the old handle sees `Stale`.
 struct ReplacedBeforeTheDraft {
     world: Arc<Store>,
     inner: Arc<Store>,
@@ -83,7 +80,6 @@ impl ScheduledReplies for ReplacedBeforeTheDraft {
     }
 }
 
-/// 사용자 예약이 발화한 run처럼 보이게 한다(루트이고 출처가 예약이면 워커가 회신 초안을 먼저 본다).
 async fn as_scheduled(w: &World, run: &RunId) {
     w.pg.sql(&format!(
         "update bot_runs set run_origin = 'schedule' where id = '{}'",
@@ -92,7 +88,6 @@ async fn as_scheduled(w: &World, run: &RunId) {
     .await;
 }
 
-/// 마지막 시도 한도(1)로 활성 집합 `set`에 묶인 저장소 핸들. 인계(리스 만료)가 시도를 쓰면 곧바로 dead letter다.
 fn handle(w: &World, worker: &str, set: &str) -> Arc<Store> {
     Arc::new(
         Store::from_pool(
@@ -129,9 +124,8 @@ async fn a_worker_that_steps_back_after_the_set_was_replaced_hands_the_run_back_
     let Some(w) = world().await else {
         return;
     };
-    let run = w.accept("req-1", "오늘 일정 알려줘").await;
+    let run = w.accept("req-1", "Show today's agenda").await;
     as_scheduled(&w, &run).await;
-    // 옛 판본의 워커: 활성 집합 set-1에 묶였다
     let old = handle(&w, "old-worker", "set-1");
     let worker = w
         .worker(&old, demo(), config())
@@ -140,7 +134,6 @@ async fn a_worker_that_steps_back_after_the_set_was_replaced_hands_the_run_back_
             release: w.broker.clone(),
         })
         .with_handback(Arc::new(ToStore(old.clone())));
-    // 집은 직후 집합이 교체돼 회신 초안 조회가 Stale → 물러난다. 대기열로 돌아가고 시도는 그대로다
     assert_eq!(worker.run_once().await, Some(Outcome::Lost));
     assert_eq!(w.pg.state_of(&run).await, "ready");
     assert_eq!(attempts(&w, &run).await, 0);
@@ -149,7 +142,6 @@ async fn a_worker_that_steps_back_after_the_set_was_replaced_hands_the_run_back_
             .await,
         1
     );
-    // 새 판본의 워커가 이어받아 끝낸다(시도 소모 0)
     let new = handle(&w, "new-worker", "set-2");
     let resumed = w.worker(&new, demo(), config());
     assert_eq!(resumed.run_once().await, Some(Outcome::Succeeded));
@@ -160,12 +152,10 @@ async fn a_worker_that_steps_back_after_the_set_was_replaced_hands_the_run_back_
 #[tokio::test]
 async fn without_the_handback_the_run_stays_leased_until_the_lease_ends_and_the_set_change_spares_the_attempt()
  {
-    // 대조: 같은 상황에서 반납을 붙이지 않으면 run은 리스가 끝날 때까지 leased로 남는다. 끝난 뒤의 인계는 활성 집합이 바뀌어 생긴 만료라 시도를 쓰지 않는다
-    // (리스 인계의 활성 집합 비교 — 예전에는 여기서 한도(1)에 닿아 dead letter가 됐다)
     let Some(w) = world().await else {
         return;
     };
-    let run = w.accept("req-2", "오늘 일정 알려줘").await;
+    let run = w.accept("req-2", "Show today's agenda").await;
     as_scheduled(&w, &run).await;
     let old = handle(&w, "old-worker", "set-1");
     let worker = w.worker(&old, demo(), config()).with_delivery(Delivery {
@@ -173,12 +163,7 @@ async fn without_the_handback_the_run_stays_leased_until_the_lease_ends_and_the_
         release: w.broker.clone(),
     });
     assert_eq!(worker.run_once().await, Some(Outcome::Lost));
-    assert_eq!(
-        w.pg.state_of(&run).await,
-        "leased",
-        "반납이 없으면 리스가 끝나길 기다린다"
-    );
-    // 리스가 끝난 뒤 새 판본의 워커가 인계한다: 직전 claim의 집합(set-1)과 이 워커의 집합(set-2)이 달라 시도를 쓰지 않는다
+    assert_eq!(w.pg.state_of(&run).await, "leased");
     w.pg.sql(&format!(
         "update bot_runs set lease_until_ms = bot_now_ms() - 1 where id = '{}'",
         run.0
@@ -188,7 +173,7 @@ async fn without_the_handback_the_run_stays_leased_until_the_lease_ends_and_the_
     let taken = RunStore::claim(&*new)
         .await
         .unwrap()
-        .expect("시도를 쓰지 않고 인계한다");
+        .expect("cross-activation takeover must spare attempts");
     assert_eq!(taken.attempt.run, run);
     assert_eq!(attempts(&w, &run).await, 0);
 }
@@ -198,16 +183,15 @@ async fn a_run_already_taken_over_or_held_by_a_current_worker_is_left_alone() {
     let Some(w) = world().await else {
         return;
     };
-    // 현재 판본의 워커가 집은 run은 반납하지 않는다(집합이 같다)
-    let run = w.accept("req-3", "오늘 일정 알려줘").await;
+    let run = w.accept("req-3", "Show today's agenda").await;
     let current = handle(&w, "current-worker", "set-1");
-    let claimed = RunStore::claim(&*current).await.unwrap().expect("집는다");
+    let claimed = RunStore::claim(&*current).await.unwrap().expect("claim");
     assert!(matches!(
         current.release_stale(&claimed.attempt).await,
         Err(Error::Denied)
     ));
     assert_eq!(w.pg.state_of(&run).await, "leased");
-    // 교체된 뒤에도 이미 다른 세대가 인계한 run의 옛 claim으로는 반납하지 못하고 새 소유자의 run은 그대로다
+
     w.pg.store
         .replace(
             Some(rev("set-1")),
@@ -226,7 +210,10 @@ async fn a_run_already_taken_over_or_held_by_a_current_worker_is_left_alone() {
     let successor = Arc::new(
         Store::from_pool(w.pg.store.pool().clone(), Config::default()).for_activation(rev("set-2")),
     );
-    let taken = RunStore::claim(&*successor).await.unwrap().expect("인계");
+    let taken = RunStore::claim(&*successor)
+        .await
+        .unwrap()
+        .expect("takeover");
     assert!(taken.attempt.generation.0 > claimed.attempt.generation.0);
     assert!(matches!(
         current.release_stale(&claimed.attempt).await,

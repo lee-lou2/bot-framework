@@ -1,4 +1,4 @@
-//! 상류 주소 규칙: `https`만, `http`는 loopback IP 리터럴만, 자격·쿼리·조각·이름 속임수는 거절.
+//! Endpoint validation tests: HTTPS-only except loopback IP literals, rejecting credentials, queries, and spoofed hostnames.
 
 use super::super::ApiEndpoint;
 
@@ -12,7 +12,6 @@ fn https_hosts_ports_and_paths_are_normalized_into_one_base_url() {
         ok("https://api.anthropic.com").url("/v1/messages"),
         "https://api.anthropic.com:443/v1/messages"
     );
-    // 호스트는 소문자로, 끝 슬래시는 하나만 떼고, 기본 경로를 이어 붙인다
     assert_eq!(
         ok("https://API.Example.com:8443/v1/").url("/chat/completions"),
         "https://api.example.com:8443/v1/chat/completions"
@@ -21,7 +20,6 @@ fn https_hosts_ports_and_paths_are_normalized_into_one_base_url() {
         ok("https://gateway.example/anthropic/proxy").url("/v1/messages"),
         "https://gateway.example:443/anthropic/proxy/v1/messages"
     );
-    // https의 공개 IP 리터럴은 허용하지만 키가 필요하다(loopback이 아니다)
     for text in [
         "https://api.example.com",
         "https://203.0.113.7:9443/v1",
@@ -50,7 +48,6 @@ fn http_is_accepted_only_for_loopback_ip_literals() {
         "http://[::1]:8080/v1/chat/completions"
     );
     assert_eq!(ok("http://127.0.0.1/v1").url(""), "http://127.0.0.1:80/v1");
-    // 이름(localhost 포함)·사설망·링크 로컬·미지정·IPv4로 매핑한 IPv6·IP의 변형 표기는 평문으로 보내지 않는다
     for bad in [
         "http://localhost:11434/v1",
         "http://LOCALHOST",
@@ -119,7 +116,6 @@ fn credentials_queries_fragments_escapes_and_odd_names_are_refused_without_echoi
         long.as_str(),
     ] {
         let error = ApiEndpoint::parse(bad).expect_err(bad);
-        // 거절 사유는 고정 문장이다: 입력(자격이 섞여 있을 수 있다)을 되풀이하지 않는다
         assert!(
             !error.contains("example") && !error.contains("pass"),
             "{error}"

@@ -1,4 +1,4 @@
-//! 모델 실행기 시험이 같이 쓰는 요청 만들기와 한 차례 실행.
+//! Shared `ModelRequest` builder and single-step helper for API runner tests.
 
 use bot_core::{
     command::JsonPayload,
@@ -17,7 +17,7 @@ pub fn tools() -> Vec<ToolSpec> {
             id: ToolId(id.into()),
             kind: ToolKind::Skill,
             class: Risk::Read,
-            description: format!("{id} 도구"),
+            description: format!("{id} tool"),
             input: JsonPayload(r#"{"type":"object"}"#.into()),
         })
         .into()
@@ -32,11 +32,11 @@ pub fn request_with(cancel: watch::Receiver<bool>, limits: Limits) -> ModelReque
             claim: Some(ClaimEpoch(1)),
         },
         model: "assistant".into(),
-        system: "프로필 지침".into(),
+        system: "profile instructions".into(),
         conversation: vec![Message {
             role: Role::User,
             speaker: Some(PrincipalId("local:owner".into())),
-            text: "오늘 일정 알려줘".into(),
+            text: "Show today's agenda".into(),
         }],
         tools: tools(),
         exchanges: Vec::new(),

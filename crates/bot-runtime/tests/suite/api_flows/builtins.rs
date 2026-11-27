@@ -17,7 +17,6 @@ const SCOPES: [&str; 5] = [
     "schedule.cancel",
 ];
 
-/// 수신자가 등록된 다른 Slack 채널 하나인 시험 호스트.
 struct Routes;
 
 impl ScheduleRoutes for Routes {
@@ -52,7 +51,7 @@ async fn builtin_world() -> Option<World> {
 }
 
 async fn accept(w: &World, request: &str, kind: ConversationKind) -> RunId {
-    let mut cmd = command(request, "요청을 처리해 주세요");
+    let mut cmd = command(request, "Please handle this request");
     cmd.reply_transport = match kind {
         ConversationKind::Direct | ConversationKind::Channel => Some(PushTransportId::SLACK),
         ConversationKind::Cli | ConversationKind::Http | ConversationKind::Scheduled => None,
@@ -84,7 +83,7 @@ async fn builtin_listings_follow_the_agent_ceiling_for_both_dialects() {
             return;
         };
         let api = FakeApi::start().await;
-        api.script(text(kind, "확인했어요", None));
+        api.script(text(kind, "Confirmed", None));
         accept(&w, "list", ConversationKind::Cli).await;
         let worker = w.worker(&w.pg.store, models(kind, &api), config());
         assert_eq!(worker.run_once().await, Some(Outcome::Succeeded));
@@ -119,7 +118,7 @@ async fn both_dialects_share_only_the_owners_memory_after_private_approval() {
         .into_iter()
         .enumerate()
         {
-            let body = format!("소유자의 기억 {i}");
+            let body = format!("Owner memory {i}");
             w.pg.store
                 .seed(MemorySeed {
                     profile: ProfileId("personal".into()),
@@ -143,7 +142,7 @@ async fn both_dialects_share_only_the_owners_memory_after_private_approval() {
                 vec![call("memory.share", json!({"id": id}))],
                 None,
             ));
-            api.script(text(kind, "확인했어요", None));
+            api.script(text(kind, "Confirmed", None));
             let refused = channel == ConversationKind::Channel || owner != OWNER;
             let run = accept(&w, &format!("share-{i}"), channel).await;
             if refused {
@@ -198,11 +197,11 @@ async fn both_dialects_record_and_return_a_schedule_beyond_the_time_limit_as_inv
             "",
             vec![call(
                 "schedule.create",
-                json!({"at": "9999-01-01T00:00:00Z", "instruction": "알려 주세요"}),
+                json!({"at": "9999-01-01T00:00:00Z", "instruction": "Notify me"}),
             )],
             None,
         ));
-        api.script(text(kind, "시각을 다시 확인해 주세요", None));
+        api.script(text(kind, "Please check the time again", None));
         let run = accept(&w, "far-future", ConversationKind::Direct).await;
         let worker = w.worker(&w.pg.store, models(kind, &api), config());
         assert_eq!(
@@ -250,7 +249,7 @@ async fn schedule_error_reaches_model(
     }
     let api = FakeApi::start().await;
     api.script(calls(kind, "", vec![request], None));
-    api.script(text(kind, "요청을 다시 확인해 주세요", None));
+    api.script(text(kind, "Please check the request again", None));
     let run = accept(&w, "schedule-input-error", ConversationKind::Direct).await;
     let worker = w.worker(&w.pg.store, models(kind, &api), config());
     assert_eq!(
@@ -301,9 +300,9 @@ async fn a_timezone_rejected_by_the_store_is_returned_to_both_models() {
             kind,
             call(
                 "schedule.create",
-                json!({"cron":"* * * * *", "timezone":"Factory", "instruction":"알려 주세요"}),
+                json!({"cron":"* * * * *", "timezone":"Factory", "instruction":"Notify me"}),
             ),
-            "실패: invalid_args",
+            "failed: invalid_args",
             false,
         )
         .await;
@@ -319,9 +318,9 @@ async fn both_models_get_a_schedule_timing_error_when_the_db_clock_is_ahead() {
             kind,
             call(
                 "schedule.create",
-                json!({"at":at, "instruction":"알려 주세요"}),
+                json!({"at":at, "instruction":"Notify me"}),
             ),
-            "실패: invalid_args",
+            "failed: invalid_args",
             true,
         )
         .await;
@@ -341,7 +340,7 @@ async fn both_dialects_approve_the_destination_then_each_draft_and_can_list_and_
                 replies: w.pg.store.clone(),
                 release: w.broker.clone(),
             });
-        let instruction = "팀에 마감 건수 알리기";
+        let instruction = "Notify the team of closing count";
         let invalid = Call {
             id: "bad-list",
             ..call("schedule.list", json!({"typo": 1}))
@@ -354,7 +353,7 @@ async fn both_dialects_approve_the_destination_then_each_draft_and_can_list_and_
             }),
         );
         api.script(calls(kind, "", vec![invalid, create], None));
-        api.script(text(kind, "예약했어요", None));
+        api.script(text(kind, "Scheduled", None));
         accept(&w, "create", ConversationKind::Direct).await;
         assert_eq!(worker.run_once().await, Some(Outcome::Parked), "{kind:?}");
         assert_eq!(
@@ -387,11 +386,11 @@ async fn both_dialects_approve_the_destination_then_each_draft_and_can_list_and_
                 .await;
         let sent = "select count(*) from bot_outbox where conv_id = 'T1/C9'";
         for i in 1..=2 {
-            // 이 스키마의 DB 시계로 실제 cron 경계를 한 분씩 지난다.
+            // Advance the schema-local DB clock by one cron minute per iteration.
             let now = (minute + i) * 60000;
             w.pg.sql(&format!("create or replace function bot_now_ms() returns bigint language sql volatile as 'select {now}::bigint'")).await;
             assert_eq!(scheduler.tick_users().await.unwrap().fired, 1);
-            let draft = format!("{i}회차에 보낼 팀 요약");
+            let draft = format!("Team summary draft #{i}");
             api.script(text(kind, &draft, None));
             assert_eq!(worker.run_once().await, Some(Outcome::Parked));
             assert_eq!(w.pg.scalar::<i64>(sent).await, i - 1);
@@ -400,7 +399,11 @@ async fn both_dialects_approve_the_destination_then_each_draft_and_can_list_and_
             approve(&w, nonce).await;
             let before = api.seen().len();
             assert_eq!(worker.run_once().await, Some(Outcome::Succeeded));
-            assert_eq!(api.seen().len(), before, "승인 후에는 동결한 초안을 쓴다");
+            assert_eq!(
+                api.seen().len(),
+                before,
+                "approval must send the frozen draft without calling the model again"
+            );
             assert_eq!(w.pg.scalar::<i64>(sent).await, i);
             let body: String = w.pg.scalar("select body from bot_outbox where conv_id = 'T1/C9' order by created_ms desc limit 1").await;
             assert!(body.contains(&draft));
@@ -424,7 +427,7 @@ async fn both_dialects_approve_the_destination_then_each_draft_and_can_list_and_
             vec![call("schedule.list", json!({}))],
             None,
         ));
-        api.script(text(kind, "취소했어요", None));
+        api.script(text(kind, "Cancelled", None));
         accept(&w, "list-cancel", ConversationKind::Direct).await;
         assert_eq!(worker.run_once().await, Some(Outcome::Succeeded));
         let seen = api.seen();

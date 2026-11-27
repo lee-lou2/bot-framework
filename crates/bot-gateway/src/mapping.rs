@@ -1,13 +1,8 @@
-//! 게이트웨이의 실제 신원·입구 매핑과 인증 설정의 지문(비밀 값 제외).
+//! Deterministic fingerprint of gateway identity, entrance, and auth-name mappings (excluding secret values).
 //!
-//! 프로필 판본은 그대로여도 호스트가 정한 매핑(CLI 계정이 가리키는 OS 사용자, Slack 워크스페이스·채널 ID, HTTP 입구의
-//! 발급자·대상·키 이름)이 바뀌면 누가 무엇에 접근하는지가 달라진다. 이 지문을 활성 판본에 묶어 매핑 변경도 활성화
-//! 사건이 되게 한다 — 옛 매핑으로 뜬 프로세스는 구판으로 닫히고, 매핑이 다른 프로세스는 명시 활성화 없이는 합류하지 못한다.
-//!
-//! 지문에 넣는 것: CLI 계정 별칭 → **실제 uid**, Slack 워크스페이스 별칭 → (팀·앱 ID·채널 별칭→ID·DM 여부·수신 방식·자격 **이름**),
-//! HTTP 입구 별칭 → (발급자·대상·키 **이름**·토큰 최대 수명), OpenAI 호환 입구 별칭 → 키 슬롯별 (슬롯 이름·자격 **이름**·주체).
-//! OpenAI 입구가 없는 호스트의 지문 바이트는 그 기능이 생기기 전과 같다(구간 자체를 넣지 않는다 — 이미 활성화된 호스트가 재활성화를 요구받지 않는다).
-//! 넣지 않는 것: 자격 **값**(회전은 재활성화 없이 반영된다), 속도·본문·실행 수 한도, 대기 시간, 소켓·수신 주소, 관리 화면 주소(신원과 무관한 운영 값).
+//! Bound into activation fingerprints so mapping changes require explicit activation.
+//! Stability invariant: hosts without OpenAI endpoints omit the `openai` section so existing deployments keep
+//! identical bytes; operational settings (limits, timeouts, listen/socket/admin addresses) are excluded.
 use crate::host::{CliAccount, HostConfig, HostError, resolve_uid};
 use sha2::{Digest, Sha256};
 
@@ -30,16 +25,14 @@ fn count(hash: &mut Sha256, n: usize) {
     hash.update((n as u64).to_be_bytes());
 }
 
-/// 워크스페이스마다 지문에 넣는 수신 방식 표지. 소켓 수신(0)만 검증을 통과하므로 상수다. 값을 계속 넣는 것은 이미 활성화된 호스트의 지문 바이트가 바뀌지 않게 하려는 것이다.
+/// Retained byte marker for Socket Mode reception to preserve activation fingerprint compatibility.
 const RECEIVE_SOCKET: u8 = 0;
 
-/// 지금 호스트에서 OS 사용자 이름을 풀어 지문을 만든다.
 pub fn fingerprint(config: &HostConfig) -> Result<[u8; 32], HostError> {
     fingerprint_with(config, &resolve_uid)
 }
 
-/// OS 사용자 해석을 바꿔 지문을 만든다(시험용·재사용). 설정 검증이 거절하는 설정에는 지문이 없다(Err):
-/// 수신 방식 표지가 상수라서 검증을 거치지 않은 `receive: "http"`가 소켓 설정과 같은 지문을 얻는 일을 막는다.
+/// Validates before hashing so unvalidated configs (e.g. `receive: "http"`) cannot collide with `RECEIVE_SOCKET`.
 pub fn fingerprint_with(
     config: &HostConfig,
     uid_of: &dyn Fn(&CliAccount) -> Result<u32, HostError>,
@@ -118,7 +111,6 @@ mod tests {
         })
     }
 
-    /// `guest`는 uid 502로 푼다(실제 OS 조회 없이)
     fn print(value: Value) -> [u8; 32] {
         let config = HostConfig::from_value(value).unwrap();
         fingerprint_with(&config, &|account| Ok(account.uid.unwrap_or(502))).unwrap()
@@ -134,7 +126,6 @@ mod tests {
         bot_core::random::hex(&bytes)
     }
 
-    /// 웹훅 입구만 있는 호스트의 지문 바이트는 OpenAI 입구가 생기기 전과 같다(이미 활성화된 호스트가 재활성화를 요구받지 않는다).
     #[test]
     fn a_host_without_openai_entrances_keeps_its_fingerprint_bytes() {
         assert_eq!(
@@ -143,8 +134,6 @@ mod tests {
         );
     }
 
-    /// Slack 워크스페이스의 모든 필드(소켓 수신을 명시, 서명 비밀 이름, 채널)와 워크스페이스 둘을 갖춘 호스트의 지문 바이트가 바뀌지 않는다.
-    /// 수신 방식 표지·서명 비밀을 다루는 코드를 고쳐도 이미 활성화된 호스트가 재활성화를 요구받지 않는다는 고정점이다.
     #[test]
     fn a_host_with_slack_workspaces_keeps_its_fingerprint_bytes() {
         let mut value = base();
@@ -174,7 +163,7 @@ mod tests {
         assert_ne!(
             original,
             print(base()),
-            "OpenAI 입구가 생기면 활성화 사건이다"
+            "adding an OpenAI entrance must change the fingerprint"
         );
         let changed_openai = |edit: &dyn Fn(&mut Value)| {
             let mut value = with_openai();
@@ -183,15 +172,15 @@ mod tests {
         };
         for (name, print) in [
             (
-                "주체",
+                "subject",
                 changed_openai(&|e| e["keys"]["automation"]["subject"] = json!("ops")),
             ),
             (
-                "자격 이름",
+                "secret name",
                 changed_openai(&|e| e["keys"]["automation"]["secret"] = json!("other-key")),
             ),
             (
-                "슬롯 이름",
+                "slot name",
                 changed_openai(&|e| {
                     let keys = e["keys"].as_object_mut().unwrap();
                     let slot = keys.remove("rotated").unwrap();
@@ -199,12 +188,12 @@ mod tests {
                 }),
             ),
             (
-                "슬롯 추가",
+                "add slot",
                 changed_openai(&|e| {
                     e["keys"]["extra"] = json!({"secret": "extra-key", "subject": "build"});
                 }),
             ),
-            ("입구 별칭", {
+            ("endpoint alias", {
                 let mut value = with_openai();
                 let endpoint = value["http"]["endpoints"]
                     .as_object_mut()
@@ -215,7 +204,7 @@ mod tests {
                 print(value)
             }),
             (
-                "슬롯 제거",
+                "remove slot",
                 changed_openai(&|e| {
                     e["keys"].as_object_mut().unwrap().remove("rotated");
                 }),
@@ -223,11 +212,10 @@ mod tests {
         ] {
             assert_ne!(print, original, "{name}");
         }
-        // 대기 시간·실행 수 한도·키 순서는 신원과 무관한 운영 값이다
         for (name, print) in [
-            ("대기 시간", changed_openai(&|e| e["wait_ms"] = json!(5000))),
+            ("wait_ms", changed_openai(&|e| e["wait_ms"] = json!(5000))),
             (
-                "실행 수 한도",
+                "max_active_runs",
                 changed_openai(&|e| e["max_active_runs"] = json!(8)),
             ),
         ] {
@@ -237,7 +225,6 @@ mod tests {
 
     #[test]
     fn openai_and_webhook_entrances_do_not_collide_in_the_fingerprint() {
-        // 같은 별칭·같은 이름을 웹훅 입구로 쓰는 것과 OpenAI 입구로 쓰는 것은 다르다(구간 표지가 다르다)
         let mut webhook = base();
         webhook["http"]["endpoints"]["x"] = json!({"issuer": "i", "audience": "a", "key": "k"});
         let mut openai = base();
@@ -249,30 +236,30 @@ mod tests {
     #[test]
     fn identity_and_auth_mapping_changes_change_the_fingerprint() {
         let original = print(base());
-        assert_eq!(original, print(base()), "결정적");
+        assert_eq!(original, print(base()), "deterministic");
         for (name, print) in [
             (
-                "실제 uid",
+                "uid",
                 changed(|v| v["cli"]["accounts"]["owner"]["uid"] = json!(502)),
             ),
             (
-                "계정 추가",
+                "add account",
                 changed(|v| v["cli"]["accounts"]["extra"] = json!({"uid": 7})),
             ),
             (
-                "팀",
+                "team_id",
                 changed(|v| v["slack"]["workspaces"]["home"]["team_id"] = json!("T2")),
             ),
             (
-                "앱",
+                "app_id",
                 changed(|v| v["slack"]["workspaces"]["home"]["app_id"] = json!("A2")),
             ),
             (
-                "채널 ID",
+                "channel id",
                 changed(|v| v["slack"]["workspaces"]["home"]["channels"]["ops"] = json!("C9")),
             ),
             (
-                "채널 별칭",
+                "channel alias",
                 changed(|v| {
                     let channels = v["slack"]["workspaces"]["home"]["channels"]
                         .as_object_mut()
@@ -282,35 +269,35 @@ mod tests {
                 }),
             ),
             (
-                "DM",
+                "dm",
                 changed(|v| v["slack"]["workspaces"]["home"]["dm"] = json!(false)),
             ),
             (
-                "서명 비밀 이름",
+                "signing_secret",
                 changed(|v| v["slack"]["workspaces"]["home"]["signing_secret"] = json!("signing")),
             ),
             (
-                "봇 토큰 이름",
+                "bot_token",
                 changed(|v| v["slack"]["workspaces"]["home"]["bot_token"] = json!("other")),
             ),
             (
-                "발급자",
+                "issuer",
                 changed(|v| v["http"]["endpoints"]["inbox"]["issuer"] = json!("j")),
             ),
             (
-                "대상",
+                "audience",
                 changed(|v| v["http"]["endpoints"]["inbox"]["audience"] = json!("b")),
             ),
             (
-                "키 이름",
+                "key name",
                 changed(|v| v["http"]["endpoints"]["inbox"]["key"] = json!("other-key")),
             ),
             (
-                "토큰 수명",
+                "max_token_age_secs",
                 changed(|v| v["http"]["endpoints"]["inbox"]["max_token_age_secs"] = json!(60)),
             ),
             (
-                "입구 추가",
+                "add endpoint",
                 changed(|v| {
                     v["http"]["endpoints"]["extra"] =
                         json!({"issuer": "i", "audience": "a", "key": "k"});
@@ -326,20 +313,23 @@ mod tests {
         let original = print(base());
         for (name, print) in [
             (
-                "소켓",
+                "socket",
                 changed(|v| v["cli"]["socket"] = json!("/tmp/b.sock")),
             ),
             (
-                "수신 주소",
+                "listen",
                 changed(|v| v["http"]["listen"] = json!("127.0.0.1:9100")),
             ),
             (
-                "대기 시간",
+                "sync_wait_ms",
                 changed(|v| v["http"]["endpoints"]["inbox"]["sync_wait_ms"] = json!(900)),
             ),
-            ("한도", changed(|v| v["limits"]["body_bytes"] = json!(2000))),
             (
-                "관리 주소",
+                "body_bytes",
+                changed(|v| v["limits"]["body_bytes"] = json!(2000)),
+            ),
+            (
+                "admin_url",
                 changed(|v| v["admin_url"] = json!("http://127.0.0.1:9/ui")),
             ),
         ] {
@@ -349,7 +339,6 @@ mod tests {
 
     #[test]
     fn field_boundaries_cannot_be_shifted_to_collide() {
-        // 별칭·팀 경계를 옮겨도 같은 지문이 되지 않는다(길이가 앞에 붙는다)
         let ws = |alias: &str, team: &str, extra: Value| {
             let mut entry = json!({"team_id": team, "bot_token": "t", "app_token": "x"});
             entry
@@ -361,20 +350,17 @@ mod tests {
         let a = ws("ab", "C", json!({}));
         let b = ws("a", "BC", json!({}));
         assert_ne!(print(a), print(b));
-        // 값이 없는 것과 있는 것은 다르다
         assert_ne!(
             print(ws("w", "T", json!({}))),
             print(ws("w", "T", json!({"app_id": "A1"})))
         );
     }
 
-    /// 설정 검증이 거절하는 설정에는 지문이 없다. 수신 방식 표지가 상수라서, 막지 않으면 검증을 거치지 않은 `receive: "http"`가 소켓 설정과 같은 지문을 얻는다.
     #[test]
     fn a_config_that_validation_refuses_has_no_fingerprint() {
         let uid_of = |account: &CliAccount| Ok(account.uid.unwrap_or(502));
         let mut declared = base();
         declared["slack"]["workspaces"]["home"]["receive"] = json!("http");
-        // 검증을 거치지 않고 만든 설정(`HostConfig`는 `Deserialize`로 그대로 만들 수 있다)
         let unvalidated: HostConfig = serde_json::from_value(declared).unwrap();
         let error = fingerprint_with(&unvalidated, &uid_of).unwrap_err();
         assert!(
@@ -383,7 +369,6 @@ mod tests {
                 .starts_with("gateway.slack.workspaces.home.receive: "),
             "{error}"
         );
-        // 선언만 빼면 같은 설정에서 지문이 나온다
         let socket: HostConfig = serde_json::from_value(base()).unwrap();
         assert_eq!(fingerprint_with(&socket, &uid_of).unwrap(), print(base()));
     }
@@ -393,7 +378,7 @@ mod tests {
         let config =
             HostConfig::from_value(json!({"cli": {"accounts": {"owner": {"os_user": "x"}}}}))
                 .unwrap();
-        let result = fingerprint_with(&config, &|_| Err(HostError("해석할 수 없어요".into())));
+        let result = fingerprint_with(&config, &|_| Err(HostError("cannot resolve".into())));
         assert!(result.is_err());
     }
 }

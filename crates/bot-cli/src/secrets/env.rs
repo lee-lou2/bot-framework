@@ -1,4 +1,5 @@
-//! 개발용 보관소. personal의 calendar-reader는 BOT_SECRET__personal__calendar_reader에서 읽는다.
+//! Development `SecretStore` reading profile-scoped `BOT_SECRET__<profile>__<name>` environment variables.
+
 use super::{Namespace, checked_profile};
 use bot_core::{
     id::{ProfileId, SecretName},
@@ -8,7 +9,6 @@ use std::collections::BTreeMap;
 
 const PREFIX: &str = "BOT_SECRET__";
 
-/// 프로필·이름이 읽는 환경 변수 이름
 pub fn variable_name(profile: &str, name: &str) -> String {
     format!(
         "{PREFIX}{}__{}",
@@ -19,7 +19,6 @@ pub fn variable_name(profile: &str, name: &str) -> String {
 
 #[derive(Default)]
 pub struct EnvStore {
-    /// 키는 환경 변수 이름 전체, 값은 원본 바이트
     vars: BTreeMap<String, Vec<u8>>,
 }
 
@@ -32,7 +31,6 @@ impl std::fmt::Debug for EnvStore {
 }
 
 impl EnvStore {
-    /// 현재 프로세스의 환경에서 `BOT_SECRET__` 항목만 가져온다.
     pub fn from_process() -> Self {
         use std::os::unix::ffi::OsStrExt;
         Self {
@@ -46,7 +44,6 @@ impl EnvStore {
         }
     }
 
-    /// 시험·조립용: 이름·값 쌍을 직접 준다.
     pub fn from_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
         Self {
             vars: pairs
@@ -62,7 +59,7 @@ impl SecretStore for EnvStore {
     fn for_profile(&self, profile: ProfileId) -> Reply<'_, Box<dyn ProfileSecrets>> {
         let handle = checked_profile(&profile).map(|profile| {
             let own = format!("{PREFIX}{}__", profile.replace('-', "_"));
-            // 이 프로필의 이름 공간만 복사한다. 돌려준 핸들에는 다른 프로필 값이 없다.
+            // Copy only this profile's namespace so foreign secrets never enter the handle.
             let values: BTreeMap<String, Vec<u8>> = self
                 .vars
                 .iter()

@@ -17,7 +17,7 @@ from testing_repo import GitShim, PUBLIC, Repo, committed, everything  # noqa: E
 
 TERM = "quokka"
 GITLEAKS = shutil.which("gitleaks")
-needs_gitleaks = unittest.skipUnless(GITLEAKS, "gitleaks가 있어야 한다(관문도 필요로 한다)")
+needs_gitleaks = unittest.skipUnless(GITLEAKS, "requires gitleaks (also required by the gate)")
 
 
 def aws_key():
@@ -29,8 +29,8 @@ class Steps(unittest.TestCase):
     def test_a_skipped_check_is_visible_and_not_a_pass(self):
         done = committed(self).gate("--only", "private-terms")
         self.assertEqual(done.returncode, 0, done.stdout)
-        self.assertIn("건너뜀: BOT_PRIVATE_TERMS_FILE", done.stdout)
-        self.assertIn("통과 0 · 실패 0 · 건너뜀 1", done.stdout)
+        self.assertIn("SKIP: BOT_PRIVATE_TERMS_FILE", done.stdout)
+        self.assertIn("PASS 0 · FAIL 0 · SKIP 1", done.stdout)
 
     def test_strict_counts_a_skip_as_a_failure(self):
         self.assertEqual(committed(self).gate("--strict", "--only", "private-terms").returncode, 1)
@@ -48,15 +48,15 @@ class Steps(unittest.TestCase):
     def test_the_tree_must_match_the_commit_and_a_difference_is_a_visible_skip(self):
         repo = committed(self)
         done = repo.gate("--only", "clean")
-        self.assertEqual((done.returncode, "작업 트리와 인덱스가 커밋과 같다" in done.stdout), (0, True), done.stdout)
+        self.assertEqual((done.returncode, "working tree and index match HEAD" in done.stdout), (0, True), done.stdout)
         repo.write("later.txt", "uncommitted\n")
         done = repo.gate("--only", "clean")
         self.assertEqual(done.returncode, 0)
-        self.assertIn("커밋하지 않은 변경이 1개", done.stdout)
-        self.assertIn("건너뜀 1", done.stdout)
-        self.assertEqual(repo.gate("--strict", "--only", "clean").returncode, 1, "공개 직전에는 통과할 수 없다")
+        self.assertIn("found 1 uncommitted change(s)", done.stdout)
+        self.assertIn("SKIP 1", done.stdout)
+        self.assertEqual(repo.gate("--strict", "--only", "clean").returncode, 1, "cannot pass under --strict")
         repo.git("add", "-A")
-        self.assertEqual(repo.gate("--strict", "--only", "clean").returncode, 1, "staged도 커밋이 아니다")
+        self.assertEqual(repo.gate("--strict", "--only", "clean").returncode, 1, "staged changes are still uncommitted")
 
 
 class Identity(unittest.TestCase):
@@ -68,7 +68,7 @@ class Identity(unittest.TestCase):
         repo.commit("private author", env={**PUBLIC, "GIT_AUTHOR_EMAIL": "me@example.test"})
         done = repo.gate("--only", "identity")
         self.assertEqual(done.returncode, 1)
-        self.assertRegex(done.stdout, r"커밋 [0-9a-f]+")
+        self.assertRegex(done.stdout, r"commit [0-9a-f]+")
         self.assertNotIn("me@example.test", everything(done))
 
     def test_identity_checks_annotated_tags_without_printing_their_names(self):
@@ -76,8 +76,8 @@ class Identity(unittest.TestCase):
         repo.git("tag", "-a", f"{TERM}-v1", "-m", "release", env={"GIT_COMMITTER_EMAIL": "me@example.test"})
         done = repo.gate("--only", "identity")
         self.assertEqual(done.returncode, 1)
-        self.assertRegex(done.stdout, r"태그 [0-9a-f]+")
-        self.assertNotIn(TERM, everything(done).lower(), "태그 이름은 출력하지 않는다")
+        self.assertRegex(done.stdout, r"tag [0-9a-f]+")
+        self.assertNotIn(TERM, everything(done).lower(), "tag names must not be printed")
 
     def test_identity_checks_the_committer_too(self):
         repo = committed(self)
@@ -86,13 +86,13 @@ class Identity(unittest.TestCase):
         self.assertEqual(repo.gate("--only", "identity").returncode, 1)
 
     def test_a_git_failure_is_a_failure_not_a_clean_result(self):
-        for sub, message in (("log", "커밋을 읽지 못했다"), ("for-each-ref", "고정한 참조가 하나도 없다"), ("fetch", "공개할 참조를 복제하지 못했다")):
+        for sub, message in (("log", "failed to read commits"), ("for-each-ref", "no refs were pinned"), ("fetch", "failed to fetch publishable refs")):
             repo = committed(self)
             done = repo.gate("--only", "identity", env=GitShim(self, sub).env())
             self.assertEqual(done.returncode, 1, f"{sub}: {done.stdout}")
             self.assertIn(message, done.stdout, sub)
             if sub == "fetch":
-                self.assertNotIn("고정한 참조가 하나도 없다", done.stdout, "복제 실패에서 바로 끝나야 한다(빈 복제본 검사로 넘어가지 않는다)")
+                self.assertNotIn("no refs were pinned", done.stdout, "must fail immediately on fetch error without falling through")
 
     def test_a_shallow_clone_cannot_pass_the_history_steps(self):
         source = committed(self, "one")
@@ -105,30 +105,30 @@ class Identity(unittest.TestCase):
             cwd=shallow, env=source.env(), capture_output=True, text=True,
         )
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("얕은 복제", done.stdout)
+        self.assertIn("shallow clone", done.stdout)
 
 
 class Strict(unittest.TestCase):
     def test_strict_needs_the_database_and_never_skips_the_postgres_tests(self):
         repo = committed(self)
-        # 가드가 빠진 구현이 실제 서버에 닿지 않게 연결 대상을 막아 둔다.
+        # Point PGHOST/PGPORT at a closed port so a broken guard cannot reach a real server.
         done = repo.gate("--strict", "--only", "test", env={"PGHOST": "127.0.0.1", "PGPORT": "1"})
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("BOT_TEST_DATABASE_URL이 없다", done.stdout)
-        self.assertNotIn("+ cargo test", done.stdout, "DB가 없으면 시험을 돌리기 전에 실패한다")
+        self.assertIn("BOT_TEST_DATABASE_URL is not set", done.stdout)
+        self.assertNotIn("+ cargo test", done.stdout, "must fail before running cargo test when DB is missing")
 
     def test_strict_fails_when_the_database_cannot_be_reached_and_never_prints_the_address(self):
         repo = committed(self)
         url = "postgres://nobody-quokka@127.0.0.1:1/none"
         done = repo.gate("--strict", "--only", "test", env={"BOT_TEST_DATABASE_URL": url})
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertRegex(done.stdout, r"연결하지 못했다|필요한 도구가 없다: psql")
+        self.assertRegex(done.stdout, r"failed to connect|missing required tool: psql")
         self.assertNotIn("nobody-quokka", everything(done))
         self.assertNotIn("127.0.0.1:1", everything(done))
 
 
 def run_with_recorder(case, *args, then="", only="test", repo=None):
-    """`cargo test` 자체를 기록 대역으로 바꿔 DB도 빌드도 없이 관문을 돌린다. `then`은 시험이 도는 «동안» 저장소에 일어나는 일(예: 커밋)을 흉내 내는 셸 한 줄이다."""
+    """Replace `cargo test` with a recorder shim (no DB or build). `then` simulates repo mutations during the run."""
     repo = repo or committed(case)
     shim = Path(tempfile.mkdtemp(prefix="gate-shim-"))
     case.addCleanup(lambda: shutil.rmtree(shim, ignore_errors=True))
@@ -155,14 +155,14 @@ class StrictRunsCargoTest(unittest.TestCase):
         done = self.run_with_recorder("--strict")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("cargo-called require=1 url=set", done.stdout)
-        self.assertIn("+ cargo test --workspace --locked --no-fail-fast", done.stdout, "첫 실패에서 멈추지 않는다")
+        self.assertIn("+ cargo test --workspace --locked --no-fail-fast", done.stdout, "must not stop at first failure")
         for secret in ("nobody-quokka", "127.0.0.1:1"):
             self.assertNotIn(secret, everything(done))
 
     def test_a_failing_test_run_still_fails_the_step_even_though_it_does_not_stop_at_the_first_failure(self):
         done = run_with_recorder(self, "--strict", then="exit 101")
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertRegex(done.stdout, r"실패\s+test\b")
+        self.assertRegex(done.stdout, r"FAIL\s+test\b")
 
     def test_without_strict_the_database_stays_optional_for_the_tests(self):
         done = self.run_with_recorder()
@@ -192,7 +192,7 @@ class StrictRunsCargoTest(unittest.TestCase):
 
 
 class PinnedCommit(unittest.TestCase):
-    """공개할 커밋을 시작할 때 고정하고, 같은 커밋에서 시험·이력 확인을 하며, 검사한 해시를 출력한다."""
+    """Pin HEAD/refs at start, run checks against the pinned commit, and print the checked commit hash."""
 
     MOVE = "git commit --allow-empty -q -m moved"
 
@@ -204,74 +204,74 @@ class PinnedCommit(unittest.TestCase):
         done = repo.gate("--only", "identity")
         head = self.head(repo)
         self.assertEqual(done.returncode, 0, done.stdout)
-        self.assertIn(f"검사할 커밋: {head}", done.stdout)
-        self.assertIn(f"검사한 커밋: {head}", done.stdout)
-        self.assertNotIn(" pin ", done.stdout, "아무것도 안 바뀌면 pin 줄은 없다")
+        self.assertIn(f"Commit to check: {head}", done.stdout)
+        self.assertIn(f"Checked commit: {head}", done.stdout)
+        self.assertNotIn(" pin ", done.stdout, "no pin row when nothing moved")
 
     def test_a_commit_made_during_a_strict_run_fails_it_and_names_the_commit_that_was_pinned(self):
         repo = committed(self)
         before = self.head(repo)
         done = run_with_recorder(self, "--strict", then=self.MOVE, repo=repo)
-        self.assertNotEqual(self.head(repo), before, "시험 도중 커밋이 만들어졌다")
+        self.assertNotEqual(self.head(repo), before, "commit was created during the run")
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertRegex(done.stdout, r"실패 pin .*HEAD")
-        self.assertIn(f"검사한 커밋: {before}", done.stdout, "고정한 커밋을 출력한다(새 커밋이 아니다)")
-        self.assertIn("통과 1 · 실패 1 · 건너뜀 0", done.stdout)
+        self.assertRegex(done.stdout, r"FAIL pin .*HEAD")
+        self.assertIn(f"Checked commit: {before}", done.stdout, "prints the pinned commit, not the moved one")
+        self.assertIn("PASS 1 · FAIL 1 · SKIP 0", done.stdout)
 
     def test_without_strict_the_same_move_is_a_visible_skip_not_a_pass(self):
         repo = committed(self)
         done = run_with_recorder(self, then=self.MOVE, repo=repo)
         self.assertEqual(done.returncode, 0, done.stdout)
-        self.assertRegex(done.stdout, r"건너뜀 pin .*HEAD")
-        self.assertIn("통과 1 · 실패 0 · 건너뜀 1", done.stdout)
+        self.assertRegex(done.stdout, r"SKIP pin .*HEAD")
+        self.assertIn("PASS 1 · FAIL 0 · SKIP 1", done.stdout)
 
     def test_a_tag_or_branch_created_during_a_strict_run_also_fails_it(self):
         for move in ("git tag late-tag", "git branch late-branch"):
             repo = committed(self)
             done = run_with_recorder(self, "--strict", then=move, repo=repo)
             self.assertEqual(done.returncode, 1, f"{move}: {done.stdout}")
-            self.assertRegex(done.stdout, r"실패 pin ", move)
+            self.assertRegex(done.stdout, r"FAIL pin ", move)
 
     def test_a_change_that_is_undone_before_the_end_is_not_detected_which_the_docs_say(self):
-        # 알려 둔 한계: 시작·복제 시점·끝의 값만 견주므로 도중에 커밋했다 되돌린 변화는 보이지 않는다.
+        # Documented limitation: only start, mirror, and end checkpoints are compared.
         repo = committed(self)
         before = self.head(repo)
         done = run_with_recorder(self, "--strict", then=self.MOVE + " && git reset -q --hard HEAD~1", repo=repo)
-        self.assertEqual(self.head(repo), before, "도중의 커밋이 끝나기 전에 원복됐다")
+        self.assertEqual(self.head(repo), before, "commit was reverted before end")
         self.assertEqual(done.returncode, 0, done.stdout)
         self.assertNotIn(" pin ", done.stdout)
         docs = (Path(__file__).resolve().parent.parent / "docs" / "release.md").read_text(encoding="utf-8")
-        self.assertIn("원복되는 변화", docs, "문서가 이 한계를 말해야 한다")
+        self.assertIn("`pin`", docs, "docs/release.md must document the pin-check limitation")
 
     def test_a_commit_on_a_detached_head_fails_a_strict_run_although_no_reference_moved(self):
-        # CI의 병합 커밋 체크아웃처럼 HEAD만 움직이고 브랜치·태그는 그대로인 경우: 참조 비교만으로는 놓친다.
+        # Detached HEAD (e.g. CI merge checkout): HEAD moves while branches and tags stay unchanged.
         repo = committed(self)
         repo.git("checkout", "-q", "--detach")
         before = repo.git("for-each-ref", "refs/heads", "refs/tags")
         done = run_with_recorder(self, "--strict", then=self.MOVE, repo=repo)
-        self.assertEqual(repo.git("for-each-ref", "refs/heads", "refs/tags"), before, "참조는 그대로다")
+        self.assertEqual(repo.git("for-each-ref", "refs/heads", "refs/tags"), before, "refs are unchanged")
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertRegex(done.stdout, r"실패 pin ")
+        self.assertRegex(done.stdout, r"FAIL pin ")
 
     def test_strict_history_steps_refuse_a_head_that_moved_before_they_ran(self):
         repo = committed(self)
         done = run_with_recorder(self, "--strict", then=self.MOVE, only="test identity", repo=repo)
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("시작할 때 고정한 커밋과 지금의 HEAD가 다르다", done.stdout)
-        self.assertRegex(done.stdout, r"통과 test ")
-        self.assertRegex(done.stdout, r"실패 identity ")
-        self.assertNotIn("모든 커밋·태그의 작성자가", done.stdout, "다른 커밋의 이력을 검사해 통과시키지 않는다")
+        self.assertIn("current HEAD differs from pinned start commit", done.stdout)
+        self.assertRegex(done.stdout, r"PASS test ")
+        self.assertRegex(done.stdout, r"FAIL identity ")
+        self.assertNotIn("all commits and tags use", done.stdout, "must not pass history from a different commit")
 
     def test_without_strict_the_history_steps_follow_the_current_head(self):
         repo = committed(self)
         done = run_with_recorder(self, then=self.MOVE, only="test identity", repo=repo)
-        self.assertNotIn("시작할 때 고정한 커밋", done.stdout)
-        self.assertRegex(done.stdout, r"통과 test ")
+        self.assertNotIn("pinned start commit", done.stdout)
+        self.assertRegex(done.stdout, r"PASS test ")
 
     def test_a_repository_without_commits_prints_that_nothing_was_pinned(self):
         done = Repo(self).gate("--only", "clean")
-        self.assertIn("검사할 커밋: (커밋 없음)", done.stdout)
-        self.assertIn("검사한 커밋: (커밋 없음)", done.stdout)
+        self.assertIn("Commit to check: (no commit)", done.stdout)
+        self.assertIn("Checked commit: (no commit)", done.stdout)
 
 
 class PrivateTerms(unittest.TestCase):
@@ -293,11 +293,11 @@ class PrivateTerms(unittest.TestCase):
         listing = repo.terms(TERM)
         done = repo.gate("--only", "private-terms", env={"BOT_PRIVATE_TERMS_FILE": str(listing)})
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertIn("금칙어 발견", done.stdout)
+        self.assertIn("private term match", done.stdout)
         text = everything(done)
         self.assertNotIn(TERM, text.lower())
         for needle in (str(repo.repo), str(repo.outside), str(listing), str(Path.home())):
-            self.assertNotIn(needle, text, "경로가 출력에 나오면 안 된다")
+            self.assertNotIn(needle, text, "paths must never appear in output")
         self.assertNotIn(repo.repo.name, text)
         self.assertNotIn(listing.parent.name, text)
 
@@ -306,7 +306,7 @@ class PrivateTerms(unittest.TestCase):
         listing = repo.terms("zebrafish")
         done = repo.gate("--only", "private-terms", env={"BOT_PRIVATE_TERMS_FILE": str(listing)})
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn("금칙어 없음", done.stdout)
+        self.assertIn("no private terms found", done.stdout)
         done = repo.gate("--only", "private-terms", env={"BOT_PRIVATE_TERMS_FILE": str(repo.outside / "missing.txt")})
         self.assertEqual(done.returncode, 1)
         inside = repo.write("terms.txt", "zebrafish\n")
@@ -318,37 +318,37 @@ class PrivateTerms(unittest.TestCase):
         repo = committed(self)
         repo.git("tag", "-a", "v1", "-m", f"tagged for the {TERM} team", env=PUBLIC)
         env = {"BOT_PRIVATE_TERMS_FILE": str(repo.terms(TERM))}
-        self.assertEqual(repo.gate("--only", "private-terms", env=env).returncode, 1, "기본은 브랜치와 태그를 모두 본다")
+        self.assertEqual(repo.gate("--only", "private-terms", env=env).returncode, 1, "default scans both branches and tags")
         heads = repo.gate("--only", "private-terms", env={**env, "RELEASE_CHECK_REFS": "refs/heads/*"})
         self.assertEqual(heads.returncode, 0, heads.stdout)
-        self.assertIn("참조 2개", heads.stdout, "브랜치 하나와 고정한 HEAD. 태그는 가져오지 않았다")
+        self.assertIn("refs: 2", heads.stdout, "one branch plus pinned HEAD; tag excluded")
 
     def test_the_checked_out_commit_is_always_pinned_even_when_no_branch_or_tag_exists(self):
         repo = committed(self)
         repo.git("checkout", "-q", "--detach")
         repo.git("branch", "-D", "main", ok=(0, 1))
         repo.git("branch", "-D", "master", ok=(0, 1))
-        self.assertEqual(repo.git("for-each-ref"), "", "분리된 HEAD: 브랜치도 태그도 없다")
+        self.assertEqual(repo.git("for-each-ref"), "", "detached HEAD with no branches or tags")
         env = {"BOT_PRIVATE_TERMS_FILE": str(repo.terms(TERM))}
         repo.write("b.txt", f"{TERM}\n")
         repo.commit(f"later {TERM}", env=PUBLIC)
         done = repo.gate("--only", "private-terms", env=env)
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertIn("참조 1개", done.stdout)
-        self.assertRegex(done.stdout, r"이력 blob [0-9a-f]{8} b\.txt:1")
+        self.assertIn("refs: 1", done.stdout)
+        self.assertRegex(done.stdout, r"history blob [0-9a-f]{8} b\.txt:1")
 
     def test_a_pin_without_any_reference_fails_instead_of_scanning_nothing(self):
-        repo = Repo(self)  # 커밋이 없어 HEAD도 없다
+        repo = Repo(self)  # No commits, so HEAD does not exist.
         done = repo.gate("--only", "identity")
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("고정한 참조가 하나도 없다", done.stdout)
+        self.assertIn("no refs were pinned", done.stdout)
         repo = committed(self)
         repo.git("checkout", "-q", "--detach")
         repo.git("branch", "-D", "main", ok=(0, 1))
         repo.git("branch", "-D", "master", ok=(0, 1))
         done = repo.gate("--only", "identity", env={"RELEASE_CHECK_REFS": "refs/heads/nothing-matches*"})
-        self.assertEqual(done.returncode, 0, "HEAD가 고정되므로 이력은 비지 않는다: " + done.stdout)
-        self.assertIn("참조 1개", done.stdout)
+        self.assertEqual(done.returncode, 0, "HEAD is pinned so history is non-empty: " + done.stdout)
+        self.assertIn("refs: 1", done.stdout)
 
     def test_a_git_failure_in_the_history_scan_is_a_failure(self):
         repo = committed(self)
@@ -382,11 +382,11 @@ class Gitleaks(unittest.TestCase):
             [GITLEAKS, "git", ".", "--no-banner", "--redact", "--log-opts=--all"],
             cwd=repo.repo, env=repo.env(), capture_output=True, text=True,
         )
-        self.assertEqual(plain.returncode, 0, "대조: `--all`만으로는 병합 해결에서 처음 생긴 값이 보이지 않는다")
+        self.assertEqual(plain.returncode, 0, "control: `--all` alone misses values introduced in a merge resolution")
         done = repo.gate("--only", "secrets-history")
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertRegex(done.stdout, r"규칙 aws-access-token · a\.txt:1 · 커밋 [0-9a-f]{8}")
-        self.assertNotIn(aws_key(), everything(done), "값은 가려서 출력한다")
+        self.assertRegex(done.stdout, r"rule aws-access-token · a\.txt:1 · commit [0-9a-f]{8}")
+        self.assertNotIn(aws_key(), everything(done), "values must be redacted")
 
     def test_the_report_names_rule_file_line_and_commit_but_never_author_email_message_or_value(self):
         repo = Repo(self)
@@ -399,8 +399,8 @@ class Gitleaks(unittest.TestCase):
         done = repo.gate("--only", "secrets-tree secrets-history")
         text = re.sub(r"\x1b\[[0-9;]*m", "", everything(done))
         self.assertEqual(done.returncode, 1, text)
-        self.assertRegex(text, r"규칙 [a-z0-9-]+ · src/app\.txt:1")
-        self.assertRegex(text, r"규칙 [a-z0-9-]+ · src/app\.txt:1 · 커밋 [0-9a-f]{8}")
+        self.assertRegex(text, r"rule [a-z0-9-]+ · src/app\.txt:1")
+        self.assertRegex(text, r"rule [a-z0-9-]+ · src/app\.txt:1 · commit [0-9a-f]{8}")
         for leaked in (TERM, aws_key(), str(repo.repo), "Person", "example.test"):
             self.assertNotIn(leaked.lower(), text.lower())
         self.assertNotIn("Author:", text)
@@ -415,8 +415,8 @@ class Gitleaks(unittest.TestCase):
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         done = repo.gate("--only", "secrets-tree", env={"PATH": f"{shim}:{os.environ['PATH']}"})
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("gitleaks 실행 실패", done.stdout)
-        self.assertNotIn("비밀 값 없음", done.stdout)
+        self.assertIn("gitleaks execution failed", done.stdout)
+        self.assertNotIn("no secrets found", done.stdout)
 
     def test_the_working_tree_scan_covers_staged_content_the_tree_no_longer_shows(self):
         repo = committed(self)
@@ -435,7 +435,7 @@ class Gitleaks(unittest.TestCase):
         repo = committed(self)
         done = repo.gate("--only", "secrets-tree", env=GitShim(self, "ls-files").env())
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("git ls-files 실패", done.stdout)
+        self.assertIn("git ls-files failed", done.stdout)
         done = repo.gate("--only", "secrets-history", env=GitShim(self, "fetch").env())
         self.assertEqual(done.returncode, 1, done.stdout)
 
@@ -443,12 +443,12 @@ class Gitleaks(unittest.TestCase):
         repo = Repo(self)
         done = repo.gate("--only", "secrets-tree")
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("하나도 없다", done.stdout)
+        self.assertIn("no publishable files found", done.stdout)
 
 
 class Environment(unittest.TestCase):
     def test_the_self_tests_ignore_the_operators_gate_settings(self):
-        """리허설에서 `RELEASE_CHECK_REFS`를 준 채 돌리면 임시 저장소의 이력 검사가 엉뚱한 참조를 보던 일: 시험은 명시하지 않은 설정을 받지 않는다."""
+        """Caller gate env vars (e.g. RELEASE_CHECK_REFS) must not leak into throwaway test repos."""
         repo = committed(self)
         env = {"RELEASE_CHECK_REFS": "refs/heads/nonexistent", "BOT_CLAUDE_CANARY": "required"}
         saved = {k: os.environ.get(k) for k in env}

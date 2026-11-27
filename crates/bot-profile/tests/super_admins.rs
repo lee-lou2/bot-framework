@@ -1,4 +1,4 @@
-//! 프로필 `super_admins` 파싱·검증·호스트 상한·정책 판본·번들 복원 시험.
+//! Integration tests for profile `super_admins` parsing, validation, host ceiling, policy revision, and bundle restore.
 mod support;
 
 use bot_core::id::{PrincipalId, ProfileId};
@@ -23,7 +23,6 @@ fn valid_super_admins_parse_and_round_trip_through_bundle() {
     assert!(!snap.is_super_admin(&PrincipalId("service:morning".into())));
     assert!(!snap.is_super_admin(&PrincipalId("local:other".into())));
 
-    // 번들 복원 뒤에도 super_admins 집합이 그대로 보존된다
     let bundle = set.bundle(&id).unwrap();
     let restored = from_bundle(bundle, &id, &snap.revision, &Limits::default()).unwrap();
     assert_eq!(restored.super_admins, snap.super_admins);
@@ -31,7 +30,6 @@ fn valid_super_admins_parse_and_round_trip_through_bundle() {
 
 #[test]
 fn rejects_service_non_member_and_invalid_super_admins() {
-    // 서비스 주체는 슈퍼 관리자가 될 수 없다
     let service = edit(
         base(),
         "profile.yaml",
@@ -44,7 +42,6 @@ fn rejects_service_non_member_and_invalid_super_admins() {
         codes(&service)
     );
 
-    // 멤버에 없는 주체는 슈퍼 관리자가 될 수 없다
     let non_member = edit(
         base(),
         "profile.yaml",
@@ -57,7 +54,6 @@ fn rejects_service_non_member_and_invalid_super_admins() {
         codes(&non_member)
     );
 
-    // 잘못된 주체 형식
     let bad_id = edit(
         base(),
         "profile.yaml",
@@ -82,11 +78,10 @@ fn host_super_admins_ceiling_restricts_profile_super_admins() {
     let root = Temp::new("super-admin-host");
     write_profile(root.path(), "personal", &files);
 
-    // 호스트 super_admins가 비어 있으면 프로필 선언만 따른다
+    // When host `super_admins` is empty, profile declarations are unrestricted.
     let open_host = host();
     assert!(load(root.path(), &open_host, &Limits::default()).is_ok());
 
-    // 호스트가 다른 주체만 허용하면 거절한다
     let mut blocked = host();
     blocked.super_admins.insert(
         "personal".into(),
@@ -98,7 +93,6 @@ fn host_super_admins_ceiling_restricts_profile_super_admins() {
         "{report}"
     );
 
-    // 호스트가 해당 주체를 허용하면 통과한다
     let mut allowed = host();
     allowed.super_admins.insert(
         "personal".into(),
@@ -125,10 +119,10 @@ fn policy_revision_is_unchanged_without_super_admins_and_changes_when_set() {
 
     assert_eq!(
         baseline.policy_revision, empty_list.policy_revision,
-        "빈 super_admins는 기존 정책 판본 해시를 유지해야 해요"
+        "empty super_admins must keep the existing policy revision hash"
     );
     assert_ne!(
         baseline.policy_revision, with_admin.policy_revision,
-        "super_admins가 있으면 정책 판본 해시가 달라져야 해요"
+        "non-empty super_admins must change the policy revision hash"
     );
 }

@@ -35,7 +35,12 @@ async fn dead_letter_resume_keeps_the_logical_run() {
     assert_eq!(state_of(&db, &run).await, "dead");
 
     db.store
-        .resume(profile(), run.clone(), operator(), "원인 확인함".into())
+        .resume(
+            profile(),
+            run.clone(),
+            operator(),
+            "root cause verified".into(),
+        )
         .await
         .unwrap();
     assert_eq!(state_of(&db, &run).await, "ready");
@@ -44,7 +49,7 @@ async fn dead_letter_resume_keeps_the_logical_run() {
     assert_eq!(
         (&again.attempt.run, again.attempt.generation),
         (&run, Generation(2)),
-        "같은 run, 새 세대"
+        "same run, new generation"
     );
     assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 1);
     let audited = db
@@ -52,9 +57,8 @@ async fn dead_letter_resume_keeps_the_logical_run() {
             "select actor || ':' || verdict from bot_audit where action = 'run.resume'",
         )
         .await;
-    assert_eq!(audited, "local:owner:원인 확인함");
+    assert_eq!(audited, "local:owner:root cause verified");
 
-    // 살아 있는 run이나 없는 run, 다른 프로필의 run은 재개할 수 없다
     let live = db
         .store
         .resume(profile(), run.clone(), operator(), "x".into())
@@ -91,23 +95,23 @@ async fn cancel_ends_queued_runs_and_flags_running_ones() {
         .unwrap();
 
     db.store
-        .cancel(profile(), queued.clone(), operator(), "그만".into())
+        .cancel(profile(), queued.clone(), operator(), "stop".into())
         .await
         .unwrap();
     assert_eq!(state_of(&db, &queued).await, "cancelled");
     assert!(
         db.store.claim().await.unwrap().is_none(),
-        "취소된 run은 집히지 않는다"
+        "cancelled run must not be claimed"
     );
 
     db.store
-        .cancel(profile(), running.clone(), operator(), "그만".into())
+        .cancel(profile(), running.clone(), operator(), "stop".into())
         .await
         .unwrap();
     assert_eq!(
         state_of(&db, &running).await,
         "leased",
-        "실행 중이면 표시만 한다"
+        "running run is only flagged for cancellation"
     );
     assert!(
         db.store
@@ -116,7 +120,7 @@ async fn cancel_ends_queued_runs_and_flags_running_ones() {
             .unwrap()
             .cancel_requested
     );
-    // 취소를 확인한 소유자는 재시도 없이 취소로 끝낸다
+    // Lease owner observing cancel finishes as cancelled without retry.
     let outcome = db
         .store
         .fail(got.attempt, Failure::Permanent("cancelled"))

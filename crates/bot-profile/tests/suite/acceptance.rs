@@ -1,4 +1,4 @@
-//! roadmap 1단계(프로필) 수락 시험: 예시 검증, 중첩 에이전트, 모호한 바인딩, 반영 전 거절, 같은 바이너리에서 확장.
+//! Profile acceptance tests: example validation, nested agents, ambiguous bindings, atomic reloads, and concurrency.
 
 use crate::support::{DELETE, Temp, base, codes, edit, host, ok, write_profile};
 use bot_core::{
@@ -10,7 +10,7 @@ use bot_profile::{HostCatalog, Limits, Registry, load};
 use std::{
     fs,
     os::unix::net::UnixListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -29,6 +29,41 @@ fn personal() -> ProfileId {
     ProfileId("personal".into())
 }
 
+fn read_example_doc(rel: &str) -> (Option<String>, String) {
+    let text = fs::read_to_string(examples_root().join(rel)).unwrap();
+    let mut desc = None;
+    let body = if let Some(rest) = text.strip_prefix("---\n")
+        && let Some((fm, tail)) = rest.split_once("\n---\n")
+    {
+        for line in fm.lines() {
+            if let Some(val) = line.strip_prefix("description:") {
+                desc = Some(val.trim().to_owned());
+            }
+        }
+        tail
+    } else {
+        text.as_str()
+    };
+    let first_line = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    (desc, first_line)
+}
+
+fn summary_counts(line: &str, rev_prefix: &str) -> Vec<String> {
+    let tail = line
+        .split_once(rev_prefix)
+        .unwrap_or_else(|| panic!("missing revision {rev_prefix} in: {line}"))
+        .1;
+    tail.split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 const SECOND: &str = r#"version: 1
 id: second
 model: assistant
@@ -44,7 +79,7 @@ fn second_profile() -> crate::support::Files {
         ("profile.yaml".into(), SECOND.into()),
         (
             "agents/main/AGENT.md".into(),
-            "두 번째 프로필의 비서.\n".into(),
+            "Assistant for the second profile.\n".into(),
         ),
     ]
 }
@@ -52,7 +87,7 @@ fn second_profile() -> crate::support::Files {
 #[test]
 fn validates_personal_example() {
     let set = load(&examples_root(), &HostCatalog::demo(), &Limits::default())
-        .unwrap_or_else(|r| panic!("예시가 검증을 통과하지 못했어요:\n{r}"));
+        .unwrap_or_else(|r| panic!("example profile failed validation:\n{r}"));
     let snap = set.profile(&personal()).unwrap();
     assert_eq!(snap.revision.0.len(), 64);
     assert_eq!(snap.policy_revision.0.len(), 64);
@@ -99,17 +134,19 @@ fn validates_personal_example() {
     );
     assert!(set.warnings().is_empty(), "{:?}", set.warnings());
     let research = &snap.agents[&agent("main/research")];
-    assert_eq!(research.description, "일정 조회를 맡는 하위 비서");
+    let (_, rules) = read_example_doc("personal/rules.md");
+    let (_, main_text) = read_example_doc("personal/agents/main/AGENT.md");
+    let (research_desc, own) = read_example_doc("personal/agents/main/agents/research/AGENT.md");
+    assert_eq!(
+        Some(research.description.as_str()),
+        research_desc.as_deref(),
+        "research description comes from front matter"
+    );
     assert_eq!(
         main.description, "main",
-        "front matter가 없으면 경로 마지막 이름"
+        "without front matter, description defaults to the last path segment"
     );
     assert!(main.builtin.is_empty() && research.builtin.is_empty());
-    let (rules, main_text, own) = (
-        "- 답은 한국어로",
-        "오늘 일정을 조회하고",
-        "부모가 맡긴 일정 조회를",
-    );
     let at = |needle: &str| {
         research
             .instructions
@@ -117,14 +154,14 @@ fn validates_personal_example() {
             .unwrap_or_else(|| panic!("{needle}"))
     };
     assert!(
-        at(rules) < at(main_text) && at(main_text) < at(own),
-        "rules → 부모 → 자기 순서"
+        at(&rules) < at(&main_text) && at(&main_text) < at(&own),
+        "assembly order must be rules -> parent -> self"
     );
     assert_eq!(main.env["AGENDA_VIEW"], "today");
     assert_eq!(main.memory_seeds.len(), 1);
     assert_eq!(main.memory_seeds[0].visibility, Visibility::Private);
     assert_eq!(main.memory_seeds[0].owner.0, "local:owner");
-    assert!(research.memory_seeds.is_empty(), "시드는 상속하지 않는다");
+    assert!(research.memory_seeds.is_empty(), "seeds are not inherited");
     assert_eq!(
         research
             .scopes
@@ -138,14 +175,16 @@ fn validates_personal_example() {
         set.bundle(&personal())
             .is_some_and(|b| b.starts_with(b"BOTPROFILE1\n"))
     );
-    // 예시 폴더에는 개인 비서(personal)와 팀 템플릿(team)이 함께 있다
+    // `examples/profiles` contains both `personal` and `team`.
     let shown = set.render();
-    assert!(
-        shown.starts_with("검증 통과: 프로필 2개\npersonal 판본 "),
-        "{shown}"
-    );
-    assert!(
-        shown.contains("에이전트 2 도구 2 트리거 1 바인딩 1"),
+    let mut lines = shown.lines();
+    let header = lines.next().expect("render header");
+    assert!(header.contains('2'), "{shown}");
+    let personal_line = lines.next().expect("personal summary line");
+    assert!(personal_line.starts_with("personal "), "{shown}");
+    assert_eq!(
+        summary_counts(personal_line, &snap.revision.0[..12]),
+        ["2", "2", "1", "1"],
         "{shown}"
     );
 }
@@ -156,13 +195,13 @@ fn discovers_nested_agents() {
     for (path, text) in [
         (
             "agents/main/agents/research/agents/deep/AGENT.md",
-            "깊이 파고든다.\n",
+            "Dig deeper.\n",
         ),
         (
             "agents/main/agents/research/agents/deep/agents/leaf/AGENT.md",
-            "잎.\n",
+            "Leaf.\n",
         ),
-        ("agents/main/agents/notes/AGENT.md", "메모한다.\n"),
+        ("agents/main/agents/notes/AGENT.md", "Take notes.\n"),
     ] {
         files = edit(files, path, "", text);
     }
@@ -191,7 +230,7 @@ fn discovers_nested_agents() {
     assert_eq!(
         leaf.instructions.split("\n\n").count(),
         5,
-        "rules + 네 단계 AGENT.md"
+        "rules plus four AGENT.md layers"
     );
     assert!(snap.agents[&snap.root].parent.is_none());
 }
@@ -213,7 +252,7 @@ fn rejects_ambiguous_bindings() {
     );
     assert_eq!(codes(&same_id), ["duplicate-binding-id"]);
 
-    // 다른 프로필이 같은 Slack 채널을 쓰면 활성 프로필 전체에서 모호하다
+    // Sharing a Slack channel across two active profiles is ambiguous.
     let root = Temp::new("ambiguous");
     write_profile(root.path(), "personal", &base());
     let clash = edit(
@@ -245,7 +284,6 @@ fn rejects_bad_link_duplicate_binding_and_missing_server_before_swap() {
         fs::read_to_string(&tools_yaml).unwrap(),
     );
 
-    // 잘못된 링크
     let link = root.path().join("personal/knowledge/hosts.md");
     std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();
     assert!(
@@ -256,11 +294,10 @@ fn rejects_bad_link_duplicate_binding_and_missing_server_before_swap() {
     );
     assert!(
         Arc::ptr_eq(&registry.set(), &first),
-        "실패한 교체는 이전 집합을 그대로 둔다"
+        "failed reload must leave previous set active"
     );
     fs::remove_file(&link).unwrap();
 
-    // 중복 바인딩
     let dup = profile_text.replace(
         "  - {id: inbox",
         "  - {id: desk2, adapter: cli, account: owner, agent: main}\n  - {id: inbox",
@@ -275,7 +312,6 @@ fn rejects_bad_link_duplicate_binding_and_missing_server_before_swap() {
     assert!(Arc::ptr_eq(&registry.set(), &first));
     fs::write(&profile_yaml, &profile_text).unwrap();
 
-    // 누락된 서버
     fs::write(
         &tools_yaml,
         tools_text.replace("demo-agenda", "gone-server"),
@@ -290,7 +326,7 @@ fn rejects_bad_link_duplicate_binding_and_missing_server_before_swap() {
     assert!(Arc::ptr_eq(&registry.set(), &first));
     fs::write(&tools_yaml, &tools_text).unwrap();
 
-    // 고치면 같은 바이트이므로 같은 집합(세대 그대로)
+    // Identical bytes produce the same set without bumping generation.
     let again = registry.reload(root.path(), &host, &limits).unwrap();
     assert!(Arc::ptr_eq(&again, &first) && again.generation() == 1);
 }
@@ -309,7 +345,7 @@ fn adds_second_profile_and_grandchild_without_code_change() {
         .path()
         .join("personal/agents/main/agents/research/agents/deep");
     fs::create_dir_all(&grandchild).unwrap();
-    fs::write(grandchild.join("AGENT.md"), "손자 역할.\n").unwrap();
+    fs::write(grandchild.join("AGENT.md"), "Grandchild role.\n").unwrap();
     let two = registry.reload(root.path(), &host, &limits).unwrap();
     assert_eq!((two.generation(), two.active().len()), (2, 2));
     assert_ne!(one.revision(), two.revision());
@@ -337,8 +373,8 @@ fn rejects_unsafe_tree_entries_before_anything_is_read() {
         let _sock;
         let expected = match case {
             "socket" => {
-                // 소켓 경로는 104바이트 제한이 있어 짧은 곳에서 만든 뒤 옮긴다
-                let short = PathBuf::from("/tmp").join(format!("bp{}.s", std::process::id()));
+                // Unix socket paths have a 104-byte limit, so bind in /tmp and rename into place.
+                let short = Path::new("/tmp").join(format!("bp{}.s", std::process::id()));
                 let _ = fs::remove_file(&short);
                 _sock = UnixListener::bind(&short).unwrap();
                 fs::rename(&short, dir.join("s.sock")).unwrap();
@@ -420,7 +456,7 @@ fn readers_never_see_a_half_applied_set() {
                 let mut last = 0;
                 while !stop.load(Ordering::Relaxed) {
                     let set = registry.set();
-                    assert!(set.generation() >= last, "세대는 거꾸로 가지 않는다");
+                    assert!(set.generation() >= last, "generation must be monotonic");
                     last = set.generation();
                     let has_second = set.profile(&ProfileId("second".into())).is_some();
                     assert_eq!(set.active().len(), if has_second { 2 } else { 1 });
@@ -444,7 +480,7 @@ fn readers_never_see_a_half_applied_set() {
     for reader in readers {
         reader.join().unwrap();
     }
-    assert_eq!(registry.set().generation(), 21, "처음 1 + 바뀐 20번");
+    assert_eq!(registry.set().generation(), 21, "initial 1 + 20 updates");
 }
 
 #[test]
@@ -455,13 +491,13 @@ fn replaced_snapshots_stay_reachable_only_while_someone_holds_them() {
     let (host, limits) = (host(), Limits::default());
     registry.reload(root.path(), &host, &limits).unwrap();
     let old = registry.set().profile(&personal()).unwrap().clone();
-    fs::write(root.path().join("personal/rules.md"), "- 바뀐 규칙\n").unwrap();
+    fs::write(root.path().join("personal/rules.md"), "- Updated rule\n").unwrap();
     registry.reload(root.path(), &host, &limits).unwrap();
     let now = registry.set().profile(&personal()).unwrap().clone();
     assert_ne!(old.revision, now.revision);
     let found = registry
         .lookup(&personal(), &old.revision)
-        .expect("쥐고 있는 옛 판본은 찾을 수 있다");
+        .expect("retained old revision must remain reachable");
     assert!(Arc::ptr_eq(&found, &old));
     assert!(Arc::ptr_eq(
         &registry.lookup(&personal(), &now.revision).unwrap(),
@@ -471,7 +507,7 @@ fn replaced_snapshots_stay_reachable_only_while_someone_holds_them() {
     drop((old, found));
     assert!(
         registry.lookup(&personal(), &revision).is_none(),
-        "아무도 쥐지 않으면 사라진다(묶음으로 다시 만든다)"
+        "dropped revision must disappear from weak cache"
     );
 }
 
@@ -487,27 +523,25 @@ fn a_zero_report_limit_never_turns_a_failure_into_success() {
             max_issues,
             ..Limits::default()
         };
-        // 한 프로필에서 오류가 여러 개 나게 한다: 링크 + 알 수 없는 파일 + 스키마 오류
         let dir = root.path().join("personal");
         std::os::unix::fs::symlink("/etc/hosts", dir.join("knowledge/a.md")).unwrap();
         fs::write(dir.join("notes.txt"), "x").unwrap();
         let report = load(root.path(), &host, &quiet).unwrap_err();
         assert!(
             !report.is_ok() && report.error_total >= 1,
-            "한도 {max_issues}: {report}"
+            "limit {max_issues}: {report}"
         );
         assert!(report.issues.len() <= max_issues.max(1) * 2);
         assert!(registry.reload(root.path(), &host, &quiet).is_err());
         assert!(
             Arc::ptr_eq(&registry.set(), &first),
-            "실패한 교체는 이전 집합을 그대로 둔다"
+            "failed reload must leave previous set active"
         );
         fs::remove_file(dir.join("knowledge/a.md")).unwrap();
         fs::remove_file(dir.join("notes.txt")).unwrap();
-        // 프로필 폴더 밖의 오류도 마찬가지다
         fs::write(root.path().join("stray.txt"), "x").unwrap();
         let report = load(root.path(), &host, &quiet).unwrap_err();
-        assert!(!report.is_ok(), "한도 {max_issues}: {report}");
+        assert!(!report.is_ok(), "limit {max_issues}: {report}");
         fs::remove_file(root.path().join("stray.txt")).unwrap();
     }
     assert!(

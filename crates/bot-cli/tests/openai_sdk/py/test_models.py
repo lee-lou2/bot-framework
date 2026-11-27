@@ -1,4 +1,4 @@
-"""공식 Python SDK(2.29.0)로 모델 목록·조회: 이 키가 쓸 수 있는 모델만, id 순서, 고정된 created, 접근 불가 모델과 없는 모델은 같은 404, 멤버가 아닌 키는 403."""
+"""Official Python SDK (2.29.0) models endpoint tests: visibility, sorting, stable created timestamp, hidden-model 404 parity, and non-member 403."""
 import json
 import time
 import unittest
@@ -16,7 +16,7 @@ class Models(Wired):
         ids = [m["id"] for m in data["data"]]
         self.assertEqual(ids, sorted(ids))
         self.assertIn(MODEL, ids)
-        self.assertNotIn(HIDDEN, ids, "이 키의 역할 밖 모델은 목록에 없다")
+        self.assertNotIn(HIDDEN, ids, "models outside this key's role must be omitted")
         self.assertTrue(all(m["object"] == "model" and m["owned_by"] == "bot-framework" and isinstance(m["created"], int) for m in data["data"]))
         self.assertEqual(reply.parse().object, "list")
 
@@ -27,7 +27,7 @@ class Models(Wired):
         time.sleep(1.2)
         second = client().models.retrieve(MODEL)
         self.assertEqual(first["created"], listed.created)
-        self.assertEqual(first["created"], second.created, "요청마다 현재 시각을 만들지 않는다")
+        self.assertEqual(first["created"], second.created, "created timestamp must be stable across requests")
         self.assertEqual(second.id, MODEL)
 
     def test_a_model_the_key_may_not_use_is_indistinguishable_from_a_missing_one(self):
@@ -39,14 +39,14 @@ class Models(Wired):
         self.assertEqual((hidden[0], missing[0]), (404, 404))
         assert_error(self, hidden[2], 404, "invalid_request_error", "model_not_found")
         scrub = lambda body, name: json.loads(json.dumps(body, ensure_ascii=False).replace(name, "<model>"))
-        self.assertEqual(scrub(hidden[2], HIDDEN), scrub(missing[2], "no-such-model-x"), "같은 404 문서(모델 이름만 다르다)")
+        self.assertEqual(scrub(hidden[2], HIDDEN), scrub(missing[2], "no-such-model-x"), "hidden and missing models must return identical 404 bodies")
         self.assertEqual(hidden[1], missing[1])
         with self.assertRaises(openai.NotFoundError):
             client().models.retrieve(HIDDEN)
         with Delta() as d:
             with self.assertRaises(openai.NotFoundError):
                 client().chat.completions.create(model=HIDDEN, messages=USER)
-        self.assertEqual((d.runs, d.model_calls), (0, 0), "접근할 수 없는 모델은 접수도 실행도 되지 않는다")
+        self.assertEqual((d.runs, d.model_calls), (0, 0), "inaccessible models must not be accepted or executed")
 
     def test_the_second_key_slot_of_the_same_subject_sees_the_same_models(self):
         ids = lambda key: [m.id for m in client(key).models.list().data]

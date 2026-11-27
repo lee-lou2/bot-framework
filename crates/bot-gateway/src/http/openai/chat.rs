@@ -1,7 +1,4 @@
-//! `POST /v1/chat/completions`: 읽기 → 검증 → 원자 접수(또는 같은 키의 재전달) → 기한 안에서 기다리기 → JSON 또는 SSE.
-//!
-//! 기한은 인증 직후 한 번 정하는 단조시계 하나다(`wait_ms`). 기다림은 그보다 `min(2초, wait_ms/4)` 먼저 끝내고 그 예산을 마지막 권한 확인과 응답 쓰기에 남긴다.
-//! 접수 전의 실패만 SDK가 자동으로 다시 보낼 상태(408·429·503)로 낸다. 접수 뒤의 불명·실패는 422 + `x-should-retry: false`다.
+//! `POST /v1/chat/completions` handler: read, validate, atomically admit, wait within deadline, and respond as JSON or SSE.
 use super::{
     Cx,
     auth::{AuthError, Authed},
@@ -32,22 +29,19 @@ use std::{sync::Arc, time::Duration};
 use tokio::time::{Instant, error::Elapsed, sleep, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-/// 상태를 다시 읽는 간격: 처음엔 빠르게, 길어지면 이 값까지 늘린다(긴 요청은 초 단위라 이 이상 촘촘할 필요가 없다)
 const POLL_START: Duration = Duration::from_millis(40);
 const POLL_MAX: Duration = Duration::from_millis(500);
-/// 본문을 읽는 데 주는 시간(총 기한이 더 짧으면 그쪽). 느리게 보내는 상대가 긴 대기 시간만큼 연결을 붙들지 못하게 한다.
+/// Caps body read time so slow clients cannot hold connections for the full `wait_ms` budget.
 const BODY_READ: Duration = Duration::from_secs(10);
-/// 서버가 만든 멱등 키 접두사. 128비트 OS 난수 16진수가 뒤따른다.
 const GENERATED_PREFIX: &str = "gw-";
 
-/// 사용자에게 내보낼 응답의 내용(성공 또는 고정 안내)
 pub(super) enum Answer {
     Text {
         text: String,
         finish: Finish,
         usage: Option<TokenUsage>,
     },
-    /// 호스트가 정한 안내(승인 대기·처리 중·승인 불가). 사용량을 싣지 않고 `stop`으로 끝난다.
+    /// Fixed host notice (pending approval, still running, or blocked); omits usage and finishes with `stop`.
     Notice(String),
 }
 
@@ -67,48 +61,40 @@ impl Answer {
 pub(super) enum Resolved {
     Answer(Answer),
     Failure(Failure),
-    /// 스트림의 상대가 끊었다(작업은 그대로 둔다)
+    /// Streaming client disconnected; leave the run running.
     Gone,
 }
 
-/// 접수한 작업 하나를 끝까지(또는 기한까지) 따라가는 데 필요한 것
 pub(super) struct Ctl {
     pub gateway: Arc<HttpGateway>,
     pub api: Arc<dyn ApiRuns>,
     pub authed: Authed,
     pub profile: ProfileId,
     pub key: String,
-    /// 기다림이 끝나는 때(총 기한보다 `min(2초, wait_ms/4)` 이르다)
+    /// Polling cutoff (`hard - min(2s, wait_ms / 4)`), reserving budget for final recheck and response write.
     pub wait_until: Instant,
-    /// 응답 쓰기까지의 총 기한
+    /// Total deadline for the entire request including final checks and output.
     pub hard: Instant,
     pub stop: CancellationToken,
-    /// 참이면 결과를 내보내기 직전 확인을 이 구조 밖에서(스트림 본문이 조각을 넘기는 순간) 한다. 거짓이면 `resolve`가 돌려주기 직전에 한다.
+    /// When true, pre-emission checks run in the stream handoff gate instead of inside `resolve`.
     pub at_handoff: bool,
 }
 
-/// 조회 호출의 결과: 끝났거나(`Ok`) 기한 안에 끝나지 못했다(`Err`)
 type Lookup = Result<Result<Option<ApiRun>, Error>, Elapsed>;
 
-/// 속도 제한에 걸린 요청의 키로 이미 접수한 작업이 있는가
+/// Ledger check for a rate-limited request to decide whether it replays an already-admitted run.
 enum Known {
-    /// 같은 요청의 작업이다
     Run(Box<ApiRun>),
-    /// 같은 키로 다른 요청을 이미 접수했다
     Different,
-    /// **확실히** 없다(원장이 «없음»이라고 답했거나, 서버가 만든 키라 있을 수 없다): 접수 전의 제한이므로 429가 맞다
+    /// Confirmed absent (or server-generated key): safe to return retryable 429.
     Nothing,
-    /// 확인하지 못했다(조회 한도·원장 오류·시간 초과): 이 키로 이미 접수했을 수 있으므로 다시 보내도 되는 429가 아니라 «확인 불가»(422, 재전송 금지)다
+    /// Could not verify absence; must fail closed as non-retryable 422 (`outcome_unknown`), never 429.
     Unconfirmed,
 }
 
-/// 같은 키의 작업 조회 한 번의 결과
 enum Look {
-    /// 조회가 끝났거나(`Ok`) 기한 안에 끝나지 못했다(`Err`)
     Got(Box<Lookup>),
-    /// 종료 신호가 와서 멈췄다
     Stopped,
-    /// 스트림의 상대가 끊었다
     Gone,
 }
 
@@ -118,10 +104,9 @@ enum Step {
     Wait,
 }
 
-/// 저장된 상태가 지금 말할 수 있는 것
 fn step(state: &ApiState) -> Step {
     match state {
-        // 일반 보류·자식 대기는 «승인 대기»가 아니다: 계속 기다린다
+        // Holds and delegated child waits are not human-approval waits; keep polling.
         ApiState::Active | ApiState::Held => Step::Wait,
         ApiState::NeedsHuman => Step::Answer(Answer::Notice(render::approval_pending())),
         ApiState::ApprovalBlocked(why) => Step::Answer(Answer::Notice(render::blocked(*why))),
@@ -130,7 +115,6 @@ fn step(state: &ApiState) -> Step {
             truncated,
             usage,
         } => {
-            // 빈 성공은 전달하지 않는다
             if text.trim().is_empty() {
                 Step::Failed(Failure::run_failed())
             } else {
@@ -150,12 +134,10 @@ fn step(state: &ApiState) -> Step {
     }
 }
 
-/// 본문 읽기의 기한: 총 기한(기다림이 끝나는 때)과 `BODY_READ` 중 이른 쪽
 fn read_deadline(started: Instant, wait_until: Instant) -> Instant {
     wait_until.min(started + BODY_READ)
 }
 
-/// `Idempotency-Key`: 없거나 하나여야 하고, 있으면 요청 ID 문자 규칙(1~128바이트)이어야 한다.
 fn supplied_key(headers: &HeaderMap) -> Result<Option<String>, Failure> {
     let mut values = headers.get_all("idempotency-key").iter();
     let Some(first) = values.next() else {
@@ -163,16 +145,16 @@ fn supplied_key(headers: &HeaderMap) -> Result<Option<String>, Failure> {
     };
     if values.next().is_some() {
         return Err(Failure::invalid(
-            "Idempotency-Key 헤더는 하나만 보낼 수 있어요",
+            "Only one Idempotency-Key header is allowed",
         ));
     }
     match first.to_str() {
         Ok(key) if valid_request_id(key) => Ok(Some(key.to_owned())),
-        _ => Err(Failure::invalid("Idempotency-Key 형식이 올바르지 않아요")),
+        _ => Err(Failure::invalid("Invalid Idempotency-Key format")),
     }
 }
 
-/// 공식 SDK의 재시도 표지(`x-stainless-retry-count > 0`). 실행·권한의 근거로 쓰지 않고, 키 없는 재전송이 새 실행이 되는 것만 막는다.
+/// Detects official SDK retries (`x-stainless-retry-count > 0`) solely to block keyless duplicate runs.
 fn retried(headers: &HeaderMap) -> bool {
     headers
         .get("x-stainless-retry-count")
@@ -221,7 +203,7 @@ impl HttpGateway {
             .cloned()
             .ok_or_else(Failure::unavailable)?;
         let api = self.api.clone().ok_or_else(Failure::unavailable)?;
-        // 인증 직후 한 번 정하는 총 기한
+        // Single monotonic deadline anchored right after authentication.
         let started = Instant::now();
         let wait = config.wait();
         let reserve = (wait / 4).min(Duration::from_secs(2));
@@ -260,7 +242,7 @@ impl HttpGateway {
             digest,
             conversation: bot_core::random::random_hex(16),
         };
-        // 접수 호출이 기한을 넘기면 커밋했는지 모른다: 같은 키로 확인한다
+        // Admission timeout leaves commit status ambiguous; confirm via ledger lookup.
         let verdict =
             match timeout_at(wait_until, self.ingress.admit_api(&*api, &routes, inbound)).await {
                 Ok(verdict) => verdict,
@@ -283,7 +265,7 @@ impl HttpGateway {
             ApiVerdict::Conflict => return Err(Failure::idempotency_conflict()),
             ApiVerdict::NotMember => return Err(Failure::access_denied()),
             ApiVerdict::Hidden => return Err(Failure::model_not_found()),
-            // 속도 제한에 걸렸어도 같은 키로 이미 접수한 작업이면 새 실행 없이 그 작업에 붙는다(재조회는 제한이 아니라 같은 일의 확인이다)
+            // Replaying an already-admitted key bypasses new-admission rate limits.
             ApiVerdict::RateLimited(wait) => match ctl.known(digest, supplied_by_caller).await {
                 Known::Run(run) => *run,
                 Known::Different => return Err(Failure::idempotency_conflict()),
@@ -295,7 +277,7 @@ impl HttpGateway {
         };
         let identity = Identity::new(&run.run.0, run.created, &run.model);
         if chat.stream {
-            // 헤더를 보내기 전에 키·권한·접수했던 바인딩을 한 번 확인한다(그 뒤의 오류는 200 스트림 안에서만 알릴 수 있다)
+            // Re-verify before committing HTTP 200 SSE headers; later failures can only be sent inline.
             ctl.release(&run).await?;
             return Ok(stream::response(
                 ctl,
@@ -317,8 +299,6 @@ impl HttpGateway {
 }
 
 impl Ctl {
-    /// 속도 제한에 걸린 요청이 키를 **직접 보냈으면**, 현재 인가 범위(프로필·입구·주체·키)의 원장에서 그 작업을 찾는다. 있으면 새 실행 없이 그 작업에 붙고(다른 요청의
-    /// 키였으면 충돌), 없거나 확인하지 못하면 제한이 그대로다. 서버가 만든 키는 이 요청이 처음이라 찾지 않는다. 이 조회도 상태 조회의 속도 제한을 받는다.
     async fn known(&self, digest: [u8; 32], supplied: bool) -> Known {
         if !supplied {
             return Known::Nothing;
@@ -335,18 +315,15 @@ impl Ctl {
         }
     }
 
-    /// 접수 호출이 끝났는지 알 수 없을 때: 같은 키로 원장을 조회해 확인한다. 그래도 모르면 422(새 실행·가짜 성공은 없다).
     async fn confirm(&self, digest: [u8; 32]) -> Result<ApiRun, Failure> {
         let lookup = self.api.lookup(self.scope());
         match timeout_at(self.hard, lookup).await {
             Ok(Ok(Some(run))) if run.digest == digest => Ok(run),
-            // 같은 키를 다른 요청이 먼저 커밋했다
             Ok(Ok(Some(_))) => Err(Failure::idempotency_conflict()),
             _ => Err(Failure::outcome_unknown()),
         }
     }
 
-    /// 같은 키의 작업을 조회한다. 조회가 오래 걸려도 스트림에는 keep-alive를 쓰고, 상대가 끊거나 종료 신호가 오면 곧바로 멈춘다.
     async fn lookup_alive(&self, sink: &mut Option<&mut Sink>) -> Look {
         enum Tick {
             Done(Box<Lookup>),
@@ -398,8 +375,7 @@ impl Ctl {
         }
     }
 
-    /// 상태·결과·안내를 내보내기 직전의 재확인: 키 값이 지금도 같은 입구·주체를 가리키는지, 그 주체가 지금도 멤버이고 접수했던 바인딩·에이전트를 쓸 수 있는지,
-    /// 이 프로세스의 판본이 활성 판본인지. 총 기한 안에 확인하지 못하면 확인하지 못한 것이다(가린다).
+    /// Re-verifies key, membership, binding, and active set within `self.hard`; fails closed on timeout.
     pub(super) async fn release(&self, run: &ApiRun) -> Result<(), Failure> {
         timeout_at(self.hard, self.recheck(run))
             .await
@@ -408,8 +384,8 @@ impl Ctl {
 
     async fn recheck(&self, run: &ApiRun) -> Result<(), Failure> {
         let gateway = &self.gateway;
-        // 오래 기다릴 수 있는 것(키 보관소 읽기)을 먼저 끝내고, 활성 집합·멤버·바인딩은 **마지막에** 본다: 이 확인이 끝나면 기다림 없이 결과를 넘기므로
-        // 그 사이에 다른 프로세스가 새 집합을 게시했어도(옛 답을 돌려주지 않도록) 그 게시는 마지막 확인에 보인다.
+        // Finish the potentially slow secret-store check first, then check active-set/membership/binding last
+        // so any concurrent active-set publish is observed immediately before releasing output.
         match gateway.openai_reauthenticate(&self.authed).await {
             Ok(()) => {}
             Err(AuthError::Invalid) => return Err(Failure::invalid_api_key()),
@@ -426,15 +402,12 @@ impl Ctl {
         }
     }
 
-    /// 기다림이 끝났는가: 기한(`wait_until`)이 됐거나 종료 신호가 왔다
     fn waiting_over(&self) -> bool {
         Instant::now() >= self.wait_until || self.stop.is_cancelled()
     }
 
-    /// 끝났거나 사람이 해야 할 일이 정해질 때까지(또는 기한까지) 같은 작업을 지켜본다. 새 실행을 만들지 않는다.
     pub(super) async fn resolve(&self, mut run: ApiRun, mut sink: Option<&mut Sink>) -> Resolved {
         let mut delay = POLL_START;
-        // 마지막 조회가 성공했는가(실패한 채 기한이 오면 작업 상태를 확인하지 못한 것이다)
         let mut confirmed = true;
         loop {
             match step(&run.state) {
@@ -465,7 +438,7 @@ impl Ctl {
             {
                 return Resolved::Gone;
             }
-            // 잠든 사이 기다림이 끝났거나 종료 신호가 왔다: 새 조회를 시작하지 않는다. 기한을 이미 넘긴 조회는 시작하자마자 만료돼 «확인 못 함»으로 오인된다.
+            // Avoid starting a lookup past `wait_until`, which would time out immediately and look unconfirmed.
             if self.waiting_over() {
                 break;
             }
@@ -475,14 +448,11 @@ impl Ctl {
                         run = next;
                         confirmed = true;
                     }
-                    // 접수한 작업이 사라졌거나 다른 작업이 됐다: 확인할 수 없다
                     Ok(Ok(_)) => return Resolved::Failure(Failure::outcome_unknown()),
-                    // 원장이 조회에 실패했다: 지금 상태를 확인하지 못했다
                     Ok(Err(_)) => confirmed = false,
-                    // 기다림의 기한이 이 조회 도중에 끝났다: 새 정보 없이 마지막으로 확인한 상태로 마친다(조회가 실패한 것이 아니다)
+                    // Deadline hit mid-lookup: keep last confirmed state instead of treating as an error.
                     Err(_) => {}
                 },
-                // 종료 신호: 마지막으로 확인한 상태 그대로 진행 중 안내로 끝낸다(다음 순서에 종료 신호를 보고 나간다)
                 Look::Stopped => {}
                 Look::Gone => return Resolved::Gone,
             }
@@ -505,7 +475,6 @@ impl Ctl {
         }
     }
 
-    /// 실패·취소도 권한이 있는 호출자에게만 알린다
     async fn refuse(&self, run: &ApiRun, failure: Failure) -> Resolved {
         if self.at_handoff {
             return Resolved::Failure(failure);

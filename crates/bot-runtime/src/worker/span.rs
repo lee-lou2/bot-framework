@@ -1,6 +1,6 @@
-//! 워커 계측. 시도의 루트 스팬(`SpanIds::attempt`)과 모델 차례·위임 자식 스팬을 남긴다.
-//! 사용자 글·인자·결과는 싣지 않는다(분류·개수·고정 코드만). 도구 호출 스팬(`child("tool", 호출 ID)`)은 브로커가 만든다.
-//! 이전 세대가 있으면 그 시도의 루트 스팬로 링크를 걸어 인계 흐름을 이어 본다.
+//! Worker OpenTelemetry span recording for attempt roots, model turns, and generation handover links.
+//!
+//! Never attaches user text, tool arguments, or results—only classifications, counts, and fixed codes.
 
 use super::Outcome;
 use bot_core::{
@@ -66,7 +66,6 @@ impl RunSpan {
         }
     }
 
-    /// 이 시도의 자식 스팬을 연다(`tag`는 종류, `id`는 그 안의 안정된 ID).
     pub(crate) fn child(&self, tag: &str, id: &str, name: &str) -> SpanRecord {
         SpanRecord::start(&self.profile, name, self.ids.child(tag, id))
     }

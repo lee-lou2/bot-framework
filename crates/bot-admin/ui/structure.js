@@ -1,4 +1,4 @@
-// 구조 탭: 지도 모듈(map.js)을 구조 자료(store.js)에 이어 주는 얇은 보기. 그리기는 모두 map.js가 맡는다.
+// Structure view connecting BotMap to the shared BotStore graph cache.
 (function (root) {
   "use strict";
   const D = root.BotDom, S = root.BotStore, { $, h } = D;
@@ -12,7 +12,7 @@
       if (on && !loadingEl) { loadingEl = h("div", { class: "map-loading" }, [D.skeleton(4)]); box.appendChild(loadingEl); }
       if (!on && loadingEl) { box.removeChild(loadingEl); loadingEl = null; }
     }
-    // 다른 탭(권한)이 먼저 새 구조를 받았을 수도 있으니, 마지막으로 그린 판본(drawn)과 견줘 다시 그린다.
+    // Access view shares BotStore, so compare against `drawn` revision to catch graph updates loaded elsewhere.
     function draw() {
       const m = S.map;
       if (!m.nodes) { map.clearAll(); loading(true); drawn = null; return; }

@@ -1,4 +1,4 @@
-//! tools.yaml 해석: 도구 선언을 `Tool`로 만들고, 파일 안에서 정해지는 것만 검사한다.
+//! Parsing and local validation of `tools.yaml` declarations and `tools.lock.yaml` linkage.
 use crate::{
     hash::{canonical_json, sha256_hex},
     issue::Issues,
@@ -31,7 +31,6 @@ fn strings(value: Option<&Value>) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// `lock`은 같은 스킬 폴더의 `tools.lock.yaml`(검증을 마친 것). 도구가 `input`을 생략하면 입력 스키마와 정의 해시를 여기서 가져온다.
 pub fn parse(
     value: &Value,
     skill: &str,
@@ -49,7 +48,7 @@ pub fn parse(
             &lock.path,
             "/server",
             format!(
-                "tools.yaml의 서버는 `{server}`인데 이 잠금은 `{}`의 것이에요",
+                "tools.yaml targets server `{server}`, but lock file is for `{}`",
                 lock.server
             ),
         );
@@ -60,7 +59,7 @@ pub fn parse(
             "too-many",
             path,
             "/tools",
-            format!("도구가 너무 많아요(최대 {})", limits.max_tools),
+            format!("too many tools (max {})", limits.max_tools),
         );
         return None;
     }
@@ -84,7 +83,7 @@ pub fn parse(
                     "duplicate-tool",
                     path,
                     format!("/tools/{i}/id"),
-                    format!("도구 id가 겹쳐요: {}", tool.name),
+                    format!("duplicate tool id: {}", tool.name),
                 );
             } else {
                 tools.push(Arc::new(tool));
@@ -92,7 +91,6 @@ pub fn parse(
         }
     }
     if let Some(lock) = lock {
-        // 선언에 없는 항목은 쓰이지 않는다(`bot mcp sync`는 선언한 도구만 적으므로 도구를 지운 뒤 다시 동기화하면 사라진다)
         let declared: BTreeSet<&str> = list
             .iter()
             .filter_map(|item| item.get("id").and_then(Value::as_str))
@@ -105,7 +103,9 @@ pub fn parse(
             issues.warning(
                 "lock-unused",
                 &lock.path,
-                format!("`{id}`는 tools.yaml에 선언돼 있지 않아 쓰이지 않아요 — `bot mcp sync`로 다시 만들면 사라져요"),
+                format!(
+                    "`{id}` is not declared in tools.yaml and will be ignored — re-run `bot mcp sync` to clean it up"
+                ),
             );
         }
     }
@@ -127,7 +127,7 @@ fn parse_tool(
             "reserved-tool",
             path,
             format!("{at}/id"),
-            format!("`{skill}.{name}`는 호스트 내장 도구 이름이라 선언할 수 없어요"),
+            format!("`{skill}.{name}` is a reserved host built-in tool name"),
         );
         return None;
     }
@@ -136,16 +136,15 @@ fn parse_tool(
         "write" => Risk::Write,
         _ => Risk::Irreversible,
     };
-    // 서버가 내세우는 도구 이름: `name`(MCP 이름 규칙, 번들 스키마가 모양을 본다), 생략하면 id. id와 같으면 쓰지 않은 것과 같다(판본도 그대로).
+    // `name` overrides the remote MCP tool name; omitting or matching `id` leaves `mcp_name` as `None` (preserving revision).
     let mcp_name = obj
         .get("name")
         .and_then(Value::as_str)
         .filter(|given| *given != name)
         .map(str::to_owned);
     let remote_name = mcp_name.as_deref().unwrap_or(&name);
-    // 인라인 `input`을 생략한 도구만 잠금의 스키마·설명·정의 해시를 함께 쓴다.
+    // Only tools without inline `input` inherit schema, description, and definition hash from `tools.lock.yaml`.
     let (input, locked) = match (obj.get("input"), lock.and_then(|l| l.tools.get(&name))) {
-        // (`bot mcp sync`는 선언한 도구를 모두 적으므로 인라인 도구의 항목은 있어도 쓰이지 않는다 — 경고하지 않는다)
         (Some(inline), _) => (inline.clone(), None),
         (None, Some(entry)) if entry.name != remote_name => {
             issues.error_at(
@@ -153,7 +152,7 @@ fn parse_tool(
                 path,
                 format!("{at}/name"),
                 format!(
-                    "tools.yaml는 이 도구의 서버 이름을 `{remote_name}`로 정했는데 잠금은 `{}`로 적었어요 — `bot mcp sync <스킬 폴더>`로 다시 만드세요",
+                    "tools.yaml maps this tool to server name `{remote_name}`, but the lock records `{}` — re-run `bot mcp sync <skill-dir>`",
                     entry.name
                 ),
             );
@@ -165,7 +164,7 @@ fn parse_tool(
                 "missing-input",
                 path,
                 format!("{at}/input"),
-                "input을 생략하려면 같은 폴더의 tools.lock.yaml에 이 도구가 있어야 해요 — `bot mcp sync <스킬 폴더>`로 만들거나 input을 적으세요",
+                "omitting `input` requires this tool to be present in tools.lock.yaml — run `bot mcp sync <skill-dir>` or specify `input` inline",
             );
             return None;
         }
@@ -173,7 +172,7 @@ fn parse_tool(
     let definition = locked.map(|entry| entry.sha256.clone());
     let before = issues.error_count();
     let schema = compile_input(&input, path, at, issues);
-    // 목적지 경로는 `$ref`를 펼친 스키마의 속성으로 확인한다(원본 스키마의 최상위가 `$ref`일 수 있다)
+    // Validate destination argument paths against the `$ref`-expanded schema.
     let expanded = schema.as_ref().map_or(&input, |compiled| compiled.doc());
     let destination = parse_destination(obj.get("destination"), class, expanded, path, at, issues);
     let egress = parse_egress(obj.get("egress"), path, at, issues);
@@ -190,7 +189,7 @@ fn parse_tool(
         return None;
     }
     let flag = |key: &str| obj.get(key).and_then(Value::as_bool).unwrap_or(false);
-    // 호출 시간 한도(초): 스키마가 1~900의 정수만 받는다. 선언하지 않으면 `None`(기본 60초)이고 도구 판본도 그대로다.
+    // Optional per-call timeout (1..=900s); `None` defaults to 60s and omits the key from revision hashing.
     let timeout_secs = obj
         .get("timeout_secs")
         .and_then(crate::schema::as_exact_u64)
@@ -212,15 +211,13 @@ fn parse_tool(
     if !env.is_empty() {
         declared["env"] = json!(env);
     }
-    // 정의 해시는 판본에 든다: 서버의 설명·스키마가 바뀌어 잠금을 다시 만들면 도구 판본이 달라져 옛 승인이 새 정의에 쓰이지 않는다
+    // Hash optional definition digest, remote name, and explicit timeout into revision to invalidate stale approvals.
     if let Some(sha) = &definition {
         declared["definition"] = json!(sha);
     }
-    // 다른 서버 이름을 가리키게 바꾸면 다른 도구다(id와 같은 이름은 쓰지 않은 것과 같아 옛 판본이 그대로다)
     if let Some(given) = &mcp_name {
         declared["name"] = json!(given);
     }
-    // 호출 시간 한도를 선언하면 판본에 든다: 한도를 바꾸면 도구 판본이 달라져 옛 승인이 새 한도에 쓰이지 않는다(선언하지 않은 도구의 판본은 그대로다)
     if let Some(secs) = timeout_secs {
         declared["timeout_secs"] = json!(secs);
     }
@@ -248,7 +245,6 @@ fn parse_tool(
     })
 }
 
-/// 인자는 항상 객체이므로 입력 스키마의 최상위는 `type: object`여야 하고, 지원하는 키워드만 써야 한다(로컬 `$ref`는 재귀 없는 것만 펼쳐 쓴다).
 fn compile_input(input: &Value, path: &str, at: &str, issues: &mut Issues) -> Option<Schema> {
     let at = format!("{at}/input");
     match Schema::compile_input(input.clone()) {
@@ -257,7 +253,7 @@ fn compile_input(input: &Value, path: &str, at: &str, issues: &mut Issues) -> Op
                 "bad-input-schema",
                 path,
                 at,
-                "input의 최상위는 `type: object`여야 해요",
+                "input schema top-level must be `type: object`",
             );
             None
         }
@@ -286,7 +282,7 @@ fn parse_destination(
             "destination-on-read",
             path,
             at,
-            "read 도구는 전송 목적지를 가질 수 없어요(쓰기 도구만 선언)",
+            "read tools cannot declare a destination (write tools only)",
         );
         return None;
     }
@@ -308,7 +304,7 @@ fn parse_destination(
                 "bad-destination",
                 path,
                 format!("{at}/{key}"),
-                format!("`{p}`가 가리키는 인자 `{first}`가 input.properties에 없어요"),
+                format!("argument `{first}` referenced by `{p}` is not in input.properties"),
             );
         }
         p.to_owned()
@@ -317,7 +313,7 @@ fn parse_destination(
     Some(Destination::Explicit { recipient, content })
 }
 
-/// `host:port` — 호스트는 소문자 라벨(63자 이하, 양끝 `-` 금지), 포트는 1~65535
+/// Validates `host:port` egress entries (lowercase DNS labels <= 63 chars, port 1..=65535).
 fn parse_egress(
     value: Option<&Value>,
     path: &str,
@@ -347,7 +343,7 @@ fn parse_egress(
                 "bad-egress",
                 path,
                 format!("{at}/egress"),
-                format!("허용 호스트 형식이 아니에요(`host:port`, 포트 1~65535): {text}"),
+                format!("invalid egress entry (expected `host:port` with port 1..=65535): {text}"),
             );
         }
     }

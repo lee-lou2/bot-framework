@@ -1,4 +1,4 @@
-//! 데모 모델 시험: README 흐름(일정 조회 · 삭제)을 차례마다 확인한다. 같은 입력이면 같은 출력이다.
+//! DemoModel tests covering deterministic agenda listing, deletion, simulation, and cancellation.
 
 use super::*;
 use crate::model::{Exchange, Limits, Message, ToolKind, ToolSpec};
@@ -29,12 +29,12 @@ fn request(text: &str, tools: &[&str], exchanges: Vec<Exchange>) -> ModelRequest
             Message {
                 role: Role::User,
                 speaker: None,
-                text: "이전 말".into(),
+                text: "previous user turn".into(),
             },
             Message {
                 role: Role::Assistant,
                 speaker: None,
-                text: "이전 답".into(),
+                text: "previous reply".into(),
             },
             Message {
                 role: Role::User,
@@ -75,7 +75,7 @@ fn listed(result: &str) -> Exchange {
     done(LIST, "{}", CallEnd::Done(JsonPayload(result.into())))
 }
 
-const EVENTS: &str = r#"{"events":[{"id":"e-walk","title":"산책","start":"07:30"},{"id":"e-meet","title":"팀 회의","start":"14:00"}]}"#;
+const EVENTS: &str = r#"{"events":[{"id":"e-walk","title":"Walk","start":"07:30"},{"id":"e-meet","title":"Team meeting","start":"14:00"}]}"#;
 
 fn calls_of(step: &ModelStep) -> Vec<(String, String, String)> {
     match step {
@@ -83,52 +83,55 @@ fn calls_of(step: &ModelStep) -> Vec<(String, String, String)> {
             .iter()
             .map(|c| (c.call.0.clone(), c.tool.0.clone(), c.args.0.clone()))
             .collect(),
-        other => panic!("호출이어야 해요: {other:?}"),
+        other => panic!("expected tool calls: {other:?}"),
     }
 }
 
 fn text_of(step: &ModelStep) -> &str {
     match step {
         ModelStep::Final { text, .. } => text,
-        other => panic!("최종 답이어야 해요: {other:?}"),
+        other => panic!("expected final reply: {other:?}"),
     }
 }
 
 #[tokio::test]
 async fn listing_asks_for_the_agenda_then_summarizes_it_in_korean() {
-    let first = step(request("오늘 일정 알려줘", &BOTH, vec![])).await;
+    let first = step(request("Show today's agenda", &BOTH, vec![])).await;
     assert_eq!(
         calls_of(&first),
         [("r1:0:0".into(), "agenda.list".into(), "{}".into())]
     );
-    let second = step(request("오늘 일정 알려줘", &BOTH, vec![listed(EVENTS)])).await;
+    let second = step(request("Show today's agenda", &BOTH, vec![listed(EVENTS)])).await;
     assert_eq!(
         text_of(&second),
-        "일정이 2건 있어요.\n- 07:30 산책\n- 14:00 팀 회의"
+        "Found 2 event(s).\n- 07:30 Walk\n- 14:00 Team meeting"
     );
 }
 
 #[tokio::test]
 async fn understands_common_tool_result_shapes() {
     for (shape, want) in [
-        (r#"[{"id":1,"name":"운동"}]"#, "일정이 1건 있어요.\n- 운동"),
         (
-            r#"{"structuredContent":{"events":[{"id":"a","title":"점심","time":"12:00"}]}}"#,
-            "일정이 1건 있어요.\n- 12:00 점심",
+            r#"[{"id":1,"name":"Workout"}]"#,
+            "Found 1 event(s).\n- Workout",
         ),
         (
-            r#"{"content":[{"type":"text","text":"{\"events\":[{\"id\":\"a\",\"summary\":\"독서\"}]}"}]}"#,
-            "일정이 1건 있어요.\n- 독서",
+            r#"{"structuredContent":{"events":[{"id":"a","title":"Lunch","time":"12:00"}]}}"#,
+            "Found 1 event(s).\n- 12:00 Lunch",
         ),
-        (r#"{"events":[]}"#, "등록된 일정이 없어요."),
-        (r#"[]"#, "등록된 일정이 없어요."),
         (
-            r#"{"content":[{"type":"text","text":"오늘은 일정이 없습니다"}]}"#,
-            "오늘은 일정이 없습니다",
+            r#"{"content":[{"type":"text","text":"{\"events\":[{\"id\":\"a\",\"summary\":\"Reading\"}]}"}]}"#,
+            "Found 1 event(s).\n- Reading",
+        ),
+        (r#"{"events":[]}"#, "No events found."),
+        (r#"[]"#, "No events found."),
+        (
+            r#"{"content":[{"type":"text","text":"No events scheduled today"}]}"#,
+            "No events scheduled today",
         ),
         ("not json at all", "not json at all"),
     ] {
-        let reply = step(request("일정 보여줘", &BOTH, vec![listed(shape)])).await;
+        let reply = step(request("Show schedule", &BOTH, vec![listed(shape)])).await;
         assert_eq!(text_of(&reply), want, "{shape}");
     }
 }
@@ -137,19 +140,19 @@ async fn understands_common_tool_result_shapes() {
 async fn listing_failures_are_reported_plainly() {
     let denied = done(LIST, "{}", CallEnd::Denied);
     assert_eq!(
-        text_of(&step(request("일정 알려줘", &BOTH, vec![denied])).await),
-        "일정을 조회할 권한이 없어요."
+        text_of(&step(request("Show agenda", &BOTH, vec![denied])).await),
+        "Permission denied to read the agenda."
     );
     let failed = done(LIST, "{}", CallEnd::Failed("unavailable".into()));
     assert!(
-        text_of(&step(request("일정 알려줘", &BOTH, vec![failed])).await)
-            .starts_with("일정을 가져오지 못했어요")
+        text_of(&step(request("Show agenda", &BOTH, vec![failed])).await)
+            .starts_with("Could not fetch the agenda")
     );
 }
 
 #[tokio::test]
 async fn deleting_finds_the_event_by_title_then_deletes_it_by_id() {
-    let text = "산책 일정을 삭제해줘";
+    let text = "Delete the walk event";
     let first = step(request(text, &BOTH, vec![])).await;
     assert_eq!(
         calls_of(&first),
@@ -172,9 +175,9 @@ async fn deleting_finds_the_event_by_title_then_deletes_it_by_id() {
         CallEnd::Done(JsonPayload("{}".into())),
     );
     let third = step(request(text, &BOTH, vec![listed(EVENTS), deleted])).await;
-    assert_eq!(text_of(&third), "'산책' 일정을 삭제했어요.");
+    assert_eq!(text_of(&third), "Deleted 'Walk'.");
 
-    // 시뮬레이션 결과(가상 영수증)는 영구 삭제라고 말하지 않는다: 그대로·MCP 감싼 모양 모두
+    // Simulated delete responses (raw or MCP-wrapped) must not claim permanent deletion.
     let sim = r#"{"simulated":true,"persisted":false,"receipt":"sim-7","event":"e-walk"}"#;
     let wrapped = serde_json::json!({"content": [{"type": "text", "text": sim}], "isError": false});
     for payload in [sim.to_owned(), wrapped.to_string()] {
@@ -186,7 +189,7 @@ async fn deleting_finds_the_event_by_title_then_deletes_it_by_id() {
         let said = step(request(text, &BOTH, vec![listed(EVENTS), simulated])).await;
         assert_eq!(
             text_of(&said),
-            "'산책' 일정 삭제를 시뮬레이션했어요(가상 영수증 sim-7)."
+            "Simulated deletion of 'Walk' (virtual receipt sim-7)."
         );
     }
     let no_receipt = done(
@@ -197,7 +200,7 @@ async fn deleting_finds_the_event_by_title_then_deletes_it_by_id() {
     let said = step(request(text, &BOTH, vec![listed(EVENTS), no_receipt])).await;
     assert_eq!(
         text_of(&said),
-        "'산책' 일정 삭제를 시뮬레이션했어요(영구 삭제는 아니에요)."
+        "Simulated deletion of 'Walk' (not permanently deleted)."
     );
     let not_simulated = done(
         DELETE,
@@ -205,13 +208,13 @@ async fn deleting_finds_the_event_by_title_then_deletes_it_by_id() {
         CallEnd::Done(JsonPayload(r#"{"simulated":false}"#.into())),
     );
     let said = step(request(text, &BOTH, vec![listed(EVENTS), not_simulated])).await;
-    assert_eq!(text_of(&said), "'산책' 일정을 삭제했어요.");
+    assert_eq!(text_of(&said), "Deleted 'Walk'.");
 
     let denied = done(DELETE, r#"{"event":"e-walk"}"#, CallEnd::Denied);
     let refused = step(request(text, &BOTH, vec![listed(EVENTS), denied])).await;
     assert_eq!(
         text_of(&refused),
-        "삭제가 승인되지 않아 '산책' 일정은 그대로 두었어요."
+        "Deletion was not approved, so 'Walk' was kept."
     );
 
     let failed = done(
@@ -220,55 +223,74 @@ async fn deleting_finds_the_event_by_title_then_deletes_it_by_id() {
         CallEnd::Failed("unavailable".into()),
     );
     let broken = step(request(text, &BOTH, vec![listed(EVENTS), failed])).await;
-    assert!(text_of(&broken).starts_with("삭제하지 못했어요"));
+    assert!(text_of(&broken).starts_with("Could not delete the event"));
 }
 
 #[tokio::test]
 async fn deleting_never_guesses_when_the_event_is_missing_or_ambiguous() {
-    let none = step(request("회식 일정 삭제해줘", &BOTH, vec![listed(EVENTS)])).await;
+    let none = step(request("Delete dinner event", &BOTH, vec![listed(EVENTS)])).await;
     assert!(
-        text_of(&none).starts_with("말씀하신 일정을 찾지 못했어요.\n일정이 2건 있어요."),
+        text_of(&none).starts_with("Could not find that event.\nFound 2 event(s)."),
         "{}",
         text_of(&none)
     );
-    let many = r#"[{"id":"1","title":"운동"},{"id":"2","title":"점심"}]"#;
-    let ambiguous = step(request("운동이랑 점심 지워줘", &BOTH, vec![listed(many)])).await;
+    let many = r#"[{"id":"1","title":"Workout"},{"id":"2","title":"Lunch"}]"#;
+    let ambiguous = step(request(
+        "Remove workout and lunch",
+        &BOTH,
+        vec![listed(many)],
+    ))
+    .await;
     assert_eq!(
         text_of(&ambiguous),
-        "맞는 일정이 여러 개예요: 운동, 점심. 어떤 일정을 삭제할까요?"
+        "Multiple events match: Workout, Lunch. Which event should I delete?"
     );
-    // 더 구체적인 제목이 있으면 그쪽을 고른다
-    let nested = r#"[{"id":"1","title":"산책"},{"id":"2","title":"저녁 산책"}]"#;
-    let pick = step(request("저녁 산책 삭제해줘", &BOTH, vec![listed(nested)])).await;
+    let nested = r#"[{"id":"1","title":"Walk"},{"id":"2","title":"Evening Walk"}]"#;
+    let pick = step(request("Delete Evening Walk", &BOTH, vec![listed(nested)])).await;
     assert_eq!(calls_of(&pick)[0].2, r#"{"event":"2"}"#);
 }
 
 #[tokio::test]
 async fn missing_tools_and_unknown_requests_get_a_plain_answer() {
     assert!(
-        text_of(&step(request("일정 알려줘", &[], vec![])).await)
-            .starts_with("일정 도구를 쓸 수 없어요")
+        text_of(&step(request("Show agenda", &[], vec![])).await)
+            .starts_with("Agenda tools are unavailable")
     );
-    let no_delete = step(request("산책 일정 삭제해줘", &[LIST], vec![listed(EVENTS)])).await;
-    assert!(text_of(&no_delete).starts_with("삭제 도구를 쓸 수 없어요"));
-    assert_eq!(text_of(&step(request("안녕", &BOTH, vec![])).await), HELP);
+    let no_delete = step(request(
+        "Delete the walk event",
+        &[LIST],
+        vec![listed(EVENTS)],
+    ))
+    .await;
+    assert!(text_of(&no_delete).starts_with("Delete tool is unavailable"));
+    assert_eq!(text_of(&step(request("hello", &BOTH, vec![])).await), HELP);
 }
 
 #[tokio::test]
 async fn the_demo_model_is_a_step_runner_that_never_needs_a_relay() {
     assert_eq!(DemoModel.kind(), RunnerKind::Step);
-    let with_relay = request("일정 알려줘", &BOTH, vec![]);
+    let with_relay = request("Show agenda", &BOTH, vec![]);
     assert!(with_relay.relay.is_none());
 }
 
 #[tokio::test]
 async fn the_same_request_always_gives_the_same_step_and_cancel_is_honored() {
-    let a = step(request("산책 일정을 삭제해줘", &BOTH, vec![listed(EVENTS)])).await;
-    let b = step(request("산책 일정을 삭제해줘", &BOTH, vec![listed(EVENTS)])).await;
+    let a = step(request(
+        "Delete the walk event",
+        &BOTH,
+        vec![listed(EVENTS)],
+    ))
+    .await;
+    let b = step(request(
+        "Delete the walk event",
+        &BOTH,
+        vec![listed(EVENTS)],
+    ))
+    .await;
     assert_eq!(a, b);
     let (tx, rx) = watch::channel(false);
     tx.send(true).unwrap();
-    let mut cancelled = request("일정 알려줘", &BOTH, vec![]);
+    let mut cancelled = request("Show agenda", &BOTH, vec![]);
     cancelled.cancel = rx;
     assert_eq!(DemoModel.step(cancelled).await, Err(ModelError::Cancelled));
 }

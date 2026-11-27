@@ -1,19 +1,4 @@
-//! Claude Code CLI(`claude -p`) 실행기.
-//!
-//! 루프 내장(`RunnerKind::Loop`) 실행기다: CLI가 자기 도구 순환을 돌리고 워커는 차례를 제어하지 않는다. 항상 `ModelStep::Final`을 돌려준다.
-//! 샌드박스(VM) 안에서 `/bot`(읽기 전용 입력 폴더)을 작업 폴더로 `--bare`로 실행한다. 지침은 입력 폴더의 `AGENTS.md`에 두고 `--append-system-prompt-file`로 시스템 지침에
-//! 실어 준다(실측: `--bare`는 작업 폴더의 `AGENTS.md`·`CLAUDE.md`를 자동으로 읽지 않으므로 이 인자가 없으면 지침이 모델에 닿지 않는다). 대화는 표준입력으로 준다:
-//! 사용자가 쓴 글은 사용자 메시지에만 있고 시스템 지침에는 이 파일(프로필이 정한 지침·스킬·지식과 고정 안내)만 있다.
-//! 모델과 도구는 `ModelRequest::relay`(run별 브로커 프런트)로만 나간다: `ANTHROPIC_BASE_URL`은 그 주소, `ANTHROPIC_API_KEY`는 이 시도에 발급한
-//! 세션 토큰이다(실제 제공자 키는 VM에 없다). 같은 주소로 `--mcp-config`(HTTP MCP) 파일을 만들되 **모델이 읽는 폴더(`/bot`) 밖인 쓰기 공간(`/work`)에** 두고,
-//! 토큰은 그 파일에 쓰지 않는다: 헤더에는 `${RELAY_TOKEN}` 자리표시만 있고 값은 환경변수로만 간다(그래서 내장 Read를 켜도 모델이 읽는 어떤 파일에도 토큰이 없다).
-//! `--strict-mcp-config`로 그것만 쓰며 그 서버의 도구만 `--allowedTools`로 미리 허용한다(`-p`에는 승인할 사람이 없다 — 승인이 필요한 호출은 브로커가 막고 run을 멈춘다).
-//! 내장 도구는 기본 0개(`--tools ""`)다. 에이전트가 `builtin`에 명시한 것만 연다: 실측으로 `--bare`에서는 `Read`만 켜지므로 `Grep`·`Glob` 요구는
-//! 실행 전에 `unsupported_builtin`으로 거절한다(다른 도구로 바꿔 열지 않는다).
-//!
-//! 세션: 호스트가 세션 포트(`ModelRequest::session`)를 주면 run마다 정해진 세션 ID로 세션을 남기고(`--session-id`), 승인·위임으로 run이 멈췄다
-//! 다시 깨어나면 체크포인트에서 세션을 되살려 `--resume`으로 잇는다(`session` 모듈). 포트가 없으면 세션을 남기지 않는다(`--no-session-persistence`).
-//! 성공·실패는 마지막 `result` 이벤트의 `is_error`로 알고(API 오류면 종료 코드도 1), 진행은 `stream_event`·`api_retry`로 안다.
+//! Claude Code CLI (`claude -p`) model runner with relay-only egress and session checkpointing.
 
 use super::{
     CliConfig, CliModel, ModelError, ModelMeta, ModelRequest, ModelRunner, RelayChannel,
@@ -39,22 +24,16 @@ use std::{
 };
 use tokio::sync::watch;
 
-/// 세션 파일을 따라 읽는 간격
 const TAIL_EVERY: Duration = Duration::from_millis(25);
 
-/// CLI가 세션을 어떻게 다루는가.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Mode {
-    /// 세션을 남기지 않는다(포트 없음)
     Ephemeral,
-    /// 이 ID로 새 세션을 시작한다
     Fresh(String),
-    /// 체크포인트에서 되살린 이 ID의 세션을 잇는다(원래 요청 본문은 다시 보내지 않는다)
     Resume(String),
 }
 
-/// 필수가 아닌 통신(자동 업데이트·원격 측정·오류 보고·피드백·기능 플래그·공식 마켓 자동 설치)을 끄고, 이 봇에 필요 없는 것을 뺀다: 자동 메모리(호출마다 새로 시작한다), claude 번들 스킬.
-/// 공식 환경변수이며 `images/model/Containerfile`의 기본 ENV와 같은 목록이다: https://code.claude.com/docs/en/env-vars
+/// Disables nonessential traffic, telemetry, auto-updates, bundled skills, and auto-memory; mirrors `images/model/Containerfile`.
 const FIXED_ENV: [(&str, &str); 12] = [
     ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
     ("DISABLE_TELEMETRY", "1"),
@@ -70,7 +49,7 @@ const FIXED_ENV: [(&str, &str); 12] = [
     ("CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1"),
 ];
 
-/// 도구 서버 설정 파일의 쓰기 공간(`/work`) 안 위치. 모델이 읽는 입력 폴더(`/bot`) 밖이다.
+/// MCP config filename under `/work`, outside the read-only `/bot` directory readable by the model.
 pub const MCP_CONFIG: &str = "mcp.claude.json";
 
 pub struct ClaudeCodeRunner {
@@ -83,7 +62,6 @@ impl ClaudeCodeRunner {
         Self { sandbox, config }
     }
 
-    /// 명령 인자. 내장 도구는 명시한 것만 연다(비어 있으면 `--tools ""`). 이 실행기가 제공하지 못하는 것을 요구하면 실행 전에 거절한다.
     pub fn args(
         model: &CliModel,
         builtin: &BTreeSet<Builtin>,
@@ -95,13 +73,14 @@ impl ClaudeCodeRunner {
         } else if builtin.iter().all(|b| *b == Builtin::Read) {
             "Read".to_owned()
         } else {
-            // 실측: `--bare`에서 Grep·Glob은 켜지지 않는다. Bash 등으로 대신 열지 않는다
+            // `--bare` supports only `Read`; fail closed rather than substituting another tool.
             return Err(cli::failed("unsupported_builtin"));
         };
         let instruction = match mode {
             Mode::Resume(_) => prompt::RESUME_INSTRUCTION,
             _ => prompt::INSTRUCTION,
         };
+        // `--bare` does not auto-load `AGENTS.md`, so attach it explicitly via `--append-system-prompt-file`.
         let mut a: Vec<String> = [
             "-p",
             instruction,
@@ -151,7 +130,7 @@ impl ClaudeCodeRunner {
             ),
             ("ANTHROPIC_BASE_URL".to_string(), relay.base_url.clone()),
             ("ANTHROPIC_API_KEY".to_string(), relay.token.clone()),
-            // MCP 설정의 `${RELAY_TOKEN}`이 채워지는 곳: 토큰은 파일이 아니라 환경으로만 간다
+            // Populates `${RELAY_TOKEN}` in `mcp.claude.json` so the session token never touches disk.
             (TOKEN_ENV.to_string(), relay.token.clone()),
             (
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string(),
@@ -198,7 +177,7 @@ impl ModelRunner for ClaudeCodeRunner {
                     host: call.work.clone(),
                     guest: WORK_MOUNT.into(),
                 }),
-                // 이어 받는 세션에는 원래 요청이 이미 들어 있다: 다시 보내면 같은 일을 또 시킬 수 있다
+                // Resumed sessions already contain the original prompt; resending it can duplicate work.
                 stdin: match mode {
                     Mode::Resume(_) => None,
                     _ => Some(prompt::render_stdin(&request).into_bytes()),
@@ -206,7 +185,7 @@ impl ModelRunner for ClaudeCodeRunner {
                 timeout: request.limits.total,
                 idle_timeout: request.limits.idle,
             };
-            // 이어 받은 세션의 보고는 그 CLI 실행 몫뿐이다(앞 실행은 도구 승인·위임으로 끝나 결과 보고가 없다): 전체 합을 알 수 없다
+            // Resumed sessions only report usage for the current invocation, not prior parked attempts.
             let parser = Box::new(Tracker::new(matches!(mode, Mode::Resume(_))));
             let output = match tail {
                 None => {
@@ -238,8 +217,6 @@ impl ModelRunner for ClaudeCodeRunner {
 }
 
 impl ClaudeCodeRunner {
-    /// CLI를 돌리는 동안 세션 파일을 따라 읽어 응답마다 묶음을 쓴다. 세션을 더 믿을 수 없으면(소유권 상실·확인 불일치·시간 초과) CLI를 끝내고
-    /// 그 사유를 돌려준다.
     async fn drive_watched(
         &self,
         spec: ModelSpec,
@@ -249,7 +226,7 @@ impl ClaudeCodeRunner {
         mut tail: Tail,
     ) -> Result<Output, ModelError> {
         let (abort, aborted) = watch::channel(false);
-        // 마지막 확인도 CLI와 같은 마감 시각과 취소 신호를 따른다(원장이 응답하지 않아도 전체 시간을 넘기지 않는다)
+        // Final session verification shares the same total deadline and cancel signal as the CLI run.
         let deadline = tokio::time::Instant::now() + limits.total;
         let mut finish_cancel = cancel.clone();
         let driven =
@@ -268,12 +245,12 @@ impl ClaudeCodeRunner {
                 output = &mut driven => output,
                 error = &mut watching => {
                     let _ = abort.send(true);
-                    let _ = driven.await; // 프로세스가 끝날 때까지 기다린다
+                    let _ = driven.await;
                     return Err(error);
                 }
             }
         }?;
-        // 최종 답을 올리기 전의 마지막 확인: 저장하지 못했거나 원장에서 끝나지 않은 도구 호출이 있으면 그 답을 성공으로 올리지 않는다
+        // Refuse to emit a final answer if any relay call was unsaved or unfinished in the ledger.
         tokio::select! {
             biased;
             () = driver::cancelled(&mut finish_cancel) => Err(ModelError::Cancelled),
@@ -297,13 +274,10 @@ fn session_error(error: SessionError) -> ModelError {
     }
 }
 
-/// 세션 파일 시각(밀리초 UTC).
 fn timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// 이 claim의 세션을 정한다. 되살릴 세션이 없으면 새로 시작하고, 있으면 아직 결과 없는 `tool_use`를 현재 권한·승인으로 마무리해(승인·위임을
-/// 다시 기다려야 하면 `Parked`) 결과 줄을 체크포인트에 먼저 남긴 뒤 새 HOME의 세션 파일을 만든다.
 async fn prepare_session(
     session: &Session,
     request: &ModelRequest,
@@ -320,8 +294,7 @@ async fn prepare_session(
         let tail = Tail::new(call.work.clone(), relative, 0, journal, session.clone());
         return Ok((Mode::Fresh(id), Some(tail)));
     };
-    // 세션 파일은 VM이 쓴 것이다: 이미 결과가 있는 릴레이 도구도 결과 본문을 믿지 않고, 원래 계획(이름·입력)을 현재 권한·도구·인자로
-    // 새 실행 없이 다시 읽어(끝난 호출의 값, 거절은 고정 단어) 그 값으로 덮어쓴다. 끝났다는 기록이 없으면 믿을 결과가 없으니 중단으로 표시한다
+    // Session files are VM-authored: overwrite every answered relay tool result from trusted host records without re-executing.
     let mut trusted = BTreeMap::new();
     for slot in saved.relay_results(&prefix) {
         let output = match port.recall(&slot).await {
@@ -345,7 +318,7 @@ async fn prepare_session(
     let mut lines = saved.lines.clone();
     let mut next = saved.next_seq();
     if let Some(line) = result_line(&saved, &id, &outcomes, &timestamp()) {
-        // 파일보다 체크포인트가 먼저다: 이 뒤에 멈춰도 다음 claim이 같은 결과 줄을 그대로 이어 받는다
+        // Checkpoint before writing the file so a crash after this point restores the exact same result line.
         port.commit(vec![rec_step(next, &line)])
             .await
             .map_err(session_error)?;
@@ -366,26 +339,20 @@ async fn prepare_session(
     Ok((Mode::Resume(id), Some(tail)))
 }
 
-/// 마지막 `result` 이벤트
 #[derive(Debug, Default)]
 struct Finished {
     is_error: bool,
     text: String,
-    /// API 오류의 HTTP 상태 (api_error_status)
     status: Option<u64>,
     input: u64,
     output: u64,
-    /// 공급자가 실제로 보고한 이 CLI 실행의 전체 토큰 수(없으면 `None`)
     measured: Option<TokenUsage>,
 }
 
-/// JSONL 이벤트를 한 줄씩 먹고 마지막 결과를 기억한다.
 #[derive(Default)]
 struct Tracker {
     result: Option<Finished>,
-    /// 이어 받은 세션이면 실측 합을 알 수 없다
     resumed: bool,
-    /// 요청마다 공급자가 실제로 보고한 계량(`usage.rs`): 한 요청이라도 보고가 빠지면 전체 합을 알 수 없다
     calls: usage::Calls,
 }
 
@@ -460,7 +427,7 @@ impl Parser for Tracker {
                 input_tokens: r.input,
                 output_tokens: r.output,
             },
-            // 공급자의 출력 한도로 잘린 답은 이 CLI가 부분 글을 결과로 내지 않고 오류로 끝나 여기까지 오지 않는다(위 `is_error`: 실패로 둔다)
+            // CLI reports output-limit truncation via `is_error`, so reaching here means `truncated: false`.
             outcome: RunOutcome {
                 truncated: false,
                 usage: if self.resumed { None } else { r.measured },

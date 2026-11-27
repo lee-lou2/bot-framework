@@ -1,4 +1,4 @@
-//! 판정: 승인은 브로커 경유·본인만, 보류 판정은 운영자만, 둘 다 CSRF 방어와 감사 체인을 지난다.
+//! Approval and hold decision tests: broker routing, designated approver, operator-only holds, CSRF, and audit chain.
 
 use crate::support::*;
 use bot_admin::fake::{Fake, digest};
@@ -30,7 +30,6 @@ async fn approval_goes_through_the_broker_as_the_authenticated_approver() {
         (d[0].nonce.0.as_str(), d[0].actor.0.as_str(), d[0].allow),
         ("ap-1", "local:owner", true)
     );
-    // 다시 누르면 새로 소비하지 않고 기존 결과를 돌려준다.
     let again = post(
         &s,
         OPERATOR,
@@ -47,7 +46,6 @@ async fn approval_goes_through_the_broker_as_the_authenticated_approver() {
         (Some(true), Some("approved"))
     );
     assert_eq!(s.fake.decisions().len(), 1);
-    // 감사 체인에 판정 주체가 남는다.
     let a = get(&s, OPERATOR, "/v1/admin/audit").await.json();
     assert_eq!(
         (
@@ -77,7 +75,7 @@ async fn denying_is_recorded_and_the_run_moves_on() {
 #[tokio::test]
 async fn only_the_designated_approver_may_decide_and_stale_screens_are_refused() {
     let s = start(Fake::demo()).await;
-    // 지정 승인자가 아닌 운영자도 대신 누를 수 없다: 승인자를 다른 사람으로 바꿔 본다.
+    // Even an operator cannot decide on behalf of another designated approver.
     s.fake
         .edit(|d| d.approvals[0].approver = bot_admin::fake::pid("local:guest"));
     let r = post(
@@ -91,8 +89,7 @@ async fn only_the_designated_approver_may_decide_and_stale_screens_are_refused()
         (r.status, r.json()["error"].as_str()),
         (403, Some("denied"))
     );
-    assert!(s.fake.decisions().is_empty(), "브로커까지 가지 않는다");
-    // 화면이 본 해시와 지금 값이 다르면 거절한다.
+    assert!(s.fake.decisions().is_empty(), "must not reach broker");
     s.fake
         .edit(|d| d.approvals[0].approver = bot_admin::fake::pid("local:owner"));
     let wrong = format!(r#"{{"allow":true,"seen":"{}"}}"#, "0".repeat(64));
@@ -101,7 +98,6 @@ async fn only_the_designated_approver_may_decide_and_stale_screens_are_refused()
         (r.status, r.json()["error"].as_str()),
         (409, Some("changed"))
     );
-    // 위험 상향으로 무효화된 승인은 소비할 수 없다.
     s.fake
         .edit(|d| d.approvals[0].state = ApprovalState::Superseded);
     let r = post(
@@ -136,7 +132,10 @@ async fn a_member_cannot_decide_someone_elses_approval() {
         &decide_body(true),
     )
     .await;
-    assert_eq!(r.status, 404, "보이지 않는 승인은 존재를 숨긴다");
+    assert_eq!(
+        r.status, 404,
+        "invisible approvals return 404 to hide existence"
+    );
     assert!(s.fake.decisions().is_empty());
 }
 
@@ -149,11 +148,11 @@ async fn state_changes_need_the_csrf_guards() {
     let body = decide_body(true);
     let cases: Vec<(&str, Vec<(&str, &str)>)> = vec![
         (
-            "토큰 없음",
+            "missing token",
             vec![auth, ("Content-Type", "application/json")],
         ),
         (
-            "틀린 토큰",
+            "wrong token",
             vec![
                 auth,
                 ("Content-Type", "application/json"),
@@ -161,11 +160,11 @@ async fn state_changes_need_the_csrf_guards() {
             ],
         ),
         (
-            "JSON 아님",
+            "not JSON",
             vec![auth, ("Content-Type", "text/plain"), ("X-Bot-Csrf", &tok)],
         ),
         (
-            "다른 출처",
+            "cross origin",
             vec![
                 auth,
                 ("Content-Type", "application/json"),
@@ -174,7 +173,7 @@ async fn state_changes_need_the_csrf_guards() {
             ],
         ),
         (
-            "교차 사이트",
+            "cross-site",
             vec![
                 auth,
                 ("Content-Type", "application/json"),
@@ -193,9 +192,9 @@ async fn state_changes_need_the_csrf_guards() {
     }
     assert!(
         s.fake.decisions().is_empty(),
-        "막힌 요청은 브로커에 닿지 않는다"
+        "blocked requests must not reach broker"
     );
-    // 다른 신원의 토큰은 쓸 수 없다.
+    // Tokens are bound to the authenticated principal.
     let other = csrf(&s, GUEST).await;
     let h = [
         auth,
@@ -208,7 +207,6 @@ async fn state_changes_need_the_csrf_guards() {
             .status,
         403
     );
-    // 같은 출처 표시가 있으면 통과한다.
     let origin = format!("http://{}", s.addr);
     let h = [
         auth,
@@ -247,7 +245,6 @@ async fn decision_bodies_are_validated() {
     assert!(s.fake.decisions().is_empty());
 }
 
-/// 감사 기록의 수(최대 200).
 async fn audit_count(s: &Server) -> Option<usize> {
     get(s, OPERATOR, "/v1/admin/audit?limit=200").await.json()["items"]
         .as_array()
@@ -272,12 +269,11 @@ async fn hold_verdicts_are_operator_only_audited_and_idempotent() {
         ),
         ("local:owner", "c-9", Some("e-2"))
     );
-    // 영수증 원문은 보존하지 않는다: 판정 종류와 지문만 남는다.
+    // Raw receipt text is not retained; only the verdict kind and digest are stored.
     assert_eq!(
         (rs[0].verdict, rs[0].digest),
         ("confirmed", bot_admin::fake::digest("msg-9"))
     );
-    // 알림 단계와 원래 업로드 영수증이 확정됐다. 목록에는 호출 전체 보류가 남는다.
     let d = get(&s, OPERATOR, "/v1/admin/runs/personal/r-4")
         .await
         .json();
@@ -292,7 +288,7 @@ async fn hold_verdicts_are_operator_only_audited_and_idempotent() {
     let list = get(&s, OPERATOR, "/v1/admin/holds").await.json();
     assert!(list["items"][0]["hold_id"].is_string());
     assert_eq!(list["items"][0]["steps"][1]["receipt"], "msg-9");
-    // 같은 보류 식별자로 같은 운영자·같은 판정을 다시 보내면 새로 기록하지 않고 «반복»으로 답한다(감사도 더하지 않는다).
+    // Replaying the same hold_id, operator, and verdict returns repeated=true with no extra audit row.
     let again = post(&s, OPERATOR, path, body).await;
     assert_eq!(
         (again.status, again.json()["repeated"].as_bool()),
@@ -302,7 +298,7 @@ async fn hold_verdicts_are_operator_only_audited_and_idempotent() {
     assert_eq!(
         audit_count(&s).await,
         Some(3),
-        "처음 판정의 감사 한 줄만 늘었다(demo 2 + 1)"
+        "only the first resolution appends an audit row (demo 2 + 1)"
     );
     let a = get(&s, OPERATOR, "/v1/admin/audit?limit=1").await.json();
     assert_eq!(
@@ -312,17 +308,13 @@ async fn hold_verdicts_are_operator_only_audited_and_idempotent() {
         ),
         (Some("hold.resolve"), Some("confirmed"))
     );
-    // 같은 식별자에 다른 값(영수증)이면 반복이 아니라 충돌이다.
     let other =
         r#"{"verdict":"confirmed","receipt":"other-receipt","effect":"e-2","hold_id":"h-e-2"}"#;
     assert_eq!(post(&s, OPERATOR, path, other).await.status, 409);
-    // 같은 식별자에 다른 판정 종류여도 충돌이다.
     let kind = r#"{"verdict":"not_executed","evidence":"msg-9","effect":"e-2","hold_id":"h-e-2"}"#;
     assert_eq!(post(&s, OPERATOR, path, kind).await.status, 409);
-    // 같은 식별자에 다른 대상(다른 단계)이면 충돌이다.
     let target = r#"{"verdict":"confirmed","receipt":"msg-9","effect":"e-1","hold_id":"h-e-2"}"#;
     assert_eq!(post(&s, OPERATOR, path, target).await.status, 409);
-    // 처음 보는 식별자는 없는 보류다.
     let unknown =
         r#"{"verdict":"confirmed","receipt":"msg-9","effect":"e-2","hold_id":"h-unknown"}"#;
     assert_eq!(post(&s, OPERATOR, path, unknown).await.status, 404);
@@ -330,18 +322,17 @@ async fn hold_verdicts_are_operator_only_audited_and_idempotent() {
     assert_eq!(
         audit_count(&s).await,
         Some(3),
-        "거절된 요청은 감사를 더하지 않는다"
+        "rejected requests must not append audit rows"
     );
 }
 
 #[tokio::test]
 async fn not_executed_resumes_the_run_and_bad_verdicts_are_refused() {
     let fake = Fake::demo();
-    // 모든 단계가 미실행인 경우의 재개. 확정 단계가 있는 경우는 holds 시험에서 다룬다.
+    // Tests resume when all steps are not_executed; confirmed-step transitions live in holds.rs.
     fake.edit(|d| d.effects.retain(|e| e.effect.0 != "e-1"));
     let s = start(fake).await;
     let path = "/v1/admin/holds/personal/r-4/c-9/resolve";
-    // 각 본문은 보류 식별자를 갖추고도 다른 결함 하나 때문에 거절돼야 한다(식별자가 없으면 그것만으로 400이다).
     for bad in [
         r#"{"verdict":"confirmed","hold_id":"h-e-2"}"#,
         r#"{"verdict":"confirmed","receipt":"","hold_id":"h-e-2"}"#,
@@ -352,7 +343,6 @@ async fn not_executed_resumes_the_run_and_bad_verdicts_are_refused() {
         r#"{"verdict":"retry","evidence":"x","hold_id":"h-e-2"}"#,
         r#"{"evidence":"x","hold_id":"h-e-2"}"#,
         r#"{"verdict":"not_executed","evidence":"x","effect":"../e","hold_id":"h-e-2"}"#,
-        // 보류 식별자: 없거나 모양이 틀리면 거절한다.
         r#"{"verdict":"not_executed","evidence":"x","effect":"e-2"}"#,
         r#"{"verdict":"not_executed","evidence":"x","effect":"e-2","hold_id":""}"#,
         r#"{"verdict":"not_executed","evidence":"x","effect":"e-2","hold_id":7}"#,
@@ -377,7 +367,7 @@ async fn not_executed_resumes_the_run_and_bad_verdicts_are_refused() {
         &s,
         OPERATOR,
         path,
-        r#"{"verdict":"not_executed","evidence":"수신처 조회에서 해당 요청 없음 확인","effect":"e-2","hold_id":"h-e-2"}"#,
+        r#"{"verdict":"not_executed","evidence":"recipient lookup confirmed request absent","effect":"e-2","hold_id":"h-e-2"}"#,
     )
     .await;
     assert_eq!(ok.status, 200);
@@ -409,14 +399,14 @@ async fn audit_chain_verifies_and_reports_the_first_tampered_entry() {
     let rows = get(&s, OPERATOR, "/v1/admin/audit").await.json();
     let seqs: Vec<u64> = rows["items"]
         .as_array()
-        .expect("행")
+        .expect("rows")
         .iter()
         .filter_map(|e| e["seq"].as_u64())
         .collect();
-    assert_eq!(seqs, [3, 2, 1], "최신순");
+    assert_eq!(seqs, [3, 2, 1], "newest first");
     assert_eq!(
         rows["items"][1]["prev"], rows["items"][2]["hash"],
-        "체인으로 이어진다"
+        "linked hash chain"
     );
     let page = get(&s, OPERATOR, "/v1/admin/audit?limit=2").await.json();
     assert_eq!(page["next"], 2);
@@ -436,7 +426,6 @@ async fn audit_chain_verifies_and_reports_the_first_tampered_entry() {
 #[tokio::test]
 async fn repeating_the_same_decision_returns_the_existing_result_but_the_opposite_is_refused() {
     let path = "/v1/admin/approvals/ap-1/decide";
-    // 승인 뒤: 같은 승인·같은 해시는 기존 결과, 거절은 막힌다.
     let s = start(Fake::demo()).await;
     assert_eq!(
         post(&s, OPERATOR, path, &decide_body(true)).await.status,
@@ -456,10 +445,9 @@ async fn repeating_the_same_decision_returns_the_existing_result_but_the_opposit
     assert_eq!(
         post(&s, OPERATOR, path, &wrong_hash).await.status,
         409,
-        "다른 내용을 본 재전송은 기존 결과를 주지 않는다"
+        "replay with a different seen hash must be refused"
     );
-    assert_eq!(s.fake.decisions().len(), 1, "브로커는 한 번만 불린다");
-    // 거절 뒤도 대칭이다.
+    assert_eq!(s.fake.decisions().len(), 1, "broker called once");
     let s = start(Fake::demo()).await;
     assert_eq!(
         post(&s, OPERATOR, path, &decide_body(false)).await.status,
@@ -475,7 +463,7 @@ async fn repeating_the_same_decision_returns_the_existing_result_but_the_opposit
         409
     );
     assert_eq!(s.fake.decisions().len(), 1);
-    // 결정한 사람이 아닌 이는 기존 결과를 받지 못한다.
+    // Only the original decider receives the idempotent replay result.
     s.fake
         .edit(|d| d.approvals[0].decided_by = Some(bot_admin::fake::pid("local:guest")));
     assert_eq!(
@@ -493,18 +481,16 @@ async fn the_audit_page_has_a_next_cursor_only_when_more_rows_exist() {
         "/v1/admin/approvals/ap-1/decide",
         &decide_body(true),
     )
-    .await; // 감사 3건
+    .await;
     let total = get(&s, OPERATOR, "/v1/admin/audit?limit=200").await.json();
     assert_eq!(total["items"].as_array().map(Vec::len), Some(3));
     assert!(total["next"].is_null());
-    // 정확히 가득 찬 쪽에는 다음 쪽이 없다.
     let exact = get(&s, OPERATOR, "/v1/admin/audit?limit=3").await.json();
     assert_eq!(exact["items"].as_array().map(Vec::len), Some(3));
     assert!(
         exact["next"].is_null(),
-        "더 없는데 «더 보기»가 나오면 안 된다"
+        "exact-fit page must not emit a next cursor"
     );
-    // 더 있으면 마지막 행의 순번이 다음 기준이다.
     let part = get(&s, OPERATOR, "/v1/admin/audit?limit=2").await.json();
     assert_eq!(
         (
@@ -532,7 +518,7 @@ async fn the_audit_page_has_a_next_cursor_only_when_more_rows_exist() {
 
 #[tokio::test]
 async fn the_audit_page_is_exact_at_the_maximum_page_size_too() {
-    let s = start(Fake::demo()).await; // 감사 2건
+    let s = start(Fake::demo()).await;
     let add = |n: usize| {
         s.fake.edit(|d| {
             let (p, a) = (
@@ -544,17 +530,17 @@ async fn the_audit_page_is_exact_at_the_maximum_page_size_too() {
             }
         })
     };
-    add(198); // 정확히 200건
+    add(198); // 200 rows total
     let full = get(&s, OPERATOR, "/v1/admin/audit?limit=200").await.json();
     assert_eq!(full["items"].as_array().map(Vec::len), Some(200));
     assert!(
         full["next"].is_null(),
-        "마지막 쪽이 정확히 200건이면 다음 쪽은 없다"
+        "no next cursor when final page has exactly 200 rows"
     );
-    add(1); // 201건
+    add(1); // 201 rows total
     let page = get(&s, OPERATOR, "/v1/admin/audit?limit=200").await.json();
     assert_eq!(page["items"].as_array().map(Vec::len), Some(200));
-    let next = page["next"].as_u64().expect("다음 쪽이 있다");
+    let next = page["next"].as_u64().expect("next cursor");
     let rest = get(
         &s,
         OPERATOR,

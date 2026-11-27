@@ -1,7 +1,4 @@
-//! 도구가 환경으로 받는 자격이 지금 보관소에 없는 도구를 기동 때 찾아 **이름만** 경고한다. 스킬 하나의 설정이 빠졌다고 봇 전체가 서면 안 되므로
-//! worker는 그대로 시작한다(`bot validate`는 이런 프로필을 엄격하게 실패시킨다). 값은 읽어 보되 어디에도 남기지 않는다.
-//! 그 도구의 호출은 브로커가 **호출을 기록하기 전에** 고정 단어(`call.refuse secret_missing`)로 거절한다(`ToolRunner::admit_secrets`) — 승인 카드도
-//! 열지 않고, 재시도 순환도 없다.
+//! Startup scan warning on tools whose declared secrets are missing or unreadable.
 use bot_core::{
     id::{ProfileId, SecretName, ToolId},
     port::{Error, ProfileSecrets, SecretStore},
@@ -12,16 +9,12 @@ use std::{
     sync::Arc,
 };
 
-/// 자격을 쓸 수 없는 이유
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Why {
-    /// 보관소에 그 이름이 없다
     Missing,
-    /// 보관소를 읽지 못했다(키체인 잠김 등 — 지금만일 수 있다)
     Unreadable,
 }
 
-/// 쓸 수 없는 도구 하나와 그 이유가 된 자격 이름 하나
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Unusable {
     pub profile: ProfileId,
@@ -31,22 +24,23 @@ pub struct Unusable {
 }
 
 impl Unusable {
-    /// 운영자에게 보일 경고 한 줄. 이름만 싣는다.
+    /// Operator warning line containing secret names only (never values).
     pub fn warning(&self) -> String {
         let (profile, tool, secret) = (&self.profile.0, &self.tool.0, &self.secret);
         match self.why {
             Why::Missing => {
-                format!("경고: 프로필 {profile}의 도구 {tool}: 자격 이름 {secret} 없음 → 사용 불가")
+                format!(
+                    "warning: profile {profile} tool {tool}: secret {secret} is missing -> unusable"
+                )
             }
             Why::Unreadable => format!(
-                "경고: 프로필 {profile}의 도구 {tool}: 자격 이름 {secret}을(를) 읽지 못했어요(보관소 오류) → 지금은 사용할 수 없을 수 있어요"
+                "warning: profile {profile} tool {tool}: failed to read secret {secret} (store error) -> may be unavailable"
             ),
         }
     }
 }
 
 async fn check(handle: &Result<Box<dyn ProfileSecrets>, Error>, name: &str) -> Option<Why> {
-    // 이름 규칙에 맞지 않는 이름은 프로필 검증이 이미 거절했다
     let secret = SecretName::parse(name)?;
     match handle {
         Ok(handle) => match handle.resolve(secret).await {
@@ -58,14 +52,12 @@ async fn check(handle: &Result<Box<dyn ProfileSecrets>, Error>, name: &str) -> O
     }
 }
 
-/// 활성 프로필의 도구 중 선언한 자격을 지금 쓸 수 없는 것들(프로필·도구 ID·이름 순). 같은 이름은 프로필마다 한 번만 읽는다.
 pub async fn unusable_tools(
     secrets: &dyn SecretStore,
     active: &BTreeMap<ProfileId, Arc<Snapshot>>,
 ) -> Vec<Unusable> {
     let mut found = Vec::new();
     for (profile, snapshot) in active {
-        // 같은 도구 ID를 여러 에이전트·스킬이 선언할 수 있다: 선언한 자격 이름을 모두 모은다
         let mut wanted: BTreeMap<ToolId, BTreeSet<String>> = BTreeMap::new();
         for agent in snapshot.agents.values() {
             for skill in agent.skills.values() {
@@ -142,10 +134,8 @@ mod tests {
         }
     }
 
-    /// (스킬 이름, 도구 ID, (환경 변수, 자격 이름)들)
     type Declared<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
 
-    /// 도구들을 선언한 `personal` 프로필
     fn declaring(tools: &[Declared]) -> BTreeMap<ProfileId, Arc<Snapshot>> {
         let mut snapshot = (*profile("personal").build()).clone();
         let agent = snapshot.agents.get_mut(&AgentId("main".into())).unwrap();
@@ -194,7 +184,7 @@ mod tests {
         assert!(
             line.contains("agenda.delete")
                 && line.contains("calendar-writer")
-                && line.contains("사용 불가"),
+                && line.contains("unusable"),
             "{line}"
         );
         assert!(!line.contains("value-never-shown"), "{line}");
@@ -221,10 +211,13 @@ mod tests {
                 ("agenda.list".to_owned(), "key-b".to_owned()),
             ]
         );
-        assert_eq!(fake.resolved().len(), 2, "이름마다 한 번만 읽는다");
+        assert_eq!(
+            fake.resolved().len(),
+            2,
+            "each secret name is read once per profile"
+        );
     }
 
-    /// 읽을 때마다 보관소 오류를 내는 보관소
     struct Broken;
 
     struct BrokenHandle;
@@ -250,7 +243,7 @@ mod tests {
         let found = unusable_tools(&*secrets, &active).await;
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].why, Why::Unreadable);
-        assert!(found[0].warning().contains("읽지 못했어요"));
+        assert!(found[0].warning().contains("failed to read"));
         assert!(found[0].warning().contains("calendar-reader"));
     }
 

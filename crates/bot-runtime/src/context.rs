@@ -1,15 +1,8 @@
-//! 맥락 조립(순수 함수). 프로필 판본의 지침·스킬·지식, 요청자에게 보이는 기억, 같은 대화의 이전 차례로 모델 입력(`Assembled`)을 만든다.
-//! 같은 입력이면 항상 같은 출력이다(현재 시각도 입력으로 받는다).
+//! Pure model-context assembly from a profile snapshot, history, and visible memory.
 //!
-//! 규칙(docs/profile-spec.md):
-//! - 지침은 부모에서 자식까지 이미 합쳐진 `Agent.instructions`를 그대로 쓴다.
-//! - 지식은 입력 글과 단어가 겹치는 문서만 점수 순으로 **최대 8개·합계 32 KiB**, 각 문서에 출처(relative_path)를 붙인다.
-//!   한도를 넘으면 점수가 낮은 것부터 버리고 문서 중간은 자르지 않는다.
-//! - 기억은 호출자가 이미 요청자·대화 종류로 거른 `MemoryHit`만 받는다(가시성 판정은 저장소 몫이다). 이 모듈은 개수·크기만 막는다. 기억은 구성원이 쓴 글이라 지침이 아니다:
-//!   시스템 지침에는 본문을 넣지 않고(고정 안내 한 문단뿐), 이번 질문 바로 앞의 사용자 영역에 출처를 붙인 «비신뢰 참고 자료»로 싣는다(`memory.rs`).
-//! - 도구는 (요청 범위 ∩ 에이전트 상한 ∩ 정책 상한)이 도구의 스코프를 **모두** 덮을 때만 보인다. 안내일 뿐 경계가 아니다 — 최종 판정은 브로커가 호출마다 다시 한다.
-//! - 위임 대상은 직계 하위 에이전트뿐이다(`delegate` 도구).
-//! - OpenAI 호환 입구로 접수된 루트 실행은 호출자가 보낸 대화 전체가 비신뢰 자료다(`chat.rs`): 서버 이력을 쓰지 않고, 모든 턴을 순서·역할 라벨 그대로 한 번만 사용자 입력에 담는다.
+//! Security boundaries: recalled memory is placed only in an untrusted user reference block
+//! (`memory.rs`), visible tools are advisory (the broker re-authorizes every call), and
+//! authenticated API root runs wrap the entire caller history as untrusted data (`chat.rs`).
 
 use crate::model::{
     Exchange, Limits, Message, ModelRequest, RelayChannel, Role, Session, ToolKind, ToolSpec,
@@ -36,53 +29,44 @@ pub use memory::REFERENCE_HEADER;
 
 pub const MAX_KNOWLEDGE_DOCS: usize = 8;
 pub const MAX_KNOWLEDGE_BYTES: usize = 32 * 1024;
-/// 기억 항목 수·합계 상한(저장소가 많이 돌려줘도 모델 입력이 불어나지 않게)
 pub const MAX_MEMORY_ITEMS: usize = 16;
 pub const MAX_MEMORY_BYTES: usize = 8 * 1024;
-/// 이전 대화 합계 상한(오래된 차례부터 버린다)
 pub const MAX_HISTORY_BYTES: usize = 64 * 1024;
-/// 위임 도구의 ID. 워커가 이 ID를 가로채 `DelegationStore::delegate`로 보낸다.
 pub use bot_core::builtin::DELEGATE_TOOL;
 
-const WEEKDAYS: [&str; 7] = ["월", "화", "수", "목", "금", "토", "일"];
+const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 pub struct ContextInput<'a> {
     pub snapshot: &'a Snapshot,
     pub run: &'a RunContext,
-    /// 같은 대화의 이전 차례(오래된 순)
+    /// Previous turns in the same conversation (oldest first).
     pub history: &'a [Turn],
-    /// 요청자에게 보이는 기억(저장소가 가시성으로 이미 거른 것)
+    /// Visibility-filtered memory hits from the store.
     pub memory: &'a [MemoryHit],
     pub now: SystemTime,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContextError {
-    /// 판본에 이 run의 에이전트가 없다
     UnknownAgent(AgentId),
-    /// 도구를 직접 부르는 run에는 모델 맥락이 없다
     NotAnAgentRun,
-    /// 인증된 API 출처의 루트 실행인데 본문이 검증된 대화(`ChatBody`)가 아니다: 일반 입력으로 대신 읽지 않고 실패한다
+    /// Authenticated API root run whose body is not a verified `ChatBody` (fails closed).
     InvalidChat,
 }
 
 #[derive(Clone, Debug)]
 pub struct Assembled {
-    /// 모델 별칭(에이전트 → 부모 → 프로필 순으로 이미 풀린 값)
     pub model: String,
     pub system: String,
     pub conversation: Vec<Message>,
     pub tools: Vec<ToolSpec>,
-    /// 위임할 수 있는 직계 하위 에이전트
     pub delegates: Vec<AgentId>,
-    /// 에이전트가 AGENT.md에 명시한 읽기 전용 내장 도구(상속 없음)
+    /// Read-only built-in tools declared directly on this agent (not inherited).
     pub builtin: BTreeSet<Builtin>,
-    /// 고른 지식 문서의 출처(검증·관측용)
     pub knowledge: Vec<String>,
 }
 
 impl Assembled {
-    /// 워커가 시도·교환·시간·취소·중계 끝점을 더해 실행기에 줄 요청을 만든다.
     pub fn into_request(
         self,
         attempt: Attempt,
@@ -108,9 +92,7 @@ impl Assembled {
     }
 }
 
-// ── 지식 고르기 ───────────────────────────────────────────────────────────────────────────────────
-
-/// 글자·숫자 덩어리(두 글자 이상)의 집합. 한글처럼 조사가 붙는 말은 아래 글자쌍으로 보완한다.
+/// Alphanumeric tokens (2+ chars); paired with character bigrams below to match inflected forms.
 fn tokens(text: &str) -> BTreeSet<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -133,7 +115,6 @@ fn stem(path: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(stem, _)| stem)
 }
 
-/// 입력 글과 겹치는 정도: 같은 낱말 하나에 3점, 같은 글자쌍 하나에 1점. 문서의 글과 파일 이름을 본다.
 fn score(query: &BTreeSet<String>, query_pairs: &BTreeSet<(char, char)>, doc: &Document) -> usize {
     let words = tokens(&format!("{} {}", stem(&doc.relative_path), doc.text));
     let shared_words = query.intersection(&words).count();
@@ -141,8 +122,8 @@ fn score(query: &BTreeSet<String>, query_pairs: &BTreeSet<(char, char)>, doc: &D
     3 * shared_words + shared_pairs
 }
 
-/// 입력 글과 겹치는 문서를 점수 순(같으면 경로 순)으로 최대 8개·합계 32 KiB까지 고른다.
-/// 한도를 넘는 문서는 통째로 건너뛰고 다음 문서를 본다(문서 중간을 자르지 않는다).
+/// Picks up to `MAX_KNOWLEDGE_DOCS` / `MAX_KNOWLEDGE_BYTES` matching docs by score (path tie-break),
+/// skipping oversized docs whole rather than truncating.
 pub fn select_knowledge<'a>(query: &str, docs: &'a [Document]) -> Vec<&'a Document> {
     let words = tokens(query);
     if words.is_empty() {
@@ -172,9 +153,6 @@ pub fn select_knowledge<'a>(query: &str, docs: &'a [Document]) -> Vec<&'a Docume
     picked
 }
 
-// ── 입력 글 ───────────────────────────────────────────────────────────────────────────────────────
-
-/// 본문 문서에서 사람이 읽을 글만: `{"text":…}`면 그 글, 비어 있는 문서(`{}`·null)는 빈 글, 그 밖은 JSON 그대로.
 fn body_text(body: &JsonPayload) -> String {
     match serde_json::from_str::<Value>(&body.0) {
         Ok(Value::Null) => String::new(),
@@ -189,7 +167,7 @@ fn body_text(body: &JsonPayload) -> String {
     }
 }
 
-/// 기억 검색·지식 고르기에 쓸 이번 질문의 글. 비신뢰 대화(API 루트)는 마지막 user 턴 하나만이다(대화 전체·접수 때 붙은 지시를 섞지 않는다).
+/// Query string for memory and knowledge lookup; API root runs use only the last user turn.
 pub fn query_text(run: &RunContext) -> String {
     if chat::is_chat(run) {
         return chat::read(run)
@@ -199,7 +177,6 @@ pub fn query_text(run: &RunContext) -> String {
     current_input(&run.work).unwrap_or_default()
 }
 
-/// 이번 입력: 트리거의 고정 지시와 본문을 합친다(같으면 한 번, 한쪽이 비면 다른 쪽만).
 pub(crate) fn current_input(work: &Work) -> Result<String, ContextError> {
     let Target::Agent { instruction, .. } = &work.target else {
         return Err(ContextError::NotAnAgentRun);
@@ -210,11 +187,9 @@ pub(crate) fn current_input(work: &Work) -> Result<String, ContextError> {
         (true, _) => body.to_owned(),
         (false, true) => instruction.to_owned(),
         (false, false) if instruction == body => body.to_owned(),
-        (false, false) => format!("{instruction}\n\n입력:\n{body}"),
+        (false, false) => format!("{instruction}\n\nInput:\n{body}"),
     })
 }
-
-// ── 문서 조각 ─────────────────────────────────────────────────────────────────────────────────────
 
 fn clock(now: SystemTime, zone: &str) -> String {
     let tz: Tz = zone.parse().unwrap_or(chrono_tz::UTC);
@@ -233,7 +208,7 @@ fn clock(now: SystemTime, zone: &str) -> String {
     )
 }
 
-/// 하위 에이전트를 소개하는 한 줄: 프로필이 선언한 `description`, 없으면 합쳐진 지침의 마지막 문단(그 에이전트 자신의 AGENT.md)의 앞부분
+/// One-line child summary from declared `description`, falling back to the child's own final paragraph.
 fn hint(agent: &Agent) -> String {
     let declared = agent.description.trim();
     if !declared.is_empty() {
@@ -263,7 +238,7 @@ fn hint(agent: &Agent) -> String {
     line.trim().to_owned()
 }
 
-/// 이 run이 쓸 수 있는 범위: 요청 범위 ∩ 에이전트 상한 ∩ 정책 상한(에이전트별 상한 포함)
+/// Request scopes intersected with the agent ceiling and policy ceilings (including per-agent caps).
 pub(crate) fn effective_scopes(
     snapshot: &Snapshot,
     agent: &Agent,
@@ -337,14 +312,14 @@ fn history_messages(history: &[Turn]) -> Vec<Message> {
     kept
 }
 
-/// 모델 입력을 조립한다.
 pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
     let (snapshot, run) = (input.snapshot, input.run);
     let agent = snapshot
         .agents
         .get(&run.agent)
         .ok_or_else(|| ContextError::UnknownAgent(run.agent.clone()))?;
-    // 인증된 API 출처의 루트 실행은 호출자의 대화 전체가 비신뢰 자료다. 이 모드의 입력은 `instruction`(호출자의 마지막 user 글과 같은 값)도 신뢰 지시로 읽지 않는다
+    // Authenticated API root runs treat the caller's entire conversation as untrusted data,
+    // including `instruction` (which mirrors the last user turn).
     let chat = if chat::is_chat(run) {
         if !matches!(run.work.target, Target::Agent { .. }) {
             return Err(ContextError::NotAnAgentRun);
@@ -392,7 +367,7 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
         sections.push(agent.instructions.trim().to_owned());
     }
     sections.push(format!(
-        "## 현재 시각\n{}",
+        "## Current Time\n{}",
         clock(input.now, &snapshot.timezone)
     ));
     if chat.is_some() {
@@ -407,7 +382,7 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
         .map(|(name, skill)| format!("### {name}\n{}", skill.instructions.text.trim()))
         .collect();
     if !skills.is_empty() {
-        sections.push(format!("## 스킬\n{}", skills.join("\n\n")));
+        sections.push(format!("## Skills\n{}", skills.join("\n\n")));
     }
     if !children.is_empty() {
         let lines: Vec<String> = children
@@ -421,7 +396,7 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
             })
             .collect();
         sections.push(format!(
-            "## 위임\n직계 하위 에이전트에게만 `{DELEGATE_TOOL}` 도구로 일을 맡길 수 있어요.\n{}",
+            "## Delegation\nYou may delegate work only to direct child agents using the `{DELEGATE_TOOL}` tool.\n{}",
             lines.join("\n")
         ));
     }
@@ -430,16 +405,16 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
             .iter()
             .map(|d| format!("### {}\n{}", d.relative_path, d.text.trim_end()))
             .collect();
-        sections.push(format!("## 참고 문서\n{}", body.join("\n\n")));
+        sections.push(format!("## Reference Documents\n{}", body.join("\n\n")));
     }
-    // 회상한 기억은 지침이 아니다: 시스템에는 본문 없이 고정 안내만 두고, 본문은 아래 대화의 이번 질문 앞(사용자 영역)에 «비신뢰 참고 자료»로 싣는다
+    // Keep recalled memory out of system instructions; place bodies in the untrusted user block below.
     let reference = memory::reference(input.memory);
     if reference.is_some() {
         sections.push(memory::SYSTEM_NOTICE.to_owned());
     }
 
     let mut conversation = match &chat {
-        // 서버 이력은 쓰지 않는다: 매 요청이 호출자가 보낸 대화 전체로 닫힌다
+        // API root runs ignore server history; each request is closed over the caller's turns.
         Some(body) => vec![Message {
             role: Role::User,
             speaker: Some(run.principal.clone()),

@@ -1,1 +1,1 @@
-오늘 일정을 조회하고 변경 전에는 정확한 일정을 확인한다.
+Check today's agenda and confirm the exact event before making changes.

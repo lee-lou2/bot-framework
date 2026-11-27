@@ -1,11 +1,11 @@
-//! 보내지 못한 예약 회신의 이유(`UnsentReason`)와 정산을 막는 펜스(`DeliveryFence`).
+//! Reasons for unsent scheduled replies (`UnsentReason`) and settlement fencing (`DeliveryFence`).
 
 use crate::{
     command::JsonPayload,
     id::{ApprovalId, Attempt, PrincipalId},
 };
 
-/// 실행 중에는 현재 claim, 승인 대기 중에는 해당 발생의 유효한 카드와 인증된 소유자를 검증한다.
+/// Verifies the active claim while running, or the occurrence's valid approval card and owner while parked.
 pub enum DeliveryFence {
     Claim(Attempt),
     Approval {
@@ -16,14 +16,14 @@ pub enum DeliveryFence {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsentReason {
-    /// 소유자가 전송을 명시적으로 거절하거나 소비 전 승인을 철회했다.
+    /// Owner explicitly rejected delivery or revoked approval before consumption.
     Rejected,
-    /// 현재 등록부가 저장된 목적지를 거절하거나 같은 바인딩이 다른 실제 수신자를 가리킨다.
+    /// Current registry rejected the stored destination or the binding now resolves to a different recipient.
     Unrouted,
 }
 
-/// 공개 대화에도 남길 수 있는 고정 안내. 초안, 수신자, 지시문은 포함하지 않는다.
-pub const UNROUTED_NOTICE: &str = "예약 수신 경로가 바뀌어 이번 답은 보내지 않았습니다.";
+/// Fixed public-safe notice containing no draft, recipient, or instruction.
+pub const UNROUTED_NOTICE: &str = "Scheduled delivery route changed; this reply was not sent.";
 
 impl UnsentReason {
     pub fn code(self) -> &'static str {

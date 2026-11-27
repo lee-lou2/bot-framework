@@ -1,4 +1,4 @@
-//! 실제 브로커의 카드와 PG가 같은 예약 내용을 승인·소비하는지 확인한다.
+//! Verifies the real broker card and PG approve and consume the exact same sealed schedule arguments.
 
 use crate::support::*;
 use bot_broker::{
@@ -8,6 +8,7 @@ use bot_broker::{
 };
 use bot_core::{
     canon,
+    cards::LABEL_ARGS,
     command::{CallResult, JsonPayload, ToolCall},
     cron::Cron,
     id::*,
@@ -22,9 +23,9 @@ use std::{
 
 const OWNER: &str = "local:owner";
 const TOOL: &str = "schedule.create";
-const ARGS: &str = r#"{"cron":"@daily","instruction":"아침 확인"}"#;
+const ARGS: &str = r#"{"cron":"@daily","instruction":"morning check"}"#;
 const SEALED: &str =
-    r#"{"cron":"0 0 * * *","instruction":"아침 확인","quiet":false,"timezone":"Asia/Seoul"}"#;
+    r#"{"cron":"0 0 * * *","instruction":"morning check","quiet":false,"timezone":"Asia/Seoul"}"#;
 
 fn broker(db: &TestDb) -> BrokerService {
     let catalog = Arc::new(FakeCatalog::new());
@@ -68,7 +69,7 @@ fn request(attempt: &Attempt, args: &str) -> ToolCall {
 
 async fn owner_attempt(db: &TestDb) -> Attempt {
     db.publish().await;
-    let mut command = accept("personal", "morning", "아침 예약");
+    let mut command = accept("personal", "morning", "morning schedule");
     command.scopes = scopes(&["run", TOOL]);
     command.approver = Some(PrincipalId(OWNER.into()));
     runs(db).accept(command).await.unwrap();
@@ -76,12 +77,13 @@ async fn owner_attempt(db: &TestDb) -> Attempt {
 }
 
 fn card_args(card: &JsonPayload) -> String {
+    let prefix = format!("{LABEL_ARGS}: ");
     let value = canon::parse(&card.0).unwrap();
     let args: Vec<_> = value["approval"]["lines"]
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|line| line.as_str()?.strip_prefix("인자: "))
+        .filter_map(|line| line.as_str()?.strip_prefix(&prefix))
         .collect();
     assert_eq!(args.len(), 1);
     args[0].into()
@@ -95,7 +97,7 @@ async fn the_approved_card_binds_the_timezone_in_postgres_before_the_receipt_is_
     let service = broker(&db);
     let first = owner_attempt(&db).await;
     let CallResult::Awaiting(nonce) = service.call(request(&first, ARGS)).await.unwrap() else {
-        panic!("승인 대기가 필요하다")
+        panic!("expected Awaiting approval")
     };
     let stored = calls(&db).approval(nonce.clone()).await.unwrap();
     assert_eq!(card_args(&stored.card), SEALED);
@@ -117,7 +119,7 @@ async fn the_approved_card_binds_the_timezone_in_postgres_before_the_receipt_is_
             expression: Cron::parse("@daily").unwrap(),
             timezone: zone.into(),
         },
-        instruction: "아침 확인".into(),
+        instruction: "morning check".into(),
         quiet: false,
         destination: None,
     };
@@ -141,7 +143,7 @@ async fn the_approved_card_binds_the_timezone_in_postgres_before_the_receipt_is_
     );
 
     let CallResult::Done(receipt) = service.call(request(&resumed, ARGS)).await.unwrap() else {
-        panic!("승인 후 예약 영수증이 필요하다")
+        panic!("expected Done receipt after approval")
     };
     assert_eq!(
         calls(&db).approval(nonce).await.unwrap().state,
@@ -153,7 +155,7 @@ async fn the_approved_card_binds_the_timezone_in_postgres_before_the_receipt_is_
         "Asia/Seoul"
     );
     let CallResult::Done(repeated) = service.call(request(&resumed, SEALED)).await.unwrap() else {
-        panic!("같은 조건의 재전달은 완료 영수증이어야 한다")
+        panic!("expected Done receipt on identical redelivery")
     };
     assert_eq!(repeated, receipt);
     assert_eq!(
@@ -175,15 +177,15 @@ async fn fractional_seconds_on_the_card_match_the_millisecond_actually_scheduled
         bot_core::schedule::utc::format_utc(UNIX_EPOCH + Duration::from_millis(ms as u64));
     let raw_at = expected_at.replace(".250Z", ".250999999Z");
     assert_ne!(raw_at, expected_at);
-    let raw = serde_json::json!({"instruction":"확인", "at":raw_at}).to_string();
+    let raw = serde_json::json!({"instruction":"check", "at":raw_at}).to_string();
     let CallResult::Awaiting(nonce) = service.call(request(&first, &raw)).await.unwrap() else {
-        panic!("승인 대기가 필요하다")
+        panic!("expected Awaiting approval")
     };
     let stored = calls(&db).approval(nonce.clone()).await.unwrap();
     let shown = card_args(&stored.card);
     assert_eq!(
         canon::parse(&shown).unwrap(),
-        serde_json::json!({"at":expected_at, "instruction":"확인", "quiet":false})
+        serde_json::json!({"at":expected_at, "instruction":"check", "quiet":false})
     );
     assert_eq!(canon::sha256(&shown), stored.approval.args_sha256);
     service

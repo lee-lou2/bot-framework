@@ -1,5 +1,4 @@
-//! 관측 내보내기 공통 런타임: 설정 옵션(`Options`), 상태 통계(`Stats`), 원자 카운터(`Counters`),
-//! 활성화 판본 문(`Door`), 지수 백오프 회로 차단기(`Breaker`), 비밀 헤더 조회, 끝점 검증.
+//! Shared observability runtime: options, stats, atomic counters, activation door, circuit breaker, and endpoint checks.
 
 use super::{
     HostHeaderValue, SecretRef,
@@ -50,7 +49,7 @@ pub struct Stats {
     pub failed: u64,
     pub circuit: &'static str,
     pub last_error: Option<&'static str>,
-    /// (이름, 종류, 출처 `호스트:포트`, 상태). 주소의 경로·헤더는 싣지 않는다.
+    /// `(name, kind, host:port origin, circuit state)` without paths or headers.
     pub backends: Vec<(String, &'static str, String, &'static str)>,
 }
 
@@ -120,8 +119,7 @@ impl Counters {
     }
 }
 
-/// 내보내기 문: 호스트가 «이 프로세스의 활성화 판본이 지금도 현재인가»에 이은 확인(`set_gate`).
-/// 확인하지 못해도(저장소 장애·시간 초과) 닫힌 것으로 본다. 문이 달리기 전(시작 중)과 문을 쓰지 않는 구성(시험)은 열려 있다.
+/// Activation gate attached once by the host; open until configured, then fails closed on false or timeout.
 pub(crate) struct Door {
     check: OnceLock<(Fence, Duration)>,
 }
@@ -147,7 +145,7 @@ impl Door {
     }
 }
 
-/// 한 배치를 보내지 못한 이유. `Stale`은 전송 직전 문이 닫혀 의도하고 버린 것(실패·차단기와 무관)이다.
+/// Batch send failure: `Stale` is an intentional drop when the gate closes and does not trip the breaker.
 pub(crate) enum Fail {
     Stale,
     Class(&'static str),
@@ -178,7 +176,7 @@ impl Breaker {
         (self.fails, self.trips, self.until) = (0, 0, None);
     }
 
-    /// 열렸으면 참. 열린 뒤 첫 시도(반열림)가 실패하면 곧바로 더 길게 다시 연다.
+    /// Returns true if the circuit tripped open; a failing half-open probe immediately re-opens with longer backoff.
     pub(crate) fn fail(&mut self, now: Instant) -> bool {
         self.fails += 1;
         if self.fails < self.opts.trip_after {
@@ -200,7 +198,6 @@ pub(crate) fn instance_id() -> String {
     bot_core::random::random_hex(6)
 }
 
-/// 끝점 검사: `https://`는 명시 없이 허용하고, 평문 `http://`는 `remote: true`가 없으면 루프백·사설 주소·`localhost`만 받는다.
 pub(crate) fn validate_endpoint(
     owner: &str,
     endpoint: &str,
@@ -212,8 +209,8 @@ pub(crate) fn validate_endpoint(
         Target::parse_with_default(endpoint, default_path).map_err(|e| format!("{owner}: {e}"))?;
     if target.scheme == Scheme::Http && !remote && !target.stays_local() {
         return Err(format!(
-            "{owner}: 수집기 호스트 «{host}»이(가) 루프백·사설 주소가 아니다 — 평문 http라 헤더 비밀과 내용이 사설망 밖으로 나갈 수 있다. \
-             https://나 사설 IP(또는 localhost)로 적거나, 정말 평문으로 보내려면 {remote_hint}를 true로 명시한다",
+            "{owner}: collector host `{host}` is not loopback or private — plaintext http may expose header secrets outside the private network; \
+             use https://, a private IP/localhost, or set {remote_hint} to true",
             host = target.host
         ));
     }
@@ -230,7 +227,7 @@ pub(crate) fn check_host_headers(
             HostHeaderValue::Secret(_) => "",
         };
         if !header_ok(name, plain) {
-            return Err(format!("{owner}: 잘못된 헤더 이름 또는 값"));
+            return Err(format!("{owner}: invalid header name or value"));
         }
     }
     Ok(())

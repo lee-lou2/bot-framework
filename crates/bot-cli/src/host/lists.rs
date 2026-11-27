@@ -1,4 +1,5 @@
-//! 호스트 등록부의 목록형 절(`models`·`egress`) 해석 도우미.
+//! Parsing helpers and authority-fingerprint binders for list-shaped host catalog sections.
+
 use super::{HostFileError, PrivateEgressMap, bad};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -6,14 +7,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 fn name_list(value: &Value, path: &str) -> Result<BTreeSet<String>, HostFileError> {
     let Value::Array(items) = value else {
-        return Err(bad(format!("{path}: 문자열 배열이어야 해요")));
+        return Err(bad(format!("{path}: must be an array of strings")));
     };
     items
         .iter()
         .map(|item| {
             item.as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| bad(format!("{path}: 문자열 배열이어야 해요")))
+                .ok_or_else(|| bad(format!("{path}: must be an array of strings")))
         })
         .collect()
 }
@@ -25,57 +26,54 @@ pub(super) fn profile_map(
 ) -> Result<BTreeMap<String, BTreeSet<String>>, HostFileError> {
     let Value::Object(map) = value else {
         return Err(bad(format!(
-            "{path}: 프로필 이름을 키로 하는 객체여야 해요"
+            "{path}: must be an object keyed by profile name"
         )));
     };
     map.iter()
         .map(|(profile, list)| {
             if !bot_core::id::is_name(profile) {
-                return Err(bad(format!("{path}: 프로필 이름이 올바르지 않아요")));
+                return Err(bad(format!("{path}: invalid profile name")));
             }
             let items = name_list(list, &format!("{path}.{profile}"))?;
             if !items.iter().all(|item| check(item)) {
-                return Err(bad(format!(
-                    "{path}.{profile}: 올바르지 않은 항목이 있어요"
-                )));
+                return Err(bad(format!("{path}.{profile}: contains an invalid entry")));
             }
             Ok((profile.clone(), items))
         })
         .collect()
 }
 
-/// `private_egress`: 프로필 → `{ "host:port": "ip:port" }` (사설/로컬 고정 목적지 매핑).
 pub(super) fn private_egress_map(value: &Value) -> Result<PrivateEgressMap, HostFileError> {
     let Value::Object(profiles) = value else {
-        return Err(bad("private_egress: 프로필 이름을 키로 하는 객체여야 해요"));
+        return Err(bad(
+            "private_egress: must be an object keyed by profile name",
+        ));
     };
     profiles
         .iter()
         .map(|(profile, routes)| {
             if !bot_core::id::is_name(profile) {
-                return Err(bad("private_egress: 프로필 이름이 올바르지 않아요"));
+                return Err(bad("private_egress: invalid profile name"));
             }
             let Value::Object(entries) = routes else {
                 return Err(bad(format!(
-                    "private_egress.{profile}: `host:port -> ip:port` 객체여야 해요"
+                    "private_egress.{profile}: must be a `host:port -> ip:port` object"
                 )));
             };
             let mapped = entries
                 .iter()
                 .map(|(from, to)| {
                     let hp = bot_broker::resolve::HostPort::parse(from).ok_or_else(|| {
-                        bad(format!(
-                            "private_egress.{profile}: 올바르지 않은 호스트예요: {from}"
-                        ))
+                        bad(format!("private_egress.{profile}: invalid host: {from}"))
                     })?;
                     let addr_str = to.as_str().ok_or_else(|| {
                         bad(format!(
-                            "private_egress.{profile}.{from}: `ip:port` 문자열이어야 해요"
+                            "private_egress.{profile}.{from}: must be an `ip:port` string"
                         ))
                     })?;
                     let addr: std::net::SocketAddr = addr_str.parse().map_err(|_| {
                         bad(format!(
-                            "private_egress.{profile}.{from}: 올바르지 않은 `ip:port`예요: {addr_str}"
+                            "private_egress.{profile}.{from}: invalid `ip:port`: {addr_str}"
                         ))
                     })?;
                     Ok(((hp.host, hp.port), addr))
@@ -86,7 +84,6 @@ pub(super) fn private_egress_map(value: &Value) -> Result<PrivateEgressMap, Host
         .collect()
 }
 
-/// `host:port` (소문자·숫자·`.`·`-`, 포트 1~5자리)
 pub(super) fn is_egress(text: &str) -> bool {
     let Some((host, port)) = text.rsplit_once(':') else {
         return false;
@@ -99,13 +96,12 @@ pub(super) fn is_egress(text: &str) -> bool {
         && port.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// 호스트 `super_admins` 항목: 유효한 비-서비스 주체(`local:*` · `slack:*/*` · `http:*/*`).
 pub(super) fn is_super_admin(text: &str) -> bool {
     bot_core::identity::identity_kind(text)
         .is_some_and(|kind| kind != bot_core::identity::IdentityKind::Service)
 }
 
-/// 사설 고정 egress 매핑이 비어 있지 않을 때만 활성화 지문에 묶는다(없으면 기존 지문 바이트 그대로).
+/// Binds `private_egress` into the activation fingerprint only when non-empty to preserve existing bytes.
 pub(super) fn bind_private_egress(base: [u8; 32], map: &PrivateEgressMap) -> [u8; 32] {
     if map.is_empty() {
         return base;
@@ -123,7 +119,7 @@ pub(super) fn bind_private_egress(base: [u8; 32], map: &PrivateEgressMap) -> [u8
     hash.finalize().into()
 }
 
-/// 호스트 `super_admins` 상한이 비어 있지 않을 때만 활성화 지문에 묶는다(없으면 기존 지문 바이트 그대로).
+/// Binds `super_admins` into the activation fingerprint only when non-empty to preserve existing bytes.
 pub(super) fn bind_super_admins(
     base: [u8; 32],
     admins: &BTreeMap<String, BTreeSet<String>>,
@@ -204,11 +200,11 @@ mod tests {
 
         assert_eq!(
             fp_base, fp_empty,
-            "빈 super_admins는 기존 지문 바이트와 같아야 해요"
+            "empty super_admins must preserve existing fingerprint bytes"
         );
         assert_ne!(
             fp_base, fp_admin,
-            "super_admins 설정은 활성화 지문에 묶여야 해요"
+            "super_admins must bind into the activation fingerprint"
         );
         assert_ne!(fp_admin, fp_other);
         assert_eq!(
@@ -217,7 +213,7 @@ mod tests {
                 .unwrap()
                 .authority_fingerprint(&rev)
                 .unwrap()),
-            "같은 입력은 결정적 지문"
+            "same input must produce a deterministic fingerprint"
         );
     }
 }

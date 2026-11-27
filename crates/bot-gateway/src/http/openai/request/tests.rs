@@ -5,7 +5,6 @@ fn ok(json: &str) -> Chat {
     parse(json.as_bytes()).unwrap_or_else(|f| panic!("{json}: {} {:?}", f.code, f.param))
 }
 
-/// (코드, 경로)
 fn err(json: &str) -> (&'static str, Option<String>) {
     let failure = parse(json.as_bytes()).expect_err(json);
     assert_eq!(failure.status, StatusCode::BAD_REQUEST, "{json}");
@@ -20,9 +19,11 @@ fn unsupported(param: &str) -> (&'static str, Option<String>) {
     ("unsupported_parameter", Some(param.to_owned()))
 }
 
-/// 현재 질문: 마지막 user 턴의 글
 fn question(chat: &Chat) -> &str {
-    let at = chat.body.current().expect("검증이 user 턴을 보장한다");
+    let at = chat
+        .body
+        .current()
+        .expect("validation guarantees a user turn");
     &chat.body.turns[at].content
 }
 
@@ -67,7 +68,6 @@ fn all_turns_keep_their_order_roles_names_and_text() {
             ("assistant", "after", None),
         ]
     );
-    // 현재 질문은 마지막 user 턴이다(그 뒤의 assistant는 질문이 아니다)
     assert_eq!(question(&chat), "last question");
 }
 
@@ -219,7 +219,6 @@ fn message_roles_content_and_names_are_checked_with_paths() {
         err(r#"{"model":"a","messages":[{"role":"user","content":"x","name":null}]}"#),
         invalid("messages[0].name")
     );
-    // 알 수 없는 메시지 필드(도구 호출·거절 포함)
     assert_eq!(
         err(
             r#"{"model":"a","messages":[{"role":"assistant","content":"x","tool_calls":[]},{"role":"user","content":"q"}]}"#
@@ -307,7 +306,6 @@ fn accepted_but_ignored_fields_are_range_checked_and_may_be_null() {
     assert_eq!(err(&with(r#""seed":1.5"#)), invalid("seed"));
     assert_eq!(err(&with(r#""seed":"7""#)), invalid("seed"));
     assert_eq!(err(&with(r#""user":5"#)), invalid("user"));
-    // user는 공식 스키마가 null을 허용하지 않는다
     assert_eq!(err(&with(r#""user":null"#)), invalid("user"));
     assert_eq!(err(&with(r#""metadata":{"a":1}"#)), invalid("metadata"));
     assert_eq!(err(&with(r#""metadata":[1]"#)), invalid("metadata"));
@@ -331,7 +329,6 @@ fn accepted_but_ignored_fields_are_range_checked_and_may_be_null() {
         err(&with(r#""response_format":"text""#)),
         invalid("response_format")
     );
-    // response_format은 공식 스키마가 null을 허용하지 않는다
     assert_eq!(
         err(&with(r#""response_format":null"#)),
         invalid("response_format")
@@ -373,7 +370,6 @@ fn what_the_server_cannot_keep_is_unsupported_and_null_means_omitted_only_where_
             "{field}"
         );
     }
-    // 공식 스키마가 nullable로 허용한 필드는 null이면 생략과 같다
     for nullable in [
         "audio",
         "frequency_penalty",
@@ -391,7 +387,6 @@ fn what_the_server_cannot_keep_is_unsupported_and_null_means_omitted_only_where_
     ] {
         ok(&with(&format!(r#""{nullable}":null"#)));
     }
-    // nullable이 아닌 필드와 알 수 없는 키는 null이어도 거절한다
     for field in [
         "function_call",
         "functions",
@@ -412,11 +407,9 @@ fn what_the_server_cannot_keep_is_unsupported_and_null_means_omitted_only_where_
 
 #[test]
 fn an_unknown_key_is_never_echoed_only_names_from_the_pinned_schema_are() {
-    // 호출자가 지어낸 필드 이름(비밀을 담았을 수 있다)은 오류 본문 어디에도 되풀이하지 않는다: 알려진 부모 경로까지만 알린다
     let secret = concat!("sk-live-", "0123456789", "abcdef");
     let at = |json: String| -> Failure { parse(json.as_bytes()).expect_err(&json) };
     let cases = [
-        // (본문, 기대 param)
         (
             format!(r#"{{"model":"a","messages":[{USER}],"{secret}":1}}"#),
             None,
@@ -454,7 +447,6 @@ fn an_unknown_key_is_never_echoed_only_names_from_the_pinned_schema_are() {
         assert!(!rendered.contains(secret), "{rendered}");
         assert!(!rendered.contains("0123456789"), "{rendered}");
     }
-    // 고정 스키마에 있는 이름은 그대로 보여 준다(지원하지 않아서 거절하는 필드가 무엇인지 알려 준다)
     for name in TOP_FIELDS.iter().filter(|name| {
         ![
             "model",
@@ -477,12 +469,11 @@ fn an_unknown_key_is_never_echoed_only_names_from_the_pinned_schema_are() {
                 .expect_err(name);
         assert_eq!(failure.param.as_deref(), Some(*name), "{name}");
     }
-    // 이름이 길든 이상하든 같다: 알려지지 않은 이름은 어느 자리에서도 되풀이되지 않는다
     let long = "k".repeat(65);
     for odd in [
         long.as_str(),
         "sp ace",
-        "한글",
+        "café",
         "a\"b",
         "a<b>",
         "tools2",
@@ -500,7 +491,6 @@ fn an_unknown_key_is_never_echoed_only_names_from_the_pinned_schema_are() {
             "{odd:?}"
         );
     }
-    // 메시지 본문·키 값도 오류에 되돌아가지 않는다
     let failure = parse(
         br#"{"model":"a","messages":[{"role":"user","content":"SECRET-TEXT","extra-field":1}]}"#,
     )

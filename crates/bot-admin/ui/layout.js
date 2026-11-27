@@ -1,12 +1,9 @@
-// 구조 지도의 순수 계산: 조회 API의 카드(graph.nodes)에서 카드·칩 좌표, 위임 연결선, 연결 관계, 카메라 값을 만든다.
-// DOM·네트워크를 쓰지 않아 node에서도 그대로 불러 시험할 수 있다. 같은 입력은 같은 결과다.
+// Pure structure-map layout: computes card/chip geometry, delegation curves, relations, and column plans from graph.nodes.
 (function (root) {
   "use strict";
 
-  // 배율 기준은 카메라(camera.js)가 정한다: 칩 글자 13px이 지도 배율 READABLE 이상에서 12px 아래로 내려가지 않는다.
   const CAM = typeof module !== "undefined" && module.exports ? require("./camera.js") : root.BotCamera;
 
-  // 단위는 px.
   const C = {
     CHIP_W: 172, CHIP_H: 34, CHIP_GX: 8, CHIP_GY: 6, CARD_PX: 16, HEAD: 52, CARD_PB: 16, DIV: 14, EMPTY_H: 34,
     GAP_X: 32, GAP_Y: 32, BUS: 64, PAD: 40, PROFILE_GAP: 72, LABEL_H: 44, MAX_COLS: 4, R: 14,
@@ -14,12 +11,11 @@
   };
   C.CARD_W = 2 * C.CHIP_W + C.CHIP_GX + 2 * C.CARD_PX;
 
-  // 에이전트 카드 안에 놓는 항목(위에서 아래로 입구 → 트리거 → 스킬 → 도구)과, 아래 독에 놓는 공통 자원.
   const ITEM_KINDS = ["binding", "trigger", "skill", "tool"];
   const COMMON_KINDS = ["scope", "secret"];
   const KINDS = ITEM_KINDS.concat(COMMON_KINDS);
-  const KIND_LABEL = { binding: "입구", trigger: "트리거", skill: "스킬", tool: "도구", scope: "스코프", secret: "비밀", agent: "에이전트", profile: "프로필" };
-  const REL_LABEL = { delegates: "위임", uses: "사용", runs: "소유", handles: "처리", triggers: "깨움", needs: "필요" };
+  const KIND_LABEL = { binding: "Binding", trigger: "Trigger", skill: "Skill", tool: "Tool", scope: "Scope", secret: "Secret", agent: "Agent", profile: "Profile" };
+  const REL_LABEL = { delegates: "Delegates", uses: "Uses", runs: "Owns", handles: "Handles", triggers: "Triggers", needs: "Needs" };
 
   const key = (c) => c.profile + "|" + c.id;
   const compare = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -29,10 +25,9 @@
     for (let i = 0; i < c.facts.length; i++) if (c.facts[i].key === name) return c.facts[i].val;
     return null;
   }
-  // 정책이 허용하지 않은 스코프만 «꺼짐»(사선·흐림)으로 보인다.
   const isOff = (c) => c.kind === "scope" && fact(c, "granted") === "false";
   const agentName = (to) => to.replace(/^agent:/, "");
-  // 카드의 주인 에이전트. 입구(binding)는 프로필 수준 카드라 «처리»로 이어진 에이전트의 카드 안에 놓는다.
+  // Bindings are profile-scoped nodes placed inside the agent card linked via "handles".
   function ownerOf(c) {
     if (c.agent) return c.agent;
     if (c.kind !== "binding") return null;
@@ -41,7 +36,6 @@
   }
   const ownerKey = (c) => (ownerOf(c) ? c.profile + "|agent:" + ownerOf(c) : null);
 
-  // 같은 에이전트 안 항목: 종류 → (트리거는 검사 순서) → 이름
   function itemOrder(a, b) {
     const k = ITEM_KINDS.indexOf(a.kind) - ITEM_KINDS.indexOf(b.kind);
     if (k) return k;
@@ -52,7 +46,7 @@
     return compare(a.name, b.name);
   }
 
-  // 위임 깊이: 들어오는 위임이 없는 에이전트가 0(main 우선), 그 아래로 BFS. 순환·미도달은 0으로 둔다.
+  // BFS delegation depth from zero-indegree roots (main first); cycles and unreachable nodes default to 0.
   function layers(agents) {
     const byName = {}, incoming = {}, out = {};
     agents.forEach((a) => { byName[a.name] = a; incoming[a.name] = 0; out[a.name] = []; });
@@ -73,7 +67,6 @@
     return depth;
   }
 
-  // ---------- 관계 ----------
   function index(nodes) {
     const byKey = {}, out = {}, inc = {};
     nodes.forEach((c) => { byKey[key(c)] = c; out[key(c)] = []; inc[key(c)] = []; });
@@ -86,13 +79,11 @@
     return { byKey, out, inc };
   }
 
-  // 어떤 노드를 가리키면 함께 밝힐 키: 자기 자신, 소속 에이전트, 직접 이어진 노드(와 그 소속 에이전트), 위임 사슬(프로필까지), 에이전트면 그 항목들.
   function related(idx, k) {
     const set = {}, add = (x) => { if (x && idx.byKey[x]) set[x] = true; };
     const c = idx.byKey[k];
     if (!c) return set;
     add(k); add(ownerKey(c));
-    // 프로필 카드: 그 프로필의 모든 카드와 항목을 함께 밝힌다.
     if (c.kind === "profile") { Object.keys(idx.byKey).forEach((x) => { if (idx.byKey[x].profile === c.profile) add(x); }); return set; }
     const near = (x) => { add(x); const n = idx.byKey[x]; if (n) add(ownerKey(n)); };
     idx.out[k].forEach((e) => near(e.key));
@@ -118,7 +109,6 @@
     return hit;
   }
 
-  // 범례(= 필터): 있는 종류와 개수, 꺼진(정책이 허용하지 않은) 개수.
   function legend(nodes) {
     const m = {};
     nodes.forEach((c) => {
@@ -130,9 +120,6 @@
     return KINDS.filter((k) => m[k]).map((k) => m[k]);
   }
 
-  // ---------- 배치 ----------
-  // 한 에이전트 카드의 안쪽: 종류별 묶음(입구·트리거·스킬·도구 순)을 2열 칩 격자로, 묶음 사이에 가는 구분선 자리.
-  // 부모에게서 물려받은 스킬(ref)은 같은 키의 칩으로 한 번 더 놓는다(눌러서 이동하면 정의한 쪽 카드로 간다).
   function inner(items) {
     const groups = [];
     let y = C.HEAD;
@@ -151,13 +138,11 @@
     return { groups, empty, h: y + C.CARD_PB, dividers: groups.slice(1).map((g) => g.y - C.DIV / 2) };
   }
 
-  // 곡선: 위·아래로 수직 접선을 가진 3차 곡선(S자). 위임선과 «필요» 선이 함께 쓴다. 아래로도 위로도 이어진다.
   function curve(x0, y0, x1, y1) {
     const dir = y1 >= y0 ? 1 : -1, dy = Math.max(24, Math.abs(y1 - y0) / 2);
     return "M" + x0 + " " + y0 + "C" + x0 + " " + (y0 + dir * dy) + " " + x1 + " " + (y1 - dir * dy) + " " + x1 + " " + y1;
   }
-  // 위임선의 경로: 첫 행 자식은 부모 아래 중앙 → 자식 위 중앙의 곡선, 아래 행 자식은 곡선으로 왼쪽 골목에 내려앉아
-  // 골목을 따라 내려간 뒤 둥글게 꺾여 카드 왼쪽 옆으로 들어간다(카드를 가로지르지 않는다). pts는 [부모 아래, 모선, 골목(모선), 골목(입구), 입구].
+  // Route lower-row children through the left gutter so delegation curves never cross card faces.
   function delegationPath(kind, pts) {
     const S = pts[0], E = pts[pts.length - 1];
     if (kind !== "left") return curve(S[0], S[1], E[0], E[1]);
@@ -165,14 +150,12 @@
     return curve(S[0], S[1], g[0], g[1]) + "L" + g[0] + " " + (E[1] - r) + "Q" + g[0] + " " + E[1] + " " + (g[0] + r) + " " + E[1] + "L" + E[0] + " " + E[1];
   }
 
-  // 한 프로필을 cols 열로 배치한다(좌표는 프로필 상자 왼쪽 위 기준). 위임 깊이마다 한 층, 층 안은 cols열 격자.
   function layoutProfile(agents, itemsOf, cols) {
     const depth = layers(agents), levels = {}, geo = {};
     agents.forEach((a) => { (levels[depth[a.name]] = levels[depth[a.name]] || []).push(a); geo[a.name] = inner(itemsOf(a)); });
     const plan = Object.keys(levels).map(Number).sort((a, b) => a - b).map((d) => {
       const list = levels[d].slice().sort(mainFirst), c = Math.min(cols, list.length), rows = [];
       for (let i = 0; i < list.length; i += c) rows.push(list.slice(i, i + c));
-      // 같은 행은 높이를 맞춘다.
       return { d, c, rows, rowH: rows.map((r) => r.reduce((m, a) => Math.max(m, geo[a.name].h), 0)) };
     });
     const levelW = (p) => p.c * C.CARD_W + (p.c - 1) * C.GAP_X;
@@ -183,13 +166,12 @@
       if (li) y += C.BUS;
       p.rows.forEach((row, r) => {
         const rowW = row.length * C.CARD_W + (row.length - 1) * C.GAP_X;
-        const x0 = p.d === 0 ? (w - rowW) / 2 : (w - levelW(p)) / 2; // 맨 위 층은 가운데, 아래 층은 격자 열에 맞춘다
+        const x0 = p.d === 0 ? (w - rowW) / 2 : (w - levelW(p)) / 2;
         row.forEach((a, c) => { cards[a.name] = { agent: a, x: x0 + c * (C.CARD_W + C.GAP_X), y, w: C.CARD_W, h: p.rowH[r], depth: p.d, row: r, col: c, lastRow: r === p.rows.length - 1, geo: geo[a.name] }; });
         y += p.rowH[r] + (r < p.rows.length - 1 ? C.GAP_Y : 0);
       });
       bottoms[p.d] = y;
     });
-    // 위임 선: 부모 아래 중앙에서 모선(bus)까지 내려와 → 첫 행 자식은 위로 들어가고, 아래 행 자식은 왼쪽 골목으로 내려가 왼쪽 옆으로 들어간다.
     const edges = [];
     agents.forEach((u) => u.links.forEach((l) => {
       if (l.rel !== "delegates") return;
@@ -208,11 +190,6 @@
     return { w, h: y, cards, edges };
   }
 
-  /**
-   * nodes: 조회 API `graph.nodes`. opts: { viewport: {w,h}, insets: {top,right,bottom,left}, hidden: {종류: true}, hideOff, cols }.
-   * 반환: { width, height, cols, profiles, cards, edges, commons, rects, bounds, empty } — 좌표는 모두 스테이지 기준 절대 좌표.
-   * 프로필 이름표는 프로필이 하나여도 늘 그린다(이름표가 프로필 카드라 눌러서 사실을 볼 수 있다).
-   */
   function build(nodes, opts) {
     opts = opts || {};
     const hidden = opts.hidden || {}, hideOff = !!opts.hideOff;
@@ -231,14 +208,12 @@
         const refs = a.links.filter((l) => l.rel === "uses").map((l) => byId[l.to]).filter((c) => c && c.kind === "skill" && ownerOf(c) !== a.name && visible(c)).map((c) => Object.assign({}, c, { ref: true }));
         return own.concat(refs).sort(itemOrder);
       };
-      // 공통 종류와 주인 없는 항목은 아래 독(공통 자원)에서 보인다.
       const commons = KINDS.map((kind) => ({ profile: name, kind, items: cards.filter((c) => c.kind === kind && visible(c) && (COMMON_KINDS.indexOf(kind) >= 0 || !known[ownerOf(c)])).sort((a, b) => compare(a.name, b.name)) })).filter((g) => g.items.length);
       const card = cards.filter((c) => c.kind === "profile")[0];
       return { name, agents, itemsOf, commons, pkey: card ? key(card) : null };
     });
     const headH = C.LABEL_H;
 
-    // 프로필 상자들을 위에서 아래로 쌓는다.
     const at = (cols) => {
       const blocks = prep.map((p) => (p.agents.length ? layoutProfile(p.agents, p.itemsOf, cols) : { w: C.CARD_W, h: 0, cards: {}, edges: [] }));
       const w = blocks.reduce((m, b) => Math.max(m, b.w), 0);
@@ -252,7 +227,7 @@
     if (!cols && !vp) cols = Math.min(3, maxAgents);
     if (cols) laid = at(cols);
     else {
-      // 열 수 고르기: 기본 배율이 읽을 수 있는 선(READABLE) 이상인 배치 중 한눈에 가장 크게 보이는 것, 같으면 화면 비율에 가까운 것.
+      // Pick the column count maximizing fit scale while staying >= READABLE, breaking ties by aspect ratio.
       const a = { w: vp.w - ins.left - ins.right, h: vp.h - ins.top - ins.bottom };
       let best = null;
       for (let c = 1; c <= Math.min(C.MAX_COLS, maxAgents); c++) {
@@ -267,7 +242,6 @@
     const cards = [], edges = [], rects = {}, profiles = [];
     laid.placed.forEach((p, i) => {
       const ox = C.PAD + p.x, oy = C.PAD + p.top + headH;
-      // 프로필 카드의 사각형은 프로필 상자 전체다(눌러서 다가가면 그 프로필 전체가 보인다).
       const box = { name: prep[i].name, key: prep[i].pkey, x: C.PAD + p.x, y: C.PAD + p.top, w: p.b.w, h: p.b.h + headH };
       profiles.push(box);
       if (box.key) rects[box.key] = { x: box.x, y: box.y, w: box.w, h: box.h, card: box.key };
@@ -276,7 +250,7 @@
         const card = { key: key(a), id: a.id, profile: a.profile, name: a.name, summary: a.summary, x: ox + c.x, y: oy + c.y, w: c.w, h: c.h, depth: c.depth, row: c.row, col: c.col, root: c.depth === 0, empty: c.geo.empty, dividers: c.geo.dividers, groups: c.geo.groups, counts: c.geo.groups.map((g) => ({ kind: g.kind, n: g.chips.length })) };
         cards.push(card);
         rects[card.key] = { x: card.x, y: card.y, w: card.w, h: card.h, card: card.key };
-        // 물려받은 칩은 정의한 쪽(먼저 놓인 칩)의 자리를 덮어쓰지 않는다.
+        // Do not let inherited skill chips overwrite the defining agent's rect.
         card.groups.forEach((g) => g.chips.forEach((ch) => { if (!ch.ref || !rects[ch.key]) rects[ch.key] = { x: card.x + ch.x, y: card.y + ch.y, w: ch.w, h: ch.h, card: card.key }; }));
       });
       p.b.edges.forEach((e) => {
@@ -284,7 +258,6 @@
         edges.push({ id: e.id, from: e.from, to: e.to, cross: e.cross, d: delegationPath(e.cross ? "top" : e.end[2], pts), start: [e.start[0] + ox, e.start[1] + oy], end: [e.end[0] + ox, e.end[1] + oy, e.end[2]] });
       });
     });
-    // 화면에 담을 상자: 에이전트 카드들과 프로필 이름 줄까지.
     const boxes = cards.map((c) => c).concat(profiles);
     const b = boxes.length ? boxes.reduce((m, c) => ({ x1: Math.min(m.x1, c.x), y1: Math.min(m.y1, c.y), x2: Math.max(m.x2, c.x + c.w), y2: Math.max(m.y2, c.y + c.h) }), { x1: 1e9, y1: 1e9, x2: -1e9, y2: -1e9 }) : { x1: 0, y1: 0, x2: 0, y2: 0 };
     return {

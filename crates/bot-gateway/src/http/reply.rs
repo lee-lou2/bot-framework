@@ -1,4 +1,4 @@
-//! HTTP 응답 조립: 오류 코드와 도구 결과(`{status, body}`)의 검증·변환.
+//! HTTP response builders and `{status, body}` tool-result validation and conversion.
 use axum::{
     body::Body,
     http::{HeaderValue, StatusCode, header},
@@ -8,9 +8,8 @@ use bot_core::command::JsonPayload;
 use serde_json::{Value, json};
 use std::time::Duration;
 
-/// 도구 결과가 돌려줄 수 있는 최종 응답 코드. 인증(401)·속도(429)·서버 오류(5xx)는 게이트웨이만 만든다.
+/// Status codes tools may return directly; auth (401), rate-limit (429), and 5xx belong to the gateway.
 pub const ALLOWED_STATUS: [u16; 8] = [200, 201, 204, 400, 403, 404, 409, 422];
-/// 도구 결과 본문의 최대 직렬화 크기
 pub const RESULT_LIMIT: usize = 1 << 20;
 
 pub fn json_response(status: StatusCode, value: &Value) -> Response {
@@ -33,7 +32,7 @@ pub fn error(status: StatusCode, code: &str) -> Response {
     json_response(status, &json!({ "error": code }))
 }
 
-/// `Retry-After`(초, 올림, 최소 1)를 붙인다.
+/// Attaches `Retry-After` rounded up to whole seconds, minimum 1.
 pub fn retry_after(mut response: Response, wait: Duration) -> Response {
     let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
     response
@@ -49,8 +48,7 @@ pub fn with_header(mut response: Response, name: header::HeaderName, value: &str
     response
 }
 
-/// MCP `CallToolResult`(`{"content":[{"type":"text","text":"..."}],"isError":false}` 또는 `structuredContent`)에서
-/// 도구 본문 JSON을 꺼낸다. `isError: true`면 거절한다(`None`). 이미 `{status, body}`이면 그대로 쓴다.
+/// Unwraps non-error MCP `CallToolResult` envelopes into the underlying tool JSON; rejects `isError: true`.
 fn unwrap_mcp(value: Value) -> Option<Value> {
     let Value::Object(map) = &value else {
         return Some(value);
@@ -76,8 +74,7 @@ fn unwrap_mcp(value: Value) -> Option<Value> {
     Some(value)
 }
 
-/// 도구 결과를 그대로 HTTP 응답으로 쓴다. 정확히 `{status, body}`(또는 이를 감싼 정상 MCP 결과)이고 상태가 허용 집합 안이며
-/// 본문이 크기 한도 안일 때만 응답이 된다(204는 본문 `null`). 아니면 None.
+/// Converts a strict `{status, body}` tool result (204 requires `body: null`) within `RESULT_LIMIT` into an HTTP response.
 pub fn tool_result(result: &JsonPayload) -> Option<Response> {
     let raw: Value = serde_json::from_str(&result.0).ok()?;
     let Value::Object(map) = unwrap_mcp(raw)? else {
@@ -139,7 +136,6 @@ mod tests {
         }
         let huge = format!(r#"{{"status":200,"body":"{}"}}"#, "x".repeat(RESULT_LIMIT));
         assert_eq!(status_of(&huge), None);
-        // MCP CallToolResult로 감싼 {status, body}도 정상 결과만 풀어 쓴다.
         assert_eq!(
             status_of(
                 r#"{"content":[{"type":"text","text":"{\"status\":404,\"body\":{\"ok\":false}}"}],"isError":false}"#
