@@ -1,5 +1,4 @@
-//! 어댑터가 인증·정규화해 접수 순서(`Ingress::admit`)에 넘기는 입력. 이 안의 값은 모두 인증된 어댑터가 채운 것이고
-//! 메시지 본문이나 헤더의 글로 입구·주체·대화를 바꿀 수 없다.
+//! Authenticated, normalized adapter inputs passed into `Ingress::admit`.
 use crate::entrance::Real;
 use bot_core::{
     id::{PrincipalId, RequestId},
@@ -7,20 +6,14 @@ use bot_core::{
 };
 use serde_json::Value;
 
-/// 접수 사건. 트리거 후보를 고르는 기준이다.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
-    /// 사람의 대화 한 건(Slack 멘션·DM·CLI 채팅). 트리거 `{event: message}`에 대응한다.
     Message,
-    /// 봇이 참여한 스레드의 사람 답글(Slack). 트리거 `{event: thread-reply}`에 대응한다.
     ThreadReply,
-    /// 등록 채널 글에 단 반응(Slack). 트리거 `{event: reaction}`에 대응한다.
     Reaction,
-    /// 인증된 HTTP 요청. 트리거 `{http: {method, path}}`에 대응한다.
     Http { method: String, path: String },
 }
 
-/// 접수 뒤 HTTP 응답 방식. 트리거의 `response.mode`이고 채팅은 항상 `Accepted`다.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Respond {
     Accepted,
@@ -45,16 +38,15 @@ impl From<&bot_core::profile::ResponseMode> for Respond {
     }
 }
 
-/// 로그에 `{:?}`로 찍지 않는다(본문이 들어 있다).
+/// Do not log with `{:?}` because `body` holds raw request content.
 pub struct Inbound {
     pub real: Real,
     pub principal: PrincipalId,
-    /// 재시도·재전달에도 같은 값. Slack은 event_id, HTTP·CLI는 호출자가 주는 키.
+    /// Stable idempotency key across retries (Slack event ID or caller-supplied key).
     pub request: RequestId,
     pub conversation: Conversation,
-    /// 접근 권한이 묶인 첨부 참조(내려받지 않는다)
+    /// Access-scoped attachment references (never fetched by the gateway).
     pub attachments: Vec<String>,
-    /// 어댑터가 검증한 본문. 채팅은 `{"text": "…"}`, HTTP는 요청 JSON 그대로.
     pub body: Value,
     pub event: Event,
 }
@@ -69,7 +61,7 @@ pub fn kind_name(kind: &ConversationKind) -> &'static str {
     }
 }
 
-/// 요청 ID로 쓸 수 있는 글: 1~128자, 영숫자와 `. _ : -`
+/// Validates request IDs: 1-128 ASCII alphanumeric or `. _ : -` characters.
 pub fn valid_request_id(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 128
@@ -87,7 +79,7 @@ mod tests {
         for ok in ["a", "Ev0123ABC", "req-1.2_3:4", &"x".repeat(128)] {
             assert!(valid_request_id(ok), "{ok}");
         }
-        for bad in ["", " ", "a b", "a/b", "a\n", "한글", &"x".repeat(129)] {
+        for bad in ["", " ", "a b", "a/b", "a\n", "café", &"x".repeat(129)] {
             assert!(!valid_request_id(bad), "{bad:?}");
         }
     }

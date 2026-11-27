@@ -1,6 +1,4 @@
-//! 작업 폴더 밖으로 새지 않는 안전한 열기. 세션 파일은 VM이 쓸 수 있는 작업 폴더 안에 있어서, 경로를 바꿔치기(심볼릭 링크·FIFO·폴더)하면
-//! 호스트가 폴더 밖의 파일을 읽거나 읽기에서 멈출 수 있다. 그래서 작업 폴더에서 한 칸씩 `openat(O_NOFOLLOW)`로 내려가고(중간 폴더 교체에도 안전하다),
-//! 마지막은 `O_NOFOLLOW|O_NONBLOCK`으로 열어(FIFO가 열기에서 멈추지 않게) **열린 fd 자체**가 일반 파일인지 확인한다.
+//! Confined `openat`-based file opening for VM-writable session files, refusing symlinks, FIFOs, and directory escapes.
 
 use rustix::{
     fs::{FileType, Mode, OFlags, fstat, open, openat},
@@ -10,13 +8,12 @@ use std::{fs::File, path::Path};
 
 pub enum Opened {
     File(File),
-    /// 아직 없다(CLI가 곧 만든다)
     Missing,
-    /// 일반 파일이 아니거나(링크·FIFO·폴더) 경로가 작업 폴더 밖으로 샌다: 이 세션을 믿을 수 없다
+    /// Target is not a regular file (symlink, FIFO, directory) or escapes `root`.
     Unsafe,
 }
 
-/// `root`(호스트가 만든 작업 폴더) 밑의 `relative`(`a/b/c`)를 연다. 상위(`..`)·빈 칸·NUL이 있는 경로는 받지 않는다.
+/// Traverses `relative` component by component under `root` with `O_NOFOLLOW`, opens the leaf with `O_NONBLOCK`, and verifies `fstat` is a regular file.
 pub fn open_beneath(root: &Path, relative: &str) -> Opened {
     let parts: Vec<&str> = relative.split('/').collect();
     if parts
@@ -32,7 +29,7 @@ pub fn open_beneath(root: &Path, relative: &str) -> Opened {
     ) else {
         return Opened::Missing;
     };
-    let (last, folders) = parts.split_last().expect("비어 있지 않다");
+    let (last, folders) = parts.split_last().expect("parts is non-empty");
     for part in folders {
         dir = match openat(
             &dir,
@@ -89,8 +86,8 @@ mod tests {
         let root = root("plain");
         let rel = "claude/projects/-bot/s.jsonl";
         assert!(matches!(open_beneath(&root, rel), Opened::Missing));
-        std::fs::write(root.join(rel), "줄\n").unwrap();
-        assert_eq!(read(open_beneath(&root, rel)).as_deref(), Some("줄\n"));
+        std::fs::write(root.join(rel), "line\n").unwrap();
+        assert_eq!(read(open_beneath(&root, rel)).as_deref(), Some("line\n"));
         assert!(matches!(
             open_beneath(&root.join("nope"), rel),
             Opened::Missing
@@ -103,11 +100,9 @@ mod tests {
         let outside = std::env::temp_dir().join(format!("bot-open-secret-{}", std::process::id()));
         std::fs::write(&outside, "host secret\n").unwrap();
         let rel = "claude/projects/-bot/s.jsonl";
-        // 마지막 칸이 링크
         symlink(&outside, root.join(rel)).unwrap();
         assert!(matches!(open_beneath(&root, rel), Opened::Unsafe));
         std::fs::remove_file(root.join(rel)).unwrap();
-        // 중간 폴더를 폴더 밖으로 가는 링크로 바꿔치기
         let outside_dir = std::env::temp_dir().join(format!("bot-open-dir-{}", std::process::id()));
         std::fs::create_dir_all(&outside_dir).unwrap();
         std::fs::write(outside_dir.join("s.jsonl"), "host secret\n").unwrap();
@@ -116,7 +111,6 @@ mod tests {
         assert!(matches!(open_beneath(&root, rel), Opened::Unsafe));
         std::fs::remove_file(root.join("claude/projects/-bot")).unwrap();
         std::fs::create_dir_all(root.join("claude/projects/-bot")).unwrap();
-        // FIFO: 열기에서 멈추지 않고 거절한다
         let fifo = root.join(rel);
         let made = std::process::Command::new("mkfifo")
             .arg(&fifo)
@@ -125,7 +119,6 @@ mod tests {
         assert!(made.success());
         assert!(matches!(open_beneath(&root, rel), Opened::Unsafe));
         std::fs::remove_file(&fifo).unwrap();
-        // 폴더, 상위·빈 칸·점 칸
         std::fs::create_dir_all(root.join(rel)).unwrap();
         assert!(matches!(open_beneath(&root, rel), Opened::Unsafe));
         for odd in ["../x", "claude//s", "./s", "claude/../s", ""] {

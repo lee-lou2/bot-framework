@@ -1,4 +1,4 @@
-//! Streamable HTTP 클라이언트: 가짜 서버(`FakeMcp`, 명세의 요구를 검사한다)와 가짜 전송 위에서 현행·구판 서버를 각각 확인한다.
+//! Streamable HTTP client tests against `FakeMcp` and `FakeWire` for modern and legacy servers.
 use super::*;
 use crate::testing::{Era, FakeMcp, FakeWire, McpRequest, McpTool, Probe};
 use serde_json::json;
@@ -11,10 +11,10 @@ fn tools() -> Vec<McpTool> {
     vec![
         McpTool::new(
             "get",
-            "조회",
+            "Query",
             json!({"type": "object", "properties": {"q": {"type": "string"}}}),
         ),
-        McpTool::new("put", "저장", json!({"type": "object"})),
+        McpTool::new("put", "Store", json!({"type": "object"})),
     ]
 }
 
@@ -49,7 +49,7 @@ async fn round_trip(http: &mut Http) -> Value {
     http.connect(LIMIT).await.unwrap();
     assert_eq!(http.tools(LIMIT).await.unwrap().len(), 2);
     let found = http.find_tool("get", LIMIT).await.unwrap().unwrap();
-    assert_eq!(found["description"], "조회");
+    assert_eq!(found["description"], "Query");
     http.call(
         "get",
         r#"{"q":"x"}"#,
@@ -81,7 +81,7 @@ async fn a_current_server_needs_no_handshake_and_answers_json_and_sse_alike() {
         let result = round_trip(&mut http).await;
         assert_eq!(text(&result), "ok:get:{\"q\":\"x\"}", "sse={sse}");
         assert_eq!(http.version(), Some(MODERN));
-        // 핸드셰이크도 세션도 없다: discover → list(두 번: tools()·find_tool) → call
+        // No handshake or session: discover -> list (twice: tools() + find_tool) -> call.
         assert_eq!(
             rpcs(&fake),
             ["server/discover", "tools/list", "tools/list", "tools/call"],
@@ -94,7 +94,6 @@ async fn a_current_server_needs_no_handshake_and_answers_json_and_sse_alike() {
         }
         let call = fake.requests().pop().unwrap();
         assert_eq!(call.header("mcp-name"), Some("get"));
-        // 호출 본문의 `_meta`: 필수 판본·기능과 우리가 더 싣는 멱등 키, 인자는 받은 바이트 그대로
         assert!(
             call.body.contains(r#""arguments":{"q":"x"}"#),
             "{}",
@@ -132,7 +131,7 @@ async fn a_legacy_server_is_reached_only_after_the_official_fallback_and_keeps_i
             assert_eq!(text(&result), "ok:get:{\"q\":\"x\"}", "{probe:?} sse={sse}");
             assert_eq!(http.version(), Some(LEGACY));
             let seen = rpcs(&fake);
-            // 읽기 전용 discover가 먼저이고, 구판 확인 뒤에만 initialize가 간다. 서버가 보낸 `ping`에는 응답(메서드 없는 본문)이 간다
+            // Read-only discover goes first; initialize follows only after legacy fallback.
             assert_eq!(
                 &seen[..3],
                 ["server/discover", "initialize", "notifications/initialized"],
@@ -141,16 +140,15 @@ async fn a_legacy_server_is_reached_only_after_the_official_fallback_and_keeps_i
             assert_eq!(
                 seen.iter().filter(|m| *m == "tools/call").count(),
                 1,
-                "{probe:?}: 호출은 한 번"
+                "{probe:?}: call must happen once"
             );
             assert_eq!(seen.last().map(String::as_str), Some("DELETE"));
             if sse {
                 assert!(
                     seen.iter().any(|m| m.is_empty()),
-                    "{probe:?}: ping에 답했다"
+                    "{probe:?}: expected response to server ping"
                 );
             }
-            // initialize 뒤의 모든 요청에 판본과 세션 ID가 있다
             for request in &fake.requests()[2..] {
                 assert_eq!(
                     request.header("mcp-protocol-version"),
@@ -182,13 +180,11 @@ async fn a_legacy_server_without_sessions_and_one_refusing_delete_both_work() {
             .iter()
             .all(|r| r.header("mcp-session-id").is_none())
     );
-    // 세션이 없으면 DELETE도 보내지 않는다
     assert_eq!(fake.count("DELETE"), 0);
 }
 
 #[tokio::test]
 async fn a_modern_error_never_triggers_the_legacy_handshake() {
-    // 현행 서버가 «지원하는 판본이 없다»고 답했다 → 판본 오류, 구판으로 떨어지지 않는다
     let mut fake = FakeMcp::new(Era::Legacy, tools());
     fake.probe = Probe::Modern400None;
     let fake = Arc::new(fake);
@@ -213,12 +209,10 @@ async fn authentication_and_server_failures_are_not_a_reason_to_fall_back() {
     assert_eq!(
         rpcs(&fake),
         ["server/discover"],
-        "인증 실패에 initialize를 보내지 않는다"
+        "auth failure must not trigger initialize"
     );
-    // 맞는 자격이면 된다
     let (mut ok, _) = client(&fake, Some("secret-token-value"));
     ok.connect(LIMIT).await.unwrap();
-    // 500은 판본 문제가 아니다
     let mut broken = FakeMcp::new(Era::Modern, tools());
     broken.fail = Some(("server/discover".into(), 500));
     let broken = Arc::new(broken);
@@ -252,7 +246,7 @@ async fn the_bearer_rides_only_in_the_authorization_header() {
             );
             assert!(
                 !request.body.contains("bearer-value-123456"),
-                "{era:?}: 본문"
+                "{era:?}: body"
             );
             assert!(!request.path.contains("bearer-value-123456"));
             for (name, value) in &request.headers {
@@ -261,7 +255,7 @@ async fn the_bearer_rides_only_in_the_authorization_header() {
                 }
             }
         }
-        // 전송 포트에는 비밀 머리로 표시돼 넘어간다(진단 출력에서 가려진다)
+        // Marked as secret header on the wire port so diagnostics redact it.
         let secrets = wire.secret_values.lock().unwrap().clone();
         assert!(!secrets.is_empty() && secrets.iter().all(|v| v == "Bearer bearer-value-123456"));
     }
@@ -276,7 +270,6 @@ async fn pagination_is_followed_to_the_end_and_an_endless_list_is_an_error() {
     http.connect(LIMIT).await.unwrap();
     assert_eq!(http.tools(LIMIT).await.unwrap().len(), 2);
     assert_eq!(fake.count("tools/list"), 2);
-    // 쪽이 끝나지 않으면 불완전한 목록이다
     let many: Vec<McpTool> = (0..40)
         .map(|n| McpTool::new(&format!("t{n}"), "", json!({"type": "object"})))
         .collect();
@@ -289,7 +282,7 @@ async fn pagination_is_followed_to_the_end_and_an_endless_list_is_an_error() {
     assert_eq!(endless.count("tools/list"), MAX_PAGES);
 }
 
-/// 긴 호출이 전송의 기본 무응답 제한(120초)에 먼저 끊기지 않게, `tools/call`만 호출 한도보다 조금 긴 전송 제한을 싣는다. 협상·목록·정리 요청은 싣지 않는다.
+/// Only `tools/call` carries a wire timeout slightly longer than the call limit so long non-streaming calls do not trip the default 120s idle timeout.
 #[tokio::test]
 async fn only_the_call_request_carries_a_transport_limit_a_little_longer_than_the_call_limit() {
     for era in [Era::Modern, Era::Legacy] {
@@ -307,22 +300,20 @@ async fn only_the_call_request_carries_a_transport_limit_a_little_longer_than_th
         assert_eq!(
             calls[0].1,
             Some(Duration::from_secs(900) + AUX_LIMIT),
-            "호출 한도 + 여유"
+            "call limit plus margin"
         );
         assert!(
             seen.iter()
                 .filter(|(rpc, _)| rpc != "tools/call")
                 .all(|(_, limit)| limit.is_none()),
-            "협상·목록·정리에는 싣지 않는다: {seen:?}"
+            "must not set wire timeout on handshake/list/close: {seen:?}"
         );
-        // 호출이 끝난 뒤 보내는 요청에는 남지 않는다
         assert!(http.wire_timeout.is_none());
     }
 }
 
 #[tokio::test]
 async fn redirects_hangs_losses_and_unreachable_servers_are_classified_without_resending() {
-    // 3xx는 따라가지 않고 상태로 돌려준다(호출은 한 번뿐)
     let mut fake = FakeMcp::new(Era::Modern, tools());
     fake.redirect = Some(("tools/call".into(), "https://elsewhere.example/mcp".into()));
     let fake = Arc::new(fake);
@@ -347,7 +338,6 @@ async fn redirects_hangs_losses_and_unreachable_servers_are_classified_without_r
             .iter()
             .all(|t| t.1 == "mcp.example")
     );
-    // 응답을 잃으면 Io, 끝나지 않으면 Timeout, 연결 전이면 Unreached
     let fake = server(Era::Modern);
     let (mut http, wire) = client(&fake, None);
     http.connect(LIMIT).await.unwrap();
@@ -356,7 +346,7 @@ async fn redirects_hangs_losses_and_unreachable_servers_are_classified_without_r
         http.call("get", "{}", "", Vec::new(), LIMIT).await,
         Err(McpError::Io)
     );
-    assert_eq!(fake.count("tools/call"), 1, "다시 보내지 않는다");
+    assert_eq!(fake.count("tools/call"), 1, "must not resend");
     *wire.lose.lock().unwrap() = None;
     let mut slow = FakeMcp::new(Era::Modern, tools());
     slow.hang = Some("tools/call".into());
@@ -375,7 +365,7 @@ async fn redirects_hangs_losses_and_unreachable_servers_are_classified_without_r
 
 #[tokio::test]
 async fn protocol_violations_are_errors_not_guesses() {
-    // 현행 서버가 스트림에서 요청을 보내면 위반이다(`input_required`·서버 요청은 지원하지 않는다)
+    // Modern servers must not send server-initiated requests on the stream.
     let mut fake = FakeMcp::new(Era::Modern, tools());
     fake.sse = true;
     fake.ping = true;
@@ -383,7 +373,6 @@ async fn protocol_violations_are_errors_not_guesses() {
     let (mut http, _) = client(&fake, None);
     http.connect(LIMIT).await.unwrap_err();
     assert_eq!(rpcs(&fake), ["server/discover"]);
-    // 응답 본문이 없는 2xx, 알 수 없는 결과 종류
     assert!(matches!(
         finish(Answer {
             status: 200,
@@ -428,7 +417,6 @@ async fn schema_annotated_arguments_are_mirrored_into_headers_and_a_mismatch_is_
         .unwrap();
     let sent = fake.requests().pop().unwrap();
     assert_eq!(sent.header("mcp-param-region"), Some("us-west1"));
-    // 머리 없이 보내면 서버가 HeaderMismatch로 거절하고, 클라이언트는 다시 보내지 않는다
     let err = http
         .call("sql", r#"{"region":"us-west1"}"#, "", Vec::new(), LIMIT)
         .await
@@ -454,7 +442,7 @@ async fn the_older_legacy_versions_negotiate_and_only_the_newer_two_get_the_vers
         assert!(result.to_string().contains("ok:get"), "{version}: {result}");
         assert_eq!(http.version(), Some(version), "{version}");
         http.close().await;
-        // 핸드셰이크 뒤의 요청: 세션 ID는 모두, 판본 머리는 2025-06-18부터(2025-03-26 명세에는 그 머리가 없다)
+        // 2025-03-26 predates the `MCP-Protocol-Version` request header.
         let requests = fake.requests();
         let after: Vec<&McpRequest> = requests
             .iter()
@@ -474,7 +462,6 @@ async fn the_older_legacy_versions_negotiate_and_only_the_newer_two_get_the_vers
                 "{version}: {r:?}"
             );
         }
-        // initialize는 우리가 내세우는 최신 구판으로 가고, 쓰기일 수 있는 호출은 한 번만 갔다
         let init = requests.iter().find(|r| r.rpc() == "initialize").unwrap();
         assert!(
             init.body.contains("\"protocolVersion\":\"2025-11-25\""),
@@ -488,7 +475,6 @@ async fn the_older_legacy_versions_negotiate_and_only_the_newer_two_get_the_vers
 #[tokio::test]
 async fn an_older_only_server_is_reached_from_the_discover_error_and_an_unknown_version_is_refused()
 {
-    // 현행 오류가 알려 주는 지원 판본이 더 오래된 구판뿐이어도 그 구판으로 간다
     let mut fake = FakeMcp::new(Era::Legacy, tools());
     fake.probe = Probe::Modern400Older;
     fake.legacy = "2025-06-18";
@@ -496,7 +482,6 @@ async fn an_older_only_server_is_reached_from_the_discover_error_and_an_unknown_
     let (mut http, _wire) = client(&fake, None);
     round_trip(&mut http).await;
     assert_eq!(http.version(), Some("2025-06-18"));
-    // 서버가 아는 구판이 아닌 판본으로 답하면 협상하지 않는다(도구는 부르지 않는다)
     for version in ["2024-11-05", "2099-01-01", "2025-11-26"] {
         let mut fake = FakeMcp::new(Era::Legacy, tools());
         fake.legacy = version;

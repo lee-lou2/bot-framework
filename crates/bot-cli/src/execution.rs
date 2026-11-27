@@ -1,13 +1,4 @@
-//! 호스트 설정의 실행 절(`providers`·`sandbox`, docs/architecture.md «호스트 설정과 역할 조립»)과 권한 지문.
-//!
-//! - `providers`: 모델 별칭 → 실행 방법. 모양 검사와 종류별 규칙은 `provider.rs`다.
-//! - `sandbox.srt`: 도구를 실행하는 역할의 srt(`binary`·`work_root`, 절대 경로). `sandbox.apple`: 모델 CLI를 쓰는 워커의 VM
-//!   (`image` 다이제스트 고정·`network`·선택 `relay_bind`는 그 호스트 전용 IPv4 주소 — 생략하면 닻이 확인한 주소, 전체 인터페이스·loopback 금지 — 와
-//!   호스트별 선택 `work_root`·`instance`·`binary`).
-//!
-//! 이 절의 **모양**은 모든 명령이 검사하지만 **필요 여부**는 역할이 정한다(런타임 역할만 실제 providers·샌드박스가 필요하다).
-//! 권한이 달라지는 설정(모델 허용·상류 목적지와 자격 이름·egress·서버 설치 판본·VM 이미지와 망)은 활성화 판본에 묶는다 —
-//! 구판 워커가 철회된 호스트 목적지를 쓰지 못하게 한다. 자격 **값**과 호스트별 경로(`work_root`·설치 위치)·주소·인스턴스 이름은 넣지 않는다.
+//! Host execution sections (`providers`, `sandbox`) and authority fingerprint calculation.
 use bot_core::id::Revision;
 use bot_profile::HostCatalog;
 use serde_json::{Map, Value};
@@ -21,23 +12,19 @@ pub use provider::{ApiProvider, Provider, parse_providers};
 pub struct Srt {
     pub binary: PathBuf,
     pub work_root: PathBuf,
-    /// 샌드박스 안 도구 프로세스의 `PATH`에 추가할 호스트 절대 폴더 목록(선택, 최대 16개). 홈 밖 CLI 설치 경로(`/opt/homebrew/bin` 등)를 열 때 쓴다.
+    /// Optional extra host directories (up to 16) appended to the sandboxed tool `PATH`.
     pub extra_path: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Apple {
-    /// 다이제스트로 고정한 이미지(`…@sha256:<64자리>`)
+    /// Digest-pinned VM image (`<name>@sha256:<64 hex>`).
     pub image: String,
     pub network: String,
-    /// 릴레이가 듣는 그 호스트 전용 인터페이스 주소(전체 인터페이스·loopback·IPv6 금지). 생략하면 닻이 망에서 확인한 게이트웨이 IP에서 OS가 빈 포트를
-    /// 정한다. 적었으면 그 IP가 확인한 게이트웨이 IP와 정확히 같을 때만 시작한다(포트 0이면 OS가 정한다).
+    /// Host-only IPv4 relay bind address; omits to use the anchor-detected gateway IP on an ephemeral port.
     pub relay_bind: Option<SocketAddr>,
-    /// 호출별 입력·작업 폴더를 만드는 호스트 폴더(절대 경로). 생략하면 설치 폴더 옆 `work/models`.
     pub work_root: Option<PathBuf>,
-    /// 같은 기계에서 도는 워커마다 다른 이름(소유 라벨·VM 이름 접두사·소유권 잠금의 기준). 생략하면 `botvm`.
     pub instance: Option<String>,
-    /// `container` 실행 파일(절대 경로). 생략하면 PATH의 `container`.
     pub binary: Option<PathBuf>,
 }
 
@@ -50,12 +37,12 @@ pub struct Sandbox {
 fn object<'a>(value: &'a Value, path: &str) -> Result<&'a Map<String, Value>, String> {
     value
         .as_object()
-        .ok_or_else(|| format!("{path}: 객체여야 해요"))
+        .ok_or_else(|| format!("{path}: must be an object"))
 }
 
 fn only(map: &Map<String, Value>, allowed: &[&str], path: &str) -> Result<(), String> {
     match map.keys().find(|key| !allowed.contains(&key.as_str())) {
-        Some(unknown) => Err(format!("{path}: 알 수 없는 키예요: {unknown}")),
+        Some(unknown) => Err(format!("{path}: unknown key: {unknown}")),
         None => Ok(()),
     }
 }
@@ -64,7 +51,7 @@ fn text<'a>(map: &'a Map<String, Value>, key: &str, path: &str) -> Result<&'a st
     map.get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && !value.contains('\0'))
-        .ok_or_else(|| format!("{path}.{key}: 비어 있지 않은 문자열이 필요해요"))
+        .ok_or_else(|| format!("{path}.{key}: must be a non-empty string"))
 }
 
 fn absolute(map: &Map<String, Value>, key: &str, path: &str) -> Result<PathBuf, String> {
@@ -73,11 +60,12 @@ fn absolute(map: &Map<String, Value>, key: &str, path: &str) -> Result<PathBuf, 
     if path_buf.is_absolute() && value != "/" {
         Ok(path_buf)
     } else {
-        Err(format!("{path}.{key}: `/`가 아닌 절대 경로여야 해요"))
+        Err(format!(
+            "{path}.{key}: must be an absolute path other than `/`"
+        ))
     }
 }
 
-/// 다이제스트로 고정한 이미지: `<이름>@sha256:<소문자 16진 64자리>`
 fn image_pinned(image: &str) -> bool {
     match image.rsplit_once("@sha256:") {
         Some((name, digest)) => {
@@ -92,7 +80,6 @@ fn image_pinned(image: &str) -> bool {
     }
 }
 
-/// `sandbox` 절(`srt`·`apple`, 둘 다 선택). 모양만 검사하고 실제 실행 가능 여부는 그 역할이 시작할 때 확인한다.
 pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
     let top = object(value, "sandbox")?;
     only(top, &["srt", "apple"], "sandbox")?;
@@ -109,9 +96,11 @@ pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
                 Some(raw) => {
                     let items = raw
                         .as_array()
-                        .ok_or_else(|| "sandbox.srt.extra_path: 배열이어야 해요".to_owned())?;
+                        .ok_or_else(|| "sandbox.srt.extra_path: must be an array".to_owned())?;
                     if items.len() > 16 {
-                        return Err("sandbox.srt.extra_path: 16개 이하여야 해요".to_owned());
+                        return Err(
+                            "sandbox.srt.extra_path: must have at most 16 entries".to_owned()
+                        );
                     }
                     let mut dirs = Vec::with_capacity(items.len());
                     for item in items {
@@ -119,13 +108,14 @@ pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
                             .as_str()
                             .filter(|s| !s.is_empty() && !s.contains('\0') && !s.contains(':'))
                             .ok_or_else(|| {
-                                "sandbox.srt.extra_path: `:`·널 없는 비어 있지 않은 문자열이어야 해요"
+                                "sandbox.srt.extra_path: must be a non-empty string without `:` or NUL"
                                     .to_owned()
                             })?;
                         let path_buf = PathBuf::from(text);
                         if !path_buf.is_absolute() || text == "/" {
                             return Err(
-                                "sandbox.srt.extra_path: `/`가 아닌 절대 경로여야 해요".to_owned()
+                                "sandbox.srt.extra_path: must be an absolute path other than `/`"
+                                    .to_owned(),
                             );
                         }
                         if !dirs.contains(&path_buf) {
@@ -161,7 +151,7 @@ pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
             let image = text(fields, "image", "sandbox.apple")?;
             if !image_pinned(image) {
                 return Err(
-                    "sandbox.apple.image: `이름@sha256:<64자리 16진>`처럼 다이제스트로 고정해야 해요"
+                    "sandbox.apple.image: must be pinned to a digest (`name@sha256:<64 hex chars>`)"
                         .to_owned(),
                 );
             }
@@ -171,11 +161,11 @@ pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
                     let bind: SocketAddr = text(fields, "relay_bind", "sandbox.apple")?
                         .parse()
                         .map_err(|_| {
-                            "sandbox.apple.relay_bind: `주소:포트` 형식이어야 해요".to_owned()
+                            "sandbox.apple.relay_bind: must be in `host:port` format".to_owned()
                         })?;
                     if bind.ip().is_unspecified() || bind.ip().is_loopback() || !bind.is_ipv4() {
                         return Err(
-                            "sandbox.apple.relay_bind: 전체 인터페이스(0.0.0.0·::)·loopback·IPv6는 쓸 수 없어요 — 그 호스트 전용 인터페이스의 IPv4 주소를 적거나, 생략하면 닻이 확인한 주소를 써요"
+                            "sandbox.apple.relay_bind: wildcard (0.0.0.0, ::), loopback, and IPv6 addresses are not allowed — specify a host-only IPv4 address or omit to use the anchor-detected address"
                                 .to_owned(),
                         );
                     }
@@ -196,7 +186,7 @@ pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
                     let name = text(fields, "instance", "sandbox.apple")?;
                     if !bot_gateway::identity::is_alias(name) {
                         return Err(
-                            "sandbox.apple.instance: 63자 이내 소문자 kebab-case여야 해요"
+                            "sandbox.apple.instance: must be lowercase kebab-case (at most 63 chars)"
                                 .to_owned(),
                         );
                     }
@@ -226,8 +216,8 @@ fn count(hash: &mut Sha256, n: usize) {
     hash.update((n as u64).to_be_bytes());
 }
 
-/// 권한이 달라지는 호스트 설정의 지문(자격 값·호스트별 경로·주소 제외). `gateway`는 게이트웨이의 신원·입구 매핑 지문이다.
-/// 프로필별 모델 허용·모델 실행 방법(상류 목적지와 자격 이름)·egress 상한·서버 별칭과 설치 판본·VM 이미지와 망 이름이 들어간다.
+/// Authority fingerprint over security-relevant host settings (excludes secret values and host-local paths/addresses).
+/// Byte layout is pinned by `fingerprint_tests.rs`; changing it forces re-activation across deployments.
 pub fn authority_fingerprint(
     gateway: &[u8; 32],
     catalog: &HostCatalog,
@@ -272,7 +262,7 @@ pub fn authority_fingerprint(
         Some(apple) => {
             hash.update([1]);
             field(&mut hash, apple.image.as_bytes());
-            // 모델 VM이 붙는 호스트 전용 망도 격리의 일부다: 다른 망으로 바뀌면 활성화 사건이다
+            // The host-only VM network is part of isolation; changing it must trigger re-activation.
             field(&mut hash, apple.network.as_bytes());
         }
         None => hash.update([0]),

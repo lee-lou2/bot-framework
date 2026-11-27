@@ -78,7 +78,6 @@ fn finds_each_entrance_by_its_resolved_identity() {
     );
     assert!(routes.find(&Real::SlackDm { team: "T1".into() }).is_some());
     assert!(routes.http_owner("inbox").is_some());
-    // 모르는 채널·다른 사용자·다른 프로필은 입구가 아니다
     assert!(
         routes
             .find(&Real::SlackChannel {
@@ -127,7 +126,7 @@ fn rejects_two_aliases_that_resolve_to_the_same_real_channel() {
         .binding("y", channel("planning-copy"), "main")
         .build();
     let err = build(vec![a, b]).err().unwrap();
-    assert!(err.0.contains("겹쳐요"), "{err}");
+    assert!(err.0.contains("Entrance conflict"), "{err}");
     assert!(!err.0.contains("C1"), "{err}");
 }
 
@@ -170,7 +169,6 @@ fn rejects_aliases_the_host_does_not_register() {
 #[test]
 fn the_same_os_user_may_use_two_profiles_through_different_accounts() {
     let a = profile("a").binding("x", cli("owner"), "main").build();
-    // 다른 별칭이 같은 uid를 가리켜도 프로필이 다르면 서로 다른 입구다
     let mut both = host();
     both.cli.accounts.get_mut("other").unwrap().uid = Some(501);
     let b = profile("b").binding("y", cli("other"), "main").build();
@@ -180,7 +178,6 @@ fn the_same_os_user_may_use_two_profiles_through_different_accounts() {
 
 #[test]
 fn two_accounts_of_one_profile_on_the_same_os_user_are_refused_with_the_real_cause() {
-    // 한 프로필의 두 바인딩이 서로 다른 계정 별칭을 쓰지만 호스트 설정에서 같은 OS 사용자로 풀린다
     let mut same_user = host();
     same_user.cli.accounts.get_mut("other").unwrap().uid = Some(501);
     let p = profile("notes")
@@ -191,12 +188,11 @@ fn two_accounts_of_one_profile_on_the_same_os_user_are_refused_with_the_real_cau
         .err()
         .unwrap()
         .0;
-    assert!(err.contains("notes/desk(cli 계정 owner)"), "{err}");
-    assert!(err.contains("notes/lab(cli 계정 other)"), "{err}");
-    assert!(err.contains("같은 OS 사용자"), "{err}");
+    assert!(err.contains("notes/desk (cli account owner)"), "{err}");
+    assert!(err.contains("notes/lab (cli account other)"), "{err}");
+    assert!(err.contains("same OS user"), "{err}");
     assert!(err.contains("`gateway.cli.accounts`"), "{err}");
-    assert!(!err.contains("501"), "실제 uid는 싣지 않는다: {err}");
-    // 별칭이 서로 달라 서로 다른 OS 사용자면 겹치지 않는다
+    assert!(!err.contains("501"), "must not leak real uid: {err}");
     let ok = profile("notes")
         .binding("desk", cli("owner"), "main")
         .binding("lab", cli("other"), "main")
@@ -235,7 +231,8 @@ fn candidates_are_sorted_and_equal_orders_are_rejected() {
         .trigger("main", same_a)
         .trigger("main", same_b)
         .build();
-    assert!(build(vec![p]).err().unwrap().0.contains("순위가 같아"));
+    let err = build(vec![p]).err().unwrap().0;
+    assert!(err.contains("one") && err.contains("two"), "{err}");
 }
 
 #[test]
@@ -248,17 +245,13 @@ fn rejects_unsupported_events_unknown_bindings_and_reserved_http_paths() {
         .binding("team", channel("planning"), "main")
         .trigger("main", odd)
         .build();
-    assert!(
-        build(vec![p])
-            .err()
-            .unwrap()
-            .0
-            .contains("지원하지 않는 이벤트")
-    );
+    let err = build(vec![p]).err().unwrap().0;
+    assert!(err.contains("p/odd") && err.contains("edited"), "{err}");
 
     let dangling = event_trigger("t", "ghost", tool_target("a.b", "{}"));
     let p = profile("p").trigger("main", dangling).build();
-    assert!(build(vec![p]).err().unwrap().0.contains("없는 바인딩"));
+    let err = build(vec![p]).err().unwrap().0;
+    assert!(err.contains("p/t") && err.contains("ghost"), "{err}");
 
     let status = http_trigger(
         "t",
@@ -277,9 +270,9 @@ fn rejects_unsupported_events_unknown_bindings_and_reserved_http_paths() {
         )
         .trigger("main", status)
         .build();
-    assert!(build(vec![p]).err().unwrap().0.contains("예약"));
+    let err = build(vec![p]).err().unwrap().0;
+    assert!(err.contains("p/t") && err.contains(STATUS_SEGMENT), "{err}");
 
-    // 사건 트리거를 HTTP 바인딩에, HTTP 트리거를 채팅 바인딩에 걸 수 없다
     let wrong = event_trigger("t", "inbox", tool_target("a.b", "{}"));
     let p = profile("p")
         .binding(
@@ -291,7 +284,8 @@ fn rejects_unsupported_events_unknown_bindings_and_reserved_http_paths() {
         )
         .trigger("main", wrong)
         .build();
-    assert!(build(vec![p]).err().unwrap().0.contains("맞지 않아요"));
+    let err = build(vec![p]).err().unwrap().0;
+    assert!(err.contains("p/t") && err.contains("inbox"), "{err}");
 }
 
 fn dm_profile(extra: Vec<Trigger>, private: Trigger) -> Arc<Snapshot> {
@@ -317,19 +311,19 @@ fn private_triggers_must_be_the_first_and_only_possible_handler() {
     private.order = 10;
     assert!(build(vec![dm_profile(vec![], private.clone())]).is_ok());
 
-    // 더 앞선(또는 같은 순위의) 일반 트리거가 있으면 거절
     let mut ahead = event_trigger("general", "direct", tool_target("a.b", "{}"));
     ahead.order = 5;
     let err = build(vec![dm_profile(vec![ahead], private.clone())])
         .err()
         .unwrap();
-    assert!(err.0.contains("먼저 잡을 수"), "{err}");
-    // 더 뒤의 일반 트리거는 괜찮다
+    assert!(
+        err.0.contains("p/secure") && err.0.contains("general"),
+        "{err}"
+    );
     let mut behind = event_trigger("general", "direct", tool_target("a.b", "{}"));
     behind.order = 20;
     assert!(build(vec![dm_profile(vec![behind], private.clone())]).is_ok());
 
-    // private은 DM 바인딩 · 도구 대상에서만
     let mut on_channel = private.clone();
     on_channel.on = TriggerSource::Event {
         binding: BindingId("team".into()),
@@ -339,15 +333,17 @@ fn private_triggers_must_be_the_first_and_only_possible_handler() {
         .binding("team", channel("planning"), "main")
         .trigger("main", on_channel)
         .build();
-    assert!(build(vec![p]).err().unwrap().0.contains("DM 바인딩"));
+    let err = build(vec![p]).err().unwrap().0;
+    assert!(
+        err.contains("p/secure") && err.to_ascii_lowercase().contains("dm"),
+        "{err}"
+    );
     let mut to_agent = private;
     to_agent.target = TriggerTarget::Instruction("x".into());
+    let err = build(vec![dm_profile(vec![], to_agent)]).err().unwrap().0;
     assert!(
-        build(vec![dm_profile(vec![], to_agent)])
-            .err()
-            .unwrap()
-            .0
-            .contains("도구 직접")
+        err.contains("p/secure") && err.to_ascii_lowercase().contains("tool"),
+        "{err}"
     );
 }
 
@@ -366,7 +362,6 @@ fn detects_when_the_active_set_was_replaced() {
 
 #[test]
 fn equal_orders_are_found_even_when_another_candidate_sits_between_them() {
-    // 정렬하면 message(0) · http(0) · message(0) 순이라 같은 후보군 둘이 이웃하지 않는다
     let first = event_trigger("a-first", "team", tool_target("a.b", "{}"));
     let second = event_trigger("c-second", "team", tool_target("a.c", "{}"));
     let p = profile("p")
@@ -374,7 +369,8 @@ fn equal_orders_are_found_even_when_another_candidate_sits_between_them() {
         .trigger("main", first)
         .trigger("main", second)
         .build();
-    assert!(build(vec![p]).err().unwrap().0.contains("순위가 같아"));
+    let err = build(vec![p]).err().unwrap().0;
+    assert!(err.contains("a-first") && err.contains("c-second"), "{err}");
 
     let mut a1 = event_trigger("a1", "team", tool_target("a.b", "{}"));
     a1.order = 3;
@@ -397,7 +393,6 @@ fn equal_orders_are_found_even_when_another_candidate_sits_between_them() {
         .build();
     let err = build(vec![p]).err().unwrap();
     assert!(err.0.contains("a1") && err.0.contains("a2"), "{err}");
-    // 서로 다른 후보군(사건 vs HTTP)의 같은 순위는 괜찮다
     let mut ok_event = event_trigger("ev", "team", tool_target("a.b", "{}"));
     ok_event.order = 3;
     let mut ok_http = http_trigger("ht", "inbox", "POST", "/x", tool_target("a.d", "{}"));
@@ -433,7 +428,10 @@ fn a_dm_binding_needs_the_operator_to_open_dm_entrances() {
     let err = Routes::build(catalog(vec![p]), &closed, &uid)
         .err()
         .unwrap();
-    assert!(err.0.contains("DM 입구를 열지 않았어요"), "{err}");
+    assert!(
+        err.0.contains("a/direct") && err.0.contains("dm: true"),
+        "{err}"
+    );
 }
 
 fn model(endpoint: &str, model: &str) -> Adapter {
@@ -470,20 +468,19 @@ fn an_openai_model_is_an_entrance_of_its_own_and_one_alias_serves_several_models
     assert_eq!(routes.find(&real("helper")).unwrap().binding_id.0, "helper");
     assert!(
         routes.find(&real("other")).is_none(),
-        "모델 이름은 정확히 일치한다"
+        "model names match strictly"
     );
     assert_eq!(routes.openai_profile("openai"), Some(&p));
     assert_eq!(
         routes.openai_profile("inbox"),
         None,
-        "웹훅 입구는 OpenAI 표에 없다"
+        "webhook endpoints are excluded from the OpenAI table"
     );
     let models: Vec<&str> = routes
         .openai_models("openai")
         .map(|(name, _)| name)
         .collect();
-    assert_eq!(models, ["assistant", "helper"], "모델 이름 순");
-    // 웹훅 입구와 OpenAI 모델은 서로의 표를 건드리지 않는다
+    assert_eq!(models, ["assistant", "helper"], "sorted by model name");
     assert_eq!(routes.http_owner("inbox").unwrap().binding.0, "inbox");
     assert!(routes.http_owner("openai").is_none());
 }
@@ -498,7 +495,7 @@ fn an_openai_alias_may_belong_to_one_profile_only() {
         .build();
     let error = build(vec![one, two])
         .err()
-        .expect("두 프로필이 한 별칭을 나눠 쓴다");
+        .expect("two profiles sharing one alias must fail");
     let text = error.to_string();
     assert!(
         text.contains("personal/assistant")
@@ -506,7 +503,7 @@ fn an_openai_alias_may_belong_to_one_profile_only() {
             && text.contains("openai"),
         "{text}"
     );
-    assert!(text.contains("프로필 하나만"), "{text}");
+    assert!(text.to_ascii_lowercase().contains("profile"), "{text}");
 }
 
 #[test]
@@ -527,13 +524,12 @@ fn an_openai_model_on_an_alias_the_host_did_not_open_is_refused_by_name() {
         .build();
     let text = build(vec![snapshot])
         .err()
-        .expect("호스트에 없는 입구")
+        .expect("unregistered endpoint must fail")
         .to_string();
     assert!(
         text.contains("personal/assistant") && text.contains("elsewhere"),
         "{text}"
     );
-    // 웹훅 입구 별칭을 OpenAI 모델의 입구로 쓸 수 없다(종류가 다르다)
     let wrong_kind = profile("personal")
         .binding("assistant", model("inbox", "assistant"), "main")
         .build();

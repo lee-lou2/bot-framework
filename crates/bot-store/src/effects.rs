@@ -1,7 +1,4 @@
-//! 단계 원장(EffectJournal): 여러 번 쓰는 도구의 단계별 intent → confirmed | rejected | held.
-//! 최초 요청에서 기록을 커밋한 뒤에만 `send=true`를 준다. 같은 키·다른 인자는 `Conflict`, 기존 confirmed는 영수증,
-//! 전송 여부가 불명인 started는 held를 돌려주며 둘 다 `send=false`다. 같은 영수증을 다시 보고해도 결과는 같다.
-//! 호출이 보류되면 운영자 판정(미실행 입증)이 있을 때만 같은 단계를 다시 보낼 수 있다.
+//! Multi-step effect journal (`EffectJournal`): commits intent before granting `send=true` and fences restarts behind operator `not_executed` verdicts.
 
 use crate::{
     audit::{self, Entry},
@@ -37,7 +34,6 @@ pub(crate) fn state_of(s: &str) -> R<EffectState> {
     })
 }
 
-/// 단계 인자의 지문. 요청과 조회가 같은 정규 JSON에서 만든다(키 순서·공백이 달라도 같다).
 pub(crate) fn args_digest(args: &JsonPayload) -> R<[u8; 32]> {
     Ok(sha256_text(&canonical(args)?.1))
 }
@@ -72,7 +68,6 @@ async fn lock_effect(
     .await?)
 }
 
-/// 사전 승인 호출의 새 쓰기 허가를 확인한다. 거절 사유(고정 낱말)가 있으면 돌려준다. 승인 없는 호출은 늘 통과한다.
 async fn write_refused(
     tx: &mut crate::db::Tx<'_>,
     granted: &Option<(String, i64)>,
@@ -86,15 +81,13 @@ async fn write_refused(
         .err())
 }
 
-/// 감사 판정: 사전 승인 호출이면 승인 ID를 덧붙인다(영수증과 같은 줄에서 짝을 지어 볼 수 있다).
 fn granted_verdict(step: &str, granted: &Option<(String, i64)>) -> String {
     granted
         .as_ref()
         .map_or_else(|| step.to_owned(), |(id, _)| format!("{step};grant={id}"))
 }
 
-/// 새 쓰기 허가를 거절한다: 감사 한 줄만 커밋하고(사용량·효과 행 0) 호출자에게는 wire 분류 오류다
-/// (대상 밖·한도·정지 = denied, 철회·교체·옛 세대 = stale, 형식 오류 = invalid).
+/// Commits an audit-only refusal row (no usage or effect written) and returns the mapped wire error.
 async fn refuse(
     mut tx: crate::db::Tx<'_>,
     profile: &str,
@@ -116,8 +109,7 @@ impl Store {
         let digest = args_digest(&r.args)?;
         let at = &r.attempt;
         let mut tx = self.pool.begin().await?;
-        // 사전 승인 호출이면 활성 집합을 먼저 공유 잠금한다(잠금 순서: 활성 집합 → run → 호출 → 효과 → 승인 → 정지 → 사용 → 감사).
-        // 승인 ID는 호출을 시작할 때 한 번 기록되고 바뀌지 않는다.
+        // Lock order for grant-bound calls: active set -> run -> call -> effect -> grant -> pause -> usage -> audit.
         let granted: Option<(String, i64)> = sqlx::query(
             "select grant_id, grant_epoch from bot_calls where profile = $1 and run = $2 and call = $3",
         )
@@ -134,7 +126,7 @@ impl Store {
                 .ok_or(Error::Stale)?;
         }
         let run = fence(&mut tx, at).await?;
-        // 단계는 지금 실행 중인(이 세대가 시작한) 호출 안에서만 만들 수 있다
+        // Effects may only be requested within a call started by the current generation.
         let call = lock_call(&mut tx, at, &r.call).await?;
         match record_of(&call)?.phase {
             CallPhase::Started { generation, .. } if generation == at.generation => {}
@@ -148,7 +140,6 @@ impl Store {
                 .await?;
         let permit = match lock_effect(&mut tx, at, &r.call, &r.step).await? {
             None => {
-                // 새 외부 쓰기 허가: 사전 승인 호출이면 승인·정지·허용 쌍·하루 한도를 같은 커밋에서 확인하고 사용량을 올린다
                 if let Some(refused) = write_refused(&mut tx, &granted, &r.args).await? {
                     return refuse(tx, &run.profile, &principal, &r.step, digest, refused).await;
                 }
@@ -181,7 +172,7 @@ impl Store {
             }
             Some(row) => {
                 if row.get::<Vec<u8>, _>("args_sha256") != digest {
-                    // 같은 유효한 승인 안에서만 충돌이다: 철회·교체·옛 세대의 승인은 먼저 낡았다고 알린다
+                    // Report stale grant before argument conflict so revoked/superseded grants surface cleanly.
                     if let Some((grant, epoch)) = &granted
                         && crate::authority::stale(&mut tx, grant, *epoch).await?
                     {
@@ -197,7 +188,7 @@ impl Store {
                 );
                 match state {
                     EffectState::Started => {
-                        // 이전 시도가 보냈는지 알 수 없다: 보류로 바꾸고 다시 보내지 않는다(같은 세대의 중복 요청도 보내지 않는다)
+                        // Prior attempt outcome is unknown: hold on generation advance and never re-send.
                         if row.get::<i64, _>("generation") < at.generation.0 as i64 {
                             sqlx::query("update bot_effects set state = 'held', reason = 'owner_lost', updated_ms = bot_now_ms() where profile = $1 and id = $2")
                                 .bind(&run.profile)
@@ -226,7 +217,7 @@ impl Store {
                             && row.get::<Option<String>, _>("resolution").as_deref()
                                 == Some("not_executed") =>
                     {
-                        // 운영자가 미실행을 입증했다: 같은 호출·같은 단계를 현재 세대로 다시 보낸다(사전 승인 호출이면 새 허가로 센다)
+                        // Operator proved non-execution: restart under the current generation (counts as a fresh grant permit).
                         if let Some(refused) = write_refused(&mut tx, &granted, &r.args).await? {
                             return refuse(tx, &run.profile, &principal, &r.step, digest, refused)
                                 .await;
@@ -293,7 +284,7 @@ impl Store {
         status_of(&row)
     }
 
-    /// 아직 확정되지 않은(started·held) 단계들. 하나라도 있으면 도구의 성공 응답만으로 호출을 끝내지 않는다.
+    /// Lists `started` or unresolved `held` steps that block completing the call.
     pub(crate) async fn effect_unresolved(
         &self,
         at: &Attempt,
@@ -314,7 +305,7 @@ impl Store {
         rows.iter().map(status_of).collect()
     }
 
-    /// 단계를 마무리한다. confirmed에는 영수증, rejected는 확정 거절, held에는 불명 사유 코드(`receipt` 칸)를 적는다.
+    /// Records step outcome (`Confirmed` receipt, `Rejected`, or `Held` reason code carried in `status.receipt`).
     pub(crate) async fn effect_record(
         &self,
         at: &Attempt,
@@ -340,7 +331,7 @@ impl Store {
         .await?
         .ok_or(Error::Missing)?;
         if row.get::<String, _>("run") != at.run.0 || row.get::<String, _>("call") != call.0 {
-            return Err(Error::Denied.into()); // 다른 호출의 단계다
+            return Err(Error::Denied.into());
         }
         let current = state_of(&row.get::<String, _>("state"))?;
         if current == status.state
@@ -348,7 +339,7 @@ impl Store {
                 == text.filter(|_| status.state == EffectState::Confirmed)
         {
             tx.rollback().await?;
-            return Ok(()); // 같은 보고의 반복
+            return Ok(());
         }
         match (current, status.state) {
             (

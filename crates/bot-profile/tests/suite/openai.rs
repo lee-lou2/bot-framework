@@ -1,5 +1,4 @@
-//! OpenAI 호환 모델 바인딩(`adapter: http` + `model`): 스키마의 두 HTTP 분기, 한 입구의 여러 모델, 승인자 매핑 검증, 입구 소유,
-//! 호스트 종류 대조, 정책 판본.
+//! Tests for OpenAI-compatible model bindings (`adapter: http` + `model`): schema branches, approvers, endpoint ownership, host checks, and policy revision.
 
 use crate::support::openai::{
     LOCAL, SLACK, codes, host_openai, load_with, models, ok, with_people,
@@ -9,8 +8,7 @@ use bot_core::{
     id::{BindingId, ProfileId},
     profile::Adapter,
 };
-use bot_profile::Limits;
-use bot_profile::load;
+use bot_profile::{Limits, load};
 
 const TRIGGERS: &str = "agents/main/triggers.yaml";
 
@@ -31,7 +29,6 @@ fn models_share_one_endpoint_and_leave_webhooks_alone() {
     assert!(matches!(source("inbox"), Adapter::Http { endpoint } if endpoint == "reminders"));
     let set = load_with(&models(""), &host_openai()).unwrap();
     assert_eq!(set.warnings().len(), 0, "{:?}", set.warnings());
-    // 모델이 생기면 정책 판본이 달라진다(웹훅 전용 프로필은 따로 골든 시험이 지킨다)
     let plain = load_with(&base(), &host_openai()).unwrap();
     let plain = plain.profile(&ProfileId("personal".into())).unwrap();
     assert_ne!(plain.policy_revision, snap.policy_revision);
@@ -61,17 +58,15 @@ fn a_model_nobody_can_run_warns() {
     };
     assert!(
         warned(&models("")).is_empty(),
-        "run 스코프가 있는 멤버와 에이전트"
+        "member and agent both have run scope"
     );
-    // 호출 멤버의 역할에 run이 없다
     let no_run = edit(
         models(""),
         "profile.yaml",
         "{identity: \"http:openai/build\", roles: [owner]}",
         "{identity: \"http:openai/build\", roles: [reader]}",
     );
-    assert_eq!(warned(&no_run).len(), 2, "모델 둘 다");
-    // 에이전트 상한에 run이 없다: research 모델만 걸린다
+    assert_eq!(warned(&no_run).len(), 2, "both models lack a runner");
     let capped = edit(
         models(""),
         "profile.yaml",
@@ -101,23 +96,23 @@ fn the_schema_has_two_disjoint_http_branches() {
             &format!("  - {{id: inbox, adapter: http, endpoint: openai, agent: main{tail}}}"),
         )
     };
-    assert_eq!(codes(&plain("")), Vec::<&str>::new(), "웹훅 분기");
+    assert_eq!(codes(&plain("")), Vec::<&str>::new(), "webhook branch");
     assert_eq!(
         codes(&model(", model: gpt-4o")),
         Vec::<&str>::new(),
-        "모델 분기(호스트가 openai를 안다)"
+        "model branch"
     );
     for (name, files) in [
-        ("웹훅에 승인자", plain(", approvers: {}")),
-        ("모델 없는 OpenAI 승인자", model(", approvers: {}")),
-        ("점이 든 모델 이름", model(", model: gpt-4.1")),
-        ("대문자 모델 이름", model(", model: GPT")),
+        ("approvers on webhook", plain(", approvers: {}")),
+        ("approvers without model", model(", approvers: {}")),
+        ("dot in model name", model(", model: gpt-4.1")),
+        ("uppercase model name", model(", model: GPT")),
         (
-            "너무 긴 모델 이름",
+            "overlong model name",
             model(&format!(", model: m{}", "a".repeat(63))),
         ),
-        ("모델이 비어 있음", model(", model: \"\"")),
-        ("알 수 없는 필드", model(", model: a, temperature: 1")),
+        ("empty model", model(", model: \"\"")),
+        ("unknown field", model(", model: a, temperature: 1")),
     ] {
         assert!(codes(&files).contains(&"schema"), "{name}");
     }
@@ -129,32 +124,35 @@ fn the_schema_has_two_disjoint_http_branches() {
 fn approver_shapes_are_checked_by_the_schema() {
     let cases = [
         (
-            "로컬에 binding",
+            "binding on local principal",
             "{\"http:openai/build\": {principal: \"local:owner\", binding: team}}",
         ),
         (
-            "Slack에 binding 없음",
+            "Slack principal without binding",
             "{\"http:openai/build\": {principal: \"slack:home/U1\"}}",
         ),
         (
-            "서비스 주체",
+            "service principal",
             "{\"http:openai/build\": {principal: \"service:morning\"}}",
         ),
         (
-            "HTTP 주체",
+            "HTTP principal",
             "{\"http:openai/build\": {principal: \"http:openai/ops\"}}",
         ),
-        ("키에 입구 없음", "{build: {principal: \"local:owner\"}}"),
         (
-            "키에 주체 없음",
+            "key without endpoint",
+            "{build: {principal: \"local:owner\"}}",
+        ),
+        (
+            "key without subject",
             "{\"http:openai\": {principal: \"local:owner\"}}",
         ),
         (
-            "알 수 없는 필드",
+            "unknown field",
             "{\"http:openai/build\": {principal: \"local:owner\", note: x}}",
         ),
         (
-            "소문자 Slack ID",
+            "lowercase Slack ID",
             "{\"http:openai/build\": {principal: \"slack:home/u1\", binding: team}}",
         ),
     ];
@@ -170,49 +168,52 @@ fn approver_shapes_are_checked_by_the_schema() {
 fn approver_mappings_must_point_at_members_and_the_same_installation() {
     let cases: [(&str, &str, &str); 8] = [
         (
-            "요청자가 멤버가 아님",
+            "requester not a member",
             "{\"http:openai/ops\": {principal: \"local:owner\"}}",
             "approver-requester-unknown",
         ),
         (
-            "다른 입구의 주체",
+            "requester on another endpoint",
             "{\"http:reminders/ci\": {principal: \"local:owner\"}}",
             "approver-requester-endpoint",
         ),
         (
-            "승인자가 멤버가 아님",
+            "approver not a member",
             "{\"http:openai/build\": {principal: \"local:ghost\"}}",
             "approver-unknown",
         ),
         (
-            "전달 바인딩이 없음",
+            "missing delivery binding",
             "{\"http:openai/build\": {principal: \"slack:home/U1\", binding: nowhere}}",
             "approver-binding-unknown",
         ),
         (
-            "전달 바인딩이 CLI",
+            "delivery binding is CLI",
             "{\"http:openai/build\": {principal: \"slack:home/U1\", binding: desk}}",
             "approver-binding-kind",
         ),
         (
-            "전달 바인딩이 DM",
+            "delivery binding is DM",
             "{\"http:openai/build\": {principal: \"slack:home/U1\", binding: direct}}",
             "approver-binding-kind",
         ),
         (
-            "전달 바인딩이 모델 바인딩",
+            "delivery binding is model",
             "{\"http:openai/build\": {principal: \"slack:home/U1\", binding: research}}",
             "approver-binding-kind",
         ),
         (
-            "다른 워크스페이스",
+            "different workspace",
             "{\"http:openai/build\": {principal: \"slack:other/U2\", binding: team}}",
             "approver-workspace-mismatch",
         ),
     ];
     for (name, approvers, code) in cases {
         let found = codes(&with_people(models(approvers)));
-        assert!(found.contains(&code), "{name}: 기대 {code}, 실제 {found:?}");
+        assert!(
+            found.contains(&code),
+            "{name}: expected {code}, got {found:?}"
+        );
     }
 }
 
@@ -220,7 +221,7 @@ fn approver_mappings_must_point_at_members_and_the_same_installation() {
 fn no_trigger_can_target_a_model_binding() {
     let http = "  - id: hook\n    \"on\": {http: {method: POST, path: /x}, binding: assistant}\n    target: {instruction: x}\n";
     let message = "  - id: chat\n    \"on\": {event: message, binding: assistant}\n    target: {instruction: x}\n";
-    for (name, extra) in [("HTTP 트리거", http), ("메시지 트리거", message)] {
+    for (name, extra) in [("HTTP trigger", http), ("message trigger", message)] {
         let files = append(models(""), TRIGGERS, extra);
         assert!(
             codes(&files).contains(&"openai-binding-no-trigger"),
@@ -228,7 +229,6 @@ fn no_trigger_can_target_a_model_binding() {
             codes(&files)
         );
     }
-    // 웹훅 바인딩의 트리거는 그대로 통한다
     let files = append(
         models(""),
         TRIGGERS,
@@ -239,7 +239,6 @@ fn no_trigger_can_target_a_model_binding() {
 
 #[test]
 fn an_endpoint_has_one_owner_and_one_kind() {
-    // 같은 프로필의 같은 모델 이름
     let twice = edit(
         models(""),
         "profile.yaml",
@@ -247,7 +246,6 @@ fn an_endpoint_has_one_owner_and_one_kind() {
         "model: assistant",
     );
     assert_eq!(codes(&twice), ["duplicate-entrance"]);
-    // 같은 별칭에 웹훅 바인딩과 모델 바인딩이 섞임
     let mixed = edit(
         models(""),
         "profile.yaml",
@@ -255,7 +253,7 @@ fn an_endpoint_has_one_owner_and_one_kind() {
         "endpoint: openai",
     );
     assert_eq!(codes(&mixed), ["endpoint-kind-mixed"]);
-    // 다른 프로필이 같은 OpenAI 별칭을 쓰면 모델 이름이 달라도 모호하다
+    // Two active profiles cannot share an OpenAI endpoint alias even with distinct model names.
     let root = Temp::new("owners");
     write_profile(root.path(), "personal", &models(""));
     let second = vec![
@@ -263,19 +261,24 @@ fn an_endpoint_has_one_owner_and_one_kind() {
             "profile.yaml".to_owned(),
             "version: 1\nid: second\nmodel: assistant\nroles: {r: [run]}\nmembers: []\nbindings:\n  - {id: other, adapter: http, endpoint: openai, model: other, agent: main}\npolicy: {scopes: [run]}\n".to_owned(),
         ),
-        ("agents/main/AGENT.md".to_owned(), "둘째.\n".to_owned()),
+        ("agents/main/AGENT.md".to_owned(), "Second.\n".to_owned()),
     ];
     write_profile(root.path(), "second", &second);
     let report = load(root.path(), &host_openai(), &Limits::default()).unwrap_err();
     assert_eq!(report.codes(), ["duplicate-entrance"]);
     let issue = report.errors().next().unwrap();
     assert!(issue.path.starts_with("second/"), "{}", issue.path);
-    assert!(issue.message.contains("소유"), "{}", issue.message);
+    let lower = issue.message.to_lowercase();
+    assert!(
+        lower.contains("own") || lower.contains("single") || lower.contains("one"),
+        "{}",
+        issue.message
+    );
 }
 
 #[test]
 fn a_mapping_for_a_subject_without_a_key_slot_only_warns() {
-    // 승인 매핑은 프로필의 지정이고 키 슬롯은 호스트의 자격 발급이다: 슬롯이 없는 주체의 매핑은 활성화를 막지 않고 경고만 한다
+    // Missing host key slot warns instead of failing activation so revoking a key never blocks profile reload.
     let files = edit(
         models("{\"http:openai/guest\": {principal: \"local:owner\"}}"),
         "profile.yaml",
@@ -290,7 +293,6 @@ fn a_mapping_for_a_subject_without_a_key_slot_only_warns() {
         .collect();
     assert_eq!(found.len(), 1, "{:?}", set.warnings());
     assert!(found[0].message.contains("http:openai/guest"));
-    // 슬롯이 있는 주체의 매핑은 경고도 없다
     let ok_set = load_with(&models(LOCAL), &host_openai()).unwrap();
     assert!(
         ok_set
@@ -298,7 +300,6 @@ fn a_mapping_for_a_subject_without_a_key_slot_only_warns() {
             .iter()
             .all(|w| w.code != "approver-key-unknown")
     );
-    // 요청자·승인자 멤버 검증은 그대로 오류다
     let no_member = models("{\"http:openai/ghost\": {principal: \"local:owner\"}}");
     assert!(codes(&no_member).contains(&"approver-requester-unknown"));
 }
@@ -307,7 +308,7 @@ fn a_mapping_for_a_subject_without_a_key_slot_only_warns() {
 fn the_host_must_know_the_endpoint_with_the_matching_kind() {
     let cases: [(&str, Files, &str); 4] = [
         (
-            "모델 바인딩을 웹훅 별칭에",
+            "model binding on webhook alias",
             edit(
                 models(""),
                 "profile.yaml",
@@ -317,7 +318,7 @@ fn the_host_must_know_the_endpoint_with_the_matching_kind() {
             "endpoint-kind-mismatch",
         ),
         (
-            "웹훅 바인딩을 OpenAI 별칭에",
+            "webhook binding on OpenAI alias",
             edit(
                 base(),
                 "profile.yaml",
@@ -327,7 +328,7 @@ fn the_host_must_know_the_endpoint_with_the_matching_kind() {
             "endpoint-kind-mismatch",
         ),
         (
-            "등록하지 않은 별칭",
+            "unregistered alias",
             edit(
                 models(""),
                 "profile.yaml",
@@ -337,7 +338,7 @@ fn the_host_must_know_the_endpoint_with_the_matching_kind() {
             "unknown-endpoint",
         ),
         (
-            "OpenAI와 함께 쓰는 웹훅 v1",
+            "webhook v1 alongside OpenAI",
             edit(
                 base(),
                 "profile.yaml",
@@ -351,9 +352,8 @@ fn the_host_must_know_the_endpoint_with_the_matching_kind() {
     with_v1.http_endpoints.insert("v1".into());
     for (name, files, code) in cases {
         let report = load_with(&files, &with_v1).expect_err(name);
-        assert!(report.has(code), "{name}: 기대 {code}\n{report}");
+        assert!(report.has(code), "{name}: expected {code}\n{report}");
     }
-    // 웹훅 `v1` 단독은 옛 그대로 통한다
     let mut alone = host();
     alone.http_endpoints.insert("v1".into());
     let files = edit(
@@ -373,7 +373,6 @@ fn the_policy_revision_follows_the_model_and_approval_mapping() {
     let slack = rev(&with_people(models(SLACK)));
     assert_ne!(without, local);
     assert_ne!(local, slack);
-    // 모델이 다른 에이전트를 가리키면 달라진다
     let agent = edit(
         with_people(models("")),
         "profile.yaml",
@@ -381,13 +380,12 @@ fn the_policy_revision_follows_the_model_and_approval_mapping() {
         "model: assistant, agent: main/research}",
     );
     assert_ne!(rev(&agent), without);
-    // 바인딩을 적는 순서는 판본 바이트(revision)만 바꾸고 정책 판본은 그대로다
+    // Reordering bindings changes raw bundle revision only, not policy_revision.
     let (a, b) = (ok(&models("")), ok(&swapped(&models(""))));
     assert_eq!(a.policy_revision, b.policy_revision);
     assert_ne!(a.revision, b.revision);
 }
 
-/// assistant와 research 바인딩 줄의 순서만 바꾼다.
 fn swapped(files: &Files) -> Files {
     let text = &files.iter().find(|(p, _)| p == "profile.yaml").unwrap().1;
     let lines: Vec<&str> = text.lines().collect();

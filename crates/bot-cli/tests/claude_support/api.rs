@@ -1,6 +1,4 @@
-//! OpenAI 호환 입구(공식 openai SDK) 종단 시험 조립. 실제 `claude` CLI·가짜 상류·실제 PG·합성 샌드박스 위에서 `serve`를 돌리고(`Rig::start_api`),
-//! 시험이 모델이 할 일과 서버 쪽 수(작업·모델 호출·도구 실행)를 다루는 제어 창구(`control`), 모델 대본(`plan`), 공식 SDK 시험을 돌리는 도구(`sdk`)를 둔다.
-//! 이 입구의 응답은 대역이 아니라 제품 게이트웨이가 만든 것이고, 모델만 가짜다.
+//! OpenAI-compatible HTTP gateway e2e harness: runs real `serve` over fake upstream, real PG, and synthetic sandbox with control plane and official SDK runners.
 #![allow(dead_code)]
 
 mod control;
@@ -27,7 +25,7 @@ pub use plan::{ERROR_BODY, text_turn};
 pub use sdk::{Outcome, Proxy, Sdk};
 pub use secrets::ApiSecrets;
 
-/// 합성 API 키(32바이트 이상 ASCII). 값은 시험 안에서만 쓰고 어디에도 남기지 않는다.
+/// Synthetic API keys (>=32 ASCII bytes) kept strictly in memory for test runs.
 pub struct Keys {
     pub build: String,
     pub rotated: String,
@@ -51,8 +49,8 @@ impl Keys {
     }
 }
 
-/// 입구 하나의 모양: 평소(긴 대기·넉넉한 한도)와 빡빡한 것(짧은 대기·실행 한도 1·작은 본문 한도). 빡빡한 쪽의 대기는 3초다 — 접수(PG 트랜잭션)도 같은 단일 기한에서 `min(2초, wait/4)`를 뺀 예산을 쓰므로
-/// 0.5초로는 첫 접수가 실제 PG에서 `request_outcome_unknown`(422)이 된다(관찰 기록은 보고서).
+/// Endpoint sizing preset: `Tight` uses a 3s wait because PG intake takes `min(2s, wait/4)` out of the
+/// single request deadline (0.5s causes real PG intake to hit `request_outcome_unknown` / 422).
 #[derive(Clone, Copy)]
 pub enum Shape {
     Main,
@@ -68,8 +66,7 @@ impl Shape {
     }
 }
 
-/// 프로필: 모델 `assistant`(에이전트 main)와 `secret-agent`(에이전트 main/secret, `run` 상한 없음 → 아무도 못 쓴다). 멤버는 http:openai/build·ops(guest는 없다).
-/// 도구 `agenda.remove`는 승인이 필요한 write다(승인자 매핑이 없으니 HTTP 호출자는 실행시킬 수 없다).
+/// Exposes `assistant` (`main`) and `secret-agent` (`main/secret`, lacking `run` scope); `agenda.remove` requires approval.
 pub const PROFILE: &str = r#"version: 1
 id: personal
 timezone: UTC
@@ -95,13 +92,12 @@ policy:
 
 const TOOLS: &str = "version: 1\nserver: agenda\ntools:\n  - id: list\n    class: read\n    scopes: [calendar.read]\n    secrets: {}\n    egress: []\n    input: {type: object, properties: {}, additionalProperties: false}\n  - id: remove\n    class: write\n    scopes: [calendar.delete]\n    secrets: {}\n    egress: []\n    input: {type: object, properties: {id: {type: string}}, required: [id], additionalProperties: false}\n";
 
-/// 도구 서버(MCP stdio): `list`는 빈 일정을, `remove`는 «지웠다»를 답한다. 승인 없이 `remove`가 실행되면 호출 원장에 남으니 시험이 그것을 센다.
 const SERVER: &str = r#"#!/usr/bin/env python3
 import json, sys
 
 TOOLS = [
-    {"name": "list", "description": "일정 목록", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "remove", "description": "일정 삭제", "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "list", "description": "List agenda", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "remove", "description": "Remove agenda item", "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}, "additionalProperties": False}},
 ]
 
 def reply(message_id, **body):
@@ -126,7 +122,6 @@ for raw in sys.stdin:
         reply(identity, error={"code": -32601, "message": "method not found"})
 "#;
 
-/// 시험이 쓰는 서버 한 대와 그 둘레: 제품 `serve`(Rig), 제어 창구, 키.
 pub struct Fixture {
     pub rig: Rig,
     pub port: u16,
@@ -137,7 +132,6 @@ pub struct Fixture {
 }
 
 impl Rig {
-    /// `start_with`와 같되 호스트 `servers` 같은 최상위 절과 저장소 설정까지 한 번에 받는다. 활성 판본이 게시될 때까지 기다린다.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_api(
         schema: Schema,
@@ -163,18 +157,16 @@ impl Rig {
             store_config,
         )
         .await;
-        rig.until(
-            "serve가 활성 판본을 게시하지 않았어요",
-            30,
-            |rig| !rig.schema.active().is_empty(),
-        )
+        rig.until("serve did not publish an active revision", 30, |rig| {
+            !rig.schema.active().is_empty()
+        })
         .await;
         rig
     }
 }
 
 impl Rig {
-    /// 운영자가 호스트 설정의 `gateway` 절(예: 키 슬롯)을 바꿔 같은 프로필로 `--activate` 다시 배포한다: 호스트 파일을 다시 쓰고 새 serve가 새 판본을 게시할 때까지 기다린다.
+    /// Rewrites `host.json` with a new `gateway` section and re-activates the profile.
     pub async fn reactivate_host(&mut self, gateway: &str, profile_yaml: &str, roles: &[Role]) {
         self.gateway = gateway.to_owned();
         let host = self.dir.path().join("host.json");
@@ -187,12 +179,11 @@ impl Rig {
     }
 }
 
-/// 호스트 `gateway` 절(CLI 계정 + OpenAI 입구 하나 + 모양에 따른 본문 한도). 키 슬롯 이름은 호스트 쪽 이름표이고 값은 합성 비밀 보관소에만 있다.
 pub fn gateway_for(shape: Shape, port: u16) -> String {
     gateway_with(shape, port, &["build", "rotated", "ops", "guest"])
 }
 
-/// `gateway_for`와 같되 키 슬롯을 고른다(`build`·`rotated`는 주체 build, `ops`는 주체 ops, `guest`는 주체 guest) — 운영자가 슬롯을 빼고 다시 배포하는 시험에 쓴다.
+/// Builds a `gateway` JSON fragment for the selected key slots (`rotated` maps to subject `build`).
 pub fn gateway_with(shape: Shape, port: u16, slots: &[&str]) -> String {
     let keys: Vec<String> = slots
         .iter()
@@ -223,7 +214,6 @@ fn tool_package(dir: &Path) -> PathBuf {
 }
 
 impl Fixture {
-    /// 서버를 띄운다. 환경이 없어 시험을 돌릴 수 없으면 `None`(건너뜀). 필수 모드(`BOT_OPENAI_CANARY=required`·`BOT_CLAUDE_CANARY`·`BOT_SRT_CANARY`·`BOT_TEST_REQUIRE_DB`)에서는 실패한다.
     pub async fn start(
         shape: Shape,
         store_config: Option<bot_store::Config>,
@@ -231,14 +221,13 @@ impl Fixture {
         Self::start_with_profile(shape, store_config, PROFILE).await
     }
 
-    /// `start`와 같되 프로필(`personal/profile.yaml`)을 고른다.
     pub async fn start_with_profile(
         shape: Shape,
         store_config: Option<bot_store::Config>,
         profile: &str,
     ) -> Option<(Self, Sdk)> {
         let Some(schema) = Schema::create() else {
-            eprintln!("skipped: BOT_TEST_DATABASE_URL이 없어 건너뜀");
+            eprintln!("skipped: BOT_TEST_DATABASE_URL is not set");
             return None;
         };
         let claude = super::claude_bin()?;
@@ -269,8 +258,11 @@ impl Fixture {
             claude,
             profile,
             &[
-                ("agents/main/agents/secret/AGENT.md", "비공개 에이전트."),
-                ("agents/main/skills/agenda/SKILL.md", "일정을 지운다."),
+                ("agents/main/agents/secret/AGENT.md", "Private agent."),
+                (
+                    "agents/main/skills/agenda/SKILL.md",
+                    "Removes agenda items.",
+                ),
                 ("agents/main/skills/agenda/tools.yaml", TOOLS),
             ],
             &gateway_for(shape, port),
@@ -279,7 +271,7 @@ impl Fixture {
             store_config,
         )
         .await;
-        std::mem::forget(dir); // 도구 패키지는 서버가 도는 동안 필요하다(/tmp 밑이고 시험 프로세스가 끝나면 OS가 치운다)
+        std::mem::forget(dir); // Tool package must stay on disk while the server runs.
         let control = Control::start(&rig).await;
         Some((
             Self {
@@ -294,12 +286,11 @@ impl Fixture {
         ))
     }
 
-    /// 입구 주소(루트 `/v1`의 바로 앞까지)
     pub fn origin(&self) -> String {
         format!("127.0.0.1:{}", self.port)
     }
 
-    /// 서버가 듣는 PG에서 키 값이 한 번이라도 평문으로 저장됐는지(스키마 전 테이블의 모든 행을 글로 보아 찾는다). 찾은 (테이블, 키 이름)들.
+    /// Scans all tables in the test schema for any plaintext API key leak.
     pub fn stored_secrets(&self) -> Vec<(String, &'static str)> {
         let mut found = Vec::new();
         for (label, key) in [
@@ -313,7 +304,6 @@ impl Fixture {
         found
     }
 
-    /// 스키마의 모든 표를 행마다 글로 보아 이 글이 든 표들(없으면 비었다)
     pub fn tables_holding(&self, needle: &str) -> Vec<String> {
         let tables = self.rig.query(
             "select string_agg(table_name, ',') from information_schema.tables where table_schema = '{s}'",
@@ -330,7 +320,6 @@ impl Fixture {
             .collect()
     }
 
-    /// 입구에 직접 보내는 요청(SDK 없이): 응답을 끝까지 읽는다.
     pub async fn request(
         &self,
         method: &'static str,

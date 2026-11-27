@@ -1,11 +1,10 @@
-//! 키로 이어지는 긴 요청 입구(OpenAI 호환 HTTP)의 원자 accept-or-replay와 범위가 정해진 조회(`bot_core::api`).
+//! Atomic accept-or-replay and scoped lookup for OpenAI-compatible HTTP runs (`bot_core::api`).
 //!
-//! 기존 접수 트랜잭션(`accept.rs`: 접수 행 `bot_requests` + `bot_runs` + 감사)을 그대로 쓴다. 별도 원장이 아니다. 한 트랜잭션에서
-//! `활성 집합 펜스 → (재전달이면 기존 작업) → 입구 잠금 → 활성 판본 대조 → 진행 중 작업 수 한도 → 접수 행·run·감사`를 처리하고 커밋한다.
-//! 커밋 응답을 잃어 확정할 수 없으면 `Unknown`이다(커밋 전 실패는 `Err(Unavailable)`이라 호출자가 안전하게 503으로 돌릴 수 있다).
+//! Uses the shared intake tables (`bot_requests`, `bot_runs`, audit) in one transaction:
+//! active-set fence -> replay check -> endpoint advisory lock -> active revision check -> active cap -> insert + audit.
+//! Ambiguous commit failures return `ApiAdmission::Unknown`; certain pre-commit rollbacks return `Err(Unavailable)`.
 //!
-//! 잠금 순서: 활성 집합 → 입구 잠금(`pg_advisory_xact_lock`, 이 트랜잭션이 처음 쥔다) → 활성 판본 → 새 run(아직 아무도 모르는 행) → 감사 head.
-//! 다른 어떤 경로도 입구 잠금을 쥔 채 다른 행을 기다리지 않는다(입구 잠금은 접수만 쥔다).
+//! Lock order: active set -> endpoint advisory lock (held only by intake) -> active profile revision -> new run -> audit head.
 
 use crate::{
     accept::{check, insert_run},
@@ -24,11 +23,10 @@ use bot_core::{
 };
 use sqlx::Row;
 
-/// 끝나지 않은 run 상태(승인·자식·보류로 기다리는 것도 센다).
 const UNFINISHED: &str = "('ready', 'leased', 'waiting', 'retry')";
 
-/// 한 접수 행과 그 run을 읽는 질의. `$1..$4`가 (프로필, 입구, 주체, 키)다. 막힌 이유는 루트와 위임 자식에 **저장된** 판정에서만 읽는다:
-/// 호출이 승인 경로 때문에 `denied`로 닫히며 남긴 낱말(`bot_calls.reason`)과, DM 전달 작업이 실패·불명으로 닫힌 기록(`bot_card_jobs.closed_reason`).
+/// Reads one API request and its root run for `(profile, api_endpoint, principal, request)`.
+/// Block verdicts come solely from stored denial reasons on root/descendant calls and closed DM card jobs.
 const VIEW: &str = "select r.id, r.created_ms, r.state, r.wait_kind, r.result, r.error, r.binding, r.agent, r.revision,
         r.truncated, r.usage_prompt, r.usage_completion, q.api_model, q.input_sha256,
         (select c.reason from bot_calls c join bot_runs t on t.profile = c.profile and t.id = c.run
@@ -50,7 +48,7 @@ fn blocked(row: &sqlx::postgres::PgRow) -> Option<ApprovalBlock> {
     row.get::<Option<String>, _>("call_block")
         .and_then(|code| ApprovalBlock::parse(&code))
         .or_else(|| {
-            // DM 전달 작업의 닫힌 기록: 전달 실패·불명(`unavailable`·`held`)은 DM 전달 실패이고, 나머지는 승인 경로 판정 낱말 그대로다
+            // DM job closures `unavailable`/`held` map to ApprovalDmUnavailable; other codes match ApprovalBlock directly.
             row.get::<Option<String>, _>("job_block")
                 .and_then(|reason| match reason.as_str() {
                     "unavailable" | "held" => Some(ApprovalBlock::ApprovalDmUnavailable),
@@ -83,8 +81,7 @@ fn view(row: &sqlx::postgres::PgRow) -> R<ApiRun> {
                 .unwrap_or_else(|| "run_failed".to_owned()),
         },
         RunState::Cancelled => ApiState::Cancelled,
-        // 진행 중: 사람이 지금 결정할 수 있는 카드가 루트 또는 대기 중인 위임 자손에 있으면 승인 대기다(Slack 카드는 게시 영수증이 확정된 뒤부터).
-        // 자식 대기·보류만으로, 또는 DM 카드가 아직 쌓이는 중이거나 올라가는 중이면 승인 대기가 아니다
+        // `NeedsHuman` only when an actionable approval card exists (and any DM card job has confirmed `posted`).
         RunState::Waiting | RunState::Ready | RunState::Leased | RunState::Retry => {
             if row.get::<bool, _>("needs_human") {
                 ApiState::NeedsHuman
@@ -120,7 +117,6 @@ async fn find(tx: &mut Tx<'_>, key: &ApiKey) -> R<Option<ApiRun>> {
     row.as_ref().map(view).transpose()
 }
 
-/// 입구·주체·키·모델·한도·대상이 이 입구의 접수로 쓸 수 있는 모양인가.
 fn valid(req: &ApiAccept) -> R<()> {
     let e = &req.accept.event;
     let endpoint_of_principal = e
@@ -138,18 +134,17 @@ fn valid(req: &ApiAccept) -> R<()> {
         && (1..=63).contains(&req.model.len())
         && id_ok(&req.model)
         && e.conversation.kind == ConversationKind::Http
-        // 모델을 고르면 바인딩 에이전트를 직접 접수한다: 도구 직접 실행은 이 입구로 통하지 않는다
+        // API endpoints dispatch only bound agents, never direct tool targets.
         && matches!(req.accept.target, Target::Agent { .. });
     if ok { Ok(()) } else { invalid() }
 }
 
-/// 이 SQLSTATE가 «커밋하지 않았다»를 **확정**하는가: 무결성 위반(23)과 확실한 롤백(40001 직렬화 실패·40002 무결성 롤백·40P01 교착)만이다.
-/// `40003`(문장 완료 불명)·`08007`(트랜잭션 해결 불명)·연결 유실·관리자 종료(57P01) 등은 커밋됐을 수 있다.
+/// Returns true only for SQLSTATEs guaranteeing rollback before commit (class 23 integrity, 40001/40002/40P01).
+/// Ambiguous codes (40003, 08007, disconnects, 57P01) may have committed.
 fn rolled_back(code: &str) -> bool {
     code.starts_with("23") || matches!(code, "40001" | "40002" | "40P01")
 }
 
-/// 이 커밋 오류가 «커밋됐는지 알 수 없다»인가(서버가 위 코드로 거절한 것만 확실히 커밋 전이다).
 fn commit_unknown(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::Database(db) => !db.code().is_some_and(|code| rolled_back(&code)),
@@ -158,7 +153,6 @@ fn commit_unknown(error: &sqlx::Error) -> bool {
 }
 
 impl Store {
-    /// 원자 accept-or-replay(위 문서).
     pub(crate) async fn api_accept(&self, req: ApiAccept) -> R<ApiAdmission> {
         valid(&req)?;
         let a = &req.accept;
@@ -176,11 +170,11 @@ impl Store {
             Err(Fail::Core(Error::Stale)) => return Ok(ApiAdmission::Stale),
             Err(other) => return Err(other),
         };
-        // 재전달은 잠금 없이 끝난다(새 슬롯·새 실행 0)
+        // Fast-path replay without taking the endpoint lock.
         if let Some(found) = find(&mut tx, &key).await? {
             return Ok(replay(found, &req));
         }
-        // 새 키: 같은 입구의 접수를 한 줄로 세운다. 같은 키의 동시 요청도 여기서 차례를 얻어 둘째는 첫째의 커밋을 본다
+        // Serialize new admissions per endpoint so concurrent duplicates see the first commit.
         sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("api:{profile}:{}", req.endpoint))
             .execute(&mut *tx)
@@ -222,7 +216,7 @@ impl Store {
             .bind(&req.endpoint)
             .execute(&mut *tx)
             .await?;
-        // 접수 행: 같은 키(입구 기준)가 이미 있으면 위에서 끝났다. 유일 색인이 마지막 방어선이다
+        // Unique index is the final guard against concurrent inserts.
         let inserted = sqlx::query(
             "insert into bot_requests (profile, binding, principal, request, input_sha256, run,
                                        http_method, http_path, http_response, api_endpoint, api_model, api_team)
@@ -245,7 +239,7 @@ impl Store {
         .rows_affected()
             == 1;
         if !inserted {
-            // 같은 (프로필, 바인딩, 주체, 키) 행이 다른 입구에 이미 있다: 이 입구의 접수가 아니다
+            // Same (profile, binding, principal, request) already exists under another endpoint.
             return Ok(ApiAdmission::Conflict);
         }
         let created = find(&mut tx, &key).await?.ok_or(Error::Unavailable)?;
@@ -259,7 +253,6 @@ impl Store {
         }
     }
 
-    /// 범위가 정해진 조회: (프로필, 입구, 주체, 키)가 모두 맞는 접수만 보인다.
     pub(crate) async fn api_lookup(&self, key: ApiKey) -> R<Option<ApiRun>> {
         let mut tx = self.begin_authorized().await?;
         let found = find(&mut tx, &key).await?;
@@ -275,7 +268,7 @@ fn http_response(mode: bot_core::profile::ResponseMode) -> &'static str {
     }
 }
 
-/// 같은 키의 기존 접수: 같은 지문·같은 모델이면 연결, 아니면 충돌. 지문에 모델이 들어 있어도 모델을 한 번 더 대조한다(같은 키의 의미가 둘로 나뉘지 않게).
+/// Replays only when both input digest and model match; mismatches conflict.
 fn replay(found: ApiRun, req: &ApiAccept) -> ApiAdmission {
     if found.digest == req.digest && found.model == req.model {
         ApiAdmission::Replayed(found)
@@ -303,7 +296,7 @@ mod tests {
         for certain in ["23503", "23505", "23514", "40001", "40002", "40P01"] {
             assert!(rolled_back(certain), "{certain}");
         }
-        // 문장 완료 불명·트랜잭션 해결 불명·연결 예외·관리자 종료·내부 오류는 커밋됐을 수 있다
+        // Ambiguous completion, connection errors, admin shutdown, and internal errors may have committed.
         for unknown in [
             "40003", "08007", "08006", "08000", "57P01", "57P02", "XX000", "53300", "",
         ] {

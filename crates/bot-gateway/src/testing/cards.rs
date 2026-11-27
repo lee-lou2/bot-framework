@@ -1,5 +1,4 @@
-//! 소유자 DM 승인 카드 전달(`bot_core::cards`)의 메모리 저장소: 작업을 점유하고(`claim`), 최초 전송자만 `begin`을 받고, 정산을 기록한다. `Posted`면 영수증을 만들고
-//! (원장 가짜에 이어 두었으면 그 승인의 `delivery`로도 읽힌다 — 실제 저장소가 정산과 한 커밋에 하는 일), 일시 실패(`NotSent`)는 다시 잡히도록 되돌린다(백오프 시간은 흉내 내지 않는다).
+//! In-memory `CardOutbox` test double for owner-DM approval card delivery.
 use crate::testing::TestCatalog;
 use crate::testing::ports::MemoryLedger;
 use bot_core::{
@@ -17,9 +16,7 @@ use std::{
 pub struct MemoryCards {
     ledger: Option<Arc<MemoryLedger>>,
     inner: Mutex<Inner>,
-    /// 실제 저장소처럼 `begin`이 «확인한 판본이 지금의 활성 판본인가»를 다시 본다(없으면 보지 않는다)
     fence: Mutex<Option<Arc<TestCatalog>>>,
-    /// `begin`이 확인하기 직전에 부르는 동작(점유한 뒤 올리기 전에 다른 프로세스가 게시하는 상황)
     before_begin: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
@@ -33,12 +30,9 @@ struct Inner {
     receipts: BTreeMap<String, CardReceipt>,
     fail_begin: bool,
     fail_claim: bool,
-    /// 정산이 차례로 받을 오류(앞에서부터 하나씩 쓰고, 비면 정상으로 기록한다)
     fail_settle: Vec<Error>,
-    /// HTTP(OpenAI 호환) 출처 카드의 고정 증거. 없으면 채널 출처 카드다.
     origins: BTreeMap<String, CardOrigin>,
     fail_origin: bool,
-    /// `block`이 기록한 (승인 식별자, 판정)
     blocked: Vec<(String, ApprovalBlock)>,
 }
 
@@ -52,7 +46,6 @@ impl MemoryCards {
         })
     }
 
-    /// `Posted` 정산이 영수증을 이 원장의 승인(`delivery`)에도 남긴다.
     pub fn linked(ledger: Arc<MemoryLedger>) -> Arc<Self> {
         Arc::new(Self {
             ledger: Some(ledger),
@@ -62,17 +55,15 @@ impl MemoryCards {
         })
     }
 
-    /// `begin`이 확인한 판본을 이 목록의 지금 활성 판본과 견준다(다르면 `Stale`). 실제 저장소의 계약이다.
+    /// Enables revision fencing in `begin` against `catalog` (returning `Stale` on mismatch).
     pub fn fence(&self, catalog: Arc<TestCatalog>) {
         *self.fence.lock().unwrap() = Some(catalog);
     }
 
-    /// `begin`이 확인하기 직전에 `hook`을 부른다(점유와 게시 사이에 일어나는 일을 흉내 낸다).
     pub fn before_begin(&self, hook: impl Fn() + Send + Sync + 'static) {
         *self.before_begin.lock().unwrap() = Some(Box::new(hook));
     }
 
-    /// 정산이 만든 영수증
     pub fn receipt(&self, nonce: &ApprovalId) -> Option<CardReceipt> {
         self.inner.lock().unwrap().receipts.get(&nonce.0).cloned()
     }
@@ -84,7 +75,6 @@ impl MemoryCards {
         }
     }
 
-    /// `begin`이 기록한 (승인 식별자, 확인한 활성 판본)
     pub fn begun(&self) -> Vec<(String, String)> {
         self.inner
             .lock()
@@ -95,12 +85,10 @@ impl MemoryCards {
             .collect()
     }
 
-    /// 정산 기록 (승인 식별자, 결과) — 정산 순서대로
     pub fn settled(&self) -> Vec<(String, CardOutcome)> {
         self.inner.lock().unwrap().settled.clone()
     }
 
-    /// 이 카드를 HTTP 출처로 만든다(원래 요청에서 이어받은 고정 증거)
     pub fn set_origin(&self, nonce: &str, origin: CardOrigin) {
         self.inner
             .lock()
@@ -109,12 +97,10 @@ impl MemoryCards {
             .insert(nonce.to_owned(), origin);
     }
 
-    /// 증거 조회가 실패한다
     pub fn fail_origin(&self, fail: bool) {
         self.inner.lock().unwrap().fail_origin = fail;
     }
 
-    /// `block`이 기록한 (승인 식별자, 판정) — 닫은 순서대로
     pub fn blocked(&self) -> Vec<(String, ApprovalBlock)> {
         self.inner.lock().unwrap().blocked.clone()
     }
@@ -127,12 +113,10 @@ impl MemoryCards {
         self.inner.lock().unwrap().fail_claim = fail;
     }
 
-    /// 다음 정산들을 이 오류들로 차례로 거절한다(기록하지 않는다).
     pub fn fail_settle(&self, errors: impl IntoIterator<Item = Error>) {
         self.inner.lock().unwrap().fail_settle = errors.into_iter().collect();
     }
 
-    /// 아직 점유되지 않고 기다리는 작업 수
     pub fn waiting(&self) -> usize {
         self.inner.lock().unwrap().pending.len()
     }
@@ -218,7 +202,7 @@ impl CardOutbox for MemoryCards {
                 }
                 inner.receipts.insert(key.nonce.0.clone(), receipt);
             }
-            // 아무것도 올라가지 않았다: 다시 잡히게 되돌리고 `begin` 기록을 지운다(다음 시도가 최초 전송자다)
+            // Re-queue transient `NotSent` attempts and clear `begun` so the next attempt can begin.
             CardOutcome::NotSent { .. } => {
                 inner.begun.retain(|(begun, _)| *begun != key);
                 inner.pending.push(job);

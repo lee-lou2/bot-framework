@@ -1,8 +1,9 @@
-//! 접수 뒤 복구: 시작 전 실패의 리스 반납, 미전송 재점유, 불명 보류, 속도 제한.
+//! Post-intake recovery for private calls: pre-start lease release, not-sent reclaim, unknown holds, and rate limiting.
 
 use super::*;
+use crate::{keyed, testing::*};
+use bot_core::{id::ClaimEpoch, state::Risk};
 
-/// 게이트가 접수 키·대화·정규화한 인자로 만드는 지문(시험이 원장에 직접 접수할 때 쓴다).
 fn fingerprint_of(call: &PrivateCall, canonical: &str) -> [u8; 32] {
     keyed::hmac(
         KEY,
@@ -20,13 +21,11 @@ fn fingerprint_of(call: &PrivateCall, canonical: &str) -> [u8; 32] {
         ],
     )
 }
-use crate::{keyed, testing::*};
-use bot_core::{id::ClaimEpoch, state::Risk};
 
 #[tokio::test]
 async fn a_delivery_made_while_the_first_is_still_in_flight_is_not_acknowledged() {
     let r = rig(true);
-    // 첫 전달이 리스를 점유한 채 시작 전에 멈췄다(워커가 사라졌다): 원장에 예약만 남는다
+    // First delivery holds a lease but never started (simulates crashed worker).
     use bot_core::ledger::{PrivateLedger, PrivateRequest};
     let first = standard("req-1");
     let sealed = FakeSealer
@@ -54,15 +53,18 @@ async fn a_delivery_made_while_the_first_is_still_in_flight_is_not_acknowledged(
     let again = receive(&r, standard("req-1")).await;
     assert!(
         matches!(again, Err(Error::Unavailable)),
-        "처리 중인 접수는 ACK하지 않고 다시 시도하게 한다"
+        "in-flight intake must trigger retry rather than ACK"
     );
-    assert!(r.runner.jobs().is_empty(), "호출 0회인데 ACK되면 안 된다");
+    assert!(
+        r.runner.jobs().is_empty(),
+        "must not ACK with zero executions"
+    );
 }
 
 #[tokio::test]
 async fn a_failure_before_the_start_record_gives_the_lease_back_and_the_redelivery_runs_once() {
     let r = rig(true);
-    // 접수한 뒤 전송 직전에 저장소의 활성 판본이 바뀌었다: 시작을 커밋하지 않고 리스를 반납한다
+    // Active revision flips before start commit: lease is released without invoking the runner.
     let ledger = r.ledger.clone();
     r.ledger
         .set_before_start(move || ledger.set_active_revision("r2"));
@@ -73,15 +75,15 @@ async fn a_failure_before_the_start_record_gives_the_lease_back_and_the_redelive
     assert_eq!(r.ledger.outcomes(), ["retry_before_start"]);
     assert!(
         r.runner.jobs().is_empty(),
-        "시작 전 실패에서는 실행기가 불리지 않는다"
+        "runner must not be called on pre-start failure"
     );
     assert!(r.ledger.starts().is_empty());
-    // 새 판본을 게시한 뒤 같은 입력이 다시 오면 새 epoch로 이어 가 처리 1회다
+    // Publishing the new revision lets the redelivery proceed under a new epoch and execute once.
     r.catalog.publish(world("r2"));
     let mut again = standard("req-1");
     again.revision = Revision("r2".into());
     receive(&r, again).await.unwrap();
-    assert_eq!(r.runner.jobs().len(), 1, "재전달 뒤 처리 1회");
+    assert_eq!(r.runner.jobs().len(), 1, "executed once after redelivery");
     assert_eq!(r.ledger.outcomes(), ["retry_before_start", "completed"]);
 }
 
@@ -97,7 +99,6 @@ async fn a_runner_that_confirms_nothing_was_sent_releases_the_claim_for_a_redeli
     receive(&r, standard("req-1")).await.unwrap();
     assert_eq!(r.runner.jobs().len(), 2);
     assert_eq!(r.ledger.outcomes(), ["not_sent", "completed"]);
-    // 다시 점유할 때마다 새 epoch다
     let claims: Vec<_> = r.runner.jobs().iter().map(|j| j.attempt.claim).collect();
     assert_eq!(claims, [Some(ClaimEpoch(1)), Some(ClaimEpoch(2))]);
 }
@@ -113,9 +114,8 @@ async fn an_unknown_result_is_held_for_good_and_never_rerun() {
     assert_eq!(
         r.runner.jobs().len(),
         1,
-        "보류는 원문으로 다시 실행하지 않는다"
+        "held intake must not be re-executed"
     );
-    // 실행기 자체의 실패도 보류다
     let r = rig(true);
     r.runner.fail_next();
     receive(&r, standard("req-2")).await.unwrap();
@@ -157,7 +157,7 @@ async fn a_started_claim_that_loses_its_lease_becomes_a_durable_hold_without_a_r
         })
         .await
         .unwrap();
-    // 시작한 워커가 사라졌다: 진행 중으로 보이다가 sweep이 보류로 바꾼다
+    // Started worker vanished: looks in-flight until expiry sweeps it to held.
     assert!(matches!(
         receive(&r, standard("req-1")).await,
         Err(Error::Unavailable)
@@ -166,7 +166,7 @@ async fn a_started_claim_that_loses_its_lease_becomes_a_durable_hold_without_a_r
     receive(&r, standard("req-1")).await.unwrap();
     assert!(
         r.runner.jobs().is_empty(),
-        "시작한 접수는 다시 실행하지 않는다"
+        "started intake must never be re-executed"
     );
 }
 
@@ -179,7 +179,7 @@ async fn a_blocked_result_is_held_because_the_effect_is_unknown_and_never_rerun(
     assert_eq!(
         r.ledger.outcomes(),
         ["held"],
-        "도구는 이미 실행됐다: 거절로 단정하지 않고 보류한다"
+        "tool already executed so blocked output must be held, not rejected"
     );
     receive(&r, standard("req-1")).await.unwrap();
     assert_eq!(r.runner.jobs().len(), 1);
@@ -210,7 +210,6 @@ async fn private_calls_are_rate_limited_and_a_refused_one_gives_the_lease_back()
         },
     );
     gate.receive(standard("req-1")).await.unwrap();
-    // 두 번째는 속도 제한으로 시작 전에 멈춘다: 반납했으니 시간이 지난 재전달이 이어 간다(새 접수 키는 새 run이 필요하므로 같은 run 재사용을 흉내 낸다)
     r.ledger.set_attempt(Attempt {
         profile: ProfileId("personal".into()),
         run: RunId("private-run-2".into()),
@@ -233,8 +232,8 @@ async fn the_reply_destination_is_bound_to_the_first_request_including_the_threa
     let mut first = standard("req-1");
     first.conversation.thread = Some("t-1".into());
     r.runner.script(crate::ports::Ran::NotSent);
-    assert!(receive(&r, first).await.is_err()); // 반납된 접수
-    // 같은 인자·같은 키인데 스레드가 다르거나 없거나 대화 ID가 다르다: 새 목적지로 바꿔치지 못한다
+    assert!(receive(&r, first).await.is_err());
+    // Changing thread or conversation ID for the same key and args must conflict.
     for (thread, conversation) in [(Some("t-2"), "dm-1"), (None, "dm-1"), (Some("t-1"), "dm-2")] {
         let mut moved = standard("req-1");
         moved.conversation.thread = thread.map(str::to_owned);
@@ -245,7 +244,6 @@ async fn the_reply_destination_is_bound_to_the_first_request_including_the_threa
         );
     }
     assert_eq!(r.runner.jobs().len(), 1);
-    // 처음 그대로면 이어 간다
     let mut same = standard("req-1");
     same.conversation.thread = Some("t-1".into());
     receive(&r, same).await.unwrap();
@@ -272,15 +270,15 @@ async fn a_tool_that_reports_an_error_is_held_and_a_definite_refusal_is_rejected
     assert_eq!(
         r.ledger.outcomes(),
         ["held"],
-        "도구가 오류라고 해도 일부 효과가 났을 수 있다"
+        "a tool returning isError may still have produced partial side effects"
     );
-    // MCP 모양이 아닌 결과는 성공으로 보지 않는다
+    // Non-MCP-shaped results are not treated as successful completion.
     r.runner
         .script(Ran::Done(JsonPayload(r#"{"ok":true}"#.into())));
     fresh_run(&r, 2);
     receive(&r, standard("req-2")).await.unwrap();
     assert_eq!(r.ledger.outcomes(), ["held", "held"]);
-    // 서버가 실행 전에 확정적으로 거절했다: 외부 효과가 없다
+    // Server rejected before execution: no external side effects.
     r.runner.script(Ran::Rejected);
     fresh_run(&r, 3);
     assert!(matches!(

@@ -1,9 +1,6 @@
-//! SOPS/age 파일 SecretStore. `sops --decrypt --output-type json <파일>`로 복호화한 JSON의 `bot.<profile>.<name>`을 읽는다.
-//! age 키는 sops가 자기 방식(`SOPS_AGE_KEY_FILE` 등)으로 찾는다. 복호화는 프로필 핸들을 만들 때 하고, 핸들에는 그 프로필의
-//! 이름 공간만 남긴다. 같은 프로필은 잠깐(30초) 기억해 호출마다 sops를 띄우지 않는다.
-//!
-//! 런타임 MCP 추가·제거 시에는 `sops set`·`sops unset`으로 기존 수신자·암호화 메타데이터를 유지한 채
-//! `bot.<profile>.<name>` 항목만 암호화 갱신하고, 즉시 캐시를 무효화한다. 평문은 디스크에 쓰지 않는다.
+//! SOPS/age `SecretStore` decrypting `bot.<profile>.<name>` with 30s per-profile caching and encrypted updates.
+//! Live updates use `sops set`/`unset` to preserve recipients and metadata without writing plaintext to disk.
+
 use super::{Namespace, checked_profile};
 use bot_core::{
     id::{ProfileId, SecretName},
@@ -28,7 +25,7 @@ pub struct SopsStore {
     file: PathBuf,
     program: PathBuf,
     cache: Namespaces,
-    /// 같은 암호화 파일에 동시에 `sops set`/`unset`을 실행하지 않도록 직렬화한다.
+    /// Serializes `sops set`/`unset` calls targeting the same encrypted file.
     write_lock: Arc<Mutex<()>>,
 }
 
@@ -42,7 +39,6 @@ impl SopsStore {
         }
     }
 
-    /// 시험용: 다른 실행 파일을 쓴다. 운영 빌드에는 포함하지 않는다.
     #[cfg(any(test, feature = "testing"))]
     pub fn with_program(file: PathBuf, program: PathBuf) -> Self {
         Self {
@@ -57,7 +53,6 @@ impl SopsStore {
         &self.file
     }
 
-    /// 이 프로필의 복호화 캐시를 즉시 비운다(외부 또는 런타임 갱신 직후 새 값을 바로 읽게 한다).
     pub fn invalidate(&self, profile: &ProfileId) {
         self.cache
             .lock()
@@ -65,7 +60,6 @@ impl SopsStore {
             .remove(&profile.0);
     }
 
-    /// 이 프로필의 암호화 파일에 저장된 비밀 **이름** 목록만 반환한다(값은 돌려주지 않는다).
     pub async fn list_names(&self, profile: &ProfileId) -> Result<BTreeSet<String>, Error> {
         let profile_name = checked_profile(profile)?.to_owned();
         let (program, file) = (self.program.clone(), self.file.clone());
@@ -75,7 +69,6 @@ impl SopsStore {
         Ok(values.into_keys().collect())
     }
 
-    /// `bot.<profile>.<name>` 항목을 기존 SOPS 파일의 수신자·형식을 유지한 채 암호화 저장하고 캐시를 비운다.
     pub async fn set_secret(
         &self,
         profile: &ProfileId,
@@ -104,7 +97,6 @@ impl SopsStore {
         Ok(())
     }
 
-    /// `bot.<profile>.<name>` 항목을 SOPS 파일에서 제거하고 캐시를 비운다.
     pub async fn unset_secret(&self, profile: &ProfileId, name: &SecretName) -> Result<(), Error> {
         let profile_name = checked_profile(profile)?.to_owned();
         let secret_name = name.as_str().to_owned();
@@ -124,7 +116,7 @@ impl SopsStore {
     }
 }
 
-/// sops가 키를 찾는 데 필요한 환경만 넘긴다(그 밖의 환경·비밀은 넘기지 않는다).
+/// Passes only the environment variables `sops` needs to locate decryption keys.
 fn passthrough() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     std::env::vars_os()
         .filter(|(key, _)| {
@@ -158,7 +150,7 @@ fn decrypt_root(program: &Path, file: &Path) -> Result<serde_json::Map<String, V
 
 fn decrypt(program: &Path, file: &Path, profile: &str) -> Result<BTreeMap<String, Vec<u8>>, Error> {
     let root = decrypt_root(program, file)?;
-    // 이 프로필의 이름 공간만 꺼낸다. 다른 프로필 값은 여기서 버린다.
+    // Retain only this profile's namespace so foreign secrets are discarded immediately.
     let own = root
         .get("bot")
         .and_then(|bot| bot.get(profile))
@@ -271,7 +263,6 @@ mod tests {
         "personal": {"calendar-reader": "synthetic-sops-value", "not-text": 5, "Bad Name": "x"},
         "work": {"calendar-reader": "other-profile-value"}}}"#;
 
-    /// `sops`를 흉내 내는 실행 파일: 인자를 확인하고 정해진 JSON을 내놓으며 호출 횟수를 센다.
     fn fake(dir: &Path, counter: &Path) -> PathBuf {
         let path = dir.join("sops");
         let script = format!(
@@ -286,7 +277,6 @@ mod tests {
         path
     }
 
-    /// 읽기·`set`·`unset`을 JSON 파일에 실제로 반영하는 시험용 가짜 `sops`(Python3 기반).
     fn fake_rw(dir: &Path) -> PathBuf {
         let path = dir.join("sops-rw");
         let script = r#"#!/usr/bin/env python3
@@ -357,7 +347,6 @@ sys.exit(2)
             resolve(&store, "personal", "absent").await,
             Err(Error::Missing)
         ));
-        // 문자열이 아니거나 이름 규칙에 맞지 않는 항목은 없는 것이다
         assert!(matches!(
             resolve(&store, "personal", "not-text").await,
             Err(Error::Missing)
@@ -366,7 +355,6 @@ sys.exit(2)
             resolve(&store, "nobody", "calendar-reader").await,
             Err(Error::Missing)
         ));
-        // personal은 한 번만 복호화했다(work·nobody는 각각 한 번)
         let runs = std::fs::read_to_string(&counter).unwrap().lines().count();
         assert_eq!(runs, 3);
     }
@@ -380,12 +368,10 @@ sys.exit(2)
         let team = ProfileId("team".into());
         let token = SecretName::parse("github-token").unwrap();
 
-        // 초기 빈 캐시 채우기
         assert!(matches!(
             resolve(&store, "team", "github-token").await,
             Err(Error::Missing)
         ));
-        // set_secret이 bot.team 서브트리를 만들고 값을 저장하며 캐시를 즉시 무효화한다
         store
             .set_secret(&team, &token, "synthetic-secret-1")
             .await
@@ -398,7 +384,6 @@ sys.exit(2)
             store.list_names(&team).await.unwrap(),
             BTreeSet::from(["github-token".to_owned()])
         );
-        // 값 갱신도 즉시 반영된다
         store
             .set_secret(&team, &token, "synthetic-secret-2")
             .await
@@ -407,7 +392,6 @@ sys.exit(2)
             resolve(&store, "team", "github-token").await.unwrap(),
             "synthetic-secret-2"
         );
-        // 줄바꿈·빈 값은 거절한다
         assert!(matches!(
             store.set_secret(&team, &token, "").await,
             Err(Error::Invalid)
@@ -416,7 +400,6 @@ sys.exit(2)
             store.set_secret(&team, &token, "a\nb").await,
             Err(Error::Invalid)
         ));
-        // unset 뒤에는 즉시 사라진다
         store.unset_secret(&team, &token).await.unwrap();
         assert!(matches!(
             resolve(&store, "team", "github-token").await,
@@ -444,8 +427,7 @@ sys.exit(2)
                 "{bad:?}"
             );
         }
-        assert!(!counter.exists(), "잘못된 프로필로는 sops를 띄우지 않는다");
-        // 복호화 결과가 JSON 객체가 아니면 거절
+        assert!(!counter.exists(), "invalid profiles must not invoke sops");
         let bad = dir.path().join("bad-sops");
         std::fs::write(&bad, "#!/bin/sh\necho '[1]'\n").unwrap();
         std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();

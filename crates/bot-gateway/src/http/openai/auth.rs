@@ -1,12 +1,4 @@
-//! API 키 인증. 키 값 하나가 입구 별칭과 주체를 정한다(URL에는 별칭이 없다).
-//!
-//! - 헤더에는 표준 `Authorization: Bearer <키>` 한 개만 허용한다(헤더가 여럿이면 거절). 키는 ASCII 32~256바이트다.
-//! - 호스트가 연 모든 OpenAI 입구의 모든 키 슬롯 값을 **지금** 비밀 보관소(Watched 래퍼)에서 읽어, 값의 SHA-256을 고정 길이로 상수 시간 대조한다.
-//!   값이 맞아도 멈추지 않고 모든 슬롯을 끝까지 본다. 한 키 값이 슬롯 둘 이상에 맞으면 실패다(회전용 슬롯은 서로 다른 값을 가진다).
-//! - 값은 이 요청 안에서만 쓰고 기억하지 않는다: 회전·삭제가 다음 요청부터 바로 반영되고, 기억이 보관소 갱신을 넘어 수명을 늘리지 않는다
-//!   (보관소 자체의 짧은 기억은 그대로 따른다). 가림 목록의 옛 값은 인증에 쓰지 않는다.
-//! - 어느 슬롯이든 **읽지 못해**(보관소 장애·시간 초과) 유일성을 확인할 수 없으면 닫는다(503). 키가 맞는지와 무관한 응답이라 키의 유효 여부를 알려 주지 않는다.
-//!   보관소에 값이 **없는** 슬롯은 누구와도 겹칠 수 없으니 그 슬롯만 쓰지 않는다(다른 키의 인증은 계속된다).
+//! Constant-time Bearer API key authentication across all active OpenAI key slots.
 use super::super::HttpGateway;
 use crate::{host::openai_key_shaped, identity, routes::Routes};
 use axum::http::{HeaderMap, header};
@@ -19,21 +11,18 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::time::timeout;
 
-/// 슬롯 값 하나(또는 프로필 핸들)를 읽는 데 주는 시간. 잠긴 키체인·응답 없는 보관소가 요청을 붙들지 못하게 한다.
+/// Per-slot secret read timeout so a stalled store cannot pin requests.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 type Hash = [u8; 32];
 
-/// 키 슬롯 하나를 읽은 결과
 enum Slot {
     Value(Vec<u8>),
-    /// 보관소에 값이 없다(또는 자격 이름이 올바르지 않다)
     Absent,
-    /// 보관소 장애·시간 초과
     Unreadable,
 }
 
-/// 인증된 호출자. 키 값은 들고 있지 않다(해시만 — 전달 직전 재확인용).
+/// Authenticated caller carrying only the key's SHA-256 hash for pre-delivery re-verification.
 pub(super) struct Authed {
     pub endpoint: String,
     pub subject: String,
@@ -42,13 +31,12 @@ pub(super) struct Authed {
 }
 
 impl Authed {
-    /// 시험용: 키 값 없이 입구·주체만 가진 인증된 호출자
     #[cfg(test)]
     pub(super) fn for_test(endpoint: &str, subject: &str) -> Self {
         Self {
             endpoint: endpoint.to_owned(),
             subject: subject.to_owned(),
-            principal: identity::http(endpoint, subject).expect("올바른 주체"),
+            principal: identity::http(endpoint, subject).expect("valid HTTP principal"),
             hash: [0; 32],
         }
     }
@@ -56,13 +44,13 @@ impl Authed {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum AuthError {
-    /// 키가 없거나 모양이 틀렸거나 어느 슬롯에도(또는 둘 이상에) 맞지 않는다.
+    /// Missing, malformed, unmatched, or ambiguously duplicated key.
     Invalid,
-    /// 유일성을 확인하지 못했다(보관소 장애·슬롯 이름 오류).
+    /// Uniqueness could not be verified due to a store failure or timeout.
     Unavailable,
 }
 
-/// 표준 Bearer 키 한 개. `Authorization` 헤더가 둘 이상이면 어느 것도 믿지 않는다.
+/// Accepts exactly one `Authorization: Bearer <key>` header; rejects duplicates.
 fn presented(headers: &HeaderMap) -> Option<&str> {
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     let value = values.next()?;
@@ -73,7 +61,7 @@ fn presented(headers: &HeaderMap) -> Option<&str> {
     (scheme.eq_ignore_ascii_case("bearer") && openai_key_shaped(token.as_bytes())).then_some(token)
 }
 
-/// 고정 길이 해시의 상수 시간 비교(첫 차이에서 멈추지 않는다)
+/// Constant-time comparison over fixed-length hashes.
 fn same(a: &Hash, b: &Hash) -> bool {
     std::hint::black_box(a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y))) == 0
 }
@@ -87,7 +75,6 @@ impl HttpGateway {
         let token = presented(headers).ok_or(AuthError::Invalid)?;
         let hash: Hash = Sha256::digest(token.as_bytes()).into();
         let (endpoint, subject) = self.match_key(routes, hash).await?;
-        // 호스트 설정 검증이 보장한 모양이다. 어긋나면 설정 오류이므로 열지 않는다.
         let principal = identity::http(&endpoint, &subject).ok_or(AuthError::Unavailable)?;
         Ok(Authed {
             endpoint,
@@ -97,8 +84,7 @@ impl HttpGateway {
         })
     }
 
-    /// 결과·안내를 내보내기 직전의 재확인: 같은 키 값이 지금도 같은 입구·주체를 정확히 하나로 가리키는가.
-    /// 키가 회전돼 같은 주체의 다른 슬롯으로 옮겨졌으면 통과한다(주체의 작업은 키가 아니라 주체에 묶인다).
+    /// Re-verifies right before emitting output that the same key still uniquely identifies the same endpoint and subject.
     pub(super) async fn openai_reauthenticate(&self, authed: &Authed) -> Result<(), AuthError> {
         let routes = self.ingress.routes().map_err(|_| AuthError::Unavailable)?;
         let (endpoint, subject) = self.match_key(&routes, authed.hash).await?;
@@ -118,8 +104,8 @@ impl HttpGateway {
         let mut matched = 0usize;
         let mut found = None;
         let mut unverifiable = false;
+        // Scan every slot without short-circuiting so duplicate keys fail closed and timing stays uniform.
         for (alias, endpoint) in &host.http.openai {
-            // 쓰는 프로필이 없는 입구는 자격 이름 공간이 없어 누구도 인증하지 못한다
             let Some(profile) = routes.openai_profile(alias) else {
                 continue;
             };
@@ -128,7 +114,7 @@ impl HttpGateway {
             {
                 Ok(Ok(handle)) => handle,
                 _ => {
-                    tracing::error!(endpoint = %alias, "OpenAI 입구의 비밀 보관소 핸들을 얻지 못했어요");
+                    tracing::error!(endpoint = %alias, "failed to open secret store handle for OpenAI endpoint");
                     unverifiable = true;
                     continue;
                 }
@@ -141,9 +127,8 @@ impl HttpGateway {
                     };
                     match timeout(READ_TIMEOUT, handle.resolve(name)).await {
                         Ok(Ok(value)) => (slot, key, Slot::Value(value.0)),
-                        // 값이 없는 슬롯은 누구와도 겹칠 수 없다(그 슬롯으로는 아무도 인증하지 못할 뿐이다)
+                        // Missing slots cannot collide with any other slot; only unreadable slots fail uniqueness.
                         Ok(Err(Error::Missing)) => (slot, key, Slot::Absent),
-                        // 읽지 못한 슬롯은 다른 슬롯과 겹치는지 알 수 없다
                         _ => (slot, key, Slot::Unreadable),
                     }
                 }
@@ -152,19 +137,19 @@ impl HttpGateway {
                 let value = match read {
                     Slot::Value(value) => value,
                     Slot::Absent => {
-                        tracing::error!(endpoint = %alias, slot = %slot, "OpenAI 입구의 키 슬롯 값이 보관소에 없어 그 슬롯으로는 인증하지 않아요");
+                        tracing::error!(endpoint = %alias, slot = %slot, "OpenAI key slot missing from secret store; skipping slot");
                         continue;
                     }
                     Slot::Unreadable => {
-                        tracing::error!(endpoint = %alias, slot = %slot, "OpenAI 입구의 키 슬롯 값을 읽지 못해 인증을 닫아요");
+                        tracing::error!(endpoint = %alias, slot = %slot, "failed to read OpenAI key slot; failing closed");
                         unverifiable = true;
                         continue;
                     }
                 };
-                // 보관소 파일 끝의 줄바꿈 등은 값이 아니다(가림 장치도 앞뒤 공백을 뗀 모양을 함께 가린다)
+                // Trim trailing newlines/whitespace from secret files to match redaction handling.
                 let secret = value.trim_ascii();
                 if !openai_key_shaped(secret) {
-                    tracing::error!(endpoint = %alias, slot = %slot, "OpenAI 입구의 키 슬롯 값이 키 모양(ASCII 32~256바이트)이 아니라 쓰지 않아요");
+                    tracing::error!(endpoint = %alias, slot = %slot, "OpenAI key slot value violates key shape (32-256 printable ASCII bytes); skipping slot");
                     continue;
                 }
                 let hash: Hash = Sha256::digest(secret).into();

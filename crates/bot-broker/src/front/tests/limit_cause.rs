@@ -1,5 +1,4 @@
-//! 한도 거절은 브로커가 `Error::RateLimited`로 직접 알린다: 앞 요청이 한도 거절을 받고 아무도 읽지 않은 채 사라져도(접속이
-//! 끊겨도) 같은 위치에서 나중에 난 저장소 장애(`Unavailable`)를 한도로 확정해 봉인하지 않는다. 진짜 한도 거절만 `unavailable` 표식이 된다.
+//! Rate-limit refusals return `Error::RateLimited` directly so an unread refusal never seals a later `Unavailable` storage error at the same position.
 
 use super::{
     cli::{call, record},
@@ -19,11 +18,11 @@ const SAY: &str = r#"{"text":"hi"}"#;
 async fn a_limit_refusal_nobody_read_cannot_seal_a_later_storage_failure_at_the_same_position() {
     let wrapped = Arc::new(Wrapped::default());
     let r = rig_full(|_| {}, |_| {}, judged(300), one_token(), wrapper(&wrapped)).await;
-    // 첫 위치가 한도의 유일한 자리를 쓴다
+    // First position consumes the single rate-limit token.
     record(&r, 4, &[("toolu_a", "echo_say", SAY)]);
     let reply = rpc(&r, &call("toolu_a", "echo_say", SAY)).await;
     assert!(reply.body.contains("ok"), "{}", reply.body);
-    // 앞 요청이 두 번째 위치에서 한도 거절을 받았지만 접속이 끊겨 프런트가 결과를 읽지 못했다(호출만 하고 버린다)
+    // An earlier request hits the rate limit at position 2, but the client disconnects before the front reads it.
     record(&r, 8, &[("toolu_b", "echo_say", SAY)]);
     let abandoned = wrapped
         .call(ToolCall {
@@ -34,22 +33,22 @@ async fn a_limit_refusal_nobody_read_cannot_seal_a_later_storage_failure_at_the_
         })
         .await;
     assert!(matches!(abandoned, Err(bot_core::port::Error::RateLimited)));
-    // 한도가 회복된 뒤 같은 자리에 진짜 저장소 오류가 났다: 거절이 아니므로 표식이 없다
+    // After the limit recovers, a real storage failure at the same position must not be sealed as a refusal.
     r.clock.advance(Duration::from_secs(60));
     wrapped.fail_with(Some(Inject::Unavailable));
     assert_eq!(word(&r, "toolu_b", "echo_say", SAY).await, "unavailable");
     assert!(
         r.turns.refusals().is_empty(),
-        "저장소 장애를 한도 거절로 봉인했다: {:?}",
+        "sealed a storage failure as a rate-limit refusal: {:?}",
         r.turns.refusals()
     );
     assert_eq!(r.runner.jobs().len(), 1);
-    // 저장소가 돌아오면 같은 위치를 다시 시도해 실행한다
+    // Once storage recovers, retrying the same position executes it.
     wrapped.fail_with(None);
     let reply = rpc(&r, &call("toolu_b", "echo_say", SAY)).await;
     assert!(reply.body.contains("ok"), "{}", reply.body);
     assert_eq!(r.runner.jobs().len(), 2);
-    // 진짜 한도 거절은 그 호출의 결과와 함께 와서 `unavailable` 표식이 된다
+    // A real rate-limit refusal seals the position with `CliRefusal::RateLimited`.
     record(&r, 12, &[("toolu_c", "echo_say", SAY)]);
     assert_eq!(word(&r, "toolu_c", "echo_say", SAY).await, "unavailable");
     assert_eq!(
@@ -59,6 +58,6 @@ async fn a_limit_refusal_nobody_read_cannot_seal_a_later_storage_failure_at_the_
     assert_eq!(
         r.runner.jobs().len(),
         2,
-        "한도에 걸린 호출은 실행하지 않았다"
+        "rate-limited call must not execute"
     );
 }

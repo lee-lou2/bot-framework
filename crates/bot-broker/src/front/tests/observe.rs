@@ -1,4 +1,4 @@
-//! 완료한 모델 응답의 도구 목록 관측: 알리는 데 성공한 뒤에야 종결 이벤트·응답이 나간다.
+//! Observed tool uses must be checkpointed before terminal stream events or JSON replies leave.
 
 use super::*;
 use crate::front::observe::{CheckpointSink, Observed, ObservedUse, TurnSink};
@@ -93,7 +93,7 @@ async fn a_completed_streamed_response_tells_its_tools_in_order_before_the_stop_
     let r = plain().await;
     let mut events = vec![start("msg_01ABC")];
     events.extend(text_block(0, "calling"));
-    // 같은 도구·같은 인자 두 개(위치로 구별), 입력은 조각으로 쪼개져 온다
+    // Two identical tool calls differentiated by position, with fragmented JSON input.
     events.extend(tool_block(
         1,
         "toolu_a",
@@ -148,7 +148,7 @@ async fn responses_without_tools_and_aborted_responses_tell_nothing() {
     let reply = stream(&r, events, End::Eof).await;
     assert!(reply.body.contains("message_stop"));
     assert!(r.turns.seen().is_empty());
-    // 도구 블록이 다 오고도 종결 이벤트 없이 끊긴 응답
+    // Aborted before message_stop even after a complete tool block.
     let mut events = vec![start("msg_2")];
     events.extend(tool_block(0, "toolu_a", "echo_say", &["{}"]));
     let reply = stream(&r, events, End::Fail).await;
@@ -211,7 +211,7 @@ async fn a_plain_json_response_is_told_before_it_is_returned() {
             uses: vec![used("toolu_n", "echo_say", r#"{"text":"n"}"#)],
         }]
     );
-    // 알리지 못하면 응답 본문을 내보내지 않는다
+    // Do not release the JSON body if checkpointing fails.
     r.turns.fail_with(Some(bot_core::port::Error::Unavailable));
     r.upstream.respond(200, body.as_bytes());
     let reply = raw(r.front.addr(), &messages(&r, r#"{"messages":[]}"#)).await;
@@ -243,13 +243,13 @@ async fn the_checkpoint_sink_writes_one_idempotent_step_per_response() {
         body,
         serde_json::json!({"id":"msg_01ABC","uses":[{"id":"toolu_a","name":"echo_say","input":{"text":"hi"}}]})
     );
-    // 같은 응답 ID에 다른 내용은 받지 않는다
+    // Reject conflicting content under the same response ID.
     let other = Observed {
         uses: vec![used("toolu_z", "echo_say", "{}")],
         ..turn
     };
     assert!(sink.completed(attempt.clone(), other).await.is_err());
-    // 너무 큰 입력은 쓰지 않는다
+    // Reject oversized inputs.
     let big = Observed {
         id: "msg_big".into(),
         uses: vec![used(
@@ -264,7 +264,7 @@ async fn the_checkpoint_sink_writes_one_idempotent_step_per_response() {
 #[tokio::test]
 async fn a_response_with_tools_but_no_usable_message_id_is_never_released() {
     let r = plain().await;
-    // 메시지 ID가 없다 / 못 쓰는 모양이다
+    // Missing or malformed message ID.
     for start_event in [
         event(
             "message_start",
@@ -283,7 +283,7 @@ async fn a_response_with_tools_but_no_usable_message_id_is_never_released() {
             reply.body
         );
     }
-    // 같은 응답 안에서 도구 사용 ID가 겹치거나 이름이 비었다
+    // Duplicate tool_use ID or empty tool name in the same response.
     for blocks in [
         [("toolu_a", "echo_say"), ("toolu_a", "echo_say")],
         [("toolu_a", "echo_say"), ("toolu_b", "")],
@@ -297,7 +297,7 @@ async fn a_response_with_tools_but_no_usable_message_id_is_never_released() {
         assert!(!reply.body.contains("message_stop"), "{}", reply.body);
     }
     assert!(r.turns.seen().is_empty());
-    // 도구가 없는 응답은 ID가 없어도 된다
+    // Responses without tools do not require a message ID.
     let mut events = vec![event(
         "message_start",
         r#"{"type":"message_start","message":{}}"#,
@@ -310,7 +310,7 @@ async fn a_response_with_tools_but_no_usable_message_id_is_never_released() {
             .body
             .contains("message_stop")
     );
-    // 일반 JSON 응답도 같다
+    // Plain JSON response enforces the same rule.
     r.upstream.respond(
         200,
         br#"{"content":[{"type":"tool_use","id":"toolu_n","name":"echo_say","input":{}}]}"#,

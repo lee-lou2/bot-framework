@@ -1,4 +1,4 @@
-//! 검증 결과 항목. 코드는 시험·도구가 읽는 안정된 이름, 설명은 사람이 읽는 한국어다.
+//! Structured validation diagnostics with stable error codes and bounded collection.
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -11,9 +11,9 @@ pub enum Severity {
 pub struct Issue {
     pub severity: Severity,
     pub code: &'static str,
-    /// 프로필 폴더 기준 상대 경로. 여러 프로필을 한꺼번에 볼 때는 `프로필/경로`.
+    /// Path relative to the profile directory, or `<profile>/<path>` when aggregated.
     pub path: String,
-    /// 파일 안 위치(JSON 포인터 `/bindings/0` 또는 `줄 3`). 없으면 빈 문자열.
+    /// Location within the file (JSON pointer like `/bindings/0` or `line 3`), or empty.
     pub at: String,
     pub message: String,
 }
@@ -55,7 +55,6 @@ impl Issue {
         self.severity == Severity::Error
     }
 
-    /// 경로 앞에 프로필 이름을 붙인다.
     pub fn in_profile(mut self, profile: &str) -> Self {
         self.path = if self.path.is_empty() {
             profile.to_owned()
@@ -69,8 +68,8 @@ impl Issue {
 impl fmt::Display for Issue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let level = match self.severity {
-            Severity::Error => "오류",
-            Severity::Warning => "경고",
+            Severity::Error => "error",
+            Severity::Warning => "warning",
         };
         let place = if self.at.is_empty() {
             self.path.clone()
@@ -81,8 +80,8 @@ impl fmt::Display for Issue {
     }
 }
 
-/// 항목 수집기. 보관은 `cap`까지만 하지만 오류 개수는 한도와 무관하게 센다 — 보고 한도가 0이어도
-/// 검증 실패가 "오류 없음"으로 바뀌지 않는다. 가득 찬 뒤 들어온 오류는 마지막 경고 자리를 차지한다.
+/// Collects issues up to `cap` while tracking the true error count regardless of `cap`;
+/// once full, new errors displace the last stored warning.
 #[derive(Debug)]
 pub struct Issues {
     items: Vec<Issue>,
@@ -138,7 +137,7 @@ impl Issues {
         self.errors > 0
     }
 
-    /// 보관하지 못한 오류까지 센 전체 개수
+    /// Total error count including errors dropped due to `cap`.
     pub fn error_count(&self) -> usize {
         self.errors
     }
@@ -157,7 +156,7 @@ impl Issues {
         }
     }
 
-    /// 다른 수집기의 항목을 프로필 이름을 붙여 합친다. 보관하지 못한 오류 개수도 함께 옮긴다.
+    /// Merges issues prefixed with `profile/`, carrying over dropped error counts.
     pub fn absorb(&mut self, other: Issues, profile: &str) {
         let stored = other.items.iter().filter(|i| i.is_error()).count();
         let dropped = other.errors - stored;
@@ -196,7 +195,7 @@ mod tests {
         assert_eq!(codes, ["w1", "e1"]);
         issues.error("e2", "p", "x");
         issues.error("e3", "p", "x");
-        assert_eq!(issues.error_count(), 3, "보관하지 못해도 센다");
+        assert_eq!(issues.error_count(), 3, "errors counted even when dropped");
         assert_eq!(issues.items().len(), 2);
     }
 

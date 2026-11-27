@@ -1,8 +1,8 @@
-//! 슈퍼 관리자 전용 런타임 스킬·MCP 관리기(`bot_core::manage::ProfileManager` 구현).
+//! Live skill and MCP manager implementing `bot_core::manage::ProfileManager` for super-admins.
 //!
-//! - `skill.inspect` · `skill.create` · `skill.update` · `skill.delete` · `mcp.add` · `mcp.remove`를 처리한다.
-//! - 모든 파일 변경은 `DiskTxn`으로 묶여 검증·설치·DB 커밋 중 하나라도 실패하면 원래 상태로 되돌린다.
-//! - 성공하면 DB `bot_active`를 `replace_live`로 갱신하고 같은 프로세스의 `Registry`·`live_revision`·`McpRunner`·`SrtSandbox`·`Decisions`를 즉시 교체한다.
+//! File mutations are wrapped in `DiskTxn` so any validation, install, or DB failure rolls back disk
+//! state; on success `bot_active` updates via `replace_live` and in-process state swaps atomically.
+
 mod activate;
 mod inspect;
 mod mcp;
@@ -58,10 +58,10 @@ pub(super) struct LiveManager {
     pub(super) secrets_admin: Arc<SecretAdmin>,
     pub(super) watched: Arc<Watched>,
     pub(super) uid: u32,
-    /// 교체된 옛 스냅숏의 강한 참조를 유지해 진행 중인 실행의 `lookup`이 깨지지 않게 한다.
+    /// Retains strong references to displaced snapshots so in-flight `Registry::lookup` calls stay valid.
     pub(super) held_snapshots: Mutex<Vec<Arc<Snapshot>>>,
     pub(super) held_restored: Mutex<Vec<restore::Prepared>>,
-    /// 디스크 편집·검증·활성화를 직렬화한다.
+    /// Serializes disk edits, validation, and activation commits.
     pub(super) tx_lock: tokio::sync::Mutex<()>,
 }
 
@@ -100,7 +100,7 @@ impl LiveManager {
             .cloned()
             .ok_or_else(|| ManageError::Rejected {
                 code: "unknown_profile",
-                message: "활성 프로필을 찾지 못했어요".into(),
+                message: "active profile not found".into(),
             })
     }
 
@@ -114,7 +114,7 @@ impl LiveManager {
             MCP_REMOVE_TOOL => self.remove_mcp(&call).await,
             _ => Err(ManageError::Rejected {
                 code: "unknown_tool",
-                message: "지원하지 않는 관리 도구예요".into(),
+                message: "unsupported management tool".into(),
             }),
         }
     }

@@ -1,10 +1,5 @@
-//! 사용자 예약의 명시 목적지를 **발화할 때** 현재 운영자 등록부로 다시 확인한다(실제 PG 저장소+실제 스케줄러, 등록부만 시험용):
-//! - 봉인한 그대로의 같은 경로 → 발화한다. 발생·run·목적지 행이 한 커밋이고 목적지는 예약 정의에서 그 run에 고정된다.
-//! - 등록부에 없다·다른 경로로 재지정됐다·값이 잘못됐다(`Denied`·`Invalid`) → 새 run 0건, 예약을 닫고 `schedule.close`로 감사한다(발화 감사 0).
-//! - 일시 오류·등록부 미연결 → 이번 발생을 건드리지 않는다(run 0, 닫지 않음, 커서·다음 확인 시각 그대로). 복구하면 **같은 발생 시각**으로 발화한다(발생을 버리지 않는다).
-//! - 원래 대화로 답하는 예약은 등록부를 묻지 않는다. 한 예약의 보류가 같은 점검의 다른 예약을 막지 않는다.
-//!
-//! 사용자 예약 행은 SQL로 넣는다(만드는 쪽은 다른 시험이 본다). 모델 호출은 없다.
+//! PostgreSQL + scheduler tests for re-verifying explicit user-schedule destinations against `ScheduleRoutes` at fire time.
+//! Matching routes fire atomically, missing/redirected routes close as `unrouted`, transient registry failures hold the occurrence untouched for later recovery, and origin-conversation schedules bypass the registry.
 
 use crate::support::*;
 use bot_broker::testing::{FakeCatalog, snapshot};
@@ -17,7 +12,6 @@ use bot_core::{
 use bot_runtime::{Scheduler, SchedulerConfig, SchedulerDeps};
 use std::sync::{Arc, Mutex};
 
-/// 정해 둔 답을 주고 물은 수신 ID를 기록하는 등록부.
 struct Routes {
     answer: Mutex<Result<DeliveryTarget, Error>>,
     asked: Mutex<Vec<String>>,
@@ -64,7 +58,6 @@ fn channel(id: &str) -> DeliveryTarget {
     }
 }
 
-/// 소유자의 `desk` 대화에서 만든 예약이 가리키는 판본(멤버·바인딩·에이전트·권한이 모두 지금도 살아 있다).
 fn live_profile() -> Arc<bot_core::profile::Snapshot> {
     snapshot("personal", "r1")
         .role("owner", &["run", "calendar.read"])
@@ -74,7 +67,6 @@ fn live_profile() -> Arc<bot_core::profile::Snapshot> {
         .build()
 }
 
-/// 실제 스케줄러(등록부는 고른 것). 카탈로그는 위 판본이다.
 fn scheduler(w: &World, routes: Option<Arc<Routes>>) -> Scheduler {
     let catalog = Arc::new(FakeCatalog::new());
     catalog.publish(live_profile());
@@ -96,10 +88,9 @@ fn scheduler(w: &World, routes: Option<Arc<Routes>>) -> Scheduler {
     }
 }
 
-/// 한 번 하는 예약 하나를 DB에 둔다: 두 분 전이 예정이라 지금 발화해야 한다. `destination`은 봉인한 수신자(없으면 원래 대화).
 async fn plant(w: &World, id: &str, destination: Option<&str>) {
     let origin = w
-        .accept_slack_dm(&format!("origin-{id}"), "예약을 만든 대화")
+        .accept_slack_dm(&format!("origin-{id}"), "Origin conversation")
         .await;
     let (binding, kind, dest) = match destination {
         Some(dest) => ("'slack'", "'channel'", format!("'{dest}'")),
@@ -115,7 +106,7 @@ async fn plant(w: &World, id: &str, destination: Option<&str>) {
            (profile, id, owner, agent, origin_run, origin_call, origin_binding, origin_kind, origin_id,
             ceiling, dest_binding, dest_kind, dest_id, dest_thread, at_ms, instruction, cursor_ms, next_ms)
          values ('personal', '{id}', '{OWNER}', 'main', '{}', 'c-{id}', 'desk', 'direct', 'owner',
-            '{{run,calendar.read}}', {binding}, {kind}, {dest}, {thread}, bot_now_ms() - 120000, '주간 보고를 보낸다',
+            '{{run,calendar.read}}', {binding}, {kind}, {dest}, {thread}, bot_now_ms() - 120000, 'Send weekly report',
             bot_now_ms() - 3600000, bot_now_ms() - 120000)",
         origin.0
     ))
@@ -147,8 +138,7 @@ async fn a_destination_that_is_still_the_registered_one_fires_with_the_destinati
         .await
         .unwrap();
     assert_eq!((tick.fired, tick.closed), (1, 0));
-    assert_eq!(routes.asked(), 1, "발화 전에 한 번 묻는다");
-    // 발생·run·목적지 행이 같은 커밋이다
+    assert_eq!(routes.asked(), 1);
     assert_eq!(runs(&w).await, before + 1);
     assert_eq!(
         w.pg.scalar::<i64>("select count(*) from bot_user_occurrences")
@@ -163,7 +153,6 @@ async fn a_destination_that_is_still_the_registered_one_fires_with_the_destinati
         "slack/channel/T1/C9/t1/pending"
     );
     assert_eq!(audit(&w, "schedule.fire").await, 1);
-    // 한 번짜리의 마지막 발생이라 정상 종료로 닫힌다(감사 한 줄): 수신 경로 때문에 닫은 것이 아니다
     assert_eq!(
         w.pg.scalar::<String>("select verdict from bot_audit where action = 'schedule.close'")
             .await,
@@ -174,10 +163,10 @@ async fn a_destination_that_is_still_the_registered_one_fires_with_the_destinati
 #[tokio::test]
 async fn a_destination_that_left_or_moved_closes_the_schedule_and_fires_nothing() {
     for (answer, why) in [
-        (Err(Error::Denied), "등록부에서 빠졌다"),
-        (Err(Error::Invalid), "값이 잘못됐다"),
-        (Ok(channel("T2/C9")), "다른 팀으로 재지정됐다"),
-        (Ok(channel("T1/C1")), "다른 채널로 재지정됐다"),
+        (Err(Error::Denied), "removed from registry"),
+        (Err(Error::Invalid), "invalid route"),
+        (Ok(channel("T2/C9")), "redirected to another team"),
+        (Ok(channel("T1/C1")), "redirected to another channel"),
     ] {
         let Some(w) = world().await else {
             return;
@@ -189,7 +178,6 @@ async fn a_destination_that_left_or_moved_closes_the_schedule_and_fires_nothing(
             .await
             .unwrap();
         assert_eq!((tick.fired, tick.closed), (0, 1), "{why}");
-        // 새 run 0, 목적지 행 0, 발생 0, 예약은 닫히고 고정 낱말로 감사한다
         assert_eq!(runs(&w).await, before, "{why}");
         for table in ["bot_deliveries", "bot_user_occurrences"] {
             assert_eq!(
@@ -213,7 +201,6 @@ async fn a_destination_that_left_or_moved_closes_the_schedule_and_fires_nothing(
             "unrouted",
             "{why}"
         );
-        // 닫힌 예약은 다시 점검해도 아무것도 하지 않는다
         let again = scheduler(&w, Some(Routes::new(Ok(channel("T1/C9")))))
             .tick_users()
             .await
@@ -240,7 +227,6 @@ async fn an_unconfirmed_registry_holds_the_occurrence_untouched_and_the_same_occ
         w.pg.scalar::<i64>("select next_ms from bot_user_schedules")
             .await,
     );
-    // 등록부가 일시적으로 답하지 못하거나 호스트가 붙이지 않았다: 몇 번을 점검해도 건드리지 않는다
     let routes = Routes::new(Err(Error::Unavailable));
     for scheduler in [
         scheduler(&w, Some(routes.clone())),
@@ -263,21 +249,18 @@ async fn an_unconfirmed_registry_holds_the_occurrence_untouched_and_the_same_occ
             w.pg.scalar::<i64>("select next_ms from bot_user_schedules")
                 .await
         ),
-        (cursor, next),
-        "커서와 다음 확인 시각이 그대로다"
+        (cursor, next)
     );
     for action in ["schedule.fire", "schedule.close"] {
         assert_eq!(audit(&w, action).await, 0, "{action}");
     }
-    // 등록부가 돌아오면 같은 발생(원래 예정 시각)으로 발화한다: 발생을 버리지 않았다
     routes.now_says(Ok(channel("T1/C9")));
     let tick = scheduler(&w, Some(routes)).tick_users().await.unwrap();
     assert_eq!(tick.fired, 1);
     assert_eq!(
         w.pg.scalar::<i64>("select at_ms from bot_user_occurrences")
             .await,
-        at,
-        "원래 예정 시각의 발생이다"
+        at
     );
     assert_eq!(runs(&w).await, before + 1);
 }
@@ -288,7 +271,6 @@ async fn a_schedule_for_the_original_conversation_never_asks_the_registry_and_a_
     let Some(w) = world().await else {
         return;
     };
-    // 목적지가 있는 예약(보류될 것)과 원래 대화로 답하는 예약이 같은 점검에 함께 나온다
     plant(&w, "s1-stuck", Some("T1/C9")).await;
     plant(&w, "s2-plain", None).await;
     let before = runs(&w).await;
@@ -298,7 +280,7 @@ async fn a_schedule_for_the_original_conversation_never_asks_the_registry_and_a_
         .await
         .unwrap();
     assert_eq!((tick.fired, tick.closed), (1, 0));
-    assert_eq!(routes.asked(), 1, "목적지가 있는 예약만 묻는다");
+    assert_eq!(routes.asked(), 1);
     assert_eq!(runs(&w).await, before + 1);
     assert_eq!(
         w.pg.scalar::<String>("select schedule from bot_user_occurrences")
@@ -310,7 +292,6 @@ async fn a_schedule_for_the_original_conversation_never_asks_the_registry_and_a_
             .await,
         "active"
     );
-    // 원래 대화 예약만 있어도 등록부는 묻지 않는다(등록부가 없어도 발화한다)
     plant(&w, "s3-plain", None).await;
     let none = scheduler(&w, None).tick_users().await.unwrap();
     assert_eq!(none.fired, 1);

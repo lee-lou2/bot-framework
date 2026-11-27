@@ -1,6 +1,4 @@
-//! 슈퍼 관리자 전용 관리 도구(`skill.*`·`mcp.*`) 브로커 수락 시험:
-//! 일반 사용자 거절(`not_super_admin`), 두 판본 권한 철회, 승인 카드 비밀 가림(`[REDACTED]`),
-//! 승인 후 정확히 1회 실행, `verify_activated` 대조, 관리기 미연결 시 fail-closed.
+//! Broker acceptance tests for super-admin live skill/MCP management tools (`skill.*`, `mcp.*`).
 use super::*;
 use bot_core::{
     builtin::{MCP_ADD_TOOL, SKILL_CREATE_TOOL, SKILL_INSPECT_TOOL},
@@ -101,7 +99,7 @@ fn non_super_admin_is_rejected_without_touching_manager() {
         (
             "c2",
             SKILL_CREATE_TOOL,
-            r#"{"name":"demo","description":"설명","body":"본문"}"#,
+            r#"{"name":"demo","description":"desc","body":"body"}"#,
         ),
         (
             "c3",
@@ -112,10 +110,7 @@ fn non_super_admin_is_rejected_without_touching_manager() {
         let res = w.call_on(&broker, "r-admin", 1, call, tool, args);
         assert!(matches!(res, Err(Error::Denied)), "{tool}: {res:?}");
     }
-    assert!(
-        manager.calls().is_empty(),
-        "관리기는 한 번도 불리지 않아야 해요"
-    );
+    assert!(manager.calls().is_empty(), "manager must never be called");
     assert_eq!(
         w.audit
             .verdicts()
@@ -130,7 +125,6 @@ fn non_super_admin_is_rejected_without_touching_manager() {
 fn super_admin_can_inspect_and_create_with_live_revision_verification() {
     let (w, manager, broker) = manage_world(&["local:owner"], &[]);
 
-    // 1) 읽기 전용 inspect는 활성 판본 변경 없이 바로 완료
     manager.set_next(Ok(ManageOutcome {
         payload: JsonPayload(r#"{"ok":true,"agents":["main"]}"#.into()),
         activated: None,
@@ -144,7 +138,6 @@ fn super_admin_can_inspect_and_create_with_live_revision_verification() {
             .any(|(a, v)| a == "manage.inspect" && v == "ok")
     );
 
-    // 2) 변경 도구(skill.create)가 새 판본 r2를 활성화하면 verify_activated가 일치 확인 뒤 완료
     let catalog = w.catalog.clone();
     let ledger = w.ledger.clone();
     manager.set_on_apply(move || {
@@ -166,7 +159,7 @@ fn super_admin_can_inspect_and_create_with_live_revision_verification() {
         1,
         "c2",
         SKILL_CREATE_TOOL,
-        r#"{"name":"review","description":"코드 검토","body":"체크리스트"}"#,
+        r#"{"name":"review","description":"code review","body":"checklist"}"#,
     ));
     assert!(created.contains(r#""revision":"r2""#), "{created}");
     assert_eq!(manager.calls().len(), 2);
@@ -181,7 +174,6 @@ fn super_admin_can_inspect_and_create_with_live_revision_verification() {
 #[test]
 fn revoked_super_admin_in_current_snapshot_is_denied_even_if_pinned_allowed() {
     let (w, manager, broker) = manage_world(&["local:owner"], &[]);
-    // 현재 활성 판본 r2에서 local:owner의 슈퍼 관리자 자격을 회수한다(고정 판본 r1에는 남아 있음)
     let next = base("r2")
         .role("owner", &MANAGE_SCOPES)
         .policy_scopes(&MANAGE_SCOPES)
@@ -210,27 +202,25 @@ fn approval_card_redacts_mcp_secret_values_and_runs_with_original_args_after_app
     );
 
     let nonce = awaiting(w.call_on(&broker, "r-admin", 1, "c-mcp", MCP_ADD_TOOL, &args));
-    assert!(manager.calls().is_empty(), "승인 전에는 실행하지 않는다");
+    assert!(manager.calls().is_empty(), "must not run before approval");
 
     let stored = w.ledger.stored_approval(&nonce);
     assert_eq!(stored.state, ApprovalState::Pending);
     assert!(
         !stored.card.0.contains(raw_secret_a) && !stored.card.0.contains(raw_secret_b),
-        "승인 카드에 비밀 원문이 남았어요: {}",
+        "raw secret leaked into approval card: {}",
         stored.card.0
     );
     assert!(
         stored.card.0.contains("[REDACTED]"),
-        "승인 카드에 가림 표지가 있어야 해요: {}",
+        "redaction marker missing from approval card: {}",
         stored.card.0
     );
 
-    // 다른 사용자는 승인할 수 없다
     assert!(matches!(
         block_on(broker.decide(nonce.clone(), PrincipalId("local:alice".into()), true)),
         Err(Error::Denied)
     ));
-    // 슈퍼 관리자(요청자)가 승인하면 원본 인자로 정확히 1회 실행된다
     block_on(broker.decide(nonce.clone(), PrincipalId("local:owner".into()), true)).unwrap();
     let reply = done(w.call_on(&broker, "r-admin", 1, "c-mcp", MCP_ADD_TOOL, &args));
     assert!(reply.contains(r#""ok":true"#), "{reply}");
@@ -239,7 +229,7 @@ fn approval_card_redacts_mcp_secret_values_and_runs_with_original_args_after_app
     assert_eq!(calls.len(), 1);
     assert!(
         calls[0].args.0.contains(raw_secret_a) && calls[0].args.0.contains(raw_secret_b),
-        "승인 후 실행에는 원본 인자가 전달돼야 해요"
+        "execution after approval must receive original args"
     );
 }
 

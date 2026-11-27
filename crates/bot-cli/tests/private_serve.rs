@@ -1,6 +1,4 @@
-//! 민감 DM(`PrivateIntake`)의 호스트 조립 수락 시험: 가짜 Slack DM → 게이트웨이의 `PrivateGate`(전용 원장·지문 키·도구 실행기) → 이 프로세스의 srt 샌드박스에서
-//! 지정한 도구 실행. 본문은 도구에만 간다(도구는 기대한 원문일 때만 성공으로 답한다). 일반 큐·모델은 쓰지 않고 저장소의 어떤 표에도 원문이 없다.
-//! 실제 PG·실제 `srt`·`python3`가 있어야 하고 없으면 건너뛴다. 모델 호출 0.
+//! End-to-end host wiring acceptance test for `PrivateIntake`: fake Slack DM -> `PrivateGate` -> designated tool in `srt` sandbox with zero plaintext persisted in PG.
 mod claude_support;
 mod process_support;
 
@@ -15,14 +13,13 @@ use std::{
     sync::Arc,
 };
 
-/// 이 원문일 때만 도구가 성공으로 답한다
 const SECRET_TEXT: &str = "TOP-SECRET-DM-TEXT-7731";
 
 const SERVER: &str = r#"#!/usr/bin/env python3
 import json, sys
 
 EXPECTED = "TOP-SECRET-DM-TEXT-7731"
-TOOLS = [{"name": "receive", "description": "받은 글을 전달한다",
+TOOLS = [{"name": "receive", "description": "Forwards received text",
           "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}, "additionalProperties": False}}]
 
 def reply(message_id, **body):
@@ -73,12 +70,11 @@ fn secrets() -> Arc<FakeSecrets> {
         ("personal", "model-key", "provider-key-for-personal"),
         ("personal", "bot-token", "xoxb-test-token"),
         ("personal", "app-token", "xapp-test-token"),
-        // 프로필별 지문 키: 없으면 민감 접수를 열지 않는다
+        // Per-profile fingerprint key required to enable private intake.
         ("personal", "private-intake", "profile-intake-key-bytes"),
     ]))
 }
 
-/// 스키마의 모든 표를 글로 펼쳐 이 표지가 있는 행 수를 센다.
 fn rows_containing(rig: &Rig, needle: &str) -> usize {
     let tables = rig.query(
         "select string_agg(table_name::text, ',') from information_schema.tables \
@@ -100,7 +96,7 @@ fn rows_containing(rig: &Rig, needle: &str) -> usize {
 async fn a_private_dm_reaches_only_the_designated_tool_in_the_srt_sandbox_and_leaves_no_plaintext()
 {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL is not set");
         return;
     };
     if !have_srt_and_python() {
@@ -117,7 +113,10 @@ async fn a_private_dm_reaches_only_the_designated_tool_in_the_srt_sandbox_and_le
         PathBuf::from("/nonexistent/claude"),
         PROFILE,
         &[
-            ("agents/main/skills/inbox/SKILL.md", "받은 글을 전달한다."),
+            (
+                "agents/main/skills/inbox/SKILL.md",
+                "Forwards received text.",
+            ),
             ("agents/main/skills/inbox/tools.yaml", TOOLS),
             ("agents/main/triggers.yaml", TRIGGERS),
         ],
@@ -132,20 +131,17 @@ async fn a_private_dm_reaches_only_the_designated_tool_in_the_srt_sandbox_and_le
     )
     .await;
     let mut rig = rig;
-    rig.until(
-        "게이트웨이가 활성 판본을 게시하지 않았어요",
-        60,
-        |rig| !rig.schema.active().is_empty(),
-    )
+    rig.until("gateway did not publish an active revision", 60, |rig| {
+        !rig.schema.active().is_empty()
+    })
     .await;
-    assert!(slack.connected().await, "Slack 소켓에 붙지 않았어요");
+    assert!(slack.connected().await, "Slack socket did not connect");
 
-    // 원문이 도구가 기대한 글이면 도구가 성공으로 답해 접수가 끝난다(Slack에도 ack)
     let first = ts(1);
     slack
         .push(dm_frame("E1", "T1", "D1", "U1", &first, SECRET_TEXT))
         .await;
-    wait(&rig, "민감 접수가 끝나지 않았어요", |rig| {
+    wait(&rig, "private intake did not succeed", |rig| {
         rig.query("select count(*) from {s}.bot_runs where private and state = 'succeeded'") == "1"
     })
     .await;
@@ -153,22 +149,20 @@ async fn a_private_dm_reaches_only_the_designated_tool_in_the_srt_sandbox_and_le
         slack
             .until(|slack| slack.acks().iter().any(|id| id == "E1"))
             .await,
-        "접수를 끝낸 뒤에 ack해야 해요"
+        "event must be acked after intake finishes"
     );
-    // 민감 접수를 받는 동안 도구 설치본의 사용 잠금을 쥐고 있다: 같은 설치본을 복구하려는 다른 기동이 배타 잠금을 잡을 수 없다
+    // Keep the install lock fd open across `stop` because tempdir cleanup removes the path.
     let lock = std::fs::read_dir(rig.dir.path().join("installs"))
         .unwrap()
         .flatten()
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "lock"))
-        .expect("설치본 사용 잠금 파일");
-    // 같은 파일을 끝난 뒤에도 가리키도록 미리 열어 둔다(`stop`이 임시 폴더를 지우면 이름으로는 다시 열 수 없다)
+        .expect("install usage lock file");
     let probe = File::open(&lock).unwrap();
     assert!(
         matches!(probe.try_lock(), Err(TryLockError::WouldBlock)),
-        "접수가 도는 동안에는 설치본의 배타 잠금을 잡을 수 없어야 해요"
+        "exclusive lock must be blocked while private intake holds the install"
     );
-    // 일반 run은 만들어지지 않았고 저장소의 어떤 표에도 원문이 없다
     assert_eq!(
         rig.query("select count(*) from {s}.bot_runs where not private"),
         "0"
@@ -176,9 +170,9 @@ async fn a_private_dm_reaches_only_the_designated_tool_in_the_srt_sandbox_and_le
     assert_eq!(
         rows_containing(&rig, SECRET_TEXT),
         0,
-        "원문이 저장소에 남았어요"
+        "plaintext leaked into store"
     );
-    // 도구는 이 글 한 번만 받았다: 같은 Slack 이벤트의 재전달은 호출을 늘리지 않는다
+    // Redelivered Slack event must be deduplicated without invoking the tool again.
     slack
         .push(dm_frame("E1b", "T1", "D1", "U1", &first, SECRET_TEXT))
         .await;
@@ -186,39 +180,32 @@ async fn a_private_dm_reaches_only_the_designated_tool_in_the_srt_sandbox_and_le
     assert_eq!(
         rig.query("select count(*) from {s}.bot_runs where private"),
         "1",
-        "재전달은 접수를 늘리지 않아요"
+        "redelivery must not create a second private run"
     );
 
-    // 도구가 기대하지 않은 글은 도구가 실패로 답한다. 쓰기 도구의 실패 답은 «실행되지 않았다»를 증명하지 못하므로 접수는 성공으로 끝나지도 일반 대화로
-    // 넘어가지도 않고 운영자가 볼 수 있는 보류로 남는다
+    // Failed write-tool reply leaves an open operator hold instead of succeeding or falling back to normal chat.
     slack
-        .push(dm_frame("E2", "T1", "D1", "U1", &ts(2), "다른 글이에요"))
+        .push(dm_frame("E2", "T1", "D1", "U1", &ts(2), "other-text"))
         .await;
-    wait(
-        &rig,
-        "두 번째 접수가 보류되지 않았어요",
-        |rig| {
-            rig.query(
-                "select count(*) from {s}.bot_holds where kind = 'private' and closed_ms is null",
-            ) == "1"
-        },
-    )
+    wait(&rig, "second intake was not held", |rig| {
+        rig.query("select count(*) from {s}.bot_holds where kind = 'private' and closed_ms is null")
+            == "1"
+    })
     .await;
     assert_eq!(
         rig.query("select count(*) from {s}.bot_runs where private and state = 'succeeded'"),
         "1",
-        "도구가 실패로 답한 접수는 성공이 아니에요"
+        "tool failure must not mark private intake succeeded"
     );
     assert_eq!(
         rig.query("select count(*) from {s}.bot_runs where not private"),
         "0",
-        "일반 대화로 넘기지 않아요"
+        "must not fall back to regular chat"
     );
-    assert_eq!(rows_containing(&rig, "다른 글이에요"), 0);
+    assert_eq!(rows_containing(&rig, "other-text"), 0);
     rig.stop().await;
-    // 끝난 뒤에는 잠금이 풀린다
     assert!(
         probe.try_lock().is_ok(),
-        "종료 뒤에는 설치본의 배타 잠금을 잡을 수 있어야 해요"
+        "exclusive lock must be released after shutdown"
     );
 }

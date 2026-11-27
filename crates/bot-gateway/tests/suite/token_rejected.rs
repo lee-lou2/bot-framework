@@ -1,12 +1,9 @@
-//! 봇 토큰을 바꾸는 동안(보관소에는 새 값, 이 프로세스의 기억에는 옛 값) 옛 토큰이 받는 Slack의 거절(`invalid_auth`·`token_revoked`·`token_expired`)은 영구 거절이 아니다.
-//! 인증 단계에서 걸러져 아무것도 실행되지 않았으니 미실행(`NotSent`)으로 정산해 다시 시도하게 하고, 기억한 토큰을 버려 다음 시도가 자격을 다시 읽고 확인한 새 토큰으로 보내게 한다.
-//! 같은 거절이 계속되면 거절된 토큰으로 게시 API를 다시 두드리지 않고(`auth.test`가 막는다) 재시도 한도는 저장소(`retries_exhausted`)가 센다.
-use crate::support;
-
+//! Slack rejected-token handling: auth rejections settle as `NotSent` and evict cached tokens so retries verify fresh credentials.
 use crate::delivery_support::*;
+use crate::support;
 use crate::support::default_secrets;
 use bot_core::{
-    cards::{CardJob, CardKey, CardOutcome},
+    cards::{CardJob, CardKey, CardOutcome, LABEL_RECIPIENT},
     command::JsonPayload,
     id::{ApprovalId, BindingId, Generation, PrincipalId, ProfileId},
     intake::NotSentReason,
@@ -31,26 +28,23 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
 const CODES: [&str; 3] = ["invalid_auth", "token_revoked", "token_expired"];
-/// 기억이 끝나지 않게 길게 둔다: 옛 토큰이 기억에 남아 있는 동안(실제로는 최대 30초)의 일을 만든다
+/// Long TTL keeps the old token cached to exercise mid-rotation eviction deterministically.
 const LONG: Duration = Duration::from_secs(3600);
 const NOT_SENT: &str = "notsent:BeforeWrite:0";
 
-/// 새 조립(지역 변수 `rig`가 함수 `rig`를 가리지 않게 따로 부른다)
 async fn fresh() -> Rig {
     rig().await
 }
 
-/// 첫 회신을 보내 옛 토큰(`test-bot-1`)이 확인돼 기억에 남은 조립
 async fn primed() -> (Rig, Arc<MemorySecrets>) {
     let secrets = default_secrets();
     let rig = rig_ttl(secrets.clone(), LONG).await;
-    to_channel(&rig, 1, json!({"text": "첫째"}));
+    to_channel(&rig, 1, json!({"text": "first"}));
     rig.deliverer.tick().await.unwrap();
     assert!(settled(&rig)[0].starts_with("confirmed:"));
     (rig, secrets)
 }
 
-/// 저장소가 미실행 정산을 받아 백오프 뒤 새 세대로 같은 회신을 다시 내놓는 것을 흉내 낸다
 fn offer_again(rig: &Rig, seq: u32, generation: u64, body: Value) {
     let mut item = outgoing(
         "personal",
@@ -79,29 +73,24 @@ fn auth_checks(rig: &Rig) -> Vec<String> {
 #[tokio::test]
 async fn a_reply_sent_while_the_bot_token_is_being_replaced_is_sent_once_with_the_new_token() {
     let (rig, secrets) = primed().await;
-    // 토큰 교체: 보관소에는 새 값이 들어갔고 Slack는 옛 토큰을 거절한다. 이 프로세스의 기억에는 아직 옛 토큰이 있다
     secrets.set("personal", "bot-token", b"test-bot-2");
     rig.slack.revoke("test-bot-1", "invalid_auth");
-    to_channel(&rig, 2, json!({"text": "둘째"}));
+    to_channel(&rig, 2, json!({"text": "second"}));
     rig.deliverer.tick().await.unwrap();
-    // 옛 토큰으로 한 번 부딪혔다: 영구 거절이 아니라 아무것도 보내지 않은 미실행이다
     assert_eq!(settled(&rig)[1], NOT_SENT);
-    // 저장소가 백오프 뒤 새 세대로 다시 내놓는다: 자격을 다시 읽어 확인한 새 토큰으로 한 번 성공한다
-    offer_again(&rig, 2, 2, json!({"text": "둘째"}));
+    offer_again(&rig, 2, 2, json!({"text": "second"}));
     rig.deliverer.tick().await.unwrap();
     let all = settled(&rig);
     assert_eq!(all.len(), 3, "{all:?}");
     assert!(all[2].starts_with("confirmed:C1:"), "{all:?}");
     assert!(!all.iter().any(|outcome| outcome == "rejected"), "{all:?}");
-    // 첫째(옛 토큰)·둘째의 첫 시도(옛 토큰, 거절)·둘째의 다시 시도(새 토큰)
     assert_eq!(tokens(&rig), ["test-bot-1", "test-bot-1", "test-bot-2"]);
     let said: Vec<String> = posts(&rig)
         .iter()
         .filter(|call| call.succeeded())
         .map(|call| call.body["text"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(said, ["첫째", "둘째"], "유실도 중복도 없어요");
-    // 새 토큰은 쓰기 전에 등록한 팀의 것인지 확인했다
+    assert_eq!(said, ["first", "second"], "no loss or duplication");
     assert_eq!(auth_checks(&rig), ["test-bot-1", "test-bot-2"]);
 }
 
@@ -109,14 +98,13 @@ async fn a_reply_sent_while_the_bot_token_is_being_replaced_is_sent_once_with_th
 async fn a_token_that_stays_rejected_is_never_final_and_is_not_posted_with_again() {
     for code in CODES {
         let (rig, _secrets) = primed().await;
-        // 보관소는 그대로인데 Slack가 토큰을 거절한다(철회·만료)
         rig.slack.revoke("test-bot-1", code);
-        to_channel(&rig, 2, json!({"text": "둘째"}));
+        to_channel(&rig, 2, json!({"text": "second"}));
         rig.deliverer.tick().await.unwrap();
         assert_eq!(settled(&rig)[1], NOT_SENT, "{code}");
-        // 다시 시도해도 같은 토큰이다: 자격을 다시 읽어 확인(`auth.test`)하는 데서 막히고 거절된 토큰으로 게시 API를 두드리지 않는다. 끝내 거절로 정산하지도 않는다
+        // Retries fail at `auth.test` without calling `chat.postMessage` again.
         for generation in 2..=3 {
-            offer_again(&rig, 2, generation, json!({"text": "둘째"}));
+            offer_again(&rig, 2, generation, json!({"text": "second"}));
             rig.deliverer.tick().await.unwrap();
         }
         let all = settled(&rig);
@@ -124,23 +112,22 @@ async fn a_token_that_stays_rejected_is_never_final_and_is_not_posted_with_again
         assert_eq!(
             posts(&rig).len(),
             2,
-            "{code}: 첫째(성공)와 첫 시도(거절)뿐이에요"
+            "{code}: only the first success and initial rejected attempt"
         );
         assert_eq!(
             auth_checks(&rig).len(),
             3,
-            "{code}: 처음 + 다시 시도마다 한 번"
+            "{code}: initial check plus one per retry"
         );
     }
 }
 
 fn one_attachment() -> Value {
-    json!({"text": "보고서", "attachments": [{"name": "a.txt", "type": "text/plain", "data": "aGk="}]})
+    json!({"text": "report", "attachments": [{"name": "a.txt", "type": "text/plain", "data": "aGk="}]})
 }
 
 #[tokio::test]
 async fn an_upload_treats_a_rejected_token_as_not_sent_at_every_step() {
-    // 주소를 받는 단계에서
     let (rig, _secrets) = primed().await;
     rig.slack.revoke("test-bot-1", "token_revoked");
     rig.outbox.push(outgoing(
@@ -156,14 +143,12 @@ async fn an_upload_treats_a_rejected_token_as_not_sent_at_every_step() {
     assert_eq!(rig.slack.calls("files.getUploadURLExternal").len(), 1);
     assert!(rig.slack.calls("files.completeUploadExternal").is_empty());
     assert!(rig.slack.uploads().is_empty());
-    // 거절된 토큰은 기억에서 버려졌다: 다시 시도하면 자격을 다시 확인하는 데서 막혀 주소 요청도 다시 나가지 않는다
     offer_again(&rig, 2, 2, one_attachment());
     rig.deliverer.tick().await.unwrap();
     assert_eq!(settled(&rig)[2], NOT_SENT);
     assert_eq!(rig.slack.calls("files.getUploadURLExternal").len(), 1);
     assert_eq!(auth_checks(&rig).len(), 2);
 
-    // 게시하는 완료 호출에서(앞 단계는 통과했다): 아무것도 게시되지 않았다
     let (rig, _secrets) = primed().await;
     rig.slack.script(
         "files.completeUploadExternal",
@@ -181,7 +166,6 @@ async fn an_upload_treats_a_rejected_token_as_not_sent_at_every_step() {
     assert_eq!(settled(&rig)[1], NOT_SENT);
     assert_eq!(rig.slack.calls("files.getUploadURLExternal").len(), 1);
     assert_eq!(rig.slack.calls("files.completeUploadExternal").len(), 1);
-    // 다음 시도는 자격을 다시 확인한다(기억에서 버렸다)
     assert_eq!(auth_checks(&rig).len(), 1);
     offer_again(&rig, 2, 2, one_attachment());
     rig.deliverer.tick().await.unwrap();
@@ -193,23 +177,26 @@ async fn an_upload_treats_a_rejected_token_as_not_sent_at_every_step() {
     );
 }
 
-/// 블록 한도를 넘는 본문은 글자판 메시지 하나로 간다: 이 길도 같은 분류·같은 기억 정리를 따른다
 #[tokio::test]
 async fn the_plain_text_path_forgets_a_rejected_token_too() {
     let (rig, _secrets) = primed().await;
     rig.slack.revoke("test-bot-1", "invalid_auth");
-    let long = "가".repeat(12_000);
+    let long = "€".repeat(12_000);
     to_channel(&rig, 2, json!({"text": long}));
     rig.deliverer.tick().await.unwrap();
     assert_eq!(settled(&rig)[1], NOT_SENT);
     let sent = posts(&rig);
     assert_eq!(sent.len(), 2);
-    assert!(sent[1].body.get("blocks").is_none(), "글자판 메시지예요");
+    assert!(sent[1].body.get("blocks").is_none(), "expected plain text");
     offer_again(&rig, 2, 2, json!({"text": long}));
     rig.deliverer.tick().await.unwrap();
     assert_eq!(settled(&rig)[2], NOT_SENT);
-    assert_eq!(auth_checks(&rig).len(), 2, "다시 확인했어요");
-    assert_eq!(posts(&rig).len(), 2, "거절된 토큰으로 다시 게시하지 않아요");
+    assert_eq!(auth_checks(&rig).len(), 2, "must re-verify token");
+    assert_eq!(
+        posts(&rig).len(),
+        2,
+        "must not post again with rejected token"
+    );
 }
 
 #[tokio::test]
@@ -229,12 +216,10 @@ async fn only_the_token_slack_refused_is_forgotten() {
     assert_eq!(current().await.as_deref(), Some("test-bot-1"));
     assert_eq!(slack.calls("auth.test").len(), 1);
 
-    // 다른 토큰의 거절은 지금 기억을 건드리지 않는다
     creds.reject("some-older-token");
     assert_eq!(current().await.as_deref(), Some("test-bot-1"));
     assert_eq!(slack.calls("auth.test").len(), 1);
 
-    // 토큰 탓이 아닌 응답(채널 거절·속도 제한·불명)은 기억을 건드리지 않는다
     for script in [
         Scripted::Json(json!({"ok": false, "error": "channel_not_found"})),
         Scripted::Raw {
@@ -256,7 +241,6 @@ async fn only_the_token_slack_refused_is_forgotten() {
     assert_eq!(current().await.as_deref(), Some("test-bot-1"));
     assert_eq!(slack.calls("auth.test").len(), 1);
 
-    // 이 토큰을 Slack가 거절하면 버린다: 다음에 다시 읽고 확인하는데 거절된 토큰은 확인을 통과하지 못한다
     slack.revoke("test-bot-1", "invalid_auth");
     let raw = creds
         .call("chat.postMessage", "test-bot-1", Body::Json(&body))
@@ -269,8 +253,8 @@ async fn only_the_token_slack_refused_is_forgotten() {
 fn card() -> Card {
     Card {
         nonce: "n-1".into(),
-        title: "예약 목적지 승인".into(),
-        lines: vec!["수신자: 팀 채널".into()],
+        title: "Scheduled delivery approval".into(),
+        lines: vec![format!("{LABEL_RECIPIENT}: Team channel")],
     }
 }
 
@@ -285,7 +269,6 @@ fn not_sent() -> CardPost {
 async fn a_rejected_token_never_makes_the_dm_card_unavailable() {
     let owner = PrincipalId("slack:home/U1".into());
     let profile = ProfileId("personal".into());
-    // 열기에서: 아무것도 올라가지 않았다
     let rig = fresh().await;
     rig.slack.script(
         "conversations.open",
@@ -298,7 +281,6 @@ async fn a_rejected_token_never_makes_the_dm_card_unavailable() {
     assert_eq!(got, not_sent());
     assert!(posts(&rig).is_empty());
 
-    // 게시에서(열기는 통과했다): 인증 단계에서 걸러져 아무것도 올라가지 않았다
     let rig = fresh().await;
     rig.slack.script(
         "chat.postMessage",
@@ -311,7 +293,6 @@ async fn a_rejected_token_never_makes_the_dm_card_unavailable() {
     assert_eq!(got, not_sent());
     assert_eq!(rig.slack.calls("conversations.open").len(), 1);
     assert_eq!(posts(&rig).len(), 1);
-    // 다음 시도는 자격을 다시 확인하고(기억에서 버렸다) 한 번 올린다
     assert_eq!(auth_checks(&rig).len(), 1);
     let got = sender
         .post_owner_card(&profile, "home", &owner, &card())
@@ -330,8 +311,12 @@ fn job() -> CardJob {
         binding: BindingId("team".into()),
         owner: PrincipalId("slack:home/U1".into()),
         card: JsonPayload(
-            json!({"nonce": "n-1", "title": "예약 목적지 승인", "lines": ["수신자: 팀 채널"]})
-                .to_string(),
+            json!({
+                "nonce": "n-1",
+                "title": "Scheduled delivery approval",
+                "lines": [format!("{LABEL_RECIPIENT}: Team channel")],
+            })
+            .to_string(),
         ),
         generation: Generation(1),
     }
@@ -345,7 +330,6 @@ async fn a_dm_card_requested_while_the_bot_token_is_being_replaced_is_posted_onc
     let cards = MemoryCards::new();
     cards.push(job());
     let deliverer = rig.card_deliverer(cards.clone());
-    // 첫 시도: 기억에 남은 옛 토큰이 거절된다 — 카드를 닫지 않고(`Unavailable` 아님) 다시 잡히게 돌려보낸다
     deliverer.tick().await.unwrap();
     assert_eq!(
         cards.settled(),
@@ -361,9 +345,8 @@ async fn a_dm_card_requested_while_the_bot_token_is_being_replaced_is_posted_onc
     assert_eq!(
         posts(&rig).len(),
         1,
-        "첫째 회신뿐이에요: 카드는 올라가지 않았어요"
+        "only the initial reply should have been posted"
     );
-    // 다시 잡힌 두 번째 시도: 새 토큰으로 한 번 올라간다
     deliverer.tick().await.unwrap();
     let settled = cards.settled();
     assert_eq!(settled.len(), 2, "{settled:?}");
@@ -380,7 +363,6 @@ async fn a_dm_card_requested_while_the_bot_token_is_being_replaced_is_posted_onc
     assert!(cards_in_dm[0].posted().is_some());
 }
 
-/// 카드 갱신·안내도 같은 길을 지난다: 거절당한 토큰은 거기서도 버려져 다음 사용이 자격을 다시 확인한다.
 #[tokio::test]
 async fn a_card_refresh_the_token_was_refused_for_makes_the_next_use_check_the_token_again() {
     let rig = support::rig_full(
@@ -399,7 +381,8 @@ async fn a_card_refresh_the_token_was_refused_for_makes_the_next_use_check_the_t
     .await;
     assert!(rig.slack.connected().await);
     let checked = rig.slack.calls("auth.test").len();
-    let card = json!({"nonce": "n1", "title": "일정 삭제", "lines": ["대상: 산책"]}).to_string();
+    let card =
+        json!({"nonce": "n1", "title": "Delete event", "lines": ["Target: Walk"]}).to_string();
     rig.ledger
         .put("n1", "personal", ApprovalState::Approved, &card);
     for envelope in ["B1", "B2"] {
@@ -414,7 +397,6 @@ async fn a_card_refresh_the_token_was_refused_for_makes_the_next_use_check_the_t
                 "n1",
             ))
             .await;
-        // 클릭 하나가 끝나야(ack) 다음 클릭을 보낸다
         assert!(
             rig.slack
                 .until(|slack| slack.acks().contains(&envelope.to_owned()))
@@ -428,11 +410,10 @@ async fn a_card_refresh_the_token_was_refused_for_makes_the_next_use_check_the_t
     assert_eq!(
         rig.slack.calls("auth.test").len(),
         checked + 1,
-        "첫 거절 뒤 두 번째 갱신 전에 토큰을 다시 확인했어요"
+        "must re-verify token before second refresh"
     );
 }
 
-/// 누른 사람에게만 보이는 안내(`chat.postEphemeral`)도 같은 길이다.
 #[tokio::test]
 async fn a_private_notice_the_token_was_refused_for_also_makes_the_next_use_check_the_token_again()
 {
@@ -452,7 +433,6 @@ async fn a_private_notice_the_token_was_refused_for_also_makes_the_next_use_chec
     .await;
     assert!(rig.slack.connected().await);
     let checked = rig.slack.calls("auth.test").len();
-    // 등록되지 않은 사람(U9)의 클릭에는 «등록된 사용자만» 안내가 간다
     for envelope in ["B1", "B2"] {
         rig.slack
             .push(button_frame(
@@ -478,6 +458,6 @@ async fn a_private_notice_the_token_was_refused_for_also_makes_the_next_use_chec
     assert_eq!(
         rig.slack.calls("auth.test").len(),
         checked + 1,
-        "첫 거절 뒤 두 번째 안내 전에 토큰을 다시 확인했어요"
+        "must re-verify token before second notice"
     );
 }

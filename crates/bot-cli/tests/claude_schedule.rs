@@ -1,10 +1,5 @@
-//! 대화에서 만든 예약의 정상 경로 수락 시험: 실제 `claude` CLI(가짜 상류)·실제 PG·실제 브로커 프런트(PlannedCalls·CheckpointSink·호스트 Park)
-//! 위에서 gateway·scheduler·worker 조립(`serve`)이 생성→목록→취소와 실제 발화를 끝까지 한다. 모델 호출은 0이다.
-//! 모델 샌드박스는 시험에서만 합성(호스트 프로세스)으로 넣고, 운영 VM 격리 수락은 Apple 어댑터로 따로 본다.
-//! 두 대화 종류를 나눠 본다: A) CLI 대화(`bot chat`, 게이트웨이 경로 전체. CLI 대화는 outbox가 아니라 상태 조회로 답하므로 «원래 대화 복원»을
-//! run 기록으로 본다), B) direct 대화(답이 outbox로 간다). **B의 첫 접수는 Slack 입구(소켓·서명·버튼)를 거치지 않고 store.accept로 직접 한다** —
-//! Slack 입구는 gateway 시험이 따로 본다. C) 위임으로 시도가 대기에 들어가면 실제 호스트 Park가 통지를 받고 부모가 정확히 한 번 재개된다.
-//! 실행: `BOT_CLAUDE_CANARY=required BOT_TEST_DATABASE_URL=… cargo test -p bot-cli --test claude_schedule` (claude CLI가 없으면 건너뛴다)
+//! End-to-end acceptance tests for chat schedules and delegation using real `claude` CLI (fake upstream), real PG, and real broker front (`PlannedCalls`, `CheckpointSink`, `HostPark`).
+//! Run: `BOT_CLAUDE_CANARY=required BOT_TEST_DATABASE_URL=... cargo test -p bot-cli --test claude_schedule`.
 mod claude_support;
 mod process_support;
 
@@ -24,7 +19,7 @@ fn profile(member: &str, binding: &str) -> String {
     profile_with(member, binding, "")
 }
 
-/// `agents`는 `policy.agents` 아래에 더할 줄들(자식 에이전트의 범위)
+/// `agents` appends child-agent scope lines under `policy.agents`.
 fn profile_with(member: &str, binding: &str, agents: &str) -> String {
     let agents = if agents.is_empty() {
         String::new()
@@ -54,7 +49,7 @@ policy:
 async fn a_cli_conversation_creates_lists_cancels_and_gets_the_fired_run_back_in_the_same_conversation()
  {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL is not set");
         return;
     };
     let Some(claude) = claude_bin() else {
@@ -74,24 +69,28 @@ async fn a_cli_conversation_creates_lists_cancels_and_gets_the_fired_run_back_in
     )
     .await;
 
-    // 1) 생성: 대화(`bot chat`) → 모델이 `schedule.create`를 부른다 → 예약이 원래 대화로 저장된다
+    // 1) Create: `bot chat` -> `schedule.create` stores schedule bound to the origin conversation.
     let far = in_secs(3600);
     rig.script(tool_turn(
         "msg_c1",
         "toolu_c1",
         "mcp__relay__schedule_create",
-        &format!(r#"{{"at":"{far}","instruction":"자료 도착 확인","quiet":false}}"#),
+        &format!(
+            r#"{{"at":"{far}","instruction":"Check whether the materials arrived","quiet":false}}"#
+        ),
     ));
-    rig.script(final_turn("msg_c2", "예약했어요"));
-    let created = rig.chat("c1", "한 시간 뒤에 자료 도착을 확인해 줘").await;
+    rig.script(final_turn("msg_c2", "Scheduled."));
+    let created = rig
+        .chat("c1", "Check in one hour whether the materials arrived")
+        .await;
     assert!(created.status.success(), "{}", said(&created));
-    assert!(said(&created).contains("예약했어요"), "{}", said(&created));
-    let id = id_in(&tool_result(&rig.upstream, "toolu_c1").expect("생성 결과"));
+    assert!(said(&created).contains("Scheduled."), "{}", said(&created));
+    let id = id_in(&tool_result(&rig.upstream, "toolu_c1").expect("create result"));
     assert_eq!(
         rig.query("select count(*) from {s}.bot_user_schedules where state = 'active'"),
         "1"
     );
-    // 신원·원래 대화는 만든 run에서 복원된다(모델 인자에는 없었다)
+    // Principal and origin conversation are derived from the creating run, not model args.
     let origin = rig.query(
         "select r.binding || '|' || r.conv_kind || '|' || r.conv_id || '|' || r.principal from {s}.bot_runs r \
          where r.id = (select origin_run from {s}.bot_user_schedules)",
@@ -105,28 +104,28 @@ async fn a_cli_conversation_creates_lists_cancels_and_gets_the_fired_run_back_in
         "{stored}"
     );
 
-    // 2) 목록: 본인 활성 예약의 ID가 모델에게 돌아온다
+    // 2) List: owner's active schedule ID is returned to the model.
     rig.script(tool_turn(
         "msg_l1",
         "toolu_l1",
         "mcp__relay__schedule_list",
         "{}",
     ));
-    rig.script(final_turn("msg_l2", "예약이 하나 있어요"));
-    let listed = rig.chat("c2", "예약 목록 보여 줘").await;
+    rig.script(final_turn("msg_l2", "There is one schedule."));
+    let listed = rig.chat("c2", "Show my schedules").await;
     assert!(listed.status.success(), "{}", said(&listed));
-    let list = tool_result(&rig.upstream, "toolu_l1").expect("목록 결과");
-    assert!(list.contains(&id), "목록에 {id}가 없어요: {list}");
+    let list = tool_result(&rig.upstream, "toolu_l1").expect("list result");
+    assert!(list.contains(&id), "list missing {id}: {list}");
 
-    // 3) 취소: 소유자가 자기 예약을 취소하고 더는 활성이 아니다
+    // 3) Cancel: owner cancels own schedule.
     rig.script(tool_turn(
         "msg_x1",
         "toolu_x1",
         "mcp__relay__schedule_cancel",
         &format!(r#"{{"id":"{id}"}}"#),
     ));
-    rig.script(final_turn("msg_x2", "취소했어요"));
-    let canceled = rig.chat("c3", "그 예약 취소해 줘").await;
+    rig.script(final_turn("msg_x2", "Canceled."));
+    let canceled = rig.chat("c3", "Cancel that schedule").await;
     assert!(canceled.status.success(), "{}", said(&canceled));
     assert_eq!(
         rig.query(&format!(
@@ -139,29 +138,31 @@ async fn a_cli_conversation_creates_lists_cancels_and_gets_the_fired_run_back_in
         "0"
     );
 
-    // 4) 실제 발화: 곧 올 시각의 예약을 만들면 scheduler가 그 시각에 run을 만들고 worker가 모델 CLI로 끝낸다
+    // 4) Fire: near-term schedule fires via scheduler and completes via worker.
     let soon = in_secs(15);
     rig.script(tool_turn(
         "msg_n1",
         "toolu_n1",
         "mcp__relay__schedule_create",
-        &format!(r#"{{"at":"{soon}","instruction":"자료 도착 확인","quiet":false}}"#),
+        &format!(
+            r#"{{"at":"{soon}","instruction":"Check whether the materials arrived","quiet":false}}"#
+        ),
     ));
-    rig.script(final_turn("msg_n2", "한 번 예약했어요"));
-    // 발화한 run의 모델 응답(만드는 대화가 끝난 뒤 첫 요청에 쓰인다)
-    rig.script(final_turn("msg_f1", "자료가 도착했어요"));
-    let again = rig.chat("c4", "잠깐 뒤에 자료 도착을 확인해 줘").await;
+    rig.script(final_turn("msg_n2", "Scheduled once."));
+    rig.script(final_turn("msg_f1", "The materials have arrived."));
+    let again = rig
+        .chat("c4", "Check shortly whether the materials arrived")
+        .await;
     assert!(again.status.success(), "{}", said(&again));
-    let id = id_in(&tool_result(&rig.upstream, "toolu_n1").expect("두 번째 생성 결과"));
+    let id = id_in(&tool_result(&rig.upstream, "toolu_n1").expect("second create result"));
     let fired_state = format!(
         "select r.state from {{s}}.bot_runs r join {{s}}.bot_user_occurrences o \
          on o.run = r.id and o.profile = r.profile where o.schedule = '{id}'"
     );
-    rig.until("예약이 발화해 끝나지 않았어요", 90, |rig| {
+    rig.until("scheduled run did not fire and finish", 90, |rig| {
         rig.query(&fired_state) == "succeeded"
     })
     .await;
-    // 발화한 run은 원래 대화(바인딩·대화 종류·대화 ID)와 소유자로 복원되고, 저장된 지시문으로 돌았다
     let fired = rig.query(&format!(
         "select run from {{s}}.bot_user_occurrences where schedule = '{id}'"
     ));
@@ -170,27 +171,26 @@ async fn a_cli_conversation_creates_lists_cancels_and_gets_the_fired_run_back_in
     ));
     assert_eq!(
         at_fire, stored,
-        "발화한 run이 원래 대화로 돌아가지 않았어요"
+        "fired run did not restore origin conversation"
     );
     assert!(
         rig.query(&format!(
             "select result from {{s}}.bot_runs where id = '{fired}'"
         ))
-        .contains("자료가 도착했어요")
+        .contains("The materials have arrived.")
     );
     let last = bodies(&rig.upstream).pop().unwrap().to_string();
     assert!(
-        last.contains("자료 도착 확인"),
-        "저장된 지시문으로 돌았어야 해요"
+        last.contains("Check whether the materials arrived"),
+        "fired run must use stored instruction"
     );
-    // 한 번짜리 예약은 발화 뒤 닫힌다
     assert_eq!(
         rig.query(&format!(
             "select state from {{s}}.bot_user_schedules where id = '{id}'"
         )),
         "closed"
     );
-    // 모델 요청은 정확히 대화 넷(2+2+2+2)과 발화 하나뿐이다(숨은 재전송 없음)
+    // Exactly 4 chats (2 turns each) + 1 fired turn; no hidden retries.
     assert_eq!(rig.upstream.requests().len(), 9);
     rig.stop().await;
 }
@@ -198,14 +198,13 @@ async fn a_cli_conversation_creates_lists_cancels_and_gets_the_fired_run_back_in
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quiet_one_gets_none() {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL is not set");
         return;
     };
     let Some(claude) = claude_bin() else {
         return;
     };
-    // Slack DM과 같은 접수 모양을 store.accept로 직접 접수한다(실제 Slack 연결이 없다). 그 뒤의 worker·모델 CLI·브로커·scheduler·outbox는
-    // 실제 경로다. 게이트웨이 역할은 띄우지 않는다.
+    // Accepts directly via `store.accept` (bypassing Slack gateway) to test scheduler + worker + outbox.
     let profile = profile(
         "slack:home/U1",
         r#"{id: dm, adapter: slack, workspace: home, dm: true, agent: main}"#,
@@ -222,7 +221,7 @@ async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quie
     .await;
     let store = Store::connect(&rig.schema.url(), Config::default())
         .await
-        .expect("저장소");
+        .expect("store");
     let revision = Revision(
         rig.query("select revision from {s}.bot_active_profiles where profile = 'personal'"),
     );
@@ -255,10 +254,10 @@ async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quie
     };
     let finished = |run: &str| format!("select state from {{s}}.bot_runs where id = '{run}'");
 
-    // 예약 둘을 만든다(하나는 일반, 하나는 quiet). 먼 시각이라 아직 발화하지 않는다
+    // Create two far-future schedules: one normal, one quiet.
     let far = in_secs(3600);
     let mut ids = Vec::new();
-    for (n, (quiet, said_text)) in [(false, "예약했어요"), (true, "조용히 예약했어요")]
+    for (n, (quiet, said_text)) in [(false, "Scheduled."), (true, "Scheduled quietly.")]
         .into_iter()
         .enumerate()
     {
@@ -267,24 +266,26 @@ async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quie
             &format!("msg_d{n}a"),
             &call,
             "mcp__relay__schedule_create",
-            &format!(r#"{{"at":"{far}","instruction":"자료 도착 확인","quiet":{quiet}}}"#),
+            &format!(
+                r#"{{"at":"{far}","instruction":"Check whether the materials arrived","quiet":{quiet}}}"#
+            ),
         ));
         rig.script(final_turn(&format!("msg_d{n}b"), said_text));
         let run = store
-            .accept(accept(&format!("r{n}"), "자료 도착을 확인해 줘"))
+            .accept(accept(
+                &format!("r{n}"),
+                "Check whether the materials arrived",
+            ))
             .await
-            .expect("접수")
+            .expect("accept")
             .0;
-        rig.until(
-            "예약을 만드는 run이 끝나지 않았어요",
-            90,
-            |rig| rig.query(&finished(&run)) == "succeeded",
-        )
+        rig.until("schedule-creating run did not finish", 90, |rig| {
+            rig.query(&finished(&run)) == "succeeded"
+        })
         .await;
         ids.push(id_in(
-            &tool_result(&rig.upstream, &call).expect("생성 결과"),
+            &tool_result(&rig.upstream, &call).expect("create result"),
         ));
-        // 만든 run의 답은 그 대화의 outbox에 쌓인다(게이트웨이가 없으니 아직 보내지 않은 pending)
         assert_eq!(
             rig.query(&format!(
                 "select binding || '|' || conv_kind || '|' || conv_id || '|' || state from {{s}}.bot_outbox where run = '{run}'"
@@ -297,10 +298,10 @@ async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quie
         "2"
     );
 
-    // 발화: 일반 예약 → 원래 대화의 outbox에 답이 쌓이고, quiet 예약 → `<조용히>`면 답이 없다. 시각은 DB 시계를 앞당겨 기다림 없이 본다
+    // Backdate timestamps to trigger immediately: normal enqueues outbox reply; quiet `<quiet>` suppresses it.
     for (id, quiet, reply) in [
-        (&ids[0], false, "자료가 도착했어요"),
-        (&ids[1], true, "<조용히>"),
+        (&ids[0], false, "The materials have arrived."),
+        (&ids[1], true, "<quiet>"),
     ] {
         rig.script(final_turn(&format!("msg_f{quiet}"), reply));
         assert_eq!(
@@ -313,14 +314,13 @@ async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quie
             "select r.state from {{s}}.bot_runs r join {{s}}.bot_user_occurrences o \
              on o.run = r.id and o.profile = r.profile where o.schedule = '{id}'"
         );
-        rig.until("예약이 발화해 끝나지 않았어요", 90, |rig| {
+        rig.until("scheduled run did not fire and finish", 90, |rig| {
             rig.query(&fired_state) == "succeeded"
         })
         .await;
         let fired = rig.query(&format!(
             "select run from {{s}}.bot_user_occurrences where schedule = '{id}'"
         ));
-        // 발화한 run은 원래 대화·소유자로 복원된다
         assert_eq!(
             rig.query(&format!(
                 "select binding || '|' || conv_kind || '|' || conv_id || '|' || principal from {{s}}.bot_runs where id = '{fired}'"
@@ -331,12 +331,12 @@ async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quie
             "select binding || '|' || conv_kind || '|' || conv_id || '|' || state from {{s}}.bot_outbox where run = '{fired}'"
         ));
         if quiet {
-            assert_eq!(outbox, "", "quiet 예약은 보낼 답이 없어요");
+            assert_eq!(outbox, "", "quiet schedule must not enqueue a reply");
             assert!(
                 rig.query(&format!(
                     "select result from {{s}}.bot_runs where id = '{fired}'"
                 ))
-                .contains("<조용히>")
+                .contains("<quiet>")
             );
         } else {
             assert_eq!(outbox, "dm|direct|D1|pending");
@@ -344,11 +344,10 @@ async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quie
                 rig.query(&format!(
                     "select body from {{s}}.bot_outbox where run = '{fired}'"
                 ))
-                .contains("자료가 도착했어요")
+                .contains("The materials have arrived.")
             );
         }
     }
-    // 모델 요청은 생성 둘(2+2)과 발화 둘뿐이다
     assert_eq!(rig.upstream.requests().len(), 6);
     rig.stop().await;
 }
@@ -356,7 +355,7 @@ async fn a_direct_conversation_gets_the_fired_reply_in_its_own_outbox_and_a_quie
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delegation_parks_the_attempt_through_the_real_host_park_and_the_parent_resumes_once() {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL is not set");
         return;
     };
     let Some(claude) = claude_bin() else {
@@ -371,33 +370,37 @@ async fn a_delegation_parks_the_attempt_through_the_real_host_park_and_the_paren
         schema,
         claude,
         &profile,
-        &[("agents/main/agents/research/AGENT.md", "조사해서 요약한다.")],
+        &[(
+            "agents/main/agents/research/AGENT.md",
+            "Research and summarize.",
+        )],
         &cli_gateway(),
         &[Role::Gateway, Role::Worker],
     )
     .await;
-    // 부모가 직계 자식에게 일을 맡긴다 → 부모 시도는 자식을 기다리며 멈추고(Park), 자식 run이 모델 응답으로 끝나고, 부모가 이어서 마무리한다
     rig.script(tool_turn(
         "msg_p1",
         "toolu_p1",
         "mcp__relay__delegate",
-        r#"{"agent":"main/research","instruction":"일정을 요약해 줘"}"#,
+        r#"{"agent":"main/research","instruction":"Summarize the agenda"}"#,
     ));
-    rig.script(final_turn("msg_p2", "자식 요약이에요"));
-    rig.script(final_turn("msg_p3", "위임을 마쳤어요"));
+    rig.script(final_turn("msg_p2", "Child summary."));
+    rig.script(final_turn("msg_p3", "Delegation completed."));
     let out = rig
-        .chat("p1", "조사 에이전트에게 일정 요약을 맡겨 줘")
+        .chat("p1", "Ask the research agent to summarize the agenda")
         .await;
     assert!(out.status.success(), "{}", said(&out));
-    assert!(said(&out).contains("위임을 마쳤어요"), "{}", said(&out));
-    // 호스트 Park는 정확히 부모 시도 하나가 자식 대기로 들어갔다는 통지 한 건만 받았다
+    assert!(
+        said(&out).contains("Delegation completed."),
+        "{}",
+        said(&out)
+    );
     let parent = rig.query("select id from {s}.bot_runs where parent is null");
     let parked = rig.park.recent();
     assert_eq!(parked.len(), 1, "{parked:?}");
     assert_eq!(parked[0].1, ParkReason::Child);
     assert_eq!(parked[0].0.run.0, parent);
     assert_eq!(rig.park.counts(), (0, 0, 1));
-    // 자식은 정확히 한 번 돌았고 부모는 같은 run으로 끝났다
     assert_eq!(rig.query("select count(*) from {s}.bot_runs"), "2");
     assert_eq!(
         rig.query(
@@ -411,9 +414,8 @@ async fn a_delegation_parks_the_attempt_through_the_real_host_park_and_the_paren
         )),
         "succeeded"
     );
-    // 모델 요청은 부모 첫 요청·자식·재개한 부모 셋뿐이고, 재개한 부모는 자식 결과를 도구 결과로 받았다
     assert_eq!(rig.upstream.requests().len(), 3);
-    let delegated = tool_result(&rig.upstream, "toolu_p1").expect("위임 결과");
-    assert!(delegated.contains("자식 요약이에요"), "{delegated}");
+    let delegated = tool_result(&rig.upstream, "toolu_p1").expect("delegation result");
+    assert!(delegated.contains("Child summary."), "{delegated}");
     rig.stop().await;
 }

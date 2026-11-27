@@ -1,4 +1,4 @@
-//! 수락 시험: 가짜 원장·카탈로그·실행기 위에서 `Broker`가 인가·승인·복구 규칙을 지키는지 본다.
+//! Acceptance tests verifying broker authorization, approval, and recovery invariants.
 
 mod approvals;
 mod authority;
@@ -44,7 +44,7 @@ pub(super) const ALL: [&str; 7] = [
     "chat.post",
 ];
 
-/// 한 프로필(`personal`)과 한 실행(`r1`, 소유자 본인, CLI)을 갖춘 시험 세계.
+/// Test world with profile `personal` and owner CLI run `r1`.
 pub(super) struct World {
     pub catalog: Arc<FakeCatalog>,
     pub ledger: Arc<MemLedger>,
@@ -62,7 +62,7 @@ pub(super) struct World {
     cfg: Config,
 }
 
-/// 기본 스냅샷 조립기: 역할·멤버·정책 스코프와 `main`·`main/research`의 도구.
+/// Base snapshot builder with roles, members, scopes, and tools for `main` and `main/research`.
 pub(super) fn base(revision: &str) -> SnapshotBuilder {
     let mut explicit = tool(Risk::Write, &["mail.send"]);
     explicit.destination = Some(Destination::Explicit {
@@ -150,7 +150,7 @@ impl World {
         world
     }
 
-    /// 같은 원장·카탈로그·실행기로 브로커를 새로 만든다(재시작). 예약·회신 저장소도 다시 붙인다.
+    /// Rebuilds the broker against the same stores to simulate a restart.
     pub fn reboot(&self) -> BrokerService {
         self.bare()
             .with_schedules(self.schedules.clone())
@@ -158,12 +158,12 @@ impl World {
             .with_routes(self.routes.clone())
     }
 
-    /// 예약·회신 저장소를 붙이지 않은 브로커(저장소가 없을 때의 동작을 본다).
+    /// Broker without schedule or reply stores attached.
     pub fn bare(&self) -> BrokerService {
         self.bare_with(Arc::new(FakeSealer))
     }
 
-    /// 봉인기를 갈아 끼운, 예약·회신 저장소를 붙이지 않은 브로커.
+    /// Bare broker with a custom `Sealer`.
     pub fn bare_with(&self, sealer: Arc<dyn Sealer>) -> BrokerService {
         BrokerService::new(
             Parts {
@@ -226,14 +226,13 @@ impl World {
         )
     }
 
-    /// 새 판본을 게시하고 활성으로 만든다.
     pub fn publish(&self, snapshot: Arc<Snapshot>) {
         self.ledger
             .set_active_revision(&snapshot.id.0, &snapshot.revision.0);
         self.catalog.publish(snapshot);
     }
 
-    /// 호출을 원장에 만들어 `Started`로 둔다(옛 세대가 시작만 하고 사라진 상황).
+    /// Seeds a `Started` call record as if a prior generation vanished mid-call.
     pub fn leave_started(&self, run: &str, call: &str, tool: &str, args: &str, generation: u64) {
         let snapshot = self
             .catalog
@@ -274,16 +273,16 @@ pub(super) fn owner_run(run: &str, generation: u64) -> RunContext {
 pub(super) fn awaiting(result: Result<CallResult, Error>) -> ApprovalId {
     match result {
         Ok(CallResult::Awaiting(nonce)) => nonce,
-        Ok(other) => panic!("승인 대기가 아니다: {other:?}"),
-        Err(error) => panic!("승인 대기가 아니다: {error:?}"),
+        Ok(other) => panic!("expected Awaiting: {other:?}"),
+        Err(error) => panic!("expected Awaiting: {error:?}"),
     }
 }
 
 pub(super) fn done(result: Result<CallResult, Error>) -> String {
     match result {
         Ok(CallResult::Done(payload)) => payload.0,
-        Ok(other) => panic!("끝나지 않았다: {other:?}"),
-        Err(error) => panic!("끝나지 않았다: {error:?}"),
+        Ok(other) => panic!("expected Done: {other:?}"),
+        Err(error) => panic!("expected Done: {error:?}"),
     }
 }
 

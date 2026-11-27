@@ -12,15 +12,15 @@ async fn accepts_duplicate_request_once() {
     };
     let first = db
         .store
-        .accept(accept("personal", "req-1", "오늘 일정 알려줘"))
+        .accept(accept("personal", "req-1", "Show today's agenda"))
         .await
         .unwrap();
     let again = db
         .store
-        .accept(accept("personal", "req-1", "오늘 일정 알려줘"))
+        .accept(accept("personal", "req-1", "Show today's agenda"))
         .await
         .unwrap();
-    assert_eq!(first, again, "같은 키·같은 내용은 기존 접수");
+    assert_eq!(first, again, "same key and body should return existing run");
     assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 1);
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'run.accept'")
@@ -28,24 +28,23 @@ async fn accepts_duplicate_request_once() {
         1
     );
 
-    // 같은 키·다른 내용은 충돌이고 아무것도 늘지 않는다
     let changed = db
         .store
-        .accept(accept("personal", "req-1", "다른 내용"))
+        .accept(accept("personal", "req-1", "Different body"))
         .await;
     assert!(is(changed, |e| matches!(e, Error::Conflict)));
     assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 1);
 
-    // 키의 한 칸이라도 다르면 별개 접수다: 주체·프로필
+    // Any difference in the key tuple (principal or profile) creates a distinct run.
     let other_principal = accept_as(
         "personal",
         "req-1",
         "local:guest",
         ConversationKind::Cli,
         "owner",
-        "오늘 일정 알려줘",
+        "Show today's agenda",
     );
-    let other_profile = accept("work", "req-1", "오늘 일정 알려줘");
+    let other_profile = accept("work", "req-1", "Show today's agenda");
     assert_ne!(db.store.accept(other_principal).await.unwrap(), first);
     assert_ne!(db.store.accept(other_profile).await.unwrap(), first);
     assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 3);
@@ -75,7 +74,7 @@ async fn concurrent_duplicate_accepts_converge_on_one_run() {
         ids.push(t.await.unwrap());
     }
     ids.dedup();
-    assert_eq!(ids.len(), 1, "모든 접수가 같은 run으로 수렴");
+    assert_eq!(ids.len(), 1, "all accepts should converge on one run");
     assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 1);
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'run.accept'")
@@ -123,7 +122,6 @@ async fn status_reads_the_same_request_without_new_effects() {
         before
     );
 
-    // 다른 프로필의 같은 키는 조회되지 않는다
     let foreign = RequestKey {
         profile: ProfileId("work".into()),
         ..key
@@ -162,20 +160,20 @@ async fn a_routing_change_after_the_first_accept_returns_the_original_run() {
         return;
     };
     let first = runs(&db)
-        .accept(accept("personal", "req-route", "일정 알려줘"))
+        .accept(accept("personal", "req-route", "Show agenda"))
         .await
         .unwrap();
-    // 프로필 판본이 바뀌어 같은 외부 요청의 라우팅 결과(대상·판본)가 달라졌다
-    let mut routed = accept("personal", "req-route", "일정 알려줘");
+    // Simulate a profile revision change altering the routed target for the same external request.
+    let mut routed = accept("personal", "req-route", "Show agenda");
     routed.target = Target::Agent {
         agent: AgentId("main/research".into()),
-        instruction: "다른 지침".into(),
+        instruction: "Different instruction".into(),
     };
     routed.revision = Revision("r2".into());
     assert_eq!(
         runs(&db).accept(routed).await.unwrap(),
         first,
-        "충돌이 아니라 최초 접수의 실행 계획으로 수렴한다"
+        "should converge on the original plan rather than conflict"
     );
     assert_eq!(
         db.scalar::<String>("select agent || ':' || revision from bot_runs")
@@ -183,9 +181,8 @@ async fn a_routing_change_after_the_first_accept_returns_the_original_run() {
         "main:r1"
     );
     assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 1);
-    // 외부 입력(본문·대화)이 달라지면 그때는 충돌이다
     let changed = runs(&db)
-        .accept(accept("personal", "req-route", "다른 요청"))
+        .accept(accept("personal", "req-route", "Different request"))
         .await;
     assert!(matches!(changed, Err(Error::Conflict)));
 }
@@ -215,14 +212,14 @@ async fn an_http_request_id_reused_on_another_route_conflicts() {
     assert_eq!(
         runs(&db).accept(http("POST", "/agenda")).await.unwrap(),
         first,
-        "같은 경로·메서드의 재전달은 같은 run"
+        "redelivery on the same method and path returns the same run"
     );
     for (method, path) in [("PUT", "/agenda"), ("POST", "/agenda/cancel")] {
         let other = runs(&db).accept(http(method, path)).await;
         assert!(matches!(other, Err(Error::Conflict)), "{method} {path}");
     }
     assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 1);
-    // HTTP가 아닌 입구의 해시 바이트는 그대로다: http가 없는 요청은 같은 키로 http 요청과 충돌하지 않고 기존 접수와 같은 해시다
+    // Non-HTTP ingress keeps its unchanged input hash bytes.
     let cli = accept("personal", "req-cli", "x");
     let again = accept("personal", "req-cli", "x");
     assert_eq!(
@@ -246,7 +243,6 @@ async fn progress_reports_started_tool_and_open_call_with_pending_approval() {
     assert_eq!(initial.active_tool, None);
     assert!(!initial.waiting_approval);
 
-    // 실행 중인 도구(started)가 잡힌다
     begin_call(&db, &run.attempt, "c-run").await;
     calls(&db)
         .start(start_call(&run.attempt, "c-run", None))
@@ -260,7 +256,7 @@ async fn progress_reports_started_tool_and_open_call_with_pending_approval() {
     assert_eq!(running.active_tool.as_deref(), Some("web.search"));
     assert!(!running.waiting_approval);
 
-    // 승인 대기 중인 열린 호출(bot_calls.state = 'open' + bot_approvals.state = 'pending')은 started보다 우선하며 waiting_approval=true다
+    // An open call with a pending approval takes precedence over a started call.
     calls(&db)
         .begin(
             run.attempt.clone(),
@@ -286,7 +282,7 @@ async fn progress_reports_started_tool_and_open_call_with_pending_approval() {
     assert_eq!(waiting.active_tool.as_deref(), Some("calendar.delete"));
     assert!(waiting.waiting_approval);
 
-    // 승인이 거절되어 더는 pending이 아니면 started 도구로 돌아가고 waiting_approval=false다
+    // Once denied, progress falls back to the started tool with waiting_approval=false.
     calls(&db)
         .decide(Decision {
             nonce: ApprovalId("n-prog-1".into()),
@@ -304,9 +300,11 @@ async fn progress_reports_started_tool_and_open_call_with_pending_approval() {
     assert_eq!(resumed.active_tool.as_deref(), Some("web.search"));
     assert!(!resumed.waiting_approval);
 
-    // 종료된 run은 활성 도구·자식·승인 대기를 비운다
     let claimed = runs(&db).claim().await.unwrap().unwrap();
-    runs(&db).finish(claimed.attempt, done("끝")).await.unwrap();
+    runs(&db)
+        .finish(claimed.attempt, done("done"))
+        .await
+        .unwrap();
     let ended = runs(&db)
         .progress(profile_id(), run.attempt.run.clone())
         .await
@@ -324,14 +322,13 @@ async fn progress_picks_most_recently_updated_deepest_active_child() {
         return;
     };
     let root = leased(&db, "req-progress-children").await;
-    // 같은 최대 깊이(1)의 활성 자식 둘: 더 최근에 갱신된 자식을 골라야 한다
     let older = DelegationStore::delegate(
         &db.store,
         Delegate {
             parent: root.attempt.clone(),
             step: "step-1".into(),
             child: AgentId("main/older".into()),
-            instruction: "먼저".into(),
+            instruction: "first".into(),
             scopes: run_scopes(),
             checked_revision: Revision("r1".into()),
         },
@@ -355,10 +352,10 @@ async fn progress_picks_most_recently_updated_deepest_active_child() {
     assert_eq!(
         at_depth_1.active_agent.as_deref(),
         Some("main/newer"),
-        "같은 깊이에서는 updated_ms가 가장 최신인 활성 자식을 고른다"
+        "at equal depth, pick the most recently updated active child"
     );
 
-    // 깊이 2 활성 손자가 있으면 updated_ms가 더 오래돼도 깊이 2가 우선한다
+    // Deeper active descendants take precedence even with an older updated_ms.
     db.sql(&format!(
         "insert into bot_runs (profile, id, root, parent, parent_step, depth, agent, principal, revision, binding,
                                conv_kind, conv_id, target, input, state, updated_ms)
@@ -378,7 +375,6 @@ async fn progress_picks_most_recently_updated_deepest_active_child() {
         Some("main/older/leaf_old")
     );
 
-    // 깊이 2 활성 손자가 둘이면 그중 가장 최근에 갱신된 손자를 고른다
     db.sql(&format!(
         "insert into bot_runs (profile, id, root, parent, parent_step, depth, agent, principal, revision, binding,
                                conv_kind, conv_id, target, input, state, updated_ms)

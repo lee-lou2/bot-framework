@@ -1,4 +1,4 @@
-//! 가짜 OTLP 수집기와 독립 디코더. 인코더와 코드를 나누지 않고 protobuf 선 형식을 직접 읽어 대조한다.
+//! Mock OTLP HTTP collector with an independent protobuf wire decoder.
 #![allow(dead_code)]
 
 use std::{
@@ -16,11 +16,11 @@ use tokio::{
 pub enum Mode {
     Ok,
     Status(u16),
-    /// 연결만 받고 응답하지 않는다.
+    /// Accepts connections and never responds.
     Hang,
-    /// 받자마자 끊는다.
+    /// Closes accepted connections immediately.
     Reset,
-    /// 요청을 다 받아 기록한 뒤, 지정한 시간이 지나서야 200으로 답한다(이미 시작한 전송이 도착해 있는 동안을 만든다).
+    /// Records the request, sleeps for the duration, then replies 200.
     Late(Duration),
 }
 
@@ -47,11 +47,11 @@ impl Collector {
     }
 
     pub fn set(&self, m: Mode) {
-        *self.mode.lock().expect("락") = m;
+        *self.mode.lock().expect("lock") = m;
     }
 
     pub fn requests(&self) -> Vec<Req> {
-        self.reqs.lock().expect("락").clone()
+        self.reqs.lock().expect("lock").clone()
     }
 
     pub fn spans(&self) -> Vec<Span> {
@@ -70,8 +70,8 @@ impl Collector {
 }
 
 pub async fn start(mode: Mode) -> Collector {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("바인드");
-    let addr = listener.local_addr().expect("주소");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
     let (mode, reqs) = (Arc::new(Mutex::new(mode)), Arc::new(Mutex::new(Vec::new())));
     let (m, r) = (mode.clone(), reqs.clone());
     tokio::spawn(async move {
@@ -81,7 +81,7 @@ pub async fn start(mode: Mode) -> Collector {
             };
             let (m, r) = (m.clone(), r.clone());
             tokio::spawn(async move {
-                let current = *m.lock().expect("락");
+                let current = *m.lock().expect("lock");
                 if matches!(current, Mode::Reset) {
                     return;
                 }
@@ -126,7 +126,7 @@ pub async fn start(mode: Mode) -> Collector {
                     _ => 200,
                 };
                 if code < 300 {
-                    r.lock().expect("락").push(Req {
+                    r.lock().expect("lock").push(Req {
                         path,
                         headers,
                         body: buf[head_end..head_end + want].to_vec(),
@@ -144,7 +144,7 @@ pub async fn start(mode: Mode) -> Collector {
     Collector { addr, mode, reqs }
 }
 
-// ---- 독립 protobuf 디코더 ----
+// Independent protobuf wire decoder.
 
 enum Wire {
     Varint(u64),
@@ -161,7 +161,7 @@ fn varint(b: &[u8]) -> (u64, usize) {
         }
         shift += 7;
     }
-    panic!("잘린 varint");
+    panic!("truncated varint");
 }
 
 fn parse(mut b: &[u8]) -> Vec<(u32, Wire)> {
@@ -169,7 +169,7 @@ fn parse(mut b: &[u8]) -> Vec<(u32, Wire)> {
     while !b.is_empty() {
         let (key, n) = varint(b);
         b = &b[n..];
-        let field = u32::try_from(key >> 3).expect("필드 번호");
+        let field = u32::try_from(key >> 3).expect("field number");
         match key & 7 {
             0 => {
                 let (v, n) = varint(b);
@@ -179,18 +179,18 @@ fn parse(mut b: &[u8]) -> Vec<(u32, Wire)> {
             1 => {
                 out.push((
                     field,
-                    Wire::Fixed64(u64::from_le_bytes(b[..8].try_into().expect("8바이트"))),
+                    Wire::Fixed64(u64::from_le_bytes(b[..8].try_into().expect("8 bytes"))),
                 ));
                 b = &b[8..];
             }
             2 => {
                 let (len, n) = varint(b);
                 b = &b[n..];
-                let len = usize::try_from(len).expect("길이");
+                let len = usize::try_from(len).expect("length");
                 out.push((field, Wire::Len(b[..len].to_vec())));
                 b = &b[len..];
             }
-            other => panic!("모르는 선 형식 {other}"),
+            other => panic!("unknown wire type {other}"),
         }
     }
     out
@@ -249,7 +249,7 @@ fn key_values(f: &[(u32, Wire)], n: u32) -> BTreeMap<String, Attr> {
                 Some((1, Wire::Len(s))) => Attr::Str(String::from_utf8(s.clone()).expect("UTF-8")),
                 Some((2, Wire::Varint(b))) => Attr::Bool(*b != 0),
                 Some((3, Wire::Varint(i))) => Attr::Int(*i as i64),
-                other => panic!("모르는 값 {}", other.is_some()),
+                other => panic!("unknown attr value present={}", other.is_some()),
             };
             (string(&kv, 1), value)
         })

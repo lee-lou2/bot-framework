@@ -1,4 +1,4 @@
-//! 스케줄러 시험(가짜 저장소): 따라잡기 순서·배치·beat·구간·DST·해석 불가·두 스케줄러 수렴·ScheduleSet 빌더.
+//! Static cron scheduler tests: catch-up ordering, beats, segments, DST, error handling, convergence, and ScheduleSet building.
 
 use super::*;
 use crate::host::SchedulerDeps;
@@ -76,7 +76,6 @@ struct Store {
     errors: VecDeque<Error>,
 }
 
-/// 저장소처럼 같은 발생을 한 번만 접수하고 커서를 앞으로만 옮기는 가짜.
 struct FakeSchedule(Mutex<Store>);
 
 fn lock(m: &Mutex<Store>) -> std::sync::MutexGuard<'_, Store> {
@@ -143,7 +142,6 @@ impl ScheduleStore for FakeSchedule {
     }
 }
 
-/// 정적 트리거가 하나도 없는 저장소(사용자 예약 시험이 쓴다).
 pub(super) struct EmptySchedule;
 
 impl ScheduleStore for EmptySchedule {
@@ -204,7 +202,7 @@ async fn missed_occurrences_are_accepted_oldest_first_within_the_batch_until_cau
     assert_eq!(
         s.tick().await.unwrap(),
         Tick::default(),
-        "다 따라잡으면 할 일이 없다"
+        "no work once caught up"
     );
     assert_eq!(store.times().last(), Some(&ms(utc(2026, 11, 24, 0, 50))));
 }
@@ -226,7 +224,7 @@ async fn a_beat_catches_up_with_only_the_latest_missed_occurrence() {
 
 #[tokio::test]
 async fn a_beat_after_a_very_long_outage_still_takes_the_true_latest_occurrence() {
-    // 1분 주기가 150일 밀렸다(21만 개 이상): 맨 마지막 발생을 골라야 한다
+    // 150 days of per-minute occurrences (>210k) must still select the latest instant.
     let from = utc(2026, 1, 1, 0, 0);
     let now = utc(2026, 5, 31, 12, 34);
     let store = FakeSchedule::new(
@@ -267,7 +265,7 @@ async fn each_segment_uses_its_own_definition_and_the_boundary_belongs_to_the_ea
         [
             (m(10), "r1".into()),
             (m(20), "r1".into()),
-            (m(30), "r1".into()), // (from, until]: 경계는 앞 구간
+            (m(30), "r1".into()),
             (m(40), "r2".into()),
             (ms(utc(2026, 11, 24, 1, 0)), "r2".into()),
         ]
@@ -281,10 +279,10 @@ async fn the_command_follows_the_stored_definition() {
     definition.approver = Some(PrincipalId("local:owner".into()));
     definition.target = Target::Agent {
         agent: AgentId("main".into()),
-        instruction: "오늘 일정을 알려줘".into(),
+        instruction: "Show today's agenda".into(),
     };
     let store = FakeSchedule::new(
-        utc(2026, 11, 25, 1, 0), // 서울 10시
+        utc(2026, 11, 25, 1, 0), // 10:00 KST
         vec![trigger(
             from,
             vec![segment("r7", from, None, definition.clone())],
@@ -292,7 +290,7 @@ async fn the_command_follows_the_stored_definition() {
     );
     scheduler(&store, 10).tick().await.unwrap();
     let (occurrence, command) = store.accepted().remove(0);
-    let at = ms(utc(2026, 11, 25, 0, 0)); // 서울 09:00
+    let at = ms(utc(2026, 11, 25, 0, 0)); // 09:00 KST
     assert_eq!(ms(occurrence.scheduled_at), at);
     assert_eq!(command.event.request.0, format!("cron:morning:{at}"));
     assert_eq!(command.event.binding.0, "@cron");
@@ -308,7 +306,6 @@ async fn the_command_follows_the_stored_definition() {
 
 #[tokio::test]
 async fn a_dst_gap_is_skipped_and_a_fold_runs_twice() {
-    // 뉴욕: 2026-03-08 02:30은 없다(봄), 2026-11-01 01:30은 두 번 온다(가을)
     let spring = utc(2026, 3, 8, 0, 0);
     let store = FakeSchedule::new(
         utc(2026, 3, 8, 12, 0),
@@ -323,7 +320,7 @@ async fn a_dst_gap_is_skipped_and_a_fold_runs_twice() {
         )],
     );
     scheduler(&store, 10).tick().await.unwrap();
-    assert!(store.times().is_empty(), "없는 시각은 건너뛴다");
+    assert!(store.times().is_empty(), "nonexistent time must be skipped");
 
     let fall = utc(2026, 11, 1, 0, 0);
     let store = FakeSchedule::new(
@@ -342,7 +339,7 @@ async fn a_dst_gap_is_skipped_and_a_fold_runs_twice() {
     assert_eq!(
         store.times(),
         [ms(utc(2026, 11, 1, 5, 30)), ms(utc(2026, 11, 1, 6, 30))],
-        "두 번 오는 시각은 서로 다른 UTC 발생으로 둘 다"
+        "ambiguous time must emit both UTC occurrences"
     );
 }
 
@@ -396,16 +393,17 @@ async fn store_answers_decide_whether_to_continue_stop_this_trigger_or_retry_lat
     let mut b = a.clone();
     b.trigger = "b".into();
     let store = FakeSchedule::new(utc(2026, 11, 24, 0, 30), vec![a, b]);
-    // 첫 접수가 Denied(정의가 바뀜): 그 트리거는 이번엔 멈추고 다른 트리거는 계속
     lock(&store.0).errors.push_back(Error::Denied);
     let tick = scheduler(&store, 10).tick().await.unwrap();
     assert_eq!(tick.accepted, 3);
     assert!(store.accepted().iter().all(|(o, _)| o.trigger == "b"));
-    // 저장소가 못 받으면 점검이 오류로 끝나고 다음 점검에서 이어 간다
     lock(&store.0).errors.push_back(Error::Unavailable);
     assert!(scheduler(&store, 10).tick().await.is_err());
     let tick = scheduler(&store, 10).tick().await.unwrap();
-    assert_eq!(tick.accepted, 3, "a의 세 발생을 이어서 접수");
+    assert_eq!(
+        tick.accepted, 3,
+        "trigger a resumes on the next tick with all three occurrences"
+    );
 }
 
 #[tokio::test]
@@ -427,7 +425,11 @@ async fn two_schedulers_converge_on_one_run_per_occurrence() {
     let (a, b) = tokio::join!(one.tick(), two.tick());
     assert!(a.is_ok() && b.is_ok());
     let times = store.times();
-    assert_eq!(times.len(), 12, "두 시간 동안 10분마다 12번, 중복 없이");
+    assert_eq!(
+        times.len(),
+        12,
+        "12 distinct 10-minute occurrences in 2 hours"
+    );
     assert_eq!(times.iter().collect::<BTreeSet<_>>().len(), 12);
 }
 
@@ -446,7 +448,7 @@ async fn the_loop_keeps_ticking_until_shutdown() {
             )],
         )],
     );
-    let s = scheduler(&store, 2); // 배치가 작아도 쉬지 않고 이어서 돈다
+    let s = scheduler(&store, 2);
     let (stop, shutdown) = tokio::sync::watch::channel(false);
     let serving = tokio::spawn(async move { s.run(shutdown).await });
     let started = std::time::Instant::now();
@@ -489,7 +491,7 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
         input: BTreeMap::new(),
         private: false,
         private_pass: false,
-        target: TriggerTarget::Instruction("오늘 일정을 알려줘".into()),
+        target: TriggerTarget::Instruction("Show today's agenda".into()),
         preapproved: None,
         human_approval: None,
     });
@@ -555,7 +557,7 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
         (set.profile.0.as_str(), set.revision.0.as_str()),
         ("personal", "r9")
     );
-    assert_eq!(set.triggers.len(), 2, "cron 트리거만");
+    assert_eq!(set.triggers.len(), 2, "cron triggers only");
     let morning = set
         .triggers
         .iter()
@@ -573,10 +575,10 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
     assert_eq!(
         morning.scopes,
         scopes(&["calendar.read"]),
-        "주체의 역할 범위 ∩ 에이전트·프로필 상한(admin.x는 상한 밖)"
+        "effective scopes must intersect role, agent, and profile policy"
     );
     assert!(
-        matches!(&morning.target, Target::Agent { instruction, .. } if instruction == "오늘 일정을 알려줘")
+        matches!(&morning.target, Target::Agent { instruction, .. } if instruction == "Show today's agenda")
     );
     let beat = set
         .triggers

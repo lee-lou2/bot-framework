@@ -19,7 +19,6 @@ fn confirmed(effect: &EffectId, receipt: &str) -> EffectStatus {
     }
 }
 
-/// 시작한 호출(c1)이 있는 실행 중 run.
 async fn running(db: &TestDb) -> RunContext {
     let run = leased(db, "r").await;
     begin_call(db, &run.attempt, "c1").await;
@@ -47,7 +46,7 @@ async fn only_the_first_request_may_send_and_confirmed_steps_return_their_receip
         1
     );
 
-    // 같은 단계의 재요청은 보내지 않는다(전송 여부가 불명이므로 held)
+    // Repeated request for an unconfirmed step is held instead of resending.
     let again = effects(&db)
         .request(step(&run.attempt, "c1", "upload", r#"{"file": "summary"}"#))
         .await
@@ -73,7 +72,7 @@ async fn only_the_first_request_may_send_and_confirmed_steps_return_their_receip
             confirmed(&first.status.effect, "file-17"),
         )
         .await
-        .unwrap(); // 같은 영수증 반복
+        .unwrap();
     let other = effects(&db)
         .record(
             run.attempt.clone(),
@@ -97,7 +96,7 @@ async fn only_the_first_request_may_send_and_confirmed_steps_return_their_receip
         .await;
     assert!(
         matches!(changed, Err(Error::Conflict)),
-        "같은 키·다른 인자는 충돌"
+        "same key with different args must conflict"
     );
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_effects").await,
@@ -147,7 +146,6 @@ async fn unresolved_lists_started_and_held_steps_only() {
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].effect, notify);
 
-    // 불명 사유를 적어 보류하면 계속 미결이고, 원래 영수증은 그대로다
     let held = EffectStatus {
         effect: notify.clone(),
         state: EffectState::Held,
@@ -192,7 +190,7 @@ async fn steps_need_a_running_call_and_a_current_owner() {
         return;
     };
     let run = leased(&db, "r").await;
-    begin_call(&db, &run.attempt, "c1").await; // 시작하지 않은(Open) 호출
+    begin_call(&db, &run.attempt, "c1").await;
     let open = effects(&db)
         .request(step(&run.attempt, "c1", "upload", "{}"))
         .await;
@@ -212,7 +210,6 @@ async fn steps_need_a_running_call_and_a_current_owner() {
         .unwrap()
         .status
         .effect;
-    // 다른 호출·옛 세대의 갱신은 거절한다
     begin_call(&db, &run.attempt, "c2").await;
     calls(&db)
         .start(start_call(&run.attempt, "c2", None))
@@ -251,12 +248,12 @@ async fn a_new_generation_finds_the_old_step_held_and_does_not_resend() {
         .status
         .effect;
     let new = db.takeover(&run.attempt.run).await;
-    // 이전 시도가 시작한 호출은 그대로 Started다(복구 판정은 브로커 몫). 같은 단계를 요청하려면 호출이 현재 세대 것이어야 한다
+    // Call remains Started under the prior generation until explicitly released.
     let blocked = effects(&db)
         .request(step(&new.attempt, "c1", "upload", "{}"))
         .await;
     assert!(matches!(blocked, Err(Error::Conflict)));
-    // 미실행이 입증돼 호출이 풀리고 다시 시작되면, 옛 세대가 남긴 started 단계는 불명(held)이다
+    // Once released and restarted, the prior generation's started step transitions to Held.
     let release = FinishCall {
         attempt: new.attempt.clone(),
         call: call("c1"),
@@ -289,7 +286,7 @@ async fn a_new_generation_finds_the_old_step_held_and_does_not_resend() {
         1
     );
 
-    // 운영자가 미실행을 입증하면(판정 기록) 같은 단계를 현재 세대로 다시 보낼 수 있다
+    // Operator NotExecuted resolution permits retrying the step under the current generation.
     db.sql("update bot_effects set resolution = 'not_executed'")
         .await;
     for _ in 0..2 {
@@ -377,7 +374,6 @@ async fn record_rejects_malformed_outcomes() {
         .record(run.attempt.clone(), call("c1"), rejected)
         .await
         .unwrap();
-    // 확정 거절은 최종이다
     let late = effects(&db)
         .record(run.attempt.clone(), call("c1"), confirmed(&id, "r"))
         .await;

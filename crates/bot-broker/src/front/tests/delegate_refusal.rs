@@ -1,5 +1,4 @@
-//! 위임(`delegate`)의 거절도 같은 규칙이다: 저장소가 거절한 호출은 모델이 본 단어를 표식으로 먼저 남기고 같은 위치는 그 단어를 재생한다(자식을 만들지 않는다).
-//! 저장소 장애는 거절이 아니라 봉인하지 않는다.
+//! Delegation refusals are sealed before returning; transient store errors are not.
 
 use super::delegate::{delegate, plan, with_family};
 use super::*;
@@ -28,7 +27,7 @@ async fn store_refusals_become_single_words_and_never_park_and_a_confirmed_one_i
             .body
             .contains("conflict")
     );
-    // 저장소가 응답하지 못한 것은 거절이 아니다: 표식 없이 `unavailable`이다
+    // Store outage is transient and must not be sealed as a refusal.
     r.delegation
         .fail_with(Some(bot_core::port::Error::Unavailable));
     assert!(
@@ -43,13 +42,13 @@ async fn store_refusals_become_single_words_and_never_park_and_a_confirmed_one_i
             (CallId("cli-4-0".into()), CliRefusal::Denied),
             (CallId("cli-5-0".into()), CliRefusal::Conflict),
         ],
-        "확정한 두 거절만 표식이 남는다"
+        "only deterministic refusals leave markers"
     );
     assert!(
         r.park.seen().is_empty(),
-        "시작하지 못했으면 대기에 들어가지 않는다"
+        "must not park when delegation did not start"
     );
-    // 저장소가 돌아와도 확정한 위치는 모델이 본 단어를 그대로 재생하고 자식을 만들지 않는다
+    // Once recovered, sealed positions replay their word without spawning children.
     r.delegation.fail_with(None);
     for (id, word) in [("toolu_d", "denied"), ("toolu_e", "conflict")] {
         assert!(
@@ -58,8 +57,12 @@ async fn store_refusals_become_single_words_and_never_park_and_a_confirmed_one_i
         );
     }
     assert!(r.delegation.commands().is_empty());
-    assert_eq!(r.turns.refusals().len(), 2, "표식은 위치마다 한 번이다");
-    // 표식이 없던 위치는 다시 판정해 자식을 시작하고 부모는 대기로 들어간다
+    assert_eq!(
+        r.turns.refusals().len(),
+        2,
+        "markers are written once per position"
+    );
+    // Unsealed positions are re-evaluated and proceed to spawn and park.
     assert!(
         rpc(&r, &delegate("toolu_f", input))
             .await

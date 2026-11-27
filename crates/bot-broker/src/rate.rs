@@ -1,6 +1,6 @@
-//! 주체별 속도·동시성 제한. 프로필과 주체(cron의 서비스 주체 포함)마다 따로 센다.
-//! 토큰 버킷(분당 보충량·최대 순간량)과 동시에 진행 중인 호출 수를 함께 본다.
-//! 한도는 호스트 프로세스 안에서만 센다(분리 배치에서 브로커를 여러 개 두면 개수만큼 늘어난다).
+//! Per-principal token-bucket rate and concurrency limiter scoped per profile.
+//!
+//! Accounting is process-local (multi-broker deployments scale limits by broker count).
 
 use crate::sys::Clock;
 use bot_core::id::{PrincipalId, ProfileId};
@@ -12,11 +12,8 @@ use std::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RateConfig {
-    /// 분당 보충하는 호출 수.
     pub per_minute: u32,
-    /// 한꺼번에 쓸 수 있는 최대 호출 수(버킷 크기).
     pub burst: u32,
-    /// 동시에 진행할 수 있는 호출 수.
     pub concurrent: u32,
 }
 
@@ -44,7 +41,7 @@ struct Bucket {
     in_flight: u32,
 }
 
-/// 주체 수가 늘어도 메모리가 무한히 자라지 않게 쓰지 않는 항목을 치우는 기준.
+/// Bucket count threshold for sweeping idle, fully refilled entries to bound memory growth.
 const SWEEP_AT: usize = 10_000;
 
 struct State {
@@ -58,7 +55,7 @@ pub struct Limiter {
     state: Mutex<State>,
 }
 
-/// 동시성 자리. 놓으면(drop) 반환된다.
+/// RAII concurrency permit released on drop.
 pub struct Slot {
     limiter: Arc<Limiter>,
     key: Key,
@@ -88,7 +85,7 @@ impl Limiter {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 호출 하나를 받아들인다. 속도 초과나 동시성 초과면 거절한다. 거절된 호출은 토큰을 쓰지 않는다.
+    /// Admits one call if within concurrency and token limits; rejected calls do not consume tokens.
     pub fn admit(
         self: &Arc<Self>,
         profile: &ProfileId,
@@ -115,7 +112,7 @@ impl Limiter {
             at: now,
             in_flight: 0,
         });
-        // 시계가 거꾸로 가면 보충하지 않는다.
+        // Never refill if the wall clock moves backwards.
         let elapsed = now
             .duration_since(bucket.at)
             .unwrap_or_default()
@@ -168,10 +165,10 @@ mod tests {
             drop(limiter.admit(&p, &a).unwrap());
         }
         assert_eq!(limiter.admit(&p, &a).err(), Some(Limit::Rate));
-        clock.advance(Duration::from_secs(1)); // 분당 60 = 초당 1개
+        clock.advance(Duration::from_secs(1));
         drop(limiter.admit(&p, &a).unwrap());
         assert_eq!(limiter.admit(&p, &a).err(), Some(Limit::Rate));
-        clock.advance(Duration::from_secs(3600)); // 오래 쉬어도 버킷 크기를 넘지 않는다
+        clock.advance(Duration::from_secs(3600));
         for _ in 0..3 {
             drop(limiter.admit(&p, &a).unwrap());
         }
@@ -228,13 +225,12 @@ mod tests {
     fn idle_buckets_are_evicted_after_refill_and_sweep_threshold_scales_for_active_buckets() {
         let (limiter, clock) = limiter(60, 2, 10);
         let p = ProfileId("personal".into());
-        // SWEEP_AT개의 주체가 호출을 끝낸 뒤 유휴 상태로 남는다.
         for i in 0..SWEEP_AT {
             let principal = PrincipalId(format!("local:u{i}"));
             drop(limiter.admit(&p, &principal).unwrap());
         }
         assert_eq!(limiter.lock().buckets.len(), SWEEP_AT);
-        // 아직 보충되지 않았으면 유지되고, 다음 정리 기준이 2배로 늘어나 호출마다 O(N) 스캔하지 않는다.
+        // Unrefilled buckets stay retained and double `next_sweep_at` to avoid O(N) scans per admit.
         let extra = PrincipalId("local:extra".into());
         let held = limiter.admit(&p, &extra).unwrap();
         {
@@ -242,9 +238,7 @@ mod tests {
             assert_eq!(st.buckets.len(), SWEEP_AT + 1);
             assert_eq!(st.next_sweep_at, SWEEP_AT * 2);
         }
-        // 동시성 자리를 잡고 있는 동안에는 시간이 지나도 치우지 않는다.
         let mut st_count_before = limiter.lock().buckets.len();
-        // next_sweep_at까지 채운 뒤 충분히 시간이 흐르면 완료된 유휴 버킷은 모두 정리되고, 진행 중인 버킷만 남는다.
         for i in st_count_before..(SWEEP_AT * 2) {
             let principal = PrincipalId(format!("local:u{i}"));
             drop(limiter.admit(&p, &principal).unwrap());
@@ -256,7 +250,7 @@ mod tests {
         drop(limiter.admit(&p, &fresh).unwrap());
         {
             let st = limiter.lock();
-            // 진행 중인 `extra`와 방금 추가된 `fresh` 두 개만 남고 유휴 버킷은 모두 제거된다.
+            // Only the in-flight `extra` and newly added `fresh` buckets remain.
             assert_eq!(st.buckets.len(), 2);
             assert_eq!(st.next_sweep_at, SWEEP_AT);
         }

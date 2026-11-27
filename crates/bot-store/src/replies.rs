@@ -1,5 +1,4 @@
-//! 회신 본문 검증. 본문은 text(최대 12,000자)·attachments(최대 8개, 디코딩 합계 8 MiB, 각 name/type/data) 중
-//! 하나 이상인 JSON 객체다. approval 카드는 브로커가 승인 원장과 같은 커밋에 만든 것만 허용하므로 일반 답에서는 거절한다.
+//! Outbox reply payload validation (`text`, `attachments`, and broker-created `approval` cards).
 
 use crate::{codec::*, db::R};
 use bot_core::command::JsonPayload;
@@ -10,7 +9,6 @@ const MAX_ATTACHMENTS: usize = 8;
 const MAX_ATTACHMENT_BYTES: usize = 8 << 20;
 const MAX_CARD_LINES: usize = 20;
 
-/// base64 문자열이 디코딩되면 몇 바이트인가(형식이 잘못이면 None).
 fn decoded_len(data: &str) -> Option<usize> {
     let ok = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '-' | '_');
     let body = data.trim_end_matches('=');
@@ -62,7 +60,7 @@ fn attachments_ok(map: &Map<String, Value>) -> R<bool> {
     }
 }
 
-/// 일반 답(`Finish.answers`)을 검증하고 정규화한 문서 글을 돌려준다.
+/// Validates and canonicalizes a normal reply (`text` and/or `attachments`; rejects `approval`).
 pub(crate) fn answer(payload: &JsonPayload) -> R<String> {
     let (value, canonical_text) = canonical(payload)?;
     let Some(map) = value.as_object() else {
@@ -82,8 +80,7 @@ pub(crate) fn answer(payload: &JsonPayload) -> R<String> {
     }
 }
 
-/// 승인 카드(브로커가 `open_approval`에 싣는 문서)를 검증한다. `{"approval": {"nonce", "title", "lines"}}`이고
-/// nonce는 이 승인의 것이어야 한다. 선택적으로 text를 함께 둘 수 있다.
+/// Validates a broker-emitted approval card payload (`approval.{nonce,title,lines}` plus optional `text`).
 pub(crate) fn card(payload: &JsonPayload, nonce: &str) -> R<String> {
     let (value, canonical_text) = canonical(payload)?;
     let Some(map) = value.as_object() else {
@@ -125,7 +122,8 @@ mod tests {
 
     #[test]
     fn packed_inline_attachments_pass_store_answer_validation() {
-        let raw = "결론이에요.\n\n<첨부 이름=\"근거.md\">\n## 상세\n- 1건\n</첨부>";
+        let raw =
+            "Summary.\n\n<attachment name=\"evidence.md\">\n## Details\n- 1 item\n</attachment>";
         let (body, files) = split(raw);
         let (packed, truncated) = pack_answers(&files, 15);
         assert!(!truncated);

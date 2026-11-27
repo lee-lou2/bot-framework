@@ -1,10 +1,10 @@
-//! 팀 프로필 템플릿(`examples/profiles/team`)을 README 5분 시작과 같은 준비로 확인한다: 내장 데모 호스트(`BOT_HOST_CONFIG` 없음)와
-//! 저장소의 예시 폴더 전체(personal + team). 검증·지도는 DB·srt 없이 돌고, 대화는 팀 시험 DB·`srt`·`python3`가 있어야 하며 없으면 건너뛴다.
+//! Verifies `examples/profiles/team` using the built-in demo host (no `BOT_HOST_CONFIG`): `validate`, `map`,
+//! and live demo-model chat (chat test requires PG, `srt`, and `python3`).
 mod process_support;
 use process_support::*;
 use std::path::{Path, PathBuf};
 
-/// 걸러 내지 않은 저장소의 예시 폴더. 내장 데모 호스트가 두 프로필의 모델과 CLI 계정(`owner`·`team`)을 모두 안다.
+/// Full example profiles root (`personal` + `team`), both mapped by the built-in demo host.
 fn all_examples() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/profiles")
 }
@@ -16,15 +16,14 @@ fn the_team_template_validates_and_maps_with_the_built_in_demo_host() {
     let validate = bot(&env, &["validate"]);
     assert!(validate.status.success(), "{}", text(&validate));
     let shown = text(&validate);
-    assert!(shown.contains("검증 통과: 프로필 2개"), "{shown}");
+    assert!(shown.contains("Validation passed: 2 profile(s)"), "{shown}");
     assert!(
-        shown.contains("team 판본 ") && shown.contains("에이전트 5 도구 2 트리거 1 바인딩 1"),
+        shown.contains("team rev ") && shown.contains("agents 5 tools 2 triggers 1 bindings 1"),
         "{shown}"
     );
     let map = bot(&env, &["map", "--profile", "team"]);
     assert!(map.status.success(), "{}", text(&map));
     let tree = text(&map);
-    // 폴더 계층이 위임 트리다: 팀 리드가 직계 넷에게 맡긴다
     for agent in [
         "main",
         "main/developer",
@@ -40,7 +39,6 @@ fn the_team_template_validates_and_maps_with_the_built_in_demo_host() {
             "{child}\n{tree}"
         );
     }
-    // 되돌릴 수 없는 도구는 항상 사람 승인, 정기 요약은 cron 하나
     assert!(
         tree.contains("class=irreversible") && tree.contains("approval=always"),
         "{tree}"
@@ -72,7 +70,6 @@ fn the_team_lead_answers_through_the_demo_model() {
     );
     let env = refs(&env);
     let _server = start_gateway_roles(&env, "gateway,worker", &socket);
-    // 팀 프로필의 CLI 입구(계정 team)로 팀 리드에게 묻는다: 데모 모델이 agenda.list로 합성 일정을 읽어 답한다
     let chat = bot(
         &env,
         &[
@@ -81,23 +78,21 @@ fn the_team_lead_answers_through_the_demo_model() {
             "team",
             "--request-id",
             "team-list",
-            "오늘 일정 알려줘",
+            "Show today's agenda",
         ],
     );
     assert!(chat.status.success(), "{}", text(&chat));
-    assert!(text(&chat).contains("산책"), "{}", text(&chat));
+    assert!(text(&chat).contains("Walk"), "{}", text(&chat));
     assert_eq!(
         schema.query(
             "select count(*) from {s}.bot_runs where profile = 'team' and state = 'succeeded'"
         ),
         "1"
     );
-    // 개인 비서 입구는 따로 열려 있고 team의 실행과 섞이지 않는다
     assert_eq!(
         schema.query("select count(*) from {s}.bot_runs where profile = 'personal'"),
         "0"
     );
-    // 되돌릴 수 없는 도구(agenda.delete)는 승인 카드가 열릴 때까지 실행되지 않는다
     let start = bot(
         &env,
         &[
@@ -107,13 +102,13 @@ fn the_team_lead_answers_through_the_demo_model() {
             "--no-wait",
             "--request-id",
             "team-del",
-            "산책 일정을 삭제해줘",
+            "Delete the walk event",
         ],
     );
     assert!(start.status.success(), "{}", text(&start));
     let pending =
         "select count(*) from {s}.bot_approvals where profile = 'team' and state = 'pending'";
-    wait_for("승인 카드가 열리지 않았어요", || {
+    wait_for("approval card did not open", || {
         schema.query(pending) == "1"
     });
 }

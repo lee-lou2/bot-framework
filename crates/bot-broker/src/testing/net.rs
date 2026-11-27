@@ -1,4 +1,4 @@
-//! 네트워크 가짜: 이름 해석표와, 받은 것을 그대로 돌려주는 상대(echo)에 이어 주는 연결기.
+//! Network test doubles: DNS resolver, echo TCP connector, and scripted model upstream.
 
 use crate::{
     model::{ChunkSource, Upstream, UpstreamRequest, UpstreamResponse, UpstreamStream},
@@ -37,7 +37,6 @@ impl FakeResolver {
             calls: Mutex::default(),
         }
     }
-    /// 해석을 요청받은 이름들.
     pub fn calls(&self) -> Vec<String> {
         lock(&self.calls).clone()
     }
@@ -60,7 +59,6 @@ impl FakeConnector {
     pub fn new() -> Self {
         Self::default()
     }
-    /// 연결을 요청받은 주소들.
     pub fn addrs(&self) -> Vec<SocketAddr> {
         lock(&self.addrs).clone()
     }
@@ -84,7 +82,6 @@ impl Connector for FakeConnector {
 
 type Seen = (String, String, Vec<(String, String)>, String);
 
-/// 상류가 한 번에 정할 수 있는 답.
 enum Step {
     Whole(u16, Vec<u8>),
     Fail,
@@ -92,7 +89,6 @@ enum Step {
     Chunks(u16, Vec<Vec<u8>>, End, Duration),
 }
 
-/// 조각을 다 내준 뒤의 모습.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum End {
     Eof,
@@ -103,7 +99,6 @@ pub enum End {
 struct FakeChunks {
     chunks: VecDeque<Vec<u8>>,
     end: End,
-    /// 조각마다 이만큼 늦게 준다(0이면 바로).
     gap: Duration,
 }
 
@@ -129,12 +124,11 @@ impl ChunkSource for FakeChunks {
     }
 }
 
-/// 상류(모델 제공자) 가짜: 받은 요청을 기록하고 적어 둔 응답을 돌려준다. 비어 있으면 200 `{"ok":true}`.
+/// Scripted upstream double; defaults to `200 {"ok":true}` when no response is queued.
 #[derive(Default)]
 pub struct FakeUpstream {
     requests: Mutex<Vec<Seen>>,
     script: Mutex<VecDeque<Step>>,
-    /// 일반(비스트리밍) 응답을 이만큼 늦게 준다.
     delay: Mutex<Duration>,
 }
 
@@ -145,11 +139,9 @@ impl FakeUpstream {
     pub fn respond(&self, status: u16, body: &[u8]) {
         lock(&self.script).push_back(Step::Whole(status, body.to_vec()));
     }
-    /// 다음 요청을 조각 여러 개로 흘려 보낸다.
     pub fn respond_chunks(&self, status: u16, chunks: &[&[u8]], end: End) {
         self.respond_slowly(status, chunks, Duration::ZERO, end);
     }
-    /// 조각을 하나씩 `gap`만큼 늦춰 흘려 보낸다(스트림이 열려 있는 동안 일어나는 일을 보려고).
     pub fn respond_slowly(&self, status: u16, chunks: &[&[u8]], gap: Duration, end: End) {
         lock(&self.script).push_back(Step::Chunks(
             status,
@@ -161,15 +153,13 @@ impl FakeUpstream {
     pub fn fail(&self) {
         lock(&self.script).push_back(Step::Fail);
     }
-    /// 이후 일반 응답을 `delay`만큼 늦춘다(요청을 보낸 뒤 일어나는 일을 보려고).
     pub fn set_delay(&self, delay: Duration) {
         *lock(&self.delay) = delay;
     }
-    /// 다음 요청에는 끝내 답하지 않는다(응답을 기다리는 중에 세션이 거둬지는 경우).
     pub fn hang(&self) {
         lock(&self.script).push_back(Step::Hang);
     }
-    /// 받은 요청 `(호스트:포트, 경로, 머리, 본문)`.
+    /// Recorded requests as `(host:port, path, headers, body)`.
     pub fn requests(&self) -> Vec<Seen> {
         lock(&self.requests).clone()
     }
@@ -233,7 +223,6 @@ impl Upstream for FakeUpstream {
             Step::Fail => Err(Error::Unavailable),
             Step::Hang => return Box::pin(std::future::pending()),
         };
-        // 응답 머리가 늦게 오는 상류도 흉내 낸다(`set_delay`).
         let delay = *lock(&self.delay);
         Box::pin(async move {
             if !delay.is_zero() {

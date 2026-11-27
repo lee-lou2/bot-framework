@@ -1,4 +1,4 @@
-//! 실제 CLI 시험의 «모델이 읽을 수 있는 폴더에 비밀 값이 없는가» 훑기: 프로세스가 끝난 직후(호출 폴더가 지워지기 전)에 마운트 폴더 전체를 훑는다.
+//! Mount directory scanner that checks `/bot` and `/work` for leaked session tokens right after a model process exits.
 #![allow(dead_code)]
 
 use bot_core::{
@@ -10,18 +10,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// 프로세스 하나가 끝난 뒤 두 마운트 폴더(`/bot`·`/work`)를 훑은 결과.
 #[derive(Clone, Debug, Default)]
 pub struct Swept {
-    /// 세션 토큰을 이름이나 내용에 담은 파일
     pub hits: Vec<PathBuf>,
-    /// 훑은 파일 수(CLI가 쓴 파일까지 훑었는지 보려고)
     pub files: usize,
-    /// 훑은 토큰 길이(빈 값을 훑지 않았는지 보려고)
     pub token_len: usize,
 }
 
-/// `roots` 아래 모든 파일에서 `needle`을 이름이나 내용에 담은 것과 훑은 파일 수(심볼릭 링크는 따라가지 않는다).
+/// Scans all files under `roots` (without following symlinks) for `needle` in paths or contents.
 pub fn sweep_files(roots: &[PathBuf], needle: &str) -> (Vec<PathBuf>, usize) {
     fn walk(dir: &Path, needle: &str, hits: &mut Vec<PathBuf>, files: &mut usize) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -47,7 +43,7 @@ pub fn sweep_files(roots: &[PathBuf], needle: &str) -> (Vec<PathBuf>, usize) {
             }
         }
     }
-    assert!(!needle.is_empty(), "빈 값은 훑을 수 없다");
+    assert!(!needle.is_empty(), "needle must not be empty");
     let (mut hits, mut files) = (Vec::new(), 0);
     for root in roots {
         walk(root, needle, &mut hits, &mut files);
@@ -55,7 +51,6 @@ pub fn sweep_files(roots: &[PathBuf], needle: &str) -> (Vec<PathBuf>, usize) {
     (hits, files)
 }
 
-/// 프로세스가 끝난 뒤 훑을 것: (폴더들, 찾을 토큰, 결과를 남길 곳)
 pub struct Sweep {
     roots: Vec<PathBuf>,
     token: String,
@@ -63,7 +58,6 @@ pub struct Sweep {
 }
 
 impl Sweep {
-    /// 이 명세의 두 마운트 폴더(`/bot`·`/work`의 호스트 쪽)와 환경의 세션 토큰(`RELAY_TOKEN`). 토큰이 없으면 훑지 않는다.
     pub fn of(spec: &ModelSpec, sink: Arc<Mutex<Vec<Swept>>>) -> Option<Self> {
         let token = spec.env.iter().find(|(key, _)| key == "RELAY_TOKEN")?;
         Some(Self {
@@ -90,7 +84,7 @@ impl Sweep {
     }
 }
 
-/// 어떤 모델 샌드박스든 감싸서, 프로세스가 끝난 직후(호출 폴더가 지워지기 전) 두 마운트 폴더를 훑는다(실제 VM 시험).
+/// Wraps any `ModelSandbox` to sweep its mounted host directories immediately after `wait()` completes.
 pub struct Sweeping<S> {
     inner: S,
     swept: Arc<Mutex<Vec<Swept>>>,
@@ -104,7 +98,6 @@ impl<S> Sweeping<S> {
         }
     }
 
-    /// 끝난 프로세스마다의 훑기 결과(시작 순서)
     pub fn swept(&self) -> Vec<Swept> {
         self.swept.lock().map(|s| s.clone()).unwrap_or_default()
     }

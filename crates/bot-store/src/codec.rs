@@ -1,4 +1,4 @@
-//! 열 값과 core 타입 사이의 변환, 입력 검증, 정규화·해시.
+//! Row-to-core conversions, input validation, JSON canonicalization, and hashing helpers.
 
 use crate::db::R;
 use bot_core::{
@@ -10,7 +10,7 @@ use bot_core::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-/// 한 입력 문서의 상한. 과대 입력은 접수하지 않는다.
+/// Maximum accepted input document size (1 MiB).
 pub(crate) const MAX_DOC_BYTES: usize = 1 << 20;
 const MAX_ID_BYTES: usize = 256;
 const MAX_ATTACHMENTS: usize = 64;
@@ -19,7 +19,7 @@ pub(crate) fn invalid<T>() -> R<T> {
     Err(Error::Invalid.into())
 }
 
-/// 식별자 문자열: 비어 있지 않고 길이가 제한되며 제어 문자(NUL 포함)가 없다.
+/// Non-empty identifier within `MAX_ID_BYTES` containing no control characters.
 pub(crate) fn id_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= MAX_ID_BYTES && !s.chars().any(char::is_control)
 }
@@ -90,7 +90,7 @@ pub(crate) fn state_from(s: &str) -> R<RunState> {
     })
 }
 
-/// 검증한 JSON 문서를 키 순서가 고정된 문자열로 다시 쓴다(공백·키 순서가 달라도 같은 값).
+/// Parses and re-serializes JSON deterministically within `MAX_DOC_BYTES`.
 pub(crate) fn canonical(payload: &JsonPayload) -> R<(Value, String)> {
     if payload.0.len() > MAX_DOC_BYTES {
         return invalid();
@@ -147,7 +147,6 @@ pub(crate) fn agent_of(target: &Target) -> &AgentId {
     }
 }
 
-/// 32바이트 해시 열을 배열로 바꾼다(길이가 다르면 `Invalid`).
 pub(crate) fn to32(bytes: Vec<u8>) -> R<[u8; 32]> {
     bytes.try_into().map_err(|_| Error::Invalid.into())
 }
@@ -156,7 +155,7 @@ pub(crate) fn sha256_text(text: &str) -> [u8; 32] {
     Sha256::digest(text.as_bytes()).into()
 }
 
-/// 대화 문서에서 사람이 읽을 글만 꺼낸다: `{"text": "…"}`면 그 글, 아니면 문서 그대로.
+/// Extracts `"text"` from a JSON object payload (or unwraps a JSON string), falling back to raw text.
 pub(crate) fn text_of(doc: &str) -> String {
     match serde_json::from_str::<Value>(doc) {
         Ok(Value::Object(map)) => match map.get("text") {

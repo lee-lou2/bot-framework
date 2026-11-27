@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! OpenAI 모델 바인딩 시험 공용: OpenAI 입구가 있는 호스트, 모델 둘이 있는 프로필, 승인자 후보 멤버.
+//! Shared fixtures for OpenAI model binding tests: host with OpenAI endpoint, dual-model profile, and approver members.
 use super::{Files, Temp, base, edit, host, write_profile};
 use bot_core::{
     id::{BindingId, PrincipalId, ProfileId},
@@ -11,7 +11,7 @@ pub fn set(items: &[&str]) -> std::collections::BTreeSet<String> {
     items.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// 기본 호스트에 OpenAI 입구 `openai`(키 슬롯 주체 build·ops)와 둘째 워크스페이스 `other`를 더한다.
+/// Extends `host()` with OpenAI endpoint `openai` (subjects `build`, `ops`) and a second Slack workspace `other`.
 pub fn host_openai() -> HostCatalog {
     let mut h = host();
     h.openai_endpoints
@@ -43,7 +43,7 @@ pub fn ok(files: &Files) -> Snapshot {
     (**set.profile(&ProfileId("personal".into())).unwrap()).clone()
 }
 
-/// 기본 프로필에 모델 둘(assistant→main, research→main/research)과 멤버 `http:openai/build`를 더한다. `approvers`는 assistant 바인딩에 붙는다.
+/// Adds two OpenAI model bindings (`assistant -> main`, `research -> main/research`) and member `http:openai/build`.
 pub fn models(approvers: &str) -> Files {
     let extra = if approvers.is_empty() {
         String::new()
@@ -66,7 +66,7 @@ pub fn models(approvers: &str) -> Files {
     )
 }
 
-/// 승인자 후보가 될 Slack 사람(같은 워크스페이스 home)과 다른 워크스페이스 사람을 멤버에 더한다.
+/// Adds Slack members from workspace `home` and workspace `other` as approver candidates.
 pub fn with_people(files: Files) -> Files {
     edit(
         files,

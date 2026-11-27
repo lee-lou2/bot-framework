@@ -1,4 +1,4 @@
-//! 통합 시험 묶음(`bot-cli`, 비카나리).
+//! Non-canary integration test suite for `bot-cli`.
 
 mod chat_support;
 mod claude_support;

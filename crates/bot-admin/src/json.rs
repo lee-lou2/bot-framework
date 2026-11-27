@@ -1,9 +1,9 @@
-//! 조회 값 → 응답 JSON. 시각은 유닉스 밀리초, 해시는 소문자 16진, 상태는 소문자 고정 낱말이다.
-//! 계약 타입은 serde에 의존하지 않으므로 여기서 손으로 옮긴다. 여기 없는 값은 응답에 나가지 않는다.
+//! Manual JSON serializers mapping `bot_core::admin` views to fixed admin API response shapes.
 
 use bot_core::{
     admin::*,
     builtin::{CardBody, card_body},
+    cards::{LABEL_BODY, LABEL_MEMORY_ID},
     command::memory_share_hash,
     id::MemoryId,
     schedule::DELIVERY_CARD_LABEL,
@@ -17,7 +17,6 @@ pub fn hex(bytes: &[u8]) -> String {
     bot_core::random::hex(bytes)
 }
 
-/// 사전 승인 한 행: 문자열 4개·정수 3개·불리언 1개(관리 화면과 계약).
 pub fn preapproval(row: &bot_core::grant::PreapprovalRow) -> Value {
     json!({
         "profile": row.profile,
@@ -114,7 +113,6 @@ pub fn approval_state(s: ApprovalState) -> &'static str {
     }
 }
 
-/// `?state=` 값: 대기(기본)·처리됨(대기를 벗어난 모두, 자동 만료·대체 포함)·전체.
 pub fn parse_approval_filter(s: &str) -> Option<ApprovalFilter> {
     match s {
         "pending" => Some(ApprovalFilter::Pending),
@@ -133,7 +131,6 @@ fn waiting(w: &Option<Waiting>) -> Value {
     }
 }
 
-/// 이 run 현재 시도의 추적 ID(시도에서 결정적으로 계산한 값).
 fn trace_id(r: &RunView) -> String {
     let at = bot_core::id::Attempt {
         profile: r.profile.clone(),
@@ -189,9 +186,7 @@ pub fn detail(d: &RunDetail) -> Value {
     })
 }
 
-/// 보류의 종류 낱말. 판정 «미실행»의 결과가 종류마다 다르다: `private`(민감 DM)는 본문이 없어 다시 실행하지 못하고 종료하며,
-/// `reply`(게이트웨이 회신)는 같은 회신을 다시 보내고, `tool`(도구 호출)은 같은 호출을 다시 이어 간다.
-/// 저장소가 조회한 출처(도구 행·회신 행·민감 접수 행)가 채운 `kind`만 따른다. 도구 이름이나 호출 ID의 모양은 보지 않는다.
+/// Maps store-reported `HoldKind` directly without inspecting tool names or call IDs.
 pub fn hold_kind(h: &HoldView) -> &'static str {
     match h.kind {
         HoldKind::Tool => "tool",
@@ -208,17 +203,13 @@ pub fn hold(h: &HoldView) -> Value {
     })
 }
 
-/// 카드 본문(`render`)을 이 조회자에게 보여도 되는가. 소유자만 보는 카드는 요청자이자 승인자인 본인(기억의 소유자, 예약을 만든 사람)이
-/// 인증된 경우에만 본문을 낸다. 운영자도 예외가 아니다(메타데이터·감사는 그대로 본다). 요청자와 승인자가 다르면 아무도 못 본다.
+/// Owner-only card bodies are visible only when the viewer is both requester and approver (operators included).
 pub fn body_visible(a: &ApprovalView, viewer: &Viewer) -> bool {
     card_body(&a.tool.0) == CardBody::None
         || (viewer.principal == a.requester && viewer.principal == a.approver)
 }
 
-/// 기억 공유 카드가 «기억 ID와 본문 전체»를 보이고, 그것이 승인 지문(`args_sha256`)과 일치하는가.
-/// 카드에는 `기억 ID`와 `본문` 행이 각각 정확히 하나여야 한다(행이 없거나 둘 이상이면 모호하므로 일치하지 않는다).
-/// `본문` 행은 이어진 줄을 모두 이은 한 행이고, 원문 그대로이거나 JSON 문자열(따옴표 포함)이어도 된다.
-/// 제목·공유 범위만 남은 카드, 본문 일부가 빠진 카드, 다른 기억의 지문을 가진 카드는 일치하지 않는다.
+/// Verifies that a memory-share card renders a single `LABEL_MEMORY_ID` and `LABEL_BODY` matching `args_sha256`.
 fn share_card_matches(a: &ApprovalView) -> bool {
     let only = |label: &str| {
         let mut rows = a.render.iter().filter(|(k, _)| k == label);
@@ -227,7 +218,7 @@ fn share_card_matches(a: &ApprovalView) -> bool {
             _ => None,
         }
     };
-    let (Some(id), Some(body)) = (only("기억 ID"), only("본문")) else {
+    let (Some(id), Some(body)) = (only(LABEL_MEMORY_ID), only(LABEL_BODY)) else {
         return false;
     };
     let id = MemoryId(id.to_owned());
@@ -236,9 +227,7 @@ fn share_card_matches(a: &ApprovalView) -> bool {
         || serde_json::from_str::<String>(body).is_ok_and(|text| hash_of(&text) == a.args_sha256)
 }
 
-/// 예약 전송 카드가 «전송 초안 전체»를 한 행으로 보이고, 그 원문의 SHA-256이 승인 지문(`args_sha256`)과 같은가.
-/// `전송 초안` 행은 정확히 하나여야 하고(없거나 둘 이상이면 모호하다) 값은 이어진 조각을 모두 이은 원문 그대로여야 한다:
-/// 승인자가 보는 글이 곧 지문의 입력이다. 일부만 보이는 카드·글자가 바뀐 카드·다른 초안의 지문을 가진 카드는 일치하지 않는다.
+/// Verifies that a scheduled-delivery card renders a single `DELIVERY_CARD_LABEL` row matching `args_sha256`.
 fn delivery_card_matches(a: &ApprovalView) -> bool {
     let mut rows = a.render.iter().filter(|(k, _)| k == DELIVERY_CARD_LABEL);
     match (rows.next(), rows.next()) {
@@ -249,9 +238,7 @@ fn delivery_card_matches(a: &ApprovalView) -> bool {
     }
 }
 
-/// 승인(긍정 판정)을 받아도 되는 카드인가. 소유자 전용 본문이 있는 카드는 승인하는 사람이 **승인 지문과 일치하는 내용 전체**
-/// (기억 공유는 기억 ID·본문, 예약 전송은 전송 초안)를 실제로 볼 수 있어야 한다: 소유자가 아니거나, 카드에 제목·공유 범위만 있거나,
-/// 본문 일부가 빠졌거나, 지문과 다르면 승인할 수 없다(볼 수 없는 내용을 승인하게 되므로). 거절은 늘 허용한다. 화면과 판정 API가 같은 조건을 쓴다.
+/// Blocks positive approval (`"no_body"`) when an owner-only card body is hidden or fails digest verification.
 pub fn approve_blocked(a: &ApprovalView, viewer: &Viewer) -> Option<&'static str> {
     let complete = match card_body(&a.tool.0) {
         CardBody::None => return None,

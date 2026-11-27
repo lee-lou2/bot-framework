@@ -1,6 +1,7 @@
-//! 사전 승인의 저장: 활성화 동기화·접수 결박·관리 조회와 정지·재개.
-//! 잠금 순서(전역 규칙의 연장): 활성 집합 → (run·호출·효과) → 승인 행 → 정지 행 → 사용 행 → 감사 head.
-//! 철회된 승인 행은 남겨 같은 ID가 되살아나지 않는다. 바뀐 선언은 항상 새 ID를 받는다.
+//! Pre-approval grant storage: activation sync, occurrence binding, admin reads, and pause/resume.
+//!
+//! Lock order: active set -> (run/call/effect) -> grant -> pause -> usage -> audit head.
+//! Revoked grants stay persisted so IDs are never reused; modified declarations receive a new grant ID.
 
 use crate::{
     audit::{self, Entry, OwnedEntry},
@@ -20,10 +21,9 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use std::collections::BTreeMap;
 
-/// 한 트리거를 가리키는 키.
 type Key = (String, String, String);
 
-/// 활성화가 같은 커밋에 남길 감사 한 줄(상태 변경 뒤 마지막에 쓴다).
+/// Deferred audit entry written at the end of an activation commit.
 pub(crate) struct Note {
     profile: String,
     action: &'static str,
@@ -73,9 +73,8 @@ fn key_of(spec: &GrantSpec) -> Key {
     )
 }
 
-/// 활성 집합 교체와 같은 커밋에서 사전 승인을 맞춘다(호출자가 `bot_active`를 `FOR UPDATE`로 쥔 상태).
-/// 지문이 같은 활성 승인은 ID를 그대로 두고, 지문이 달라졌거나 처음이면 새 ID를 발급하며(옛 승인은 철회),
-/// 새 집합에 선언이 없는 활성 승인은 철회한다. 돌려주는 것은 이번에 발급한 승인과 감사 줄이다.
+/// Reconciles active grants during an activation swap (caller holds `bot_active FOR UPDATE`),
+/// keeping matching fingerprints and revoking changed or removed grants.
 pub(crate) async fn sync_in(
     tx: &mut Tx<'_>,
     specs: &[GrantSpec],
@@ -179,7 +178,7 @@ async fn issue(tx: &mut Tx<'_>, spec: &GrantSpec) -> R<String> {
     .bind(spec.max_per_day as i32)
     .fetch_one(&mut **tx)
     .await?;
-    // 정지 상태는 트리거에 속한다: 승인이 교체돼도 이어진다(처음이면 풀린 상태로 만든다)
+    // Pause state belongs to the trigger and survives grant replacement (new triggers start unpaused).
     sqlx::query(
         "insert into bot_trigger_pause (profile, agent, trigger) values ($1, $2, $3) on conflict do nothing",
     )
@@ -200,9 +199,9 @@ fn hex_bytes(text: &str) -> R<Vec<u8>> {
         .collect()
 }
 
-/// 접수에서 본 이 트리거의 활성 승인과 정지 상태.
+/// Active grant and pause state seen when accepting a scheduled occurrence.
 pub(crate) enum Binding {
-    /// 승인이 없다(사전 승인 선언이 없는 트리거).
+    /// Trigger has no pre-approval grant.
     None,
     Bound {
         grant: String,
@@ -211,9 +210,8 @@ pub(crate) enum Binding {
     Paused,
 }
 
-/// 발생 접수 안에서 활성 승인과 정지 상태를 읽는다(정지 행을 `FOR SHARE`로 잠가 정지 커밋과 직렬화한다).
-/// 정지 중이거나, 발생의 **예정 시각**(`at_ms`)이 마지막 정지·재개 전환보다 앞서면 건너뛴다: 정지 구간에 예정된 발생(또는 정지 전에 예정됐지만 밀려 접수되는 발생)을
-/// 재개 뒤 따라잡기가 접수해 쓰게 하지 않는다. 재개 뒤에 예정된 새 발생부터 받는다.
+/// Reads grant and pause state (`FOR SHARE`) for an occurrence, returning `Paused` if paused
+/// or if `at_ms` predates the last pause/resume transition so catch-up skips paused-window occurrences.
 pub(crate) async fn binding_in(
     tx: &mut Tx<'_>,
     profile: &str,
@@ -257,7 +255,6 @@ pub(crate) async fn binding_in(
     })
 }
 
-/// 새 run을 승인에 묶는다(접수 커밋 안에서).
 pub(crate) async fn bind_run(
     tx: &mut Tx<'_>,
     profile: &str,
@@ -301,7 +298,7 @@ const LIST: &str = "select g.id, g.profile, g.agent, g.trigger, g.max_per_day, p
                     where g.state = 'active'";
 
 impl Store {
-    /// 운영자 전용. 활성 승인마다 정지 세대·정지 여부·오늘(UTC) 사용량을 한 문장(한 스냅숏)으로 읽는다.
+    /// Operator-only snapshot of active grants with pause epoch, pause state, and today's UTC usage.
     pub(crate) async fn admin_preapprovals(&self, viewer: &Viewer) -> R<Vec<PreapprovalRow>> {
         if !viewer.operator {
             return Err(Error::Denied.into());
@@ -313,7 +310,6 @@ impl Store {
         Ok(rows.iter().map(row_of).collect())
     }
 
-    /// 읽기 전용 경로의 활성 집합 확인(고정한 핸들이면 지금도 현재인지).
     async fn check_pinned_pool(&self) -> R<()> {
         let mut tx = self.pool.begin().await?;
         self.check_pinned(&mut tx).await?;
@@ -321,8 +317,8 @@ impl Store {
         Ok(())
     }
 
-    /// 정지(`pause`)·재개. 승인 ID와 세대를 현재와 대조해 전환과 감사를 한 커밋에 쓴다. 같은 세대에서 이미 그 상태이거나, 직전 성공 명령의 재전달
-    /// (그 뒤 전환이 없었다)이면 `repeated`다(변경·감사 0). 승인이 교체됐거나 그 사이 전환이 있었으면 `Stale`(상태가 우연히 같아도 같다).
+    /// Toggles trigger pause state with CAS on `(grant_id, epoch)`; replays of the immediately prior
+    /// transition return `repeated: true` without mutating state or appending audit.
     pub(crate) async fn pause_run(
         &self,
         actor: &PrincipalId,

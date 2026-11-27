@@ -1,6 +1,7 @@
-//! 회신 발송 예약(outbox). 게이트웨이가 `claim`으로 점유하고 게시 자격을 검사한 뒤 `begin`이 커밋돼야만 보낸다.
-//! 발송 세대는 run 세대와 별개이며 claim마다 오른다. begin 전에 리스가 끝나면 다시 점유하고,
-//! begin 뒤(sending)에 응답을 잃으면 held로 둔다. settle은 영수증·감사와 한 커밋이다. 같은 발송 키(profile, run, seq)는 끝까지 유지된다.
+//! Reply delivery outbox: claim, activation-fenced begin, and idempotent settlement.
+//!
+//! Delivery generation is independent of run generation and increments per claim. Unbegun lease expiries
+//! are reclaimable; expired `sending` rows move to `held` to prevent duplicate external sends.
 
 use crate::{
     audit::{self, Entry, OwnedEntry},
@@ -33,7 +34,7 @@ fn bind_key<'q>(
 }
 
 impl Store {
-    /// 발송 예약을 리스로 점유한다. 리스가 끝난 sending은 불명이므로 먼저 held로 옮기고 자동 claim 대상에서 뺀다.
+    /// Moves expired `sending` rows to `held`, then claims up to `limit` eligible replies in per-run `seq` order.
     pub(crate) async fn outbox_claim(&self, scope: &DeliveryScope, limit: u32) -> R<Vec<Outgoing>> {
         if limit == 0 {
             return Ok(vec![]);
@@ -64,7 +65,7 @@ impl Store {
                 OwnedEntry::new(profile, "system", "outbox.held", call, "owner_lost")
             })
             .collect();
-        // 같은 run의 앞선 회신이 아직 나가는 중이면 뒤의 것을 잡지 않는다(순서 유지)
+        // Preserve per-run reply order by skipping rows whose earlier `seq` is still pending or sending.
         let rows = sqlx::query(
             "select o.profile, o.run, o.seq from bot_outbox o
              where o.state = 'pending' and o.transport = $1
@@ -117,16 +118,16 @@ impl Store {
                 body: JsonPayload(claimed.get("body")),
             });
         }
-        // 감사 head 잠금은 모든 점유 쓰기가 끝난 커밋 직전에 한 번만 잡는다
+        // Acquire the audit head lock once, right before commit, after all claim writes.
         audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(out)
     }
 
-    /// 현재 리스·현재 활성 판본과의 일치를 확인하고 sending을 기록한다. 최초 호출만 Ok다(재호출은 `Conflict`).
+    /// Transitions a leased row to `sending` after checking the active revision and lease; retries return `Conflict`.
     pub(crate) async fn outbox_begin(&self, key: &DeliveryKey, checked: &Revision) -> R<()> {
         let mut tx = self.begin_authorized().await?;
-        // 게시 자격 검사에 쓴 판본이 지금도 활성인지 교체와 직렬화해 대조한다(철회·교체 중에는 기다렸다가 Stale)
+        // Serialize against activation swaps so the authorized profile revision is still active.
         crate::active::guard_active(&mut tx, &key.profile.0, checked).await?;
         let row = bind_key(
             sqlx::query("select state, generation, lease_until_ms, call from bot_outbox where profile = $1 and run = $2 and seq = $3 for update"),
@@ -168,8 +169,7 @@ impl Store {
         Ok(())
     }
 
-    /// 결과를 기록한다. 현재 발송 세대의 sending에서만 받는다(옛 세대·이미 정산된 건은 `Stale`).
-    /// 이미 같은 결과로 정산됐다면 멱등으로 Ok다. 보류(held) 뒤에 늦게 온 확정 영수증은 받아 확정으로 바꾼다.
+    /// Settles a `sending` delivery (or upgrades a `held` row on late confirmation) idempotently with audit.
     pub(crate) async fn outbox_settle(&self, key: &DeliveryKey, outcome: DeliveryOutcome) -> R<()> {
         if let DeliveryOutcome::Confirmed { receipt } = &outcome
             && !receipt_ok(receipt)
@@ -247,7 +247,7 @@ impl Store {
             DeliveryOutcome::NotSent { retry_after, .. } => {
                 let attempts = attempts + 1;
                 if attempts >= self.cfg.max_attempts as i32 {
-                    // 재시도를 다 썼다: 운영자에게 최종 실패로 보이도록 보류한다
+                    // Retries exhausted: hold for operator visibility as a terminal failure.
                     verdict = "retries_exhausted".to_owned();
                     bind_key(
                         sqlx::query("update bot_outbox set state = 'held', reason = 'retries_exhausted', attempts = $4, lease_until_ms = null, updated_ms = bot_now_ms() where profile = $1 and run = $2 and seq = $3"),
@@ -257,7 +257,7 @@ impl Store {
                     .execute(&mut *tx)
                     .await?;
                 } else {
-                    // 다음 claim은 백오프와 수신처가 준 대기 시간 중 더 긴 쪽 이후에 새 세대로 잡는다
+                    // Delay next claim by the greater of exponential jitter backoff and provider `retry_after`.
                     let floor = retry_after.map_or(0, |d| d.as_millis() as i64);
                     bind_key(
                         sqlx::query(

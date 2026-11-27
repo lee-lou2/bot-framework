@@ -1,10 +1,4 @@
-//! 모델 별칭 → 실행기(`providers`). 프로필이 허용한 별칭만 고르고, 데모 모델은 외부 키·VM 없이 결정적으로 실행한다.
-//!
-//! `claude-cli`는 모델 샌드박스(Apple VM 어댑터)와 상류 전송이 조립돼 실행기가 주어졌을 때만 시작한다(`claude`; worker가 호스트 설정의
-//! `sandbox.apple`로 조립한다). 없으면 명시적으로 거절한다 — 별칭만 있다고 일반 실행기로 폴백하지 않는다.
-//!
-//! `anthropic-api`·`openai-api`는 VM·CLI 없이 워커가 상류 API를 직접 부르는 Step 실행기다(`bot_runtime::model::ApiRunner`). 서비스 키를 읽는 보관소(가림 장치를 거친다)와
-//! 요청 직전의 활성화 판본 확인(`ActiveCheck`)이 조립돼 있어야 시작한다.
+//! Resolves allowed profile model aliases into `DemoModel`, `ClaudeCodeRunner`, or `ApiRunner`.
 use super::watched::Watched;
 use crate::{
     execution::{ApiProvider, Provider},
@@ -23,17 +17,14 @@ use std::{
     sync::Arc,
 };
 
-/// API 직접 호출 실행기를 만들 때 쓰는 이 프로세스의 조각
 #[derive(Clone)]
 pub struct ApiParts {
-    /// 서비스 키를 읽는 보관소(가림 장치를 거치는 것만 받는다)
+    /// Accepts `Watched` only so every read provider key enters the redactor before use.
     pub secrets: Arc<Watched>,
-    /// 요청 직전의 판본 확인
     pub gate: Arc<dyn ActiveCheck>,
 }
 
 pub struct ProviderModels {
-    /// 프로필 → 허용한 모델 별칭
     allowed: BTreeMap<String, BTreeSet<String>>,
     runners: BTreeMap<String, Arc<dyn ModelRunner>>,
 }
@@ -48,24 +39,23 @@ impl Models for ProviderModels {
     }
 }
 
-/// API 직접 호출 별칭 하나의 실행기. 조각이 없거나 주소·키 설정이 규칙에 어긋나면 Err(기동 실패).
 fn api_runner(
     alias: &str,
     config: &ApiProvider,
     parts: Option<&ApiParts>,
 ) -> Result<Arc<dyn ModelRunner>, String> {
     let parts = parts.ok_or_else(|| {
-        format!("모델 별칭 {alias}: API 직접 호출 실행기가 조립되지 않아 시작하지 않아요")
+        format!("model alias {alias}: direct API runner is not assembled; refusing to start")
     })?;
     let endpoint = ApiEndpoint::parse(&config.endpoint)
         .map_err(|reason| format!("providers.{alias}.endpoint: {reason}"))?;
-    let secret =
-        match config.secret.as_deref() {
-            Some(name) => Some(SecretName::parse(name).ok_or_else(|| {
-                format!("providers.{alias}.secret이 자격 이름 규칙에 맞지 않아요")
-            })?),
-            None => None,
-        };
+    let secret = match config.secret.as_deref() {
+        Some(name) => Some(
+            SecretName::parse(name)
+                .ok_or_else(|| format!("providers.{alias}.secret is not a valid secret name"))?,
+        ),
+        None => None,
+    };
     let settings = ApiSettings {
         kind: config.kind,
         endpoint,
@@ -76,12 +66,11 @@ fn api_runner(
         effort: config.effort,
     };
     let runner = ApiRunner::new(settings, parts.secrets.clone(), parts.gate.clone())
-        .map_err(|reason| format!("모델 별칭 {alias}: {reason}"))?;
+        .map_err(|reason| format!("model alias {alias}: {reason}"))?;
     Ok(Arc::new(runner))
 }
 
-/// 프로필이 허용한 모든 별칭의 실행기를 만든다. 실행 방법이 없거나 아직 쓸 수 없는 것이면 Err(기동 실패). `claude`는 `claude-cli`
-/// 별칭이 쓸 CLI 실행기(조립돼 있을 때만), `api`는 API 직접 호출 별칭이 쓸 조각(조립돼 있을 때만)이다.
+/// Builds runners for every profile-allowed alias; refuses to start rather than falling back if a runner is missing.
 pub fn build(
     host: &HostFile,
     claude: Option<Arc<dyn ModelRunner>>,
@@ -95,14 +84,14 @@ pub fn build(
             }
             let provider = host.providers.get(alias).ok_or_else(|| {
                 format!(
-                    "프로필 {profile}이 허용한 모델 별칭 {alias}의 실행 방법이 없어요 — 호스트 설정의 providers.{alias}를 적어요(예: {{\"kind\": \"demo\"}})"
+                    "profile {profile} allows model alias {alias}, but providers.{alias} is missing from host config (e.g. {{\"kind\": \"demo\"}})"
                 )
             })?;
             let runner: Arc<dyn ModelRunner> = match provider {
                 Provider::Demo => Arc::new(DemoModel),
                 Provider::ClaudeCli { .. } => claude.clone().ok_or_else(|| {
                     format!(
-                        "모델 별칭 {alias}: claude-cli 실행기가 조립되지 않아 시작하지 않아요(호스트 설정의 sandbox.apple이 필요해요)"
+                        "model alias {alias}: claude-cli runner is not assembled (sandbox.apple is required in host config)"
                     )
                 })?,
                 Provider::Api(config) => api_runner(alias, config, api)?,
@@ -137,7 +126,6 @@ mod tests {
         let models = build(&host, None, None).unwrap();
         let personal = ProfileId("personal".into());
         assert!(models.runner(&personal, "assistant").is_some());
-        // 다른 프로필이 허용한 별칭·허용하지 않은 별칭·모르는 프로필은 실행기를 받지 못한다
         assert!(models.runner(&personal, "other").is_none());
         assert!(
             models
@@ -149,14 +137,12 @@ mod tests {
                 .runner(&ProfileId("stranger".into()), "assistant")
                 .is_none()
         );
-        // 허용한 별칭의 실행 방법이 없으면 시작하지 않는다
         let missing = parsed(r#", "providers": {"assistant": {"kind": "demo"}}"#);
         let error = build(&missing, None, None).err().unwrap();
         assert!(
             error.contains("other") && error.contains("providers.other"),
             "{error}"
         );
-        // 허용 별칭이 없는 호스트는 실행기도 없다(아무것도 요구하지 않는다)
         assert!(build(&host::parse(r#"{"version": 1}"#).unwrap(), None, None).is_ok());
     }
 
@@ -190,17 +176,15 @@ mod tests {
                 "assistant": {"kind": "anthropic-api", "model": "m", "endpoint": "https://api.example", "secret": "key"},
                 "other": {"kind": "openai-api", "model": "m", "endpoint": "http://127.0.0.1:11434/v1"}}"#,
         );
-        // 조각(키 보관소·판본 확인)이 없으면 시작하지 않는다: 별칭만 있다고 다른 실행기로 폴백하지 않는다
         let error = build(&host, None, None).err().unwrap();
         assert!(
-            error.contains("API 직접 호출") && error.contains("assistant"),
+            error.contains("direct API") && error.contains("assistant"),
             "{error}"
         );
         let models = build(&host, None, Some(&parts())).unwrap();
         let personal = ProfileId("personal".into());
         let runner = models.runner(&personal, "assistant").unwrap();
         assert_eq!(runner.kind(), bot_runtime::model::RunnerKind::Step);
-        // 허용하지 않은 별칭은 실행기를 받지 못한다(다른 프로필의 별칭)
         assert!(models.runner(&personal, "other").is_none());
         let work = models.runner(&ProfileId("work".into()), "other").unwrap();
         assert_eq!(work.kind(), bot_runtime::model::RunnerKind::Step);
@@ -208,7 +192,6 @@ mod tests {
 
     #[test]
     fn an_api_alias_with_a_remote_endpoint_and_no_key_cannot_start() {
-        // 호스트 설정 단계에서 이미 거절하지만(`parse_providers`) 실행기도 같은 규칙을 한 번 더 지킨다
         let host =
             parsed(r#", "providers": {"assistant": {"kind": "demo"}, "other": {"kind": "demo"}}"#);
         let mut forced = host;
@@ -251,7 +234,6 @@ mod tests {
         let active = MemoryActive::new(Some("set-1"));
         let gate = active.check("set-1");
         assert!(gate.verify().await.is_ok());
-        // 다른 프로세스가 집합을 바꿨다: 이 프로세스는 구판이라 보낼 수 없다
         active.set(Some("set-2"));
         assert!(matches!(
             gate.verify().await,
@@ -285,7 +267,6 @@ mod tests {
             &models.runner(&personal, "assistant").unwrap(),
             &cli
         ));
-        // 데모 별칭은 그대로 데모 실행기이고 CLI 실행기를 받지 않는다
         assert!(!Arc::ptr_eq(
             &models.runner(&ProfileId("work".into()), "other").unwrap(),
             &cli

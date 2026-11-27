@@ -1,9 +1,7 @@
-//! 승인 원장: 요청·결정·대체·소비. 브로커가 판정하고 저장소가 세대 검사·전이·감사·대기 해제를 한 커밋으로 한다.
-//! - 요청(`open`)은 run을 승인 대기로 넘기고 워커 리스를 놓는다. 푸시 대화(Slack)에는 카드 회신 행을 같은 커밋으로 쌓는다.
-//! - 결정(`decide`)은 승인자 본인만, 승인 세대가 현재일 때만 받는다(옛 버튼 거절). 기다리는 승인이 모두 결정되면 run을 같은 세대로 깨운다.
-//! - 승인 필드는 재개해도 바뀌지 않는다. 인계(리스 만료)로 세대가 오르면 옛 승인은 무효(Superseded)다.
+//! Approval ledger: decision, superseding, expiration, and single-use consumption with generation fencing.
 //!
-//! 잠금 순서: run → 호출 → 승인 → 감사 head(늘 마지막). 만료 청소(`expire_approvals`)도 run마다 이 순서다(승인을 먼저 잠그거나 감사 head를 쥔 채 다음 run을 잠그지 않는다).
+//! Lock order: run -> call -> approval -> audit head (always last).
+//! `expire_approvals` commits one transaction per run in this same order to avoid deadlocks with concurrent decisions.
 
 use crate::{
     audit::{self, Entry, OwnedEntry},
@@ -65,10 +63,9 @@ pub(crate) fn approval_of(row: &PgRow) -> R<Approval> {
     })
 }
 
-/// 저장된 승인이 지금 다시 계산한 결합값과 같은가. nonce와 만료는 조회 키·시각 검사이므로 비교하지 않는다.
+/// Checks whether a stored approval matches the recomputed binding fields (excluding nonce, expiry, and transient claim token).
 fn same_binding(stored: &Approval, expected: &Approval) -> bool {
     let (a, b) = (stored, expected);
-    // claim 토큰은 비교하지 않는다(정상 재개마다 바뀌고, 승인에는 저장하지 않는다)
     (&a.attempt.profile, &a.attempt.run, a.attempt.generation)
         == (&b.attempt.profile, &b.attempt.run, b.attempt.generation)
         && a.call == b.call
@@ -81,7 +78,7 @@ fn same_binding(stored: &Approval, expected: &Approval) -> bool {
         && a.args_sha256 == b.args_sha256
 }
 
-/// 기다리던 승인이 하나도 남지 않았으면 승인 대기 중인 run을 깨운다(같은 세대로 재개).
+/// Moves an approval-waiting run back to `ready` in the same generation once no pending approvals remain.
 pub(crate) async fn wake_waiters(tx: &mut Tx<'_>, profile: &str, run: &str) -> R<bool> {
     let woke = sqlx::query(
         "update bot_runs set state = 'ready', wait_kind = null, keep_generation = true, updated_ms = bot_now_ms()
@@ -96,8 +93,7 @@ pub(crate) async fn wake_waiters(tx: &mut Tx<'_>, profile: &str, run: &str) -> R
     Ok(woke == 1)
 }
 
-/// 승인 행의 run을 먼저 잠가 순서 규칙(run → 승인)을 지키고, 승인 세대가 현재인지 대조한다.
-/// 승인 세대와 run 세대가 다르거나 취소됐으면 `Stale`(옛 버튼). run 상태는 대기·재개 어느 쪽이어도 된다.
+/// Locks the approval's run first (preserving `run -> approval` order) and rejects stale generations or cancelled runs.
 async fn lock_run_for(tx: &mut Tx<'_>, approval: &PgRow) -> R<()> {
     let run = sqlx::query(
         "select generation, state, cancel_requested from bot_runs where profile = $1 and id = $2 for update",
@@ -139,8 +135,7 @@ pub(crate) async fn lock_approval(tx: &mut Tx<'_>, nonce: &str) -> R<PgRow> {
     .ok_or_else(|| Error::Missing.into())
 }
 
-/// 호출이 가리키는 승인이 아직 쓸 수 있는데(결정을 받았거나 기다리는 중) 내놓지 않은 채 시작하지 못한다. 대체된 승인만 건너뛴다(정책이 바뀌어 더는 필요 없다).
-/// `presented`는 시작을 요청한 쪽이 승인을 냈는가다(낸 승인의 대조·소비는 `consume`이 한다).
+/// Blocks call start if the call still points to a non-superseded approval that was not presented.
 pub(crate) async fn require_presented(
     tx: &mut Tx<'_>,
     pointer: Option<&ApprovalId>,
@@ -161,7 +156,7 @@ pub(crate) async fn require_presented(
     }
 }
 
-/// `start`가 승인을 소비한다(같은 트랜잭션·같은 잠금 안). 소비·시작·감사가 한 커밋이다.
+/// Consumes an approved record inside the caller's `start` transaction after verifying binding, reasons, expiry, and call linkage.
 pub(crate) async fn consume(
     tx: &mut Tx<'_>,
     at: &Attempt,
@@ -194,8 +189,7 @@ pub(crate) async fn consume(
     {
         return Err(Error::Stale.into());
     }
-    // 저장된 승인이 이 호출의 승인이어야 한다: 호출이 가리키는 승인과 같고, 승인한 도구·봉인 지문이 호출 행에 기록된 것과 같아야 한다.
-    // 호출자가 넘긴 값이 아니라 두 저장 행을 대조한다(어긋나면 승인을 소비하지 않는다)
+    // Cross-check the stored call row against the stored approval row, not caller-supplied arguments.
     let recorded = sqlx::query(
         "select tool, args_sha256, approval from bot_calls where profile = $1 and run = $2 and call = $3",
     )
@@ -221,8 +215,7 @@ pub(crate) async fn consume(
 }
 
 impl Store {
-    /// 승인 화면·클릭 경로의 읽기 전용 맥락. 대기 중에도 읽는다. 승인자 본인만, 승인 세대가 현재일 때만(옛 버튼은 `Stale`),
-    /// claim 토큰 없이 돌려준다(토큰은 실행기만 쥔다).
+    /// Read-only run context for the approver at the current generation, omitting the worker claim token.
     pub(crate) async fn approval_context(
         &self,
         nonce: &ApprovalId,
@@ -266,12 +259,12 @@ impl Store {
             reasons: row.get("reasons"),
             card: bot_core::command::JsonPayload(row.get("card")),
             state: state_of(&row.get::<String, _>("state"))?,
-            // 소유자 DM으로 전달한 카드는 게시를 확인한 뒤에만 영수증이 있다(클릭 대조용)
+            // Present only after an owner-DM card job has confirmed `posted` (used for click verification).
             delivery: self.cards_receipt(nonce).await?,
         })
     }
 
-    /// 지금 호출에 연결된 승인만 닫는다(승인 화면 뒤 조건이 바뀐 경우). 이미 닫혔으면 새 깨움 없이 Ok, 소비된 것은 `Conflict`.
+    /// Supersedes a pending/approved record still pointed to by its call; idempotent if already superseded, `Conflict` if consumed.
     pub(crate) async fn approval_supersede(
         &self,
         nonce: &ApprovalId,
@@ -286,7 +279,7 @@ impl Store {
             tx.rollback().await?;
             return Ok(());
         }
-        // 잠금 순서: run → 호출 → 승인 → 감사 head
+        // Lock order: run -> call -> approval -> audit head.
         lock_run_for(&mut tx, &seen).await?;
         let call_at = Attempt {
             profile: ProfileId(seen.get("profile")),
@@ -322,8 +315,7 @@ impl Store {
         Ok(())
     }
 
-    /// 승인자의 결정. Pending→Approved|Denied, Approved+거절→Revoked, 그 밖은 `Conflict`.
-    /// 만료(DB 시각)·옛 세대·취소된 run은 `Stale`. 결정과 대기 run 깨움·감사가 한 커밋이다.
+    /// Applies an approver decision (`Pending -> Approved|Denied`, `Approved + deny -> Revoked`) and wakes waiting runs atomically.
     pub(crate) async fn approval_decide(&self, d: Decision) -> R<ApprovalState> {
         let mut tx = self.begin_authorized().await?;
         let seen = peek(&mut tx, &d.nonce.0).await?;
@@ -338,7 +330,7 @@ impl Store {
         if now >= row.get::<i64, _>("expires_ms") {
             return Err(Error::Stale.into());
         }
-        // 소유자 DM으로 전달하는 카드는 게시를 확인하기 전에는 열리지 않은 카드다: 누르거나 API로 결정해도 승인을 소비하지 않는다
+        // Owner-DM cards remain closed to decisions until delivery is confirmed (`posted`).
         let job: Option<String> =
             sqlx::query_scalar("select state from bot_card_jobs where nonce = $1 for share")
                 .bind(&d.nonce.0)
@@ -368,12 +360,8 @@ impl Store {
         Ok(next)
     }
 
-    /// 만료된 승인을 닫고 기다리던 run을 깨운다. 다시 들어온 호출은 만료를 알고 새 승인을 연다. 워커가 집기 전에 부른다.
-    ///
-    /// **run마다 한 트랜잭션**이다(승인을 한꺼번에 잠그지 않는다). 소유자의 결정·취소·시작과 같은 순서 `run → 승인 → … → 감사 head`를 지킨다:
-    /// 승인 행을 먼저 잠그고 run을 기다리거나, 감사 head를 쥔 채 다음 run을 잠그면 같은 run을 반대 순서로 잠그는 쪽(소유자의 클릭)과 PG 교착이 난다.
-    /// 만료한 run은 잠금 없이 읽어 모으고, 각 run은 **잠근 뒤에 다시 판정**한다(그 사이 결정·대체·소비된 승인은 건드리지 않는다).
-    /// 한 run이 실패하면 거기서 멈추고 오류를 돌려준다(앞선 run은 이미 커밋됐다). 다음 호출이 이어서 한다.
+    /// Expires overdue approvals per run so each transaction preserves `run -> approval -> audit head` lock order.
+    /// Candidate runs are scanned unlocked and re-verified under lock; stops on first error after prior runs commit.
     pub(crate) async fn expire_approvals(&self) -> R<()> {
         let due = sqlx::query(
             "select profile, run from bot_approvals
@@ -389,7 +377,6 @@ impl Store {
         Ok(())
     }
 
-    /// 한 run의 만료한 승인을 닫는다: `run FOR UPDATE → 그 run의 만료 승인 UPDATE → 깨움 → 감사(늘 마지막)`.
     async fn expire_run_approvals(&self, profile: &str, run: &str) -> R<()> {
         let mut tx = self.pool.begin().await?;
         let locked =
@@ -399,7 +386,7 @@ impl Store {
                 .fetch_optional(&mut *tx)
                 .await?;
         if locked.is_none() {
-            return Ok(()); // run이 이미 없다(승인도 함께 지워졌다)
+            return Ok(()); // Run already deleted (approvals cascade).
         }
         let mut gone: Vec<String> = sqlx::query_scalar(
             "update bot_approvals set state = 'expired'
@@ -411,7 +398,7 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         if gone.is_empty() {
-            return Ok(()); // 잠그는 사이 결정·대체·소비됐다
+            return Ok(()); // Decided, superseded, or consumed while acquiring the lock.
         }
         gone.sort();
         wake_waiters(&mut tx, profile, run).await?;
@@ -425,8 +412,7 @@ impl Store {
     }
 }
 
-/// 리스 만료 인계: 옛 세대가 연 승인은 모두 무효다(옛 버튼 거절). 호출자가 run을 잠갔다.
-/// 감사 항목은 `audits`에 모아 호출자가 커밋 직전에 한 번에 잇는다.
+/// Supersedes approvals from generations `<= generation` on lease handover; caller holds the run lock.
 pub(crate) async fn supersede_generation_into(
     tx: &mut Tx<'_>,
     profile: &str,
@@ -456,7 +442,7 @@ pub(crate) async fn supersede_generation_into(
     Ok(())
 }
 
-/// 끝난 run의 열린 승인을 닫는다(취소·dead·성공). 호출자가 run을 잠갔다.
+/// Supersedes open approvals when a run terminates; caller holds the run lock.
 pub(crate) async fn close_for_run(tx: &mut Tx<'_>, profile: &str, run: &str) -> R<()> {
     sqlx::query(
         "update bot_approvals set state = 'superseded' where profile = $1 and run = $2 and state in ('pending', 'approved')",

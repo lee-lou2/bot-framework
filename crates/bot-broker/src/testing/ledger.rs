@@ -1,17 +1,9 @@
-//! `CallLedger`의 기준 구현(메모리). 실제 저장소가 지켜야 할 불변식을 그대로 적었다.
-//! - 워커 연산(`context`·`begin`·`open_approval`·`start`·`finish`)은 `attempt`의 세대와 claim epoch가 모두 현재일 때만
-//!   한다(아니면 `Stale`, claim이 없으면 `Denied`). 취소된 run도 `Stale`이다. 정상 재개(승인 대기 뒤)는 세대를 유지하고
-//!   claim epoch만 올린다. 승인은 (프로필, run, 세대)에만 묶인다(claim은 저장하지 않는다).
-//! - `start`는 `checked_revision`이 저장소의 활성 판본과 같을 때만 한다(아니면 `Stale`). 권한을 검사한 뒤 활성 판본이
-//!   바뀌었다면 승인 소비와 시작이 같은 잠금에서 함께 거절된다. 활성 판본이 없는 프로필(삭제·철회)도 `Stale`이다.
-//! - 승인 결정·`supersede`·`approval_context`는 신원 기준(세대·취소)만 본다. 지정된 승인자만 할 수 있다.
-//! - `start`는 승인 소비와 `Started` 기록을 한 번에 한다. 소비한 승인은 다시 쓸 수 없다(`Conflict`).
-//!   `Open`에서만 시작한다. 요청 트리 private 플래그가 켜졌는데 꺼진 채로 판정했으면 `Conflict`다.
-//! - `open_approval`은 이전 대기·승인을 `Superseded`로 닫는다. `decide`는 대기 중인 승인을 정하고,
-//!   승인한 뒤 실행 전의 거절은 철회(`Revoked`)다. 결정되면 기다리는 run을 깨운다(`woken`).
-//! - `finish`: `Open`→`Blocked`(권한·승인 거절), `Started`(같은 세대 또는 옛 세대)→`Done`·`Released`(`Open`으로
-//!   복귀)·`Held`·`Blocked`, 판정이 있는 `Held`→`Done`(영수증)·`Released`(미실행).
-//! - 상태 전이마다 감사 한 줄을 같은 임계 구역에서 쌓는다(`audit_log`).
+//! In-memory reference implementation of `CallLedger` enforcing all production store invariants.
+//!
+//! - Worker operations require current generation, claim epoch, and active (non-cancelled, non-ended) run; approval decisions check identity only.
+//! - `start` atomically checks `checked_revision` against active profile revision, consumes any bound approval, checks the private-memory flag, and transitions `Open` -> `Started`.
+//! - `open_approval` supersedes prior pending/approved entries; `decide` and `supersede` wake waiting runs.
+//! - Every state transition appends an audit entry within the same mutex guard.
 
 use crate::{approval::same_binding, sys::Clock};
 use bot_core::{
@@ -37,15 +29,12 @@ pub struct MemLedger {
     after_begin: Mutex<Option<Hook>>,
     before_start: Mutex<Option<Hook>>,
     after_finish: Mutex<Option<Hook>>,
-    /// 켜면 `context`가 답하지 못한다(원장 장애).
     context_down: AtomicBool,
-    /// `context`가 답하기 전에 기다리는 시간(느린 원장).
     context_delay: Mutex<std::time::Duration>,
-    /// `context`의 응답을 처음 폴링할 때 스레드를 이만큼 붙잡는다(실행이 밀린 상황: 응답과 마감이 함께 준비된다).
+    /// Blocks the executor thread during `context` polling to simulate scheduling lag past deadlines.
     context_block: Mutex<std::time::Duration>,
-    /// 켜면 `begin`이 도구·인자 해시가 달라도 기존 기록을 그대로 돌려준다(저장소가 걸러 주지 못하는 경우를 흉내 낸다).
+    /// When set, `begin` returns existing records without checking tool/args_sha256 mismatch.
     lenient_begin: AtomicBool,
-    /// `step` 읽기에 끼어드는 갈고리(붙잡기·읽기가 끝나는 순간의 일).
     steps: steps::StepProbe,
     notes: openai::Notes,
 }
@@ -68,7 +57,6 @@ struct RunEntry {
     generation: Generation,
     claim: u64,
     cancelled: bool,
-    /// 성공으로 끝나 리스를 놓은 run(저장소가 run을 끝낸 커밋 뒤). 워커 연산은 `Stale`이다.
     ended: bool,
 }
 
@@ -78,7 +66,7 @@ struct ApprovalEntry {
 }
 
 impl Inner {
-    /// 신원 기준 확인: 프로필·세대·취소. claim은 보지 않는다(승인·화면·추적용).
+    /// Checks run identity (profile, generation, active) without requiring a claim epoch (approvals/UI/tracing).
     fn identity(&self, attempt: &Attempt) -> Result<&RunEntry, Error> {
         let run = self.runs.get(&attempt.run).ok_or(Error::Missing)?;
         if run.context.attempt.profile != attempt.profile {
@@ -90,7 +78,7 @@ impl Inner {
         Ok(run)
     }
 
-    /// 워커 연산 확인: 신원에 더해 이 attempt가 현재 claim을 쥐고 있어야 한다.
+    /// Checks run identity plus current claim epoch ownership for worker operations.
     fn fence(&self, attempt: &Attempt) -> Result<&RunEntry, Error> {
         let run = self.identity(attempt)?;
         match attempt.claim {
@@ -146,10 +134,8 @@ mod openai;
 mod steps;
 
 impl MemLedger {
-    /// 판본·세대·승인 대조와 `Started` 기록(일반 `start`와 `complete_share`가 같이 쓴다).
     fn begin_run(i: &mut Inner, now: SystemTime, start: StartCall) -> Result<(), Error> {
         i.fence(&start.attempt)?;
-        // 기대 판본과 명시적으로 같아야 한다. 활성 프로필이 없어도(삭제·철회) 통과시키지 않는다.
         if i.active.get(&start.attempt.profile) != Some(&start.checked_revision) {
             return Err(Error::Stale);
         }
@@ -195,8 +181,7 @@ impl MemLedger {
         Ok(())
     }
 
-    /// 기억 공유의 저장소 쪽 커밋: 호출에 묶인 지문이 `expected`(지금 본문으로 다시 계산한 값)와 같을 때만 승인 소비·시작·완료를
-    /// 한 번에 한다. 다르면 아무것도 바꾸지 않고 `Conflict`다(승인은 소비되지 않는다). 완료 결과에는 기억 ID만 남긴다.
+    /// Atomically verifies the bound digest against `expected`, consumes approval, and completes a `memory.share` call.
     pub fn complete_share(
         &self,
         start: StartCall,
@@ -208,7 +193,7 @@ impl MemLedger {
         let key = (start.attempt.run.clone(), start.call.clone());
         let record = i.calls.get(&key).ok_or(Error::Missing)?;
         if matches!(record.phase, CallPhase::Done(_)) {
-            return Ok(()); // 완료한 호출의 재시도는 다시 공유하지 않는다
+            return Ok(());
         }
         if record.args_sha256 != expected {
             return Err(Error::Conflict);
@@ -243,7 +228,7 @@ impl CallLedger for MemLedger {
                 tokio::time::sleep(delay).await;
             }
             if !block.is_zero() {
-                std::thread::sleep(block); // 폴링하는 동안 실행기를 붙잡는다
+                std::thread::sleep(block);
             }
             reply.await
         })
@@ -342,7 +327,7 @@ impl CallLedger for MemLedger {
                 a.nonce.clone(),
                 ApprovalEntry {
                     stored: StoredApproval {
-                        // 승인에는 claim을 저장하지 않는다(세대 신원만).
+                        // Approvals bind to generation identity only (never claim epoch).
                         approval: Approval {
                             attempt: Attempt {
                                 claim: None,
@@ -371,7 +356,7 @@ impl CallLedger for MemLedger {
             }
             let run = i.identity(&entry.stored.approval.attempt)?;
             let mut context = run.context.clone();
-            context.attempt.claim = None; // 신원만: 워커 연산을 인가하지 못한다
+            context.attempt.claim = None;
             context.private_memory_read = i.private_flag(&entry.stored.approval.attempt.run);
             Ok(context)
         })
@@ -451,8 +436,7 @@ impl CallLedger for MemLedger {
         }
         self.with(|i, now| {
             let key = (start.attempt.run.clone(), start.call.clone());
-            // memory.share는 승인과 공유를 함께 커밋하는 `MemoryStore::share`로만 시작한다. 예약 생성·취소와 예약 회신 전송도 저장소의
-            // 전용 커밋(`UserSchedules`·`ScheduledReplies::enqueue`)으로만 한다.
+            // Built-in atomic commits must use their dedicated store methods, never generic `start`.
             if i.calls.get(&key).is_some_and(|c| {
                 matches!(
                     c.tool.0.as_str(),

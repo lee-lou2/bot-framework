@@ -68,13 +68,11 @@ async fn every_write_is_fenced_to_the_current_generation_and_profile() {
             .open_approval(open_approval(binding(&old.attempt, "c1", "n-old")))
             .await
     ));
-    // 새 소유자는 같은 호출을 이어 쓴다
     assert!(matches!(
         begin_call(&db, &new.attempt, "c1").await.phase,
         CallPhase::Open { .. }
     ));
 
-    // 다른 프로필·없는 run
     let foreign = Attempt {
         profile: ProfileId("work".into()),
         ..new.attempt.clone()
@@ -129,7 +127,7 @@ async fn a_cancelled_run_cannot_start_anything() {
             profile_id(),
             run.attempt.run.clone(),
             owner(),
-            "그만".into(),
+            "stop".into(),
         )
         .await
         .unwrap();
@@ -146,8 +144,9 @@ async fn a_private_flag_raised_between_judgement_and_start_is_a_conflict() {
     };
     let run = leased(&db, "r").await;
     begin_call(&db, &run.attempt, "c1").await;
+    // Simulate a concurrent run in the tree reading private memory after broker authorization.
     db.sql("update bot_runs set private_memory_read = true")
-        .await; // 판정 뒤 다른 실행이 private 기억을 조회했다
+        .await;
     assert!(matches!(
         calls(&db).start(start_call(&run.attempt, "c1", None)).await,
         Err(Error::Conflict)
@@ -193,7 +192,7 @@ async fn a_started_call_cannot_start_again_without_a_proven_release() {
             .await,
         Err(Error::Conflict)
     ));
-    // 미실행이 입증돼 풀리면(옛 세대의 시작도 새 세대가 닫는다) 다시 시작할 수 있다
+    // Once proven unexecuted via Released, the new generation may start the call again.
     let release = FinishCall {
         attempt: second.attempt.clone(),
         call: call("c1"),
@@ -225,7 +224,6 @@ async fn finish_follows_the_phase_matrix() {
     let payload = || JsonPayload(r#"{"ok":true}"#.into());
     let conflict = |r: Result<(), Error>| matches!(r, Err(Error::Conflict));
 
-    // 열린 호출은 거절로만 닫힌다
     begin_call(&db, &run.attempt, "open").await;
     assert!(conflict(
         calls(&db)
@@ -242,10 +240,9 @@ async fn finish_follows_the_phase_matrix() {
     ));
     assert!(
         conflict(calls(&db).finish(finish("open", Outcome::Blocked)).await),
-        "닫힌 호출은 다시 닫지 않는다"
+        "closed call cannot be finished again"
     );
 
-    // 시작한 호출은 완료·보류·되돌림 어느 쪽으로도 닫힌다
     begin_call(&db, &run.attempt, "done").await;
     calls(&db)
         .start(start_call(&run.attempt, "done", None))
@@ -256,7 +253,7 @@ async fn finish_follows_the_phase_matrix() {
         .await
         .unwrap();
     let CallPhase::Done(stored) = phase(&db, &run.attempt, "done").await else {
-        panic!("완료여야 한다")
+        panic!("expected Done phase")
     };
     assert_eq!(stored.0, r#"{"ok":true}"#);
     assert!(conflict(
@@ -281,7 +278,6 @@ async fn a_held_call_parks_the_run_and_waits_for_an_operator_verdict() {
         outcome: Outcome::Held("runner_error".into()),
     };
     calls(&db).finish(held).await.unwrap();
-    // 보류는 run을 대기로 넘기고 리스를 놓는다. 시도 횟수는 쓰지 않는다
     assert_eq!(state_of_run(&db, &run.attempt.run).await, "waiting");
     assert_eq!(
         db.scalar::<String>("select wait_kind from bot_runs").await,
@@ -292,7 +288,7 @@ async fn a_held_call_parks_the_run_and_waits_for_an_operator_verdict() {
         runs(&db).renew(run.attempt.clone()).await,
         Err(Error::Stale)
     ));
-    // 원래 시작한 세대·소유 표지는 보류 뒤에도 남는다(복구 판정용)
+    // Original started_generation and owner persist through Held for recovery checks.
     assert_eq!(
         db.scalar::<i64>("select started_generation from bot_calls")
             .await,
@@ -303,10 +299,9 @@ async fn a_held_call_parks_the_run_and_waits_for_an_operator_verdict() {
         format!("{}.1.c1", run.attempt.run.0)
     );
 
-    // 판정이 없는 보류는 닫을 수 없다. 운영자가 실행됨으로 판정하면 영수증으로 완료한다
     assert!(
         runs(&db).claim().await.unwrap().is_none(),
-        "대기 중인 run은 집히지 않는다"
+        "waiting run must not be claimable"
     );
     db.sql("update bot_calls set resolution = 'executed', receipt = 'r-1'")
         .await;
@@ -357,7 +352,7 @@ async fn meeting_an_unresolved_hold_again_parks_the_new_attempt() {
     assert_eq!(
         state_of_run(&db, &again.attempt.run).await,
         "waiting",
-        "판정이 없으면 다시 대기한다"
+        "run re-parks when hold has no resolution"
     );
     assert_eq!(db.scalar::<i32>("select attempts from bot_runs").await, 0);
 }

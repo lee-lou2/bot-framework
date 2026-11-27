@@ -1,9 +1,4 @@
-//! 지연 결합 로그·이슈 싱크 레이어와 패닉 훅.
-//!
-//! `logging::init()`은 `host.json`을 읽기 전에 전역 구독자를 한 번 설치한다. 이후 `serve::trace::start`가
-//! OTLP 로그·이슈 내보내기를 만들면 `attach_sinks`로 이 레이어에 연결하고, 반환된 `SinkGuard`가 떨어질 때 해제한다.
-//! 재귀 방지: 관측·HTTP 전송 타깃의 로그는 무시하고, 스레드 로컬 진입 표지로 중첩 호출을 막는다.
-
+//! Late-bound OTLP log/issue tracing layer and panic hook.
 use bot_admin::{
     issues::IssueExporter,
     logs::{LogEntry, LogExporter, LogLevel},
@@ -26,7 +21,7 @@ use tracing::{
 };
 use tracing_subscriber::{Layer, layer::Context};
 
-/// 싱크에서 건너뛸 타깃 접두사(전송 계층의 오류가 다시 로그·이슈 내보내기로 들어가는 재귀를 막는다).
+/// Target prefixes skipped by the sink to prevent exporter/HTTP transport logs from recursing back into sinks.
 const SKIP_TARGETS: [&str; 9] = [
     "bot_admin::obs",
     "bot_admin::trace",
@@ -62,7 +57,7 @@ fn current() -> Option<ActiveSinks> {
     slot().read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// 연결된 싱크의 수명 가드. 떨어지면 자기가 붙인 토큰이 여전히 활성일 때만 해제한다.
+/// Detaches the attached sinks on drop only if its registration token is still active.
 pub struct SinkGuard {
     token: u64,
 }
@@ -79,7 +74,6 @@ impl Drop for SinkGuard {
     }
 }
 
-/// OTLP 로그·이슈 내보내기를 전역 `SinkLayer`와 패닉 훅에 연결한다.
 pub fn attach_sinks(
     logs: Option<Arc<LogExporter>>,
     issues: Option<Arc<IssueExporter>>,
@@ -180,7 +174,6 @@ impl Visit for FieldCollector {
     }
 }
 
-/// 전역 구독자에 한 번 설치하는 지연 결합 싱크 레이어.
 pub(super) struct SinkLayer;
 
 impl<S: Subscriber> Layer<S> for SinkLayer {
@@ -197,6 +190,7 @@ impl<S: Subscriber> Layer<S> for SinkLayer {
         if !wants_log && !wants_issue {
             return;
         }
+        // Thread-local reentrancy guard prevents nested tracing events while recording.
         let entered = IN_SINK.with(|flag| {
             if flag.get() {
                 false

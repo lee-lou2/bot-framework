@@ -1,5 +1,5 @@
-//! 공식 SDK 시험(파이썬 unittest·Node `node:test`)을 시험 프로세스 밖에서 돌리는 도구. 환경은 지운 채 필요한 값만 준다 — 호스트의 `OPENAI_*`·프록시 환경이 새지 않고,
-//! SDK는 `base_url`·`api_key`만 바뀐 채 루프백의 와이어 프록시(실제로 간 요청을 세고 모든 응답을 공식 OpenAPI로 검사한다)를 거쳐 제품 입구에 닿는다. 실제 OpenAI API·실키는 쓰지 않는다.
+//! Harness for running official Python and Node OpenAI SDK tests against the loopback wire proxy in a clean environment.
+//! Clears host `OPENAI_*` and proxy vars so SDKs only hit the local OpenAPI-validating wire proxy with synthetic keys.
 use super::Fixture;
 use crate::process_support::{http_get, which};
 use serde_json::Value;
@@ -20,14 +20,13 @@ pub struct Sdk {
     node: PathBuf,
 }
 
-/// 시험 한 번의 결과. `ok`는 종료 코드 0·실패 0·건너뜀 0·시험이 하나 이상 돌았을 때만 참이다.
+/// `ok` is true only when exit status is 0, zero failures/skips occurred, and at least one test ran.
 pub struct Outcome {
     pub ok: bool,
     pub ran: usize,
     pub log: String,
 }
 
-/// 위치 문제를 필수 모드에서는 실패로, 아니면 건너뜀 표지를 남기고 None으로 돌려준다.
 fn unavailable(why: &str) -> Option<Sdk> {
     assert!(
         std::env::var("BOT_OPENAI_CANARY").as_deref() != Ok("required"),
@@ -38,31 +37,32 @@ fn unavailable(why: &str) -> Option<Sdk> {
 }
 
 impl Sdk {
-    /// `BOT_OPENAI_SDK_DIR`(`scripts/openai-sdk-setup.sh`가 만든 폴더)가 가리키는 환경. 없으면 건너뛴다(필수 모드에서는 실패). 있는데 어긋나면 실패한다.
+    /// Locates the SDK install at `BOT_OPENAI_SDK_DIR` (built by `scripts/openai-sdk-setup.sh`).
+    /// Skips if unset unless `BOT_OPENAI_CANARY=required`; panics if present but incomplete or out of sync.
     pub fn locate() -> Option<Self> {
         let Some(dir) = std::env::var_os("BOT_OPENAI_SDK_DIR").map(PathBuf::from) else {
             return unavailable(
-                "BOT_OPENAI_SDK_DIR가 없어 공식 SDK 시험을 건너뜀(scripts/openai-sdk-setup.sh)",
+                "BOT_OPENAI_SDK_DIR not set; skipping official SDK tests (scripts/openai-sdk-setup.sh)",
             );
         };
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/openai_sdk");
         let python = dir.join("venv/bin/python");
         let Some(node) = which("node") else {
-            return unavailable("node가 없어 공식 SDK 시험을 건너뜀");
+            return unavailable("node not found; skipping official SDK tests");
         };
         assert!(
             python.is_file() && dir.join("node/node_modules/openai/package.json").is_file(),
-            "{}: 공식 SDK 환경이 불완전하다 — scripts/openai-sdk-setup.sh를 다시 돌려라",
+            "{}: official SDK environment is incomplete — re-run scripts/openai-sdk-setup.sh",
             dir.display()
         );
-        // 설치 폴더의 Node 시험 파일은 저장소 것의 복사본이다: 어긋나면 옛 시험이 돈다
+        // Node test files in the install dir are copies from the repo; drift would run stale tests.
         for entry in std::fs::read_dir(src.join("node")).unwrap().flatten() {
             let name = entry.file_name();
             if name.to_string_lossy().ends_with(".mjs") {
                 assert_eq!(
                     std::fs::read(entry.path()).unwrap(),
                     std::fs::read(dir.join("node").join(&name)).unwrap_or_default(),
-                    "{}: 설치 폴더의 Node 시험 파일이 저장소와 다르다 — scripts/openai-sdk-setup.sh를 다시 돌려라",
+                    "{}: installed Node test file differs from repo — re-run scripts/openai-sdk-setup.sh",
                     name.to_string_lossy()
                 );
             }
@@ -75,7 +75,6 @@ impl Sdk {
         })
     }
 
-    /// 와이어 프록시를 띄운다(입구 포트로 전달한다). 버리면 멈춘다.
     pub async fn proxy(&self, gateway_port: u16) -> Proxy {
         let mut child = Command::new(&self.python)
             .arg("-I")
@@ -87,20 +86,19 @@ impl Sdk {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .expect("와이어 프록시 시작");
+            .expect("spawn wire proxy");
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let first = tokio::time::timeout(Duration::from_secs(20), lines.next_line())
             .await
-            .expect("프록시가 포트를 알리지 않았다")
+            .expect("wire proxy did not report port")
             .unwrap()
-            .expect("프록시가 바로 끝났다");
+            .expect("wire proxy exited immediately");
         Proxy {
-            port: first.trim().parse().expect("프록시 포트"),
+            port: first.trim().parse().expect("proxy port"),
             _child: child,
         }
     }
 
-    /// SDK 시험 프로세스에 줄 환경(두 SDK 시험이 같이 쓴다)
     pub fn env(&self, fixture: &Fixture, proxy: &Proxy) -> Vec<(String, String)> {
         let pair = |k: &str, v: String| (k.to_owned(), v);
         vec![
@@ -132,7 +130,7 @@ impl Sdk {
         command
     }
 
-    /// `sdk_run.py`를 돌린다: 시험은 그 안에서 돌고 검사된다 — `expected.json`의 시험이 전부 통과해야 하고, 건너뜀·xfail·todo·누락·미등록·통과 0건은 실패다. 결과 한 줄(JSON)에서 돌린 수를 읽는다.
+    /// Runs `sdk_run.py`, enforcing all manifest tests in `expected.json` pass with no skips, xfails, todos, or drift.
     async fn run_checked(&self, env: &[(String, String)], args: &[&str]) -> Outcome {
         let output = self
             .command(&self.python, env)
@@ -141,7 +139,7 @@ impl Sdk {
             .args(args)
             .output()
             .await
-            .expect("sdk_run.py 실행");
+            .expect("run sdk_run.py");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let result: Value = stdout
             .lines()
@@ -157,27 +155,24 @@ impl Sdk {
         }
     }
 
-    /// 파이썬 시험 파일(예: `test_models.py`)을 돌린다.
     pub async fn python(&self, env: &[(String, String)], file: &str) -> Outcome {
         self.run_checked(env, &["py", file]).await
     }
 
-    /// Node 시험 파일(설치 폴더의 `node/<file>`)을 돌린다.
     pub async fn node(&self, env: &[(String, String)], file: &str) -> Outcome {
         let dir = self.dir.join("node");
         self.run_checked(env, &["node", file, "--node-dir", dir.to_str().unwrap()])
             .await
     }
 
-    /// `expected.json`의 한 묶음(`main`·`tight`)에서 기대하는 시험 파일들(파이썬·Node)
     pub fn suite(&self, profile: &str) -> (Vec<String>, Vec<String>) {
         let expected: Value =
             serde_json::from_str(&std::fs::read_to_string(self.src.join("expected.json")).unwrap())
-                .expect("expected.json은 JSON");
+                .expect("expected.json must be JSON");
         let files = |kind: &str| -> Vec<String> {
             expected["suites"][profile][kind]
                 .as_array()
-                .unwrap_or_else(|| panic!("expected.json에 {profile}.{kind}가 없다"))
+                .unwrap_or_else(|| panic!("expected.json missing {profile}.{kind}"))
                 .iter()
                 .map(|f| f.as_str().unwrap().to_owned())
                 .collect()
@@ -185,7 +180,6 @@ impl Sdk {
         (files("python"), files("node"))
     }
 
-    /// 프록시가 실제로 본 것을 검사한다: 공식 스키마·SSE 틀 위반 0, 요청 1건 이상, 기대한 공식 스키마를 모두 한 번 이상 검사했다.
     pub async fn check_proxy(
         &self,
         env: &[(String, String)],
@@ -198,7 +192,6 @@ impl Sdk {
     }
 }
 
-/// 와이어 프록시: 실제로 입구에 간 요청과 응답 검사 결과를 알려 준다.
 pub struct Proxy {
     pub port: u16,
     _child: Child,
@@ -211,10 +204,9 @@ impl Proxy {
             .await
             .unwrap();
         assert_eq!(status, 200, "{path}: {body}");
-        serde_json::from_str(&body).expect("프록시 응답은 JSON")
+        serde_json::from_str(&body).expect("proxy response must be JSON")
     }
 
-    /// 공식 스키마·SSE 틀 위반 목록과 검사한 응답 수(스키마별), 상태 코드별 응답 수, 보낸 요청 수
     pub async fn summary(&self) -> Value {
         self.get("/__wire/summary").await
     }

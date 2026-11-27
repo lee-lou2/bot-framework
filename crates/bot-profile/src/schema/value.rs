@@ -1,16 +1,13 @@
-//! JSON Schema 2020-12 값 동치(`json_equal`)와 정확한 숫자 비교·정수 추출.
-//! `serde_json::Value`의 기본 비교는 `1`과 `1.0`을 다르게 보고, `f64` 변환은 `2^53`을 넘는 정수의 정밀도를 잃는다.
+//! JSON Schema 2020-12 value equality and lossless numeric comparison and integer extraction.
 use serde_json::{Number, Value};
 use std::cmp::Ordering;
 
-/// `-2^63` (정확한 IEEE 754 `f64` 값).
+/// Exact IEEE 754 `f64` boundary values for `-2^63`, `2^63`, and `2^64`.
 const MIN_I64_F64: f64 = -9_223_372_036_854_775_808.0;
-/// `2^63` (정확한 IEEE 754 `f64` 값).
 const BOUND_I64_F64: f64 = 9_223_372_036_854_775_808.0;
-/// `2^64` (정확한 IEEE 754 `f64` 값).
 const BOUND_U64_F64: f64 = 18_446_744_073_709_551_616.0;
 
-/// JSON Schema 2020-12 의미의 값 동치(`1 == 1.0`, 객체 키 순서 무관).
+/// JSON Schema 2020-12 equality (`1 == 1.0`, order-independent object keys).
 pub(super) fn json_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,
@@ -29,14 +26,12 @@ pub(super) fn json_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// `Number`가 정확히 정수(`i64`·`u64`)로 저장돼 있으면 `i128`로 꺼낸다.
 pub(super) fn as_int(n: &Number) -> Option<i128> {
     n.as_i64()
         .map(i128::from)
         .or_else(|| n.as_u64().map(i128::from))
 }
 
-/// JSON Schema `integer` 타입 판정: 정수 표기이거나 소수부가 0인 유한 부동소수점.
 pub(super) fn is_integer(n: &Number) -> bool {
     n.is_i64()
         || n.is_u64()
@@ -44,7 +39,6 @@ pub(super) fn is_integer(n: &Number) -> bool {
             .is_some_and(|f| f.is_finite() && f.fract() == 0.0)
 }
 
-/// 정수(`i128`, `[-2^63, 2^64 - 1]`)와 부동소수점(`f64`)의 정확한 수학적 크기 비교.
 fn cmp_int_f64(int: i128, f: f64) -> Option<Ordering> {
     if f.is_nan() {
         return None;
@@ -62,7 +56,7 @@ fn cmp_int_f64(int: i128, f: f64) -> Option<Ordering> {
     if f >= BOUND_U64_F64 {
         return Some(Ordering::Less);
     }
-    // [-2^63, 2^64) 안의 모든 유한 `f64`의 정수부는 `i128`로 정밀도 손실 없이 표현된다.
+    // Every finite `f64` in `[-2^63, 2^64)` has a lossless integer part in `i128`.
     let trunc = f.trunc() as i128;
     match int.cmp(&trunc) {
         Ordering::Equal => {
@@ -79,7 +73,7 @@ fn cmp_int_f64(int: i128, f: f64) -> Option<Ordering> {
     }
 }
 
-/// 두 JSON 숫자의 정확한 크기 비교(양쪽 정수면 `i128` 비교, 정수·실수 혼합도 반올림 오차 없음).
+/// Lossless comparison of JSON numbers across `i64`, `u64`, and `f64` (avoids `> 2^53` rounding).
 pub(super) fn num_cmp(a: &Number, b: &Number) -> Option<Ordering> {
     match (as_int(a), as_int(b)) {
         (Some(x), Some(y)) => Some(x.cmp(&y)),
@@ -89,7 +83,7 @@ pub(super) fn num_cmp(a: &Number, b: &Number) -> Option<Ordering> {
     }
 }
 
-/// 정수로 쓰인 JSON 값(`300` 또는 YAML float-integer `300.0`)을 정확한 `u64`로 읽는다.
+/// Extracts an exact `u64` from an integer JSON value or whole-number float (`300.0`).
 pub(crate) fn as_exact_u64(v: &Value) -> Option<u64> {
     let n = v.as_number()?;
     if let Some(u) = n.as_u64() {
@@ -102,7 +96,7 @@ pub(crate) fn as_exact_u64(v: &Value) -> Option<u64> {
     (f.is_finite() && (0.0..BOUND_U64_F64).contains(&f) && f.fract() == 0.0).then_some(f as u64)
 }
 
-/// 정수로 쓰인 JSON 값(`5`·`-3` 또는 YAML float-integer `5.0`)을 정확한 `i64`로 읽는다.
+/// Extracts an exact `i64` from an integer JSON value or whole-number float (`5.0`).
 pub(crate) fn as_exact_i64(v: &Value) -> Option<i64> {
     let n = v.as_number()?;
     if let Some(i) = n.as_i64() {

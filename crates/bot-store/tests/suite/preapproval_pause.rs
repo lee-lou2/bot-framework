@@ -1,4 +1,5 @@
-//! 사전 승인의 정지·재개: 새 허가 차단·결과 기록 허용·세대 비교·CAS 명령·경합·관리 조회. 실제 PG 위에서 확인한다.
+//! Pre-approval pause and resume (PG): blocks new permits, preserves in-flight result recording,
+//! enforces epoch fencing and CAS transitions, handles concurrent races, and exposes admin listing.
 
 use crate::support::{preapproval::*, *};
 use bot_core::{
@@ -32,7 +33,8 @@ async fn pause_stops_new_permits_not_results_and_a_resume_cannot_revive_an_old_c
         .await
         .unwrap();
     assert!(first.send);
-    // 정지 커밋 뒤에는 새 허가가 없다. 먼저 허가한 쓰기의 결과 기록과 같은 단계의 재요청은 받는다
+
+    // Pause blocks new permits while allowing replays and recording results of already-permitted steps.
     let paused = pause(&r, &r.grant.0, 0, true).await.unwrap();
     assert!(paused.row.paused && paused.row.epoch == 1 && !paused.repeated);
     let blocked = r.effect(&ctx, &call, "s2", "post", "channel:reports").await;
@@ -45,7 +47,7 @@ async fn pause_stops_new_permits_not_results_and_a_resume_cannot_revive_an_old_c
         .effect(&ctx, &call, "s1", "post", "channel:reports")
         .await
         .unwrap();
-    assert!(!replay.send, "정지 중에도 재요청은 새 쓰기가 아니다");
+    assert!(!replay.send, "replay is not a new write");
     effects(&r.db)
         .record(
             ctx.attempt.clone(),
@@ -55,7 +57,8 @@ async fn pause_stops_new_permits_not_results_and_a_resume_cannot_revive_an_old_c
         .await
         .unwrap();
     assert_eq!(r.used().await, 1);
-    // 새 접수와 호출 시작도 막힌다: 정지 중 발생은 건너뛰고(커서만 앞으로) 재개 뒤 새 발생부터 받는다
+
+    // Occurrences while paused advance the cursor and skip without creating runs.
     let cursor_before =
         r.db.scalar::<i64>("select cursor_ms from bot_schedule_cursors")
             .await;
@@ -65,13 +68,9 @@ async fn pause_stops_new_permits_not_results_and_a_resume_cannot_revive_an_old_c
             .await;
     assert!(
         cursor_after > cursor_before,
-        "건너뛴 발생은 다시 오지 않는다"
+        "skipped occurrence advances cursor"
     );
-    assert_eq!(
-        r.db.scalar::<i64>("select count(*) from bot_runs").await,
-        1,
-        "run을 만들지 않았다"
-    );
+    assert_eq!(r.db.scalar::<i64>("select count(*) from bot_runs").await, 1);
     assert_eq!(
         r.verdicts("schedule.occurrence")
             .await
@@ -80,14 +79,15 @@ async fn pause_stops_new_permits_not_results_and_a_resume_cannot_revive_an_old_c
         Some("skip:trigger_paused")
     );
     let held_back = r.next_run_unchecked().await;
-    assert!(held_back.is_none(), "정지 중에는 접수가 없다");
-    // 재개해도 정지 전에 시작한 호출의 새 허가는 되살아나지 않는다(세대가 다르다)
+    assert!(held_back.is_none());
+
+    // Resuming bumps epoch so pre-pause calls remain stale and cannot acquire new permits.
     let resumed = pause(&r, &r.grant.0, 1, false).await.unwrap();
     assert!(!resumed.row.paused && resumed.row.epoch == 2);
     let stale = r.effect(&ctx, &call, "s3", "post", "channel:reports").await;
     assert!(
         matches!(stale, Err(Error::Stale)),
-        "정지 전 호출의 새 허가는 낡았다(denied가 아니다)"
+        "pre-pause call must fail as Stale, not Denied"
     );
     assert!(
         r.verdicts("effect.refuse")
@@ -95,7 +95,7 @@ async fn pause_stops_new_permits_not_results_and_a_resume_cannot_revive_an_old_c
             .contains(&reason::STALE.to_owned())
     );
     assert_eq!(r.used().await, 1);
-    // 재개 뒤 새 발생은 새 세대에 묶여 정상으로 쓴다
+
     let (fresh, fresh_call) = r.started().await;
     let bound: i64 =
         r.db.scalar(&format!(
@@ -110,7 +110,7 @@ async fn pause_stops_new_permits_not_results_and_a_resume_cannot_revive_an_old_c
             .unwrap()
             .send
     );
-    assert_eq!(r.used().await, 2, "정지·재개는 사용량을 지우지 않는다");
+    assert_eq!(r.used().await, 2, "pause/resume preserves daily usage");
 }
 
 #[tokio::test]
@@ -151,23 +151,24 @@ async fn pause_commands_are_compare_and_set_and_listing_shows_usage() {
         AdminRead::preapprovals(&r.db.store, &outsider).await,
         Err(Error::Denied)
     ));
-    // 정지 → 같은 명령 재전달(응답 유실)은 같은 행·감사 1건
+
     let g = r.grant.0.clone();
     let one = pause(&r, &g, 0, true).await.unwrap();
     assert!(!one.repeated && one.row.epoch == 1 && one.row.paused);
     let replay = pause(&r, &g, 0, true).await.unwrap();
     assert!(replay.repeated && replay.row == one.row);
     let same_epoch = pause(&r, &g, 1, true).await.unwrap();
-    assert!(same_epoch.repeated, "이미 정지 상태");
+    assert!(same_epoch.repeated, "already paused at current epoch");
     assert_eq!(r.audits("preapproval.pause").await, 1);
-    // 재개 → 다시 정지: 첫 정지 명령의 재전달은 상태가 같아도 낡았다(ABA)
+
+    // After resume and re-pause, replaying the first pause fails ABA check as stale.
     assert!(!pause(&r, &g, 1, false).await.unwrap().repeated);
     assert!(!pause(&r, &g, 2, true).await.unwrap().repeated);
     assert!(matches!(pause(&r, &g, 0, true).await, Err(Error::Stale)));
     assert!(matches!(pause(&r, &g, 1, false).await, Err(Error::Stale)));
     assert!(
         matches!(pause(&r, "g-other", 3, false).await, Err(Error::Stale)),
-        "다른 승인 ID"
+        "mismatched grant ID"
     );
     assert!(matches!(
         pause(&r, &g, -1, false).await,
@@ -184,7 +185,7 @@ async fn pause_commands_are_compare_and_set_and_listing_shows_usage() {
         ),
         (2, 1)
     );
-    // 없는 트리거는 Missing, 승인이 교체되면 옛 ID는 낡았다(정지 상태는 이어진다)
+
     let missing = AdminAct::set_pause(
         &r.db.store,
         PrincipalId(OWNER.into()),
@@ -205,7 +206,7 @@ async fn pause_commands_are_compare_and_set_and_listing_shows_usage() {
     let fresh = issued[0].0.0.clone();
     assert!(
         matches!(pause(&r, &g, 3, false).await, Err(Error::Stale)),
-        "교체된 승인 ID는 낡았다"
+        "superseded grant ID must be stale"
     );
     let rows = AdminRead::preapprovals(&r.db.store, &operator())
         .await
@@ -218,7 +219,7 @@ async fn pause_commands_are_compare_and_set_and_listing_shows_usage() {
             rows[0].epoch
         ),
         (1, fresh.as_str(), true, 3),
-        "정지는 승인이 바뀌어도 이어진다"
+        "pause state persists across grant replacement"
     );
 }
 
@@ -266,7 +267,6 @@ async fn a_pause_racing_new_permits_leaves_no_permit_after_its_commit() {
     };
     let (sent, paused) = tokio::join!(writers, stopper);
     assert!(paused.row.paused);
-    // 사용량·효과 행·감사 시작 줄이 정확히 일치하고, 정지 커밋 시각 뒤에 만든 단계는 없다
     assert_eq!(r.used().await, sent);
     assert_eq!(r.audits("effect.start").await, sent);
     assert_eq!(
@@ -284,41 +284,29 @@ async fn occurrences_scheduled_in_or_before_a_pause_stay_skipped_after_the_resum
     let Some(r) = rig(10, PAIRS).await else {
         return;
     };
-    // 스케줄러가 밀려 정지 전에 예정된 발생을 아직 접수하지 못했다
     let before = r.db.now_ms().await - 1;
     r.pause(&r.grant.0, 0, true).await.unwrap();
-    // 정지 커밋 뒤에 예정된 발생(정지 구간)
     let during = r.db.now_ms().await + 2;
     tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     r.pause(&r.grant.0, 1, false).await.unwrap();
-    // 재개 뒤 따라잡기가 두 발생을 접수하려 해도 건너뛴다(정지 커밋 뒤 새 접수 없음, 정지 중 예정된 발생은 받지 않음)
+
+    // Catch-up after resume skips occurrences scheduled before or during the pause window.
     for at in [before, during] {
         assert!(matches!(r.occur_at(at).await, Err(Error::Stale)), "{at}");
     }
-    assert_eq!(
-        r.db.scalar::<i64>("select count(*) from bot_runs").await,
-        0,
-        "run 0"
-    );
+    assert_eq!(r.db.scalar::<i64>("select count(*) from bot_runs").await, 0);
     assert_eq!(
         r.db.scalar::<i64>("select count(*) from bot_run_grants")
             .await,
         0
     );
     let skipped = r.verdicts("schedule.occurrence").await;
-    assert_eq!(
-        skipped,
-        vec!["skip:trigger_paused".to_owned(); 2],
-        "건너뛴 발생마다 감사 한 줄"
-    );
+    assert_eq!(skipped, vec!["skip:trigger_paused".to_owned(); 2]);
     let cursor =
         r.db.scalar::<i64>("select cursor_ms from bot_schedule_cursors")
             .await;
-    assert_eq!(
-        cursor, during,
-        "커서는 건너뛴 발생까지 나아간다(다시 오지 않는다)"
-    );
-    // 재개 뒤 예정된 새 발생은 새 세대에 묶여 접수된다
+    assert_eq!(cursor, during, "cursor advances past skipped occurrences");
+
     let fresh = r.db.now_ms().await;
     r.occur_at(fresh).await.unwrap();
     let bound: i64 = r.db.scalar("select epoch from bot_run_grants").await;

@@ -1,14 +1,12 @@
-//! 원격 MCP 서버로 나가는 요청 직전의 판본 확인(`GuardedWire`). 모델 상류의 `GuardedUpstream`과 같은 보장이다(`guard.rs`의 실행 저장소·브로커 래퍼와 한 짝).
-//!
-//! 브로커는 호출을 시작하기 전에 활성 판본을 확인하지만, 원격 서버와는 요청이 여럿 오간다(판본 확인·도구 목록·구판의 초기화·`tools/call`). 승인 뒤 서버가 느려
-//! 목록을 기다리는 사이 다른 프로세스가 목적지를 철회한 새 집합을 게시하면, 구판 워커가 옛 주소로 bearer와 쓰기 호출을 보낼 수 있다. 그래서 **요청마다**(자격을 읽은 뒤,
-//! 연결을 맺기 전에) 이 프로세스의 판본이 아직 활성인지 다시 확인하고, 아니면(또는 확인하지 못하면) 아무것도 보내지 않는다(`WireFail::Stale`).
+//! Active-revision guard (`GuardedWire`) verified before every outbound remote MCP HTTP request.
+// Because an MCP session spans multiple HTTP round-trips (version negotiation, tools/list, tools/call),
+// re-verifying active revision before each send prevents a stale worker from sending bearer tokens or
+// write calls to a destination revoked by a newer activation.
 use bot_broker::mcp::wire::{RemoteWire, WireFail, WireReply, WireRequest};
 use bot_core::active::ActiveCheck;
 use std::{sync::Arc, time::Duration};
 use tokio::time::{Instant, timeout_at};
 
-/// 확인이 끝나지 않을 때 요청을 붙잡아 두는 한도. 넘기면 보내지 않는다(확인하지 못한 판본으로 나가지 않는다).
 const GRACE: Duration = Duration::from_secs(10);
 
 pub struct GuardedWire {
@@ -22,7 +20,6 @@ impl GuardedWire {
         Self::with_grace(inner, active, GRACE)
     }
 
-    /// 확인을 기다리는 한도를 정해 만든다(시험에서 짧게 쓴다).
     pub fn with_grace(
         inner: Arc<dyn RemoteWire>,
         active: Arc<dyn ActiveCheck>,
@@ -35,9 +32,9 @@ impl GuardedWire {
         }
     }
 
-    /// 보내기 직전의 확인. 마감을 넘겨 도착한 성공은 받지 않는다(마감과 완료가 같은 때에 준비돼도 시각을 마감과 대조한다).
     async fn confirm(&self) -> Result<(), WireFail> {
         let limit = Instant::now() + self.grace;
+        // Reject completions that arrive at or past the deadline even if both resolve in the same poll.
         match timeout_at(limit, self.active.verify()).await {
             Ok(Ok(())) if Instant::now() < limit => Ok(()),
             _ => Err(WireFail::Stale),
@@ -48,7 +45,6 @@ impl GuardedWire {
 impl RemoteWire for GuardedWire {
     fn send(&self, request: WireRequest) -> WireReply<'_> {
         Box::pin(async move {
-            // 구판이면(또는 확인하지 못하면) 아무것도 보내지 않는다
             self.confirm().await?;
             self.inner.send(request).await
         })

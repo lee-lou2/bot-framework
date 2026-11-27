@@ -1,4 +1,4 @@
-//! 관리 조회(PG): 판정된 보류 단계는 더 이상 보류로 보이지 않고, 보류 종류는 실제 출처로 정해지며, 호출 실패는 고정 분류로만 보인다.
+//! Admin read views (PG): resolved hold steps leave the hold list, hold kinds reflect source, and call errors use fixed classes.
 
 use crate::support::{admin::*, *};
 use bot_core::{
@@ -19,7 +19,6 @@ fn step(attempt: &Attempt, name: &str) -> EffectRequest {
     }
 }
 
-/// 두 단계가 모두 보류인 다단계 호출(c1)이 있어 run이 보류 대기에 든 상태.
 async fn two_held_steps(db: &TestDb) -> (RunContext, [EffectId; 2]) {
     let run = leased(db, "multi").await;
     begin_call(db, &run.attempt, "c1").await;
@@ -34,7 +33,7 @@ async fn two_held_steps(db: &TestDb) -> (RunContext, [EffectId; 2]) {
             effect: permit.status.effect.clone(),
             state: EffectState::Held,
             resolution: None,
-            receipt: Some("timeout".into()), // 보류 사유 코드
+            receipt: Some("timeout".into()),
         };
         effects(db)
             .record(run.attempt.clone(), call("c1"), held)
@@ -53,7 +52,6 @@ async fn two_held_steps(db: &TestDb) -> (RunContext, [EffectId; 2]) {
     (run, [ids.remove(0), ids.remove(0)])
 }
 
-/// 다단계 호출(c1)의 한 단계를 가리키는 판정 대상(열린 발생 ID는 보류 목록에서 읽는다).
 async fn step_ref(db: &TestDb, run: &RunContext, effect: &EffectId) -> HoldRef {
     hold_ref(
         db,
@@ -72,7 +70,7 @@ async fn a_step_judged_not_executed_no_longer_shows_as_held() {
     };
     let (run, [first, second]) = two_held_steps(&db).await;
     let verdict = || HoldVerdict::NotExecuted {
-        evidence: "수신처에 없음".into(),
+        evidence: "not found at destination".into(),
     };
     let actor = PrincipalId("local:admin".into());
     let target = step_ref(&db, &run, &first).await;
@@ -99,9 +97,9 @@ async fn a_step_judged_not_executed_no_longer_shows_as_held() {
     assert_eq!(
         state_of(&first),
         (EffectState::Started, None),
-        "판정된 단계는 보류가 아니다"
+        "resolved step is no longer held"
     );
-    // 미실행 판정 표지는 DB에 남는다: 저장소를 새로 열어(재시작) 읽어도 같다. 판정하지 않은 단계에는 없다
+    // NotExecuted resolution persists across store restart; unresolved steps have none.
     let restarted = db.peer("restarted").await;
     let after_restart = AdminRead::detail(
         &restarted,
@@ -120,11 +118,15 @@ async fn a_step_judged_not_executed_no_longer_shows_as_held() {
     };
     assert_eq!(marker(&first), Some(EffectResolution::NotExecuted));
     assert_eq!(marker(&second), None);
-    assert_eq!(state_of(&second).0, EffectState::Held, "미결 단계만 보류");
+    assert_eq!(
+        state_of(&second).0,
+        EffectState::Held,
+        "only unresolved step remains held"
+    );
     assert_eq!(
         state_of_run(&db, &run.attempt.run).await,
         "waiting",
-        "미결 단계가 남았으면 run은 계속 기다린다"
+        "run stays waiting while an unresolved step remains"
     );
     let holds = AdminRead::holds(&db.store, &operator(), None)
         .await
@@ -167,7 +169,6 @@ async fn a_held_call_shows_only_a_fixed_error_class() {
     .unwrap();
     assert_eq!(detail.calls[0].state, CallState::Held);
     assert_eq!(detail.calls[0].error, Some(CallError::Timeout));
-    // 보류가 아닌 호출은 분류가 없다
     let ok = leased(&db, "ok").await;
     begin_call(&db, &ok.attempt, "c9").await;
     let detail = AdminRead::detail(
@@ -186,7 +187,7 @@ async fn holds_carry_the_kind_of_their_source_and_names_cannot_impersonate_anoth
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 도구 보류: 도구 이름이 `reply`여도 도구 보류다
+    // Tool named `reply` must still classify as HoldKind::Tool.
     let tool_run = leased(&db, "tool").await;
     calls(&db)
         .begin(tool_run.attempt.clone(), call("c1"), tool("reply"), [1; 32])
@@ -204,15 +205,13 @@ async fn holds_carry_the_kind_of_their_source_and_names_cannot_impersonate_anoth
         })
         .await
         .unwrap();
-    // 회신 보류: 푸시 대화 run의 답 행이 보류가 됐다
     let dm = leased_in(&db, "dm", bot_core::state::ConversationKind::Direct).await;
     runs(&db)
-        .finish(dm.attempt.clone(), done("안녕하세요"))
+        .finish(dm.attempt.clone(), done("hello"))
         .await
         .unwrap();
     db.sql("update bot_outbox set state = 'held', reason = 'timeout'")
         .await;
-    // 민감 DM 보류
     let private = crate::support::private::started(&db, "p", 1).await;
     PrivateLedger::finish(&db.store, private.clone(), PrivateOutcome::Held)
         .await
@@ -237,10 +236,10 @@ async fn holds_carry_the_kind_of_their_source_and_names_cannot_impersonate_anoth
             .tool
             .0,
         "reply",
-        "이름이 reply여도 종류는 도구"
+        "tool named reply still has HoldKind::Tool"
     );
 
-    // 합성 ID 접두사는 도구 호출 ID로 쓸 수 없다(판정 경로가 섞이지 않는다)
+    // Synthetic hold ID prefixes cannot be used as tool call IDs.
     let run = leased(&db, "ids").await;
     for id in ["reply:x:1", "private:x"] {
         assert!(matches!(
@@ -263,7 +262,6 @@ async fn holding_a_call_turns_its_started_steps_without_a_receipt_into_judgeable
         .start(start_call(&run.attempt, "c1", None))
         .await
         .unwrap();
-    // 한 단계는 영수증을 받아 확정, 다른 단계는 시작만 하고 결과를 모른다
     let sent = effects(&db)
         .request(step(&run.attempt, "upload"))
         .await
@@ -298,7 +296,7 @@ async fn holding_a_call_turns_its_started_steps_without_a_receipt_into_judgeable
     let holds = AdminRead::holds(&db.store, &operator(), None)
         .await
         .unwrap();
-    assert_eq!(holds.len(), 1, "run이 보류로 기다리면 목록에도 있다");
+    assert_eq!(holds.len(), 1, "held waiting run appears in holds list");
     let state_of = |id: &EffectId| {
         holds[0]
             .steps
@@ -309,21 +307,21 @@ async fn holding_a_call_turns_its_started_steps_without_a_receipt_into_judgeable
     assert_eq!(
         state_of(&unknown.status.effect),
         Some((EffectState::Held, Some("timeout".into()))),
-        "결과가 불명인 단계는 판정 가능한 보류가 된다"
+        "step with unknown outcome becomes a judgeable hold"
     );
     assert_eq!(
         state_of(&sent.status.effect).map(|s| s.0),
         Some(EffectState::Confirmed),
-        "영수증을 받은 단계는 그대로다"
+        "confirmed step keeps its receipt"
     );
-    // 알림의 미실행 판정은 업로드 영수증이 있는 호출 전체를 재개하지 않는다.
+    // Marking notify as NotExecuted must not resume the call while upload holds a confirmed receipt.
     let target = step_ref(&db, &run, &unknown.status.effect).await;
     AdminAct::resolve_hold(
         &db.store,
         PrincipalId("local:admin".into()),
         target,
         HoldVerdict::NotExecuted {
-            evidence: "수신처에 없음".into(),
+            evidence: "not found at destination".into(),
         },
     )
     .await
@@ -349,9 +347,8 @@ async fn batched_holds_and_aggregated_status_match_across_profiles_and_hold_kind
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // personal: 1) 다단계 보류 호출(2단계 → bot_holds 2행이지만 보류 카드 1건),
-    //           2) 단일 보류 호출(1건), 3) 회신 보류(1건), 4) 만료된 민감 DM(sweep 전!),
-    //           5) 승인 대기 1건, 6) ready 1건
+    // personal: 1 multi-step tool hold (2 bot_holds rows -> 1 hold card), 1 single tool hold,
+    // 1 reply hold, 1 expired unswept private DM, 1 pending approval, and 1 ready run.
     let (_multi, multi_steps) = two_held_steps(&db).await;
 
     let single = leased(&db, "single-hold").await;
@@ -369,10 +366,9 @@ async fn batched_holds_and_aggregated_status_match_across_profiles_and_hold_kind
         .await
         .unwrap();
 
-    // 회신 보류: direct run을 끝낸 뒤 outbox sending 리스를 만료시켜 held로 옮긴다
     let reply_run = leased_in(&db, "reply-hold", ConversationKind::Direct).await;
     runs(&db)
-        .finish(reply_run.attempt.clone(), done("회신 본문"))
+        .finish(reply_run.attempt.clone(), done("reply body"))
         .await
         .unwrap();
     let scope = DeliveryScope::all(PushTransportId::SLACK);
@@ -386,7 +382,7 @@ async fn batched_holds_and_aggregated_status_match_across_profiles_and_hold_kind
         .await;
     assert!(outbox(&db).claim(&scope, 10).await.unwrap().is_empty());
 
-    // 만료된 민감 DM(아직 sweep 전): status()가 집계 전에 sweep_private()를 돌려 보류로 잡아야 한다
+    // Expired private DM (unswept): status() must run sweep_private() before counting.
     let PrivatePermit::Start {
         attempt: priv_at, ..
     } = PrivateLedger::begin(
@@ -418,7 +414,6 @@ async fn batched_holds_and_aggregated_status_match_across_profiles_and_hold_kind
     };
     db.expire_lease(&priv_at.run).await;
 
-    // 승인 대기 1건
     let awaiting = leased(&db, "pending-approval").await;
     begin_call(&db, &awaiting.attempt, "c-ap").await;
     calls(&db)
@@ -426,16 +421,15 @@ async fn batched_holds_and_aggregated_status_match_across_profiles_and_hold_kind
         .await
         .unwrap();
 
-    // ready 1건(personal) + work 프로필의 단일 보류 호출 1건 + ready 1건
     runs(&db)
-        .accept(accept("personal", "ready-p", "기다림"))
+        .accept(accept("personal", "ready-p", "waiting"))
         .await
         .unwrap();
     runs(&db)
-        .accept(accept("work", "work-hold", "작업"))
+        .accept(accept("work", "work-hold", "task"))
         .await
         .unwrap();
-    // personal ready를 건너뛰지 않도록 work run만 직접 claim되도록 work-ready는 뒤에 접수
+    // Claim the work run while restoring personal's ready run so it stays queued.
     let mut work_run = None;
     for _ in 0..4 {
         let Some(ctx) = runs(&db).claim().await.unwrap() else {
@@ -445,7 +439,6 @@ async fn batched_holds_and_aggregated_status_match_across_profiles_and_hold_kind
             work_run = Some(ctx);
             break;
         }
-        // personal ready는 다시 ready로 돌려놓는다
         db.sql(&format!(
             "update bot_runs set state = 'ready', lease_until_ms = null, lease_owner = null where id = '{}'",
             ctx.attempt.run.0
@@ -467,11 +460,11 @@ async fn batched_holds_and_aggregated_status_match_across_profiles_and_hold_kind
         .await
         .unwrap();
     runs(&db)
-        .accept(accept("work", "ready-w", "작업 대기"))
+        .accept(accept("work", "ready-w", "pending task"))
         .await
         .unwrap();
 
-    // AdminRead::status를 holds보다 먼저 호출해 sweep_private()가 status 안에서 수행되는지 검증한다
+    // Call status() before holds() to verify sweep_private() runs inside status().
     let statuses = AdminRead::status(&db.store, &operator()).await.unwrap();
     let all_holds = AdminRead::holds(&db.store, &operator(), None)
         .await
@@ -484,25 +477,24 @@ async fn batched_holds_and_aggregated_status_match_across_profiles_and_hold_kind
         let expected_holds = all_holds.iter().filter(|h| h.profile == st.profile).count() as u64;
         assert_eq!(
             st.holds, expected_holds,
-            "프로필 {}의 status.holds는 holds 목록 개수와 같아야 한다",
+            "status.holds for profile {} must match holds list count",
             st.profile.0
         );
     }
     assert_eq!(
         statuses[0].holds, 4,
-        "personal: 다단계1 + 단일1 + 회신1 + 민감DM1"
+        "personal: 1 multi-step + 1 single + 1 reply + 1 private DM"
     );
     assert_eq!(statuses[0].approvals_pending, 1);
     assert!(statuses[0].oldest_ready_secs.is_some());
-    assert_eq!(statuses[1].holds, 1, "work: 단일 보류 1건");
+    assert_eq!(statuses[1].holds, 1, "work: 1 single hold");
     assert_eq!(statuses[1].approvals_pending, 0);
     assert!(statuses[1].oldest_ready_secs.is_some());
 
-    // 배치 조회된 holds의 각 종류·단계·hold_id가 빠짐없이 채워져 있다
     let multi_view = all_holds
         .iter()
         .find(|h| h.profile.0 == "personal" && h.call.0 == "c1")
-        .expect("다단계 보류 카드");
+        .expect("multi-step hold card");
     assert_eq!(multi_view.kind, HoldKind::Tool);
     assert!(multi_view.hold_id.is_none());
     assert_eq!(multi_view.steps.len(), 2);
@@ -514,13 +506,13 @@ async fn batched_holds_and_aggregated_status_match_across_profiles_and_hold_kind
         all_holds
             .iter()
             .any(|h| h.kind == HoldKind::Reply && h.hold_id.is_some()),
-        "회신 보류 hold_id 포함"
+        "reply hold includes hold_id"
     );
     assert!(
         all_holds
             .iter()
             .any(|h| h.kind == HoldKind::Private && h.hold_id.is_some()),
-        "민감 DM 보류 hold_id 포함"
+        "private DM hold includes hold_id"
     );
 }
 
@@ -557,7 +549,6 @@ async fn config_max_connections_applies_and_0028_indexes_exist() {
     .unwrap();
     assert_eq!(clamped.pool().options().get_max_connections(), 1);
 
-    // 0028 색인이 모두 생성되었고 기존 bot_runs_ready·bot_runs_leased 색인도 보존된다
     for index in [
         "bot_runs_private_active",
         "bot_runs_updated",
@@ -575,6 +566,6 @@ async fn config_max_connections_applies_and_0028_indexes_exist() {
         .fetch_one(db.store.pool())
         .await
         .unwrap();
-        assert!(present, "색인 {index}가 있어야 한다");
+        assert!(present, "index {index} must exist");
     }
 }

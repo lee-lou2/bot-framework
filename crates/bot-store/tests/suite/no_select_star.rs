@@ -1,10 +1,7 @@
-//! 저장소 질의는 `select *`·`select x.*`·`returning *`를 쓰지 않는다(열 목록은 `src/cols.rs`). 준비된 문은 연결마다 캐시되는데 결과 형식이 열 순서까지 포함하므로,
-//! 마이그레이션이 열을 더하거나 열을 지웠다 다시 만들면 PostgreSQL이 `cached plan must not change result type`(0A000)으로 거절한다.
-//! 시험이 병렬로 도는 동안 한 연결이 옛 준비문을 다시 쓰면 가끔 터지는 흔들림이 이것이었다(`run_origin`).
+//! Store queries must not use `select *`, `x.*`, or `returning *` (`src/cols.rs`), preventing PostgreSQL `cached plan must not change result type` (0A000) failures after migrations.
 
 use std::{fs, path::Path};
 
-/// 이 줄에 `select *`·`select x.*`·`returning *`·`x.*` 별표 열 선택이 있는가(주석 줄은 설명이니 건너뛴다).
 fn selects_by_star(line: &str) -> bool {
     let line = line.trim_start().to_lowercase();
     if line.starts_with("//") || line.starts_with("--") {
@@ -35,7 +32,7 @@ fn has_keyword_star(line: &str, keyword: &str) -> bool {
     false
 }
 
-/// 문자열 상수(`const RUN_COLUMNS: &str = "r.*,`)까지 포함해 SQL 별칭 별표(`ident.*`)를 잡는다.
+/// Detects qualified SQL wildcards (`ident.*`), including inside string constants.
 fn has_qualified_star(line: &str) -> bool {
     let bytes = line.as_bytes();
     let mut pos = 0;
@@ -105,8 +102,8 @@ fn the_matcher_sees_every_star_form_and_nothing_else() {
         r#""select count(*) from bot_runs""#,
         r#""select profile, id from bot_runs""#,
         r#""select {} from bot_runs""#,
-        "// select * from 은 주석이다",
-        "-- select * from 은 SQL 주석이다",
+        "// select * from is a comment",
+        "-- select * from is a SQL comment",
         r#""select 1 from bot_runs r where r.id = $1""#,
         r#""select exists(select 1 from t)""#,
         r#""select a * b from t""#,
@@ -122,14 +119,13 @@ fn no_store_query_selects_every_column_by_star() {
     let mut files = Vec::new();
     collect_sources(&src, &mut files);
     files.sort();
-    // 하위 폴더의 .rs와 .sql 파일도 실제로 검사 대상에 들어가는지 확인한다
     assert!(
         files.iter().any(|p| p.ends_with("cards/closing.rs")),
-        "하위 폴더 .rs 파일을 재귀 순회해야 한다"
+        "must recurse into nested .rs files"
     );
     assert!(
         files.iter().any(|p| p.ends_with("queue/pick.sql")),
-        "하위 폴더 .sql 파일을 재귀 순회해야 한다"
+        "must recurse into nested .sql files"
     );
     let mut found = Vec::new();
     for path in files {
@@ -146,6 +142,6 @@ fn no_store_query_selects_every_column_by_star() {
     }
     assert!(
         found.is_empty(),
-        "`select *` 또는 `x.*`를 쓰는 곳이 있다 — 열을 명시한다(`src/cols.rs`): {found:?}"
+        "found `select *` or `x.*` — list columns explicitly (`src/cols.rs`): {found:?}"
     );
 }

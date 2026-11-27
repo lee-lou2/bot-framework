@@ -1,5 +1,5 @@
-//! 민감 DM 전용 원장(PrivateLedger)의 상태 기계(PG): 예약 → 시작 → 완료·거절·보류, 반납과 재점유,
-//! 리스가 끝난 접수는 보류, 일반 큐·호출·효과·기억·위임 경로는 private 토큰을 거절한다.
+//! Private DM ledger (`PrivateLedger`) state machine (PG): reservation, start, completion/denial/hold,
+//! release/reclaim, lease-expiry hold, and rejection of private attempts on general store paths.
 
 use crate::support::{private::*, *};
 use bot_core::{
@@ -17,18 +17,17 @@ async fn a_reservation_is_a_private_run_that_workers_never_pick() {
     assert_eq!(row(&db).await, "leased:-:1:1:false");
     assert!(
         runs(&db).claim().await.unwrap().is_none(),
-        "워커는 집지 않는다"
+        "workers must not claim private runs"
     );
     assert!(
         runs(&db).history(at.clone(), 5).await.is_err(),
-        "이력에도 열리지 않는다"
+        "private runs are excluded from history"
     );
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'private.begin'")
             .await,
         1
     );
-    // 같은 키의 재전달은 점유 중이다(새 효과 없음)
     assert!(matches!(
         ledger(&db).begin(request("r1", 1)).await.unwrap(),
         PrivatePermit::InProgress
@@ -47,11 +46,11 @@ async fn only_a_new_key_is_checked_against_the_active_revision() {
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_requests").await,
         0,
-        "어긋난 새 접수는 행도 남기지 않는다"
+        "stale new accept must leave no request row"
     );
 
     let at = reserve(&db, "r1", 1).await;
-    // 활성 판본이 바뀐 뒤의 재전달은 새 접수가 아니므로 검사하지 않는다
+    // Redelivery after a revision swap is not a fresh key, so begin succeeds while start checks active revision.
     db.store
         .replace(
             Some(Revision("set-1".into())),
@@ -66,7 +65,6 @@ async fn only_a_new_key_is_checked_against_the_active_revision() {
         ledger(&db).begin(request("r1", 1)).await.unwrap(),
         PrivatePermit::InProgress
     ));
-    // 그러나 전송 직전의 시작은 지금 활성 판본과 대조한다
     assert!(matches!(
         ledger(&db).start(start_of(&at, 1)).await,
         Err(Error::Stale)
@@ -111,7 +109,7 @@ async fn start_checks_lease_epoch_tool_fingerprint_and_revision_then_commits_onc
     assert_eq!(
         row(&db).await,
         "leased:-:1:1:false",
-        "거절은 아무것도 남기지 않는다"
+        "rejected starts must not mutate row"
     );
 
     ledger(&db).start(start_of(&at, 1)).await.unwrap();
@@ -126,7 +124,6 @@ async fn start_checks_lease_epoch_tool_fingerprint_and_revision_then_commits_onc
         1
     );
 
-    // 리스가 끝난 뒤에는 시작할 수 없다
     let late = reserve(&db, "r2", 2).await;
     db.expire_lease(&late.run).await;
     assert!(matches!(
@@ -162,7 +159,7 @@ async fn finish_follows_the_transition_table() {
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 시작 전: 반납·거절만 된다
+    // Before start: only RetryBeforeStart and Rejected are valid.
     let at = reserve(&db, "a", 1).await;
     for outcome in [
         PrivateOutcome::Completed,
@@ -184,7 +181,7 @@ async fn finish_follows_the_transition_table() {
         PrivatePermit::Rejected
     ));
 
-    // 시작 뒤: 미전송 반납·완료·보류·거절만 되고 시작 전 반납은 안 된다
+    // After start: RetryBeforeStart is invalid; NotSent/Completed/Held/Rejected are valid.
     let at = started(&db, "b", 2).await;
     assert!(matches!(
         ledger(&db)
@@ -213,7 +210,7 @@ async fn finish_follows_the_transition_table() {
         PrivatePermit::Completed
     ));
 
-    // 결과를 모르면 보류한다. 보류에서 거절·미전송으로 바꾸는 길은 없다(운영자 판정뿐)
+    // From Held, only a late Completed confirmation (or operator hold resolution) is accepted.
     let at = started(&db, "c", 3).await;
     ledger(&db)
         .finish(at.clone(), PrivateOutcome::Held)
@@ -234,7 +231,6 @@ async fn finish_follows_the_transition_table() {
             Err(Error::Conflict)
         ));
     }
-    // 시작이 확인된 행의 늦은 성공은 받는다
     ledger(&db)
         .finish(at, PrivateOutcome::Completed)
         .await
@@ -251,7 +247,6 @@ async fn a_released_row_is_reclaimed_only_by_the_same_redelivery_with_a_new_epoc
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 시작 전 반납
     let first = reserve(&db, "r1", 1).await;
     ledger(&db)
         .finish(first.clone(), PrivateOutcome::RetryBeforeStart)
@@ -263,13 +258,12 @@ async fn a_released_row_is_reclaimed_only_by_the_same_redelivery_with_a_new_epoc
         attempt: second, ..
     } = ledger(&db).begin(request("r1", 1)).await.unwrap()
     else {
-        panic!("반납된 행은 같은 입력의 재전달이 다시 점유한다")
+        panic!("matching redelivery must reclaim a released row")
     };
     assert_eq!(
         (second.run.clone(), second.generation.0, epoch(&second)),
         (first.run.clone(), 1, 2)
     );
-    // 옛 소유자는 시작도 결과 기록도 못 한다
     assert!(matches!(
         ledger(&db).start(start_of(&first, 1)).await,
         Err(Error::Stale)
@@ -280,7 +274,8 @@ async fn a_released_row_is_reclaimed_only_by_the_same_redelivery_with_a_new_epoc
             .await,
         Err(Error::Stale)
     ));
-    // 시작한 뒤 전송 전 실패가 확정되면 시작 표시를 지우고 반납한다
+
+    // Confirmed pre-send failure clears the started flag and returns the row to ready.
     ledger(&db).start(start_of(&second, 1)).await.unwrap();
     ledger(&db)
         .finish(second, PrivateOutcome::NotSent)
@@ -290,7 +285,7 @@ async fn a_released_row_is_reclaimed_only_by_the_same_redelivery_with_a_new_epoc
     let PrivatePermit::Start { attempt: third, .. } =
         ledger(&db).begin(request("r1", 1)).await.unwrap()
     else {
-        panic!("재점유")
+        panic!("expected reclaim")
     };
     assert_eq!(epoch(&third), 3);
     ledger(&db).start(start_of(&third, 1)).await.unwrap();
@@ -305,21 +300,20 @@ async fn a_redelivery_must_match_the_first_request_exactly() {
     reserve(&db, "r1", 1).await;
     type Edit = fn(&mut PrivateRequest);
     let edits: [(&str, Edit); 5] = [
-        ("지문", |r| r.fingerprint = [2; 32]),
-        ("에이전트", |r| r.agent = AgentId("other".into())),
-        ("도구", |r| r.tool = ToolId("inbox.delete".into())),
-        ("대화", |r| r.conversation.id = "dm-2".into()),
-        ("스레드", |r| r.conversation.thread = Some("t2".into())),
+        ("fingerprint", |r| r.fingerprint = [2; 32]),
+        ("agent", |r| r.agent = AgentId("other".into())),
+        ("tool", |r| r.tool = ToolId("inbox.delete".into())),
+        ("conversation", |r| r.conversation.id = "dm-2".into()),
+        ("thread", |r| r.conversation.thread = Some("t2".into())),
     ];
     for (what, edit) in edits {
         let mut other = request("r1", 1);
         edit(&mut other);
         assert!(
             matches!(ledger(&db).begin(other).await, Err(Error::Conflict)),
-            "{what}가 다르면 충돌"
+            "mismatched {what} must conflict"
         );
     }
-    // 개인 DM이 아닌 대화는 첫 접수부터 받지 않는다
     let mut channel = request("r2", 1);
     channel.conversation.kind = ConversationKind::Channel;
     assert!(matches!(
@@ -337,7 +331,6 @@ async fn a_private_attempt_cannot_use_any_general_path() {
     let at = reserve(&db, "r1", 1).await;
     let denied = |e: &Error| matches!(e, Error::Denied | Error::Stale | Error::Missing);
 
-    // 호출 원장: 맥락·호출·승인 카드·시작 모두 거절(모델 프록시도 맥락을 얻지 못한다)
     assert!(matches!(
         calls(&db).context(at.clone()).await,
         Err(Error::Denied)
@@ -358,7 +351,6 @@ async fn a_private_attempt_cannot_use_any_general_path() {
         calls(&db).start(start_call(&at, "p-1", None)).await,
         Err(Error::Denied)
     ));
-    // 큐: 갱신·체크포인트·완료·실패·이력
     assert!(matches!(
         runs(&db).renew(at.clone()).await,
         Err(Error::Denied)
@@ -380,7 +372,7 @@ async fn a_private_attempt_cannot_use_any_general_path() {
         Err(Error::Denied)
     ));
     assert!(runs(&db).history(at.clone(), 5).await.is_err());
-    // 단계 원장·기억·위임
+
     let effect = EffectRequest {
         attempt: at.clone(),
         call: call("p-1"),
@@ -421,7 +413,6 @@ async fn a_private_attempt_cannot_use_any_general_path() {
             .await
             .is_err_and(|e| denied(&e))
     );
-    // 거절은 어떤 호출·단계·승인·체크포인트 행도 만들지 않았다
     for table in ["bot_calls", "bot_effects", "bot_approvals", "bot_steps"] {
         let sql = format!("select count(*) from {table}");
         assert_eq!(db.scalar::<i64>(&sql).await, 0, "{table}");

@@ -1,8 +1,4 @@
-//! `bot add tool` 동시성·서식 보존·파일 안전성 시험(`srt`·DB 없이 순수 파일 시스템에서 실행).
-//! - 같은 스킬의 6개 동시 덧붙이기 / 4개 동시 첫 생성에서 갱신 유실 0건 및 잠금 파일 0건
-//! - 주석·`\r\n` vs `\n`·역순 키·들여쓰기 없는 목록·`tools: [] # 주석`·EOF 개행 누락 보존
-//! - 비어 있지 않은 플로우 배열은 주석을 파괴하지 않고 원본 유지 + 수동 붙여넣기 조각 출력
-//! - `0600` 권한 보존, FIFO 무대기 즉시 거절, 하드링크 거절, 강제 종료로 남은 `.bot-add-tool.tmp` 안전 복구
+//! Filesystem concurrency, formatting preservation, and file-safety tests for `bot add tool`.
 use crate::process_support::{BOT, bot, text};
 use bot_profile::{Limits, locate::parse_tools_yaml};
 use std::{
@@ -51,7 +47,7 @@ fn spawn_add_tool(profile: &Path, id: &str) -> std::process::Child {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("bot add tool 실행")
+        .expect("spawn bot add tool")
 }
 
 #[test]
@@ -61,9 +57,10 @@ fn concurrent_add_tool_on_large_and_new_files_loses_zero_updates_and_leaves_no_e
     let skill_dir = profile.join("skills/demo");
     let tools_path = skill_dir.join("tools.yaml");
 
-    // 1) 약 170 KB 기존 tools.yaml(100개 유효 도구 + 주석)에 6개 프로세스가 동시에 도구를 덧붙여도 유실 0건
+    // 1) Six concurrent appends onto an existing ~170 KB tools.yaml lose zero updates.
     let pad = "a".repeat(1400);
-    let mut big = String::from("# 동시 추가 시험용 tools.yaml\nversion: 1\nserver: demo\ntools:\n");
+    let mut big =
+        String::from("# Concurrent add-tool test tools.yaml\nversion: 1\nserver: demo\ntools:\n");
     for i in 0..100 {
         big.push_str(&format!("  # seed-{i}: {pad}\n"));
         big.push_str(&format!(
@@ -77,7 +74,7 @@ fn concurrent_add_tool_on_large_and_new_files_loses_zero_updates_and_leaves_no_e
         .collect();
     for (i, child) in children.into_iter().enumerate() {
         let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "par-{i} 실패: {}", text(&out));
+        assert!(out.status.success(), "par-{i} failed: {}", text(&out));
     }
     let raw = fs::read(&tools_path).unwrap();
     let doc = parse_tools_yaml(
@@ -88,19 +85,18 @@ fn concurrent_add_tool_on_large_and_new_files_loses_zero_updates_and_leaves_no_e
         true,
         &Limits::default(),
     )
-    .expect("동시 덧붙이기 결과 유효");
-    assert_eq!(doc.tool_ids.len(), 106, "기존 100개 + 동시 6개 모두 보존");
+    .expect("concurrent append output must stay valid");
+    assert_eq!(doc.tool_ids.len(), 106, "100 existing + 6 concurrent tools");
     assert!(
         std::str::from_utf8(&raw)
             .unwrap()
-            .starts_with("# 동시 추가 시험용 tools.yaml\n"),
-        "동시 추가 뒤에도 주석 보존"
+            .starts_with("# Concurrent add-tool test tools.yaml\n"),
+        "header comment must be preserved"
     );
     for i in 0..6 {
         let want = format!("par-{i}");
-        assert!(doc.tool_ids.contains(&want), "{want} 누락");
+        assert!(doc.tool_ids.contains(&want), "missing {want}");
     }
-    // 잠금 파일이나 임시 파일이 스킬 폴더에 남지 않는다
     let mut names: Vec<String> = fs::read_dir(&skill_dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -108,7 +104,7 @@ fn concurrent_add_tool_on_large_and_new_files_loses_zero_updates_and_leaves_no_e
     names.sort();
     assert_eq!(names, ["SKILL.md", "tools.yaml"]);
 
-    // 2) `tools.yaml`이 아직 없는 스킬에 4개 프로세스가 동시에 첫 도구를 추가해도 모두 성공·보존
+    // 2) Four concurrent first-time creations when tools.yaml does not exist yet.
     let made = bot(
         &[("BOT_DATABASE_URL", "not-a-valid-url")],
         &["add", "skill", "fresh", "--dir", profile.to_str().unwrap()],
@@ -119,7 +115,11 @@ fn concurrent_add_tool_on_large_and_new_files_loses_zero_updates_and_leaves_no_e
         .collect();
     for (i, child) in fresh_children.into_iter().enumerate() {
         let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "fresh init-{i} 실패: {}", text(&out));
+        assert!(
+            out.status.success(),
+            "fresh init-{i} failed: {}",
+            text(&out)
+        );
     }
     let fresh_raw = fs::read(profile.join("skills/fresh/tools.yaml")).unwrap();
     let fresh_doc = parse_tools_yaml(
@@ -130,7 +130,7 @@ fn concurrent_add_tool_on_large_and_new_files_loses_zero_updates_and_leaves_no_e
         true,
         &Limits::default(),
     )
-    .expect("동시 첫 생성 결과 유효");
+    .expect("concurrent creation output must stay valid");
     assert_eq!(fresh_doc.tool_ids.len(), 4);
     for i in 0..4 {
         assert!(fresh_doc.tool_ids.contains(&format!("init-{i}")));
@@ -146,43 +146,47 @@ fn preserves_comments_crlf_indentless_reverse_keys_and_refuses_flow_arrays_witho
     let cases: &[(&str, &str, bool, &[&str])] = &[
         (
             "block-lf",
-            "# 머리 주석\nversion: 1\nserver: demo\ntools:\n  # 첫 도구\n  - id: first\n    class: read\n    scopes:\n      - demo.first\n    input: {type: object, properties: {}, additionalProperties: false}\n# 꼬리 주석\n",
+            "# header comment\nversion: 1\nserver: demo\ntools:\n  # first tool\n  - id: first\n    class: read\n    scopes:\n      - demo.first\n    input: {type: object, properties: {}, additionalProperties: false}\n# footer comment\n",
             false,
-            &["# 머리 주석", "# 첫 도구", "# 꼬리 주석"],
+            &["# header comment", "# first tool", "# footer comment"],
         ),
         (
             "reverse-key",
-            "# 역순 주석\nversion: 1\ntools:\n  # 항목 주석\n  - id: first\n    class: read\n    scopes: [demo.first]\n    input: {type: object, properties: {}, additionalProperties: false}\n# 서버 주석\nserver: demo\n",
+            "# reverse comment\nversion: 1\ntools:\n  # item comment\n  - id: first\n    class: read\n    scopes: [demo.first]\n    input: {type: object, properties: {}, additionalProperties: false}\n# server comment\nserver: demo\n",
             false,
-            &["# 역순 주석", "# 항목 주석", "# 서버 주석"],
+            &["# reverse comment", "# item comment", "# server comment"],
         ),
         (
             "indentless",
-            "# 0칸 목록\nversion: 1\nserver: demo\ntools:\n- id: first\n  class: read\n  scopes: [demo.first]\n  input: {type: object, properties: {}, additionalProperties: false}\n",
+            "# zero-indent list\nversion: 1\nserver: demo\ntools:\n- id: first\n  class: read\n  scopes: [demo.first]\n  input: {type: object, properties: {}, additionalProperties: false}\n",
             false,
-            &["# 0칸 목록", "\n- id: added\n"],
+            &["# zero-indent list", "\n- id: added\n"],
         ),
         (
             "block-crlf",
-            "# CRLF 주석\r\nversion: 1\r\nserver: demo\r\ntools:\r\n  # 도구 주석\r\n  - id: first\r\n    class: read\r\n    scopes: [demo.first]\r\n    input: {type: object, properties: {}, additionalProperties: false}\r\n",
+            "# CRLF comment\r\nversion: 1\r\nserver: demo\r\ntools:\r\n  # tool comment\r\n  - id: first\r\n    class: read\r\n    scopes: [demo.first]\r\n    input: {type: object, properties: {}, additionalProperties: false}\r\n",
             true,
-            &["# CRLF 주석\r\n", "# 도구 주석\r\n", "  - id: added\r\n"],
+            &[
+                "# CRLF comment\r\n",
+                "# tool comment\r\n",
+                "  - id: added\r\n",
+            ],
         ),
         (
             "empty-crlf",
-            "# 빈 목록 주석\r\nversion: 1\r\nserver: demo\r\ntools: [] # 인라인 주석\r\n",
+            "# empty list comment\r\nversion: 1\r\nserver: demo\r\ntools: [] # inline comment\r\n",
             true,
             &[
-                "# 빈 목록 주석\r\n",
-                "tools: # 인라인 주석\r\n",
+                "# empty list comment\r\n",
+                "tools: # inline comment\r\n",
                 "  - id: added\r\n",
             ],
         ),
         (
             "no-eof-newline",
-            "# 개행 없음\nversion: 1\nserver: demo\ntools:\n  - id: first\n    class: read\n    scopes: [demo.first]\n    input: {type: object, properties: {}, additionalProperties: false}",
+            "# no eof newline\nversion: 1\nserver: demo\ntools:\n  - id: first\n    class: read\n    scopes: [demo.first]\n    input: {type: object, properties: {}, additionalProperties: false}",
             false,
-            &["# 개행 없음", "  - id: added\n"],
+            &["# no eof newline", "  - id: added\n"],
         ),
     ];
 
@@ -194,7 +198,7 @@ fn preserves_comments_crlf_indentless_reverse_keys_and_refuses_flow_arrays_witho
         for needle in must_contain {
             assert!(
                 updated.contains(needle),
-                "{name}: `{needle}` 누락:\n{updated}"
+                "{name}: missing `{needle}`:\n{updated}"
             );
         }
         if expect_crlf {
@@ -202,9 +206,12 @@ fn preserves_comments_crlf_indentless_reverse_keys_and_refuses_flow_arrays_witho
                 .as_bytes()
                 .windows(2)
                 .any(|w| w[1] == b'\n' && w[0] != b'\r');
-            assert!(!bare_lf, "{name}: CRLF 파일에 단독 LF가 섞임:\n{updated:?}");
+            assert!(
+                !bare_lf,
+                "{name}: bare LF mixed into CRLF file:\n{updated:?}"
+            );
         } else {
-            assert!(!updated.contains('\r'), "{name}: LF 파일에 CR이 섞임");
+            assert!(!updated.contains('\r'), "{name}: CR mixed into LF file");
         }
         let doc = parse_tools_yaml(
             "demo",
@@ -214,17 +221,21 @@ fn preserves_comments_crlf_indentless_reverse_keys_and_refuses_flow_arrays_witho
             true,
             &Limits::default(),
         )
-        .unwrap_or_else(|e| panic!("{name}: 검증 실패: {e:?}\n{updated}"));
+        .unwrap_or_else(|e| panic!("{name}: validation failed: {e:?}\n{updated}"));
         assert!(doc.tool_ids.contains(&"added".to_owned()), "{name}");
     }
 
-    // 비어 있지 않은 플로우 배열 + 주석: 원본 바이트 유지 + 수동 붙여넣기 YAML 출력
-    let flow = "# 소중한 주석\nversion: 1\nserver: demo\ntools: [{id: first, class: read, scopes: [demo.first], input: {type: object, properties: {}, additionalProperties: false}}] # 끝 주석\n";
+    // Non-empty flow array: refuse without modifying original bytes and print manual YAML snippet.
+    let flow = "# important comment\nversion: 1\nserver: demo\ntools: [{id: first, class: read, scopes: [demo.first], input: {type: object, properties: {}, additionalProperties: false}}] # tail comment\n";
     fs::write(&tools_path, flow).unwrap();
     let refused = add_tool(&profile, &["demo.added"]);
     assert!(!refused.status.success(), "{}", text(&refused));
     let msg = text(&refused);
-    assert!(msg.contains("- id: added") && msg.contains("보존"), "{msg}");
+    let lower = msg.to_ascii_lowercase();
+    assert!(
+        msg.contains("- id: added") && (lower.contains("preserv") || lower.contains("comment")),
+        "{msg}"
+    );
     assert_eq!(fs::read_to_string(&tools_path).unwrap(), flow);
 }
 
@@ -236,23 +247,23 @@ fn preserves_file_mode_rejects_fifo_and_hardlink_and_recovers_stale_tmp() {
     let skill_dir = profile.join("skills/demo");
     let tools_path = skill_dir.join("tools.yaml");
 
-    // 1) 0600 권한 유지
+    // 1) Preserve 0600 permissions.
     let base = "version: 1\nserver: demo\ntools:\n  - id: first\n    class: read\n    scopes: [demo.first]\n    input: {type: object, properties: {}, additionalProperties: false}\n";
     fs::write(&tools_path, base).unwrap();
     fs::set_permissions(&tools_path, fs::Permissions::from_mode(0o600)).unwrap();
     let ok = add_tool(&profile, &["demo.second"]);
     assert!(ok.status.success(), "{}", text(&ok));
     let mode = fs::metadata(&tools_path).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "기존 0600 권한을 유지해야 함(실제: {mode:o})");
+    assert_eq!(mode, 0o600, "must preserve 0600 mode (got {mode:o})");
 
-    // 2) 이전 강제 종료로 남은 안전한 `.bot-add-tool.tmp`는 자동 정리 후 성공
+    // 2) Clean up orphaned regular `.bot-add-tool.tmp` left by an earlier crash.
     let stale_tmp = skill_dir.join(".bot-add-tool.tmp");
     fs::write(&stale_tmp, "partial write").unwrap();
     let recovered = add_tool(&profile, &["demo.third"]);
     assert!(recovered.status.success(), "{}", text(&recovered));
-    assert!(!stale_tmp.exists(), "고아 임시 파일은 정리돼야 함");
+    assert!(!stale_tmp.exists(), "stale temp file must be cleaned up");
 
-    // 3) `.bot-add-tool.tmp`가 링크면 절대 지우지 않고 거절
+    // 3) Refuse symlinked `.bot-add-tool.tmp` without touching target.
     let victim = dir.path().join("victim.txt");
     fs::write(&victim, "keep").unwrap();
     std::os::unix::fs::symlink(&victim, &stale_tmp).unwrap();
@@ -261,17 +272,22 @@ fn preserves_file_mode_rejects_fifo_and_hardlink_and_recovers_stale_tmp() {
     assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
     fs::remove_file(&stale_tmp).unwrap();
 
-    // 4) 하드링크(`nlink > 1`) 거절(연결된 바깥 파일 무손상)
+    // 4) Reject hardlink (`nlink > 1`) without touching the linked file.
     let linked_outside = dir.path().join("linked.yaml");
     fs::write(&linked_outside, base).unwrap();
     fs::remove_file(&tools_path).unwrap();
     fs::hard_link(&linked_outside, &tools_path).unwrap();
     let hard = add_tool(&profile, &["demo.fifth"]);
     assert!(!hard.status.success(), "{}", text(&hard));
-    assert!(text(&hard).contains("하드링크"), "{}", text(&hard));
+    let hard_msg = text(&hard).to_ascii_lowercase();
+    assert!(
+        hard_msg.contains("hard link") || hard_msg.contains("hardlink"),
+        "{}",
+        text(&hard)
+    );
     assert_eq!(fs::read_to_string(&linked_outside).unwrap(), base);
 
-    // 5) FIFO(명명 파이프)를 열 때 멈추지 않고 즉시 거절
+    // 5) Reject FIFO immediately without blocking on open.
     fs::remove_file(&tools_path).unwrap();
     let mkfifo = Command::new("mkfifo").arg(&tools_path).status().unwrap();
     assert!(mkfifo.success());
@@ -279,9 +295,13 @@ fn preserves_file_mode_rejects_fifo_and_hardlink_and_recovers_stale_tmp() {
     let fifo = add_tool(&profile, &["demo.sixth"]);
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "FIFO에서 멈추면 안 됨: {:?}",
+        "must not block on FIFO: {:?}",
         started.elapsed()
     );
     assert!(!fifo.status.success(), "{}", text(&fifo));
-    assert!(text(&fifo).contains("일반 파일"), "{}", text(&fifo));
+    assert!(
+        text(&fifo).to_ascii_lowercase().contains("regular file"),
+        "{}",
+        text(&fifo)
+    );
 }

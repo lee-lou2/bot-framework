@@ -23,8 +23,8 @@ use tokio::{
     sync::Notify,
 };
 
-/// 단계 허가를 받으면 로컬 수신처에 실제로 쓰고 받은 영수증을 기록한다.
-/// 두 번째 실행은 같은 단계를 조회한 다음 새 단계 이름으로 같은 요청을 보낸다.
+/// Writes to a local TCP sink when granted an effect permit and records the returned receipt;
+/// on a second run it checks the same step then attempts a second step name.
 struct PostingTool {
     store: bot_store::Store,
     addr: SocketAddr,
@@ -179,7 +179,7 @@ async fn exercise(interrupted: bool) {
     assert_eq!(
         delivered.load(Ordering::SeqCst),
         1,
-        "종결을 잃고 다시 보냈다"
+        "must not re-send after losing the final result"
     );
     assert_eq!(state_of_run(&db, &at.run).await, "waiting");
     let target = hold_ref(&db, HoldKind::Tool, &at.run, &call("c1"), None).await;
@@ -191,7 +191,7 @@ async fn exercise(interrupted: bool) {
                 operator().principal,
                 target.clone(),
                 HoldVerdict::NotExecuted {
-                    evidence: "기록 없음".into()
+                    evidence: "no record".into()
                 }
             )
             .await,
@@ -205,7 +205,7 @@ async fn exercise(interrupted: bool) {
     let restart = broker(&db, runner.clone());
     for _ in 0..2 {
         let CallResult::Done(actual) = restart.call(post(&next.attempt)).await.unwrap() else {
-            panic!("최종 영수증이 필요하다")
+            panic!("expected final receipt")
         };
         assert_eq!(actual.0, r#"{"receipt":"receipt-1"}"#);
     }

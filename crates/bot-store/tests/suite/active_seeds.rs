@@ -1,4 +1,4 @@
-//! 활성 집합 게시(PG): CAS·소속 프로필의 기억 시드·감사가 한 트랜잭션이다. 어느 하나라도 실패하면 이전 판본과 기억이 그대로다.
+//! Atomic active-set publishing (PG): CAS, profile memory seeds, and audit commit in one transaction.
 
 use crate::support::*;
 use bot_core::{command::MemorySeed, id::*, port::*, profile::ActiveRevisions, state::Visibility};
@@ -43,8 +43,8 @@ async fn the_set_the_seeds_and_the_audit_commit_together() {
             rev("set-1"),
             set(&[("personal", "r1"), ("work", "w1")]),
             vec![
-                seed("personal", "memory/a.md", 1, "첫째 시드"),
-                seed("work", "memory/b.md", 2, "둘째 시드"),
+                seed("personal", "memory/a.md", 1, "first seed"),
+                seed("work", "memory/b.md", 2, "second seed"),
             ],
             Default::default(),
         )
@@ -55,7 +55,7 @@ async fn the_set_the_seeds_and_the_audit_commit_together() {
         db.scalar::<i64>("select count(*) from bot_audit where action = 'memory.seed'")
             .await,
         2,
-        "새로 들어간 시드마다 감사 한 줄(본문 없이)"
+        "one audit entry per inserted seed"
     );
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'active.replace'")
@@ -65,21 +65,21 @@ async fn the_set_the_seeds_and_the_audit_commit_together() {
     assert_eq!(db.store.current().await.unwrap(), Some(rev("set-1")));
     assert_eq!(db.store.verify().await.unwrap().first_bad, None);
 
-    // 같은 시드를 다시 게시해도 다시 만들지 않는다(재사용)
+    // Republishing an identical seed reuses the existing row.
     db.store
         .replace(
             Some(rev("set-1")),
             rev("set-2"),
             set(&[("personal", "r2"), ("work", "w1")]),
             vec![
-                seed("personal", "memory/a.md", 1, "첫째 시드"),
-                seed("personal", "memory/c.md", 3, "새 시드"),
+                seed("personal", "memory/a.md", 1, "first seed"),
+                seed("personal", "memory/c.md", 3, "new seed"),
             ],
             Default::default(),
         )
         .await
         .unwrap();
-    assert_eq!(memories_in(&db).await, 3, "새 시드만 늘었다");
+    assert_eq!(memories_in(&db).await, 3, "only the new seed is inserted");
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'memory.seed'")
             .await,
@@ -97,7 +97,7 @@ async fn a_bad_seed_or_a_seed_for_a_profile_outside_the_set_rolls_everything_bac
             None,
             rev("set-1"),
             set(&[("personal", "r1")]),
-            vec![seed("personal", "memory/a.md", 1, "기존 시드")],
+            vec![seed("personal", "memory/a.md", 1, "existing seed")],
             Default::default(),
         )
         .await
@@ -105,9 +105,9 @@ async fn a_bad_seed_or_a_seed_for_a_profile_outside_the_set_rolls_everything_bac
     let audits = db.scalar::<i64>("select count(*) from bot_audit").await;
     for bad in [
         seed("personal", "memory/x.md", 9, "   "),
-        seed("personal", "memory/x.md", 9, &"가".repeat(9000)),
-        seed("work", "memory/x.md", 9, "집합 밖 프로필"),
-        seed("personal", "", 9, "경로 없음"),
+        seed("personal", "memory/x.md", 9, &"€".repeat(9000)),
+        seed("work", "memory/x.md", 9, "profile outside set"),
+        seed("personal", "", 9, "missing path"),
     ] {
         let result = db
             .store
@@ -115,7 +115,7 @@ async fn a_bad_seed_or_a_seed_for_a_profile_outside_the_set_rolls_everything_bac
                 Some(rev("set-1")),
                 rev("set-2"),
                 set(&[("personal", "r2")]),
-                vec![seed("personal", "memory/ok.md", 5, "정상 시드"), bad],
+                vec![seed("personal", "memory/ok.md", 5, "valid seed"), bad],
                 Default::default(),
             )
             .await;
@@ -123,9 +123,9 @@ async fn a_bad_seed_or_a_seed_for_a_profile_outside_the_set_rolls_everything_bac
         assert_eq!(
             db.store.current().await.unwrap(),
             Some(rev("set-1")),
-            "판본은 그대로"
+            "active revision unchanged"
         );
-        assert_eq!(memories_in(&db).await, 1, "정상 시드도 들어가지 않았다");
+        assert_eq!(memories_in(&db).await, 1, "valid sibling seed rolled back");
         assert_eq!(
             db.scalar::<i64>("select count(*) from bot_audit").await,
             audits
@@ -144,14 +144,14 @@ async fn an_error_in_the_middle_of_the_transaction_leaves_the_previous_set_seeds
             None,
             rev("set-1"),
             set(&[("personal", "r1")]),
-            vec![seed("personal", "memory/a.md", 1, "기존 시드")],
+            vec![seed("personal", "memory/a.md", 1, "existing seed")],
             Default::default(),
         )
         .await
         .unwrap();
     let audits = db.scalar::<i64>("select count(*) from bot_audit").await;
-    // 사전 검증(`check_seed`)은 통과하지만 DB의 제약이 둘째 시드를 거절한다: 트랜잭션 중간의 실제 오류
-    db.sql("alter table bot_memories add constraint reject_poison check (body <> '독 시드')")
+    // Passes pre-validation (`check_seed`) but triggers a mid-transaction DB constraint error.
+    db.sql("alter table bot_memories add constraint reject_poison check (body <> 'poison seed')")
         .await;
     let result = db
         .store
@@ -160,17 +160,17 @@ async fn an_error_in_the_middle_of_the_transaction_leaves_the_previous_set_seeds
             rev("set-2"),
             set(&[("personal", "r2")]),
             vec![
-                seed("personal", "memory/first.md", 2, "첫 시드(정상)"),
-                seed("personal", "memory/second.md", 3, "독 시드"),
+                seed("personal", "memory/first.md", 2, "first seed (valid)"),
+                seed("personal", "memory/second.md", 3, "poison seed"),
             ],
             Default::default(),
         )
         .await;
-    assert!(result.is_err(), "제약 위반은 게시 실패다");
+    assert!(result.is_err(), "constraint violation must fail publish");
     assert_eq!(
         db.store.current().await.unwrap(),
         Some(rev("set-1")),
-        "이전 판본 그대로"
+        "previous revision unchanged"
     );
     assert_eq!(
         db.scalar::<String>("select revision from bot_active_profiles where profile = 'personal'")
@@ -180,14 +180,14 @@ async fn an_error_in_the_middle_of_the_transaction_leaves_the_previous_set_seeds
     assert_eq!(
         memories_in(&db).await,
         1,
-        "먼저 들어간 첫 시드도 남지 않는다"
+        "earlier seed in the same tx must roll back"
     );
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit").await,
         audits
     );
     assert_eq!(db.store.verify().await.unwrap().first_bad, None);
-    // 제약을 풀면 같은 게시가 성공한다(실패가 잠금이나 반쪽 상태를 남기지 않았다)
+    // Dropping the constraint lets the same publish succeed cleanly.
     db.sql("alter table bot_memories drop constraint reject_poison")
         .await;
     db.store
@@ -195,7 +195,7 @@ async fn an_error_in_the_middle_of_the_transaction_leaves_the_previous_set_seeds
             Some(rev("set-1")),
             rev("set-2"),
             set(&[("personal", "r2")]),
-            vec![seed("personal", "memory/second.md", 3, "독 시드")],
+            vec![seed("personal", "memory/second.md", 3, "poison seed")],
             Default::default(),
         )
         .await
@@ -224,7 +224,7 @@ async fn a_losing_cas_inserts_no_seeds() {
             Some(rev("stale")),
             rev("set-2"),
             set(&[("personal", "r2")]),
-            vec![seed("personal", "memory/a.md", 1, "패자의 시드")],
+            vec![seed("personal", "memory/a.md", 1, "loser seed")],
             Default::default(),
         )
         .await;
@@ -250,7 +250,7 @@ async fn racing_publishers_leave_exactly_the_winners_seeds() {
                     "personal",
                     &format!("memory/{n}.md"),
                     n,
-                    &format!("시드 {n}"),
+                    &format!("seed {n}"),
                 )],
                 Default::default(),
             )
@@ -264,8 +264,8 @@ async fn racing_publishers_leave_exactly_the_winners_seeds() {
             Err(error) => assert!(matches!(error, Error::Conflict)),
         }
     }
-    assert_eq!(winners, 1, "CAS를 이긴 게시는 하나");
-    assert_eq!(memories_in(&db).await, 1, "이긴 쪽의 시드만 있다");
+    assert_eq!(winners, 1, "exactly one publisher wins CAS");
+    assert_eq!(memories_in(&db).await, 1, "only the winner's seed exists");
     let current = db.store.current().await.unwrap().unwrap();
     let path = db
         .scalar::<String>("select seed_path from bot_memories")
@@ -278,9 +278,9 @@ async fn racing_publishers_leave_exactly_the_winners_seeds() {
 
 #[test]
 fn the_shared_check_names_the_reason_without_quoting_the_body() {
-    let ok = seed("personal", "memory/a.md", 1, "정상");
+    let ok = seed("personal", "memory/a.md", 1, "valid");
     assert_eq!(check_seed(&ok), Ok(()));
-    let secret = "비밀 본문 SENTINEL";
+    let secret = "secret body SENTINEL";
     let mut bad_field = seed("personal", "memory/a.md", 1, secret);
     bad_field.owner = PrincipalId(String::new());
     assert_eq!(check_seed(&bad_field), Err(SeedError::BadField("owner")));
@@ -288,7 +288,7 @@ fn the_shared_check_names_the_reason_without_quoting_the_body() {
         check_seed(&seed("personal", "p", 1, "  \n")),
         Err(SeedError::EmptyText)
     );
-    let long = "가".repeat(9000);
+    let long = "€".repeat(9000);
     let too_long = check_seed(&seed("personal", "p", 1, &long));
     assert_eq!(
         too_long,
@@ -309,7 +309,7 @@ fn the_shared_check_names_the_reason_without_quoting_the_body() {
     ] {
         let shown = format!("{error} {error:?}");
         assert!(
-            !shown.contains("SENTINEL") && !shown.contains("가가"),
+            !shown.contains("SENTINEL") && !shown.contains("€€"),
             "{shown}"
         );
     }

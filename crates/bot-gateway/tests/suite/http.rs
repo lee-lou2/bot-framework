@@ -1,4 +1,4 @@
-//! HTTP 입구 수락 시험: 인증 → 접수 → 동기/비동기 응답 → 재조회. 실제 TCP 서버에 원시 HTTP/1.1로 붙는다.
+//! HTTP ingress acceptance tests over raw HTTP/1.1: auth, admission, sync/async replies, and replay.
 use bot_core::state::RunState;
 use bot_gateway::{http::token::sign, testing::*};
 use serde_json::{Value, json};
@@ -9,7 +9,6 @@ use crate::http_support::*;
 #[tokio::test]
 async fn replays_http_result() {
     let rig = rig().await;
-    // 워커가 150ms 뒤 끝낸 것처럼 결과를 넣는다
     let store = rig.store.clone();
     let finisher = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -23,7 +22,6 @@ async fn replays_http_result() {
     finisher.await.unwrap();
     assert_eq!(first.status, 201, "{}", first.body);
     assert_eq!(first.json(), json!({"id": "e-1"}));
-    // 같은 요청 재조회: 새 접수·도구 호출 없이 같은 상태·본문
     let again = post(&rig, "/inbox/agenda", "svc", "k1", json!({"event": "e-1"})).await;
     assert_eq!(
         (again.status, again.body.as_str()),
@@ -35,7 +33,6 @@ async fn replays_http_result() {
         accepted.target,
         r#"tool main agenda.delete {"event":"e-1"}"#
     );
-    // 같은 키에 다른 내용은 충돌이고 기존 접수는 그대로다
     let changed = post(&rig, "/inbox/agenda", "svc", "k1", json!({"event": "e-2"})).await;
     assert_eq!(changed.status, 409);
     assert_eq!(rig.store.accepted().len(), 1);
@@ -60,12 +57,11 @@ async fn accepted_mode_returns_202_then_the_same_result_at_the_status_url() {
     );
     let done = get(&rig, "/inbox/_requests/n1", "svc").await;
     assert_eq!((done.status, done.json()), (200, json!({"sent": true})));
-    // 여러 번 조회해도 같고 새 접수는 없다
     let again = get(&rig, "/inbox/_requests/n1", "svc").await;
     assert_eq!(again.body, done.body);
     assert_eq!(rig.store.accepted().len(), 1);
 
-    // 다른 주체는 같은 요청 ID를 볼 수 없다(조회 키에 인증 주체가 들어 있다)
+    // Status lookup key is scoped to the authenticated principal.
     assert_eq!(get(&rig, "/inbox/_requests/n1", "other").await.status, 404);
     assert_eq!(get(&rig, "/inbox/_requests/never", "svc").await.status, 404);
     assert_eq!(
@@ -100,7 +96,6 @@ async fn a_sync_request_that_outlives_its_deadline_turns_into_202_and_can_be_fet
         (later.status, later.json()),
         (404, json!({"error": "no such event"}))
     );
-    // 같은 POST를 다시 보내도 같은 결과(새 호출 없음)
     let replay = post(
         &rig,
         "/inbox/agenda",
@@ -119,7 +114,7 @@ async fn terminal_states_and_unexpected_results_map_to_fixed_responses() {
     for (request, state, result, want) in [
         ("d1", RunState::Dead, None, 500),
         ("c1", RunState::Cancelled, None, 409),
-        // `{status, body}`를 시도했지만 허용되지 않은 상태·깨진 JSON·결과 없음은 502
+        // Disallowed status code, malformed JSON, or missing result map to 502.
         (
             "bad1",
             RunState::Succeeded,
@@ -128,11 +123,11 @@ async fn terminal_states_and_unexpected_results_map_to_fixed_responses() {
         ),
         ("bad2", RunState::Succeeded, Some("not json"), 502),
         ("bad3", RunState::Succeeded, None, 502),
-        // 도구 결과 모양이 아닌 값(에이전트의 답 등)은 감싸서 200
+        // Non-tool payloads (e.g. agent replies) are wrapped with 200 in accepted mode.
         (
             "agent1",
             RunState::Succeeded,
-            Some(r#"{"text":"안녕"}"#),
+            Some(r#"{"text":"hello"}"#),
             200,
         ),
     ] {
@@ -144,11 +139,11 @@ async fn terminal_states_and_unexpected_results_map_to_fixed_responses() {
         if request == "agent1" {
             assert_eq!(
                 reply.json(),
-                json!({"request_id": "agent1", "state": "succeeded", "result": {"text": "안녕"}})
+                json!({"request_id": "agent1", "state": "succeeded", "result": {"text": "hello"}})
             );
         }
     }
-    // 동기 제출은 허용되지 않은 상태 코드를 그대로 쓰지 않고, 도구 결과 모양이 아니면 감싸지 않고 502
+    // Sync submissions require a valid `{status, body}` envelope; other shapes map to 502.
     for (request, result) in [
         ("sync-bad", r#"{"status":500,"body":{}}"#),
         ("sync-raw", r#"{"text":"hi"}"#),
@@ -215,7 +210,7 @@ async fn authentication_failures_reveal_nothing_and_unknown_endpoints_are_404() 
         }
     }
     assert!(rig.store.accepted().is_empty());
-    // 등록되지 않은 입구 별칭은 인증 전에 404
+    // Unregistered endpoint aliases return 404 before auth.
     let reply = send(rig.addr, "POST", "/nobody/notify", &[], "{}").await;
     assert_eq!(reply.status, 404);
     assert_eq!(send(rig.addr, "GET", "/", &[], "").await.status, 404);
@@ -224,17 +219,14 @@ async fn authentication_failures_reveal_nothing_and_unknown_endpoints_are_404() 
 #[tokio::test]
 async fn rejections_use_the_documented_status_codes() {
     let rig = rig().await;
-    // 멤버가 아닌 주체
     let stranger = post(&rig, "/inbox/notify", "stranger", "s1", json!({})).await;
     assert_eq!(stranger.status, 403);
-    // 맞는 트리거가 없는 경로(인증 뒤)
     assert_eq!(
         post(&rig, "/inbox/other", "svc", "p1", json!({}))
             .await
             .status,
         404
     );
-    // Idempotency-Key 없음·잘못된 모양
     let auth = format!("Bearer {}", token_for("svc"));
     let no_key = send(
         rig.addr,
@@ -257,7 +249,6 @@ async fn rejections_use_the_documented_status_codes() {
             .status,
         400
     );
-    // 본문: 잘못된 JSON·잘못된 Content-Type·너무 큼
     let headers = |ct: &'static str| {
         vec![
             ("Authorization", auth.as_str()),
@@ -302,7 +293,6 @@ async fn rejections_use_the_documented_status_codes() {
         .status,
         413
     );
-    // 허용하지 않는 method
     assert_eq!(
         send(
             rig.addr,
@@ -346,7 +336,6 @@ async fn rate_limited_requests_get_429_with_retry_after() {
         .unwrap();
     assert!(wait >= 1, "{wait}");
     assert_eq!(limited.json()["error"], "rate_limited");
-    // 다른 주체의 예산은 그대로, 거절된 요청은 접수되지 않았다
     assert_eq!(
         post(&rig, "/inbox/notify", "other", "o1", json!({}))
             .await
@@ -354,7 +343,6 @@ async fn rate_limited_requests_get_429_with_retry_after() {
         202
     );
     assert_eq!(rig.store.accepted().len(), 4);
-    // 속도 제한에 걸렸던 같은 요청은 한도가 풀리면 그대로 접수될 수 있다(아직 접수된 적 없다)
     assert!(rig.store.accepted().iter().all(|a| a.key.request.0 != "r9"));
 }
 
@@ -365,7 +353,6 @@ async fn a_store_outage_is_503_and_a_missing_or_short_key_fails_closed() {
     let outage = post(&rig, "/inbox/notify", "svc", "u1", json!({})).await;
     assert_eq!(outage.status, 503);
     assert!(outage.header("retry-after").is_some());
-    // 같은 요청은 복구 뒤 접수된다
     assert_eq!(
         post(&rig, "/inbox/notify", "svc", "u1", json!({}))
             .await
@@ -373,7 +360,7 @@ async fn a_store_outage_is_503_and_a_missing_or_short_key_fails_closed() {
         202
     );
 
-    // 키가 없거나 너무 짧거나 다른 프로필에만 있으면 어떤 토큰도 받지 않는다
+    // Missing, too-short, or wrong-profile signing keys fail closed with 503.
     for secrets in [
         MemorySecrets::new(&[]),
         MemorySecrets::new(&[("personal", "inbox-key", b"short")]),

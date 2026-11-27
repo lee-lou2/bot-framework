@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# 통합 시험 전용 우회 이음매(Overrides·over_http·Launch::Ready 등). 운영 빌드에는 넣지 않는다.
+# Integration-test-only override seams (Overrides, over_http, Launch::Ready). Never enable in production builds.
 testing = []
 
 [dependencies]

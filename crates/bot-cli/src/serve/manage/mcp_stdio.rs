@@ -1,4 +1,4 @@
-//! `mcp.add`의 로컬 stdio MCP 서버 추가·경로 격리 검증·읽기 전용 설치·즉시 활성화.
+//! Local stdio MCP server registration (`mcp.add`), root-isolation checks, and live activation.
 use super::{
     LiveManager,
     mcp::{AddCtx, auto_mcp_skill_md, reject, sanitize_tool_id},
@@ -17,28 +17,28 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// 로컬 stdio MCP 서버의 `root`가 호스트 핵심 시스템·비밀·프로필·설치 폴더를 가리키지 않는지 막는다.
+/// Rejects system, profile, host-config, secret, install, and home paths as local stdio MCP roots.
 fn check_stdio_root(root: &Path, forbidden: &[PathBuf]) -> Result<PathBuf, ManageError> {
     if !root.is_absolute() || root == Path::new("/") {
         return Err(reject(
             "invalid_root",
-            "root는 `/`가 아닌 절대 경로여야 해요",
+            "root must be an absolute path other than `/`",
         ));
     }
     let meta = fs::symlink_metadata(root).map_err(|_| {
         reject(
             "invalid_root",
-            format!("root 폴더를 찾지 못했어요: {}", root.display()),
+            format!("root directory not found: {}", root.display()),
         )
     })?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return Err(reject(
             "invalid_root",
-            "root는 심볼릭 링크가 아닌 일반 폴더여야 해요",
+            "root must be a regular directory, not a symlink",
         ));
     }
     let canon = fs::canonicalize(root)
-        .map_err(|_| reject("invalid_root", "root 경로를 확인할 수 없어요"))?;
+        .map_err(|_| reject("invalid_root", "failed to resolve root path"))?;
     const SYSTEM: &[&str] = &[
         "/",
         "/bin",
@@ -59,7 +59,7 @@ fn check_stdio_root(root: &Path, forbidden: &[PathBuf]) -> Result<PathBuf, Manag
             return Err(reject(
                 "forbidden_root",
                 format!(
-                    "시스템 폴더는 MCP 서버 root로 지정할 수 없어요: {}",
+                    "system directory cannot be used as MCP server root: {}",
                     canon.display()
                 ),
             ));
@@ -71,7 +71,7 @@ fn check_stdio_root(root: &Path, forbidden: &[PathBuf]) -> Result<PathBuf, Manag
         {
             return Err(reject(
                 "forbidden_root",
-                "프로필·호스트 설정·비밀·설치·홈 폴더와 겹치는 경로는 MCP 서버 root로 쓸 수 없어요",
+                "MCP server root cannot overlap profile, host config, secret, install, or home directories",
             ));
         }
     }
@@ -92,7 +92,7 @@ impl LiveManager {
             .ok_or_else(|| {
                 reject(
                     "invalid_args",
-                    "로컬 stdio MCP에는 root 절대 경로가 필요해요",
+                    "local stdio MCP requires an absolute `root` path",
                 )
             })?;
         let command: Vec<String> = ctx
@@ -104,7 +104,7 @@ impl LiveManager {
             .ok_or_else(|| {
                 reject(
                     "invalid_args",
-                    "로컬 stdio MCP에는 비어 있지 않은 command 배열이 필요해요",
+                    "local stdio MCP requires a non-empty `command` array",
                 )
             })?;
         let stdio_tools = ctx
@@ -115,7 +115,7 @@ impl LiveManager {
             .ok_or_else(|| {
                 reject(
                     "invalid_args",
-                    "로컬 stdio MCP에는 stdio_tools 정의가 하나 이상 필요해요",
+                    "local stdio MCP requires at least one `stdio_tools` entry",
                 )
             })?;
 
@@ -144,13 +144,10 @@ impl LiveManager {
                 let name = SecretName::parse(raw_name)
                     .filter(|n| !bot_broker::private::reserved_secret(n))
                     .ok_or_else(|| {
-                        reject(
-                            "invalid_secret",
-                            format!("비밀 이름이 올바르지 않아요: {raw_name}"),
-                        )
+                        reject("invalid_secret", format!("invalid secret name: {raw_name}"))
                     })?;
                 let val_str = val.as_str().ok_or_else(|| {
-                    reject("invalid_secret", "secret_values 값은 문자열이어야 해요")
+                    reject("invalid_secret", "secret_values entries must be strings")
                 })?;
                 self.store_secret_value(&ctx.call.profile, &name, val_str, created_secrets)
                     .await?;
@@ -166,20 +163,22 @@ impl LiveManager {
         for item in stdio_tools {
             let obj = item
                 .as_object()
-                .ok_or_else(|| reject("invalid_args", "stdio_tools 항목은 객체여야 해요"))?;
+                .ok_or_else(|| reject("invalid_args", "each stdio_tools item must be an object"))?;
             let raw_name = obj
                 .get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| reject("invalid_args", "도구 name이 필요해요"))?;
+                .ok_or_else(|| reject("invalid_args", "tool `name` is required"))?;
             let id = sanitize_tool_id(raw_name, &mut used_ids);
             let class = obj
                 .get("class")
                 .and_then(Value::as_str)
-                .ok_or_else(|| reject("invalid_args", "도구 class가 필요해요"))?;
-            let input = obj
-                .get("input")
-                .filter(|v| v.is_object())
-                .ok_or_else(|| reject("invalid_args", "도구 input JSON 스키마 객체가 필요해요"))?;
+                .ok_or_else(|| reject("invalid_args", "tool `class` is required"))?;
+            let input = obj.get("input").filter(|v| v.is_object()).ok_or_else(|| {
+                reject(
+                    "invalid_args",
+                    "tool `input` JSON Schema object is required",
+                )
+            })?;
             let scope = format!("{}.{id}", ctx.skill);
             new_scopes.push(scope.clone());
             summary_tools.push((
@@ -249,7 +248,7 @@ impl LiveManager {
         let profile_dir = self.profile_dir(&ctx.call.profile);
         let profile_yaml_path = profile_dir.join("profile.yaml");
         let profile_text = fs::read_to_string(&profile_yaml_path)
-            .map_err(|_| reject("io_error", "profile.yaml을 읽지 못했어요"))?;
+            .map_err(|_| reject("io_error", "failed to read profile.yaml"))?;
         let mut profile_doc =
             bot_profile::parse_yaml("profile.yaml", &profile_text, &Limits::default())
                 .map_err(|e| reject("invalid_profile", e.to_string()))?;
@@ -285,7 +284,7 @@ impl LiveManager {
         txn.write_file(&profile_yaml_path, render_yaml(&profile_doc).as_bytes())
             .map_err(|m| reject("io_error", m))?;
         let host_rendered = serde_json::to_string_pretty(host_doc)
-            .map_err(|_| reject("invalid_host", "host.json을 직렬화하지 못했어요"))?;
+            .map_err(|_| reject("invalid_host", "failed to serialize host.json"))?;
         txn.write_file(ctx.host_path, format!("{host_rendered}\n").as_bytes())
             .map_err(|m| reject("io_error", m))?;
 

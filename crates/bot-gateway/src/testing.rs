@@ -1,4 +1,4 @@
-//! 시험·데모 보조: 합성 프로필 스냅샷 조립기와 메모리 가짜 저장소. 운영 빌드에는 넣지 않는다(`testing` 기능).
+//! Test and demo helpers providing synthetic profile fixtures and in-memory port doubles (`testing` feature).
 pub mod api;
 pub mod cards;
 pub mod catalog;
@@ -29,7 +29,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// 합성 스냅샷 조립기. 에이전트·바인딩·멤버·트리거만 채우고 나머지는 비워 둔다.
 pub struct Fixture {
     snapshot: Snapshot,
 }
@@ -104,27 +103,24 @@ impl Fixture {
         self
     }
 
-    /// 에이전트를 하나 더 둔다(`main`과 같은 모양, 스코프만 다르다)
     pub fn agent(mut self, id: &str, scopes: &[&str]) -> Self {
         let mut agent = self
             .snapshot
             .agents
             .get(&self.snapshot.root)
-            .expect("루트 에이전트가 있어야 해요")
+            .expect("root agent must exist")
             .clone();
         agent.scopes = scopes.iter().map(|s| s.to_string()).collect();
-        // 트리거는 선언한 에이전트만 소유한다
         agent.triggers = Vec::new();
         self.snapshot.agents.insert(AgentId(id.into()), agent);
         self
     }
 
-    /// 에이전트가 가진 스코프(에이전트 상한)
     pub fn agent_scopes(mut self, agent: &str, scopes: &[&str]) -> Self {
         self.snapshot
             .agents
             .get_mut(&AgentId(agent.into()))
-            .expect("에이전트가 있어야 해요")
+            .expect("agent must exist")
             .scopes = scopes.iter().map(|s| s.to_string()).collect();
         self
     }
@@ -138,7 +134,7 @@ impl Fixture {
         self.snapshot
             .agents
             .get_mut(&AgentId(agent.into()))
-            .expect("에이전트가 있어야 해요")
+            .expect("agent must exist")
             .triggers
             .push(trigger);
         self
@@ -151,7 +147,6 @@ impl Fixture {
 
 pub use catalog::catalog;
 
-/// 사건 트리거(`on: {event: message, binding}`)
 pub fn event_trigger(id: &str, binding: &str, target: TriggerTarget) -> Trigger {
     Trigger {
         id: id.into(),
@@ -170,7 +165,6 @@ pub fn event_trigger(id: &str, binding: &str, target: TriggerTarget) -> Trigger 
     }
 }
 
-/// 다른 사건 이름(`thread-reply`·`reaction`)을 받는 사건 트리거
 pub fn event_trigger_on(id: &str, binding: &str, event: &str, target: TriggerTarget) -> Trigger {
     let mut trigger = event_trigger(id, binding, target);
     if let TriggerSource::Event { event: name, .. } = &mut trigger.on {
@@ -179,7 +173,6 @@ pub fn event_trigger_on(id: &str, binding: &str, event: &str, target: TriggerTar
     trigger
 }
 
-/// HTTP 트리거(`on: {http: {method, path}, binding}`)
 pub fn http_trigger(
     id: &str,
     binding: &str,
@@ -206,7 +199,6 @@ pub fn http_trigger(
     }
 }
 
-/// HTTP 트리거의 응답 방식을 `sync`로 바꾼다.
 pub fn sync(mut trigger: Trigger) -> Trigger {
     if let TriggerSource::Http { response, .. } = &mut trigger.on {
         *response = ResponseMode::Sync;
@@ -221,7 +213,6 @@ pub fn tool_target(tool: &str, args: &str) -> TriggerTarget {
     }
 }
 
-/// 접수된 요청 한 건(원문 확인용)
 #[derive(Clone, Debug)]
 pub struct Accepted {
     pub reply_transport: Option<PushTransportId>,
@@ -232,19 +223,13 @@ pub struct Accepted {
     pub approver: Option<String>,
     pub scopes: Vec<String>,
     pub revision: String,
-    /// `종류:id:thread`
     pub conversation: String,
-    /// HTTP 입구면 `METHOD /path`
     pub http: Option<String>,
-    /// 접수 때 저장한 HTTP 경로·응답 방식(조회가 돌려준다)
     pub route: Option<HttpRoute>,
-    /// 어댑터가 덧붙인 인증된 Slack 이벤트 원천
     pub source: Option<SlackSource>,
-    /// 접수가 남긴 넘김 후보 사슬
     pub chain: Option<PassChain>,
 }
 
-/// 같은 키·같은 내용은 기존 run, 다른 내용은 충돌인 메모리 저장소. 접수 순서와 결과를 시험이 직접 만진다.
 #[derive(Default)]
 pub struct MemoryStore {
     inner: Mutex<Inner>,
@@ -252,7 +237,6 @@ pub struct MemoryStore {
 
 #[derive(Default)]
 struct Inner {
-    /// 키 → (입력 지문, 접수 기록)
     accepted: BTreeMap<String, (String, Accepted)>,
     states: BTreeMap<String, (RunState, Option<JsonPayload>)>,
     fail_next: Option<Error>,
@@ -284,19 +268,16 @@ impl MemoryStore {
         all
     }
 
-    /// 이 요청의 저장된 HTTP 경로·응답 방식을 지운다(이 메타가 생기기 전의 옛 행을 흉내 낸다).
     pub fn forget_route(&self, key: &RequestKey) {
         if let Some((_, accepted)) = self.inner.lock().unwrap().accepted.get_mut(&key_text(key)) {
             accepted.route = None;
         }
     }
 
-    /// 다음 접수 한 번을 이 오류로 실패시킨다.
     pub fn fail_next(&self, error: Error) {
         self.inner.lock().unwrap().fail_next = Some(error);
     }
 
-    /// run의 상태·결과를 정한다(워커가 끝낸 것처럼).
     pub fn set_state(&self, key: &RequestKey, state: RunState, result: Option<&str>) {
         self.inner.lock().unwrap().states.insert(
             key_text(key),
@@ -433,12 +414,10 @@ impl RunStore for MemoryStore {
     }
 }
 
-/// 게이트웨이가 쓰지 않는 포트 메서드
 fn unavailable<T: Send + 'static>() -> Reply<'static, T> {
     Box::pin(std::future::ready(Err(Error::Unavailable)))
 }
 
-/// 민감 DM 전용 입구를 흉내 낸다: 원문을 이 안에만 두고 같은 키의 재전달은 한 번만 센다.
 #[derive(Default)]
 pub struct MemoryPrivate {
     inner: Mutex<PrivateInner>,
@@ -456,7 +435,6 @@ impl MemoryPrivate {
         Arc::new(Self::default())
     }
 
-    /// (도구, 인자 원문) 목록. 같은 키 재전달은 한 건이다.
     pub fn received(&self) -> Vec<(String, String)> {
         self.inner
             .lock()
@@ -497,7 +475,6 @@ impl PrivateIntake for MemoryPrivate {
     }
 }
 
-/// 프로필별 이름 공간만 보는 메모리 SecretStore(시험용). 값은 Debug로 찍히지 않는다.
 pub struct MemorySecrets {
     values: Mutex<BTreeMap<(String, String), Vec<u8>>>,
 }
@@ -516,7 +493,6 @@ impl MemorySecrets {
         })
     }
 
-    /// 값을 지운다(운영자가 보관소에서 자격을 없앤 것을 흉내 낸다: 이후 `resolve`는 `Missing`이다).
     pub fn remove(&self, profile: &str, name: &str) {
         self.values
             .lock()
@@ -524,7 +500,6 @@ impl MemorySecrets {
             .remove(&(profile.to_owned(), name.to_owned()));
     }
 
-    /// 값을 바꾼다(운영자가 보관소의 토큰을 교체한 것을 흉내 낸다).
     pub fn set(&self, profile: &str, name: &str, value: &[u8]) {
         self.values
             .lock()
@@ -558,7 +533,6 @@ impl SecretStore for MemorySecrets {
     }
 }
 
-/// 끝난 스팬을 모아 두는 계측 수신처(시험용)
 #[derive(Default)]
 pub struct RecordingTracer {
     spans: Mutex<Vec<SpanRecord>>,
@@ -573,7 +547,6 @@ impl RecordingTracer {
         self.spans.lock().unwrap().clone()
     }
 
-    /// 이름이 `name`인 스팬들
     pub fn named(&self, name: &str) -> Vec<SpanRecord> {
         self.spans()
             .into_iter()
@@ -581,7 +554,7 @@ impl RecordingTracer {
             .collect()
     }
 
-    /// 이름이 `name`인 스팬이 `count`개 이상 기록될 때까지(최대 5초) 기다린다. 스팬은 응답을 보낸 **뒤에** 기록될 수 있어, 응답이 도착했다고 바로 세면 흔들린다.
+    /// Waits up to 5 seconds for at least `count` spans with `name` (spans may flush right after responses).
     pub async fn until_named(&self, name: &str, count: usize) -> bool {
         for _ in 0..500 {
             if self.named(name).len() >= count {

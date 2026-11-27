@@ -1,6 +1,4 @@
-//! 호스트 등록부의 `gateway` 절(BOT_HOST_CONFIG JSON). 프로필이 쓰는 별칭을 실제 워크스페이스·채널·OS 사용자·
-//! 인증된 HTTP 입구에 연결하고, 어댑터 자격의 **이름**(값이 아니라)과 속도·본문 한도를 정한다.
-//! 모르는 필드는 거절하고, 오류에는 필드 경로만 싣고 값은 싣지 않는다.
+//! Host registry `gateway` section parsing and validation without echoing secret values.
 use crate::{identity::is_alias, limits::Limits};
 use bot_core::id::SecretName;
 use serde::Deserialize;
@@ -24,20 +22,19 @@ pub struct HostConfig {
     pub http: HttpHost,
     #[serde(default)]
     pub limits: LimitsHost,
-    /// 승인 카드를 Slack에 그대로 담을 수 없을 때 안내할 인증된 관리 화면 주소(선택)
+    /// Optional authenticated Admin UI URL linked when an approval card cannot fit in Slack.
     pub admin_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliHost {
-    /// 생략하면 `default_socket()`
     pub socket: Option<String>,
     #[serde(default)]
     pub accounts: BTreeMap<String, CliAccount>,
 }
 
-/// 별칭이 가리키는 OS 사용자. `os_user`와 `uid` 중 정확히 하나.
+/// OS user mapping for a CLI alias; exactly one of `os_user` or `uid` must be set.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliAccount {
@@ -52,15 +49,12 @@ pub struct SlackHost {
     pub workspaces: BTreeMap<String, SlackWorkspace>,
 }
 
-/// 수신 방식 선언(`receive`, 생략하면 `socket`). 읽기만 하고 이 모듈 안의 `validate`만 본다: `http`는 받아 줄 수신기가 없어 이름을 밝혀 거절하므로
-/// 검증을 통과한 워크스페이스는 모두 소켓으로 받는다. 바깥 코드가 수신 방식을 가를 일이 없도록 이 타입과 필드는 비공개다.
+/// Kept private because `validate` rejects `http`; all validated workspaces use Socket Mode.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum Receive {
-    /// 앱 토큰으로 Socket Mode 세션을 연다(공개 주소가 필요 없다).
     #[default]
     Socket,
-    /// Events API·버튼을 HTTP로 받는 방식. 수신기가 없어 선언만 읽는다.
     Http,
 }
 
@@ -68,33 +62,29 @@ enum Receive {
 #[serde(deny_unknown_fields)]
 pub struct SlackWorkspace {
     pub team_id: String,
-    /// 있으면 소켓 hello가 이 앱이 아닐 때 멈춘다.
     pub app_id: Option<String>,
-    /// 자격 이름. 값은 바인딩 소유 프로필의 `bot/<profile>/<name>`에서 읽는다.
+    /// Secret name resolved under `bot/<profile>/<name>` for the binding-owning profile.
     pub bot_token: String,
     pub app_token: Option<String>,
-    /// 자격 이름. 지금은 이름 모양만 검사하고 쓰지 않는다(HTTP 수신기가 생길 때 쓴다). 활성화 지문에는 들어가며, 이미 이 키를 적은 설정이 거절되지 않게 남긴다.
+    /// Secret name retained for activation fingerprint stability and future HTTP ingress support.
     pub signing_secret: Option<String>,
     #[serde(default)]
     pub channels: BTreeMap<String, String>,
-    /// 이 워크스페이스에서 봇과의 1:1 DM 입구(`dm: true` 바인딩)를 연다. 운영자가 명시해야 한다.
+    /// Explicit opt-in enabling 1:1 DM bindings (`dm: true`) for this workspace.
     #[serde(default)]
     pub dm: bool,
     #[serde(default)]
     receive: Receive,
 }
 
-/// 읽기(`Deserialize`)는 `host/openai.rs`가 한다: `endpoints`의 각 입구를 `kind`로 갈라 웹훅은 `endpoints`에, OpenAI는 `openai`에 담는다.
+/// Deserialized by `host/openai.rs`, splitting `endpoints` by `kind` into `endpoints` (webhook) and `openai`.
 #[derive(Clone, Debug, Default)]
 pub struct HttpHost {
-    /// 생략하면 `127.0.0.1:8788`(관리 화면의 기본 `127.0.0.1:8787`과 겹치지 않는다)
+    /// Defaults to `127.0.0.1:8788` (distinct from Admin UI's default `127.0.0.1:8787`).
     pub listen: Option<String>,
-    /// 루프백이 아닌 주소(`listen`)를 열어도 된다는 운영자의 명시(관리 화면의 `remote`와 같은 뜻). 이 입구는 TLS 없는 평문 HTTP라서 베어러 토큰이 그대로 오간다 —
-    /// 켜려면 TLS를 맡는 프록시·사설망 뒤인지 먼저 확인한다. 생략하면 루프백만 열린다.
+    /// Explicit opt-in to bind non-loopback addresses over plaintext HTTP (use only behind TLS/private network).
     pub remote: bool,
-    /// 웹훅 입구(발급자·대상·키 이름의 JWT). `kind`를 생략하거나 `webhook`이면 여기에 담긴다.
     pub endpoints: BTreeMap<String, HttpEndpoint>,
-    /// OpenAI 호환 입구(`kind: openai`, 정적 API 키 슬롯). 같은 JSON 객체 `endpoints`에 쓴다.
     pub openai: BTreeMap<String, OpenAiEndpoint>,
 }
 
@@ -103,11 +93,9 @@ pub struct HttpHost {
 pub struct HttpEndpoint {
     pub issuer: String,
     pub audience: String,
-    /// HS256 키의 자격 이름
+    /// HS256 secret name.
     pub key: String,
-    /// sync 응답을 기다리는 최대 시간(ms). 생략하면 10초, 넘으면 202로 바꾼다.
     pub sync_wait_ms: Option<u64>,
-    /// 있으면 토큰의 남은 수명(exp − 지금)이 이보다 길 때 거절한다.
     pub max_token_age_secs: Option<u64>,
 }
 
@@ -138,7 +126,6 @@ fn bad(path: &str, why: &str) -> HostError {
     HostError(format!("gateway.{path}: {why}"))
 }
 
-/// Slack ID(`T…`·`C…`·`A…`): 대문자·숫자
 pub(crate) fn is_slack_id(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 32
@@ -157,23 +144,25 @@ fn is_os_user(text: &str) -> bool {
 }
 
 fn secret(path: &str, name: &str) -> Result<(), HostError> {
-    SecretName::parse(name)
-        .map(|_| ())
-        .ok_or_else(|| bad(path, "자격 이름은 63자 이내 소문자 kebab-case여야 해요"))
+    SecretName::parse(name).map(|_| ()).ok_or_else(|| {
+        bad(
+            path,
+            "secret name must be lowercase kebab-case within 63 chars",
+        )
+    })
 }
 
 impl HostConfig {
-    /// `gateway` 절의 JSON 값을 읽고 검사한다.
     pub fn from_value(value: serde_json::Value) -> Result<Self, HostError> {
         let config: HostConfig = serde_json::from_value(value)
-            .map_err(|e| HostError(format!("gateway 절을 읽지 못했어요: {e}")))?;
+            .map_err(|e| HostError(format!("failed to parse gateway section: {e}")))?;
         config.validate()?;
         Ok(config)
     }
 
     pub fn from_json(text: &str) -> Result<Self, HostError> {
         let value = serde_json::from_str(text)
-            .map_err(|e| HostError(format!("gateway 절을 읽지 못했어요: {e}")))?;
+            .map_err(|e| HostError(format!("failed to parse gateway section: {e}")))?;
         Self::from_value(value)
     }
 
@@ -181,13 +170,16 @@ impl HostConfig {
         for (alias, account) in &self.cli.accounts {
             let path = format!("cli.accounts.{alias}");
             if !is_alias(alias) {
-                return Err(bad(&path, "별칭은 63자 이내 소문자 kebab-case여야 해요"));
+                return Err(bad(
+                    &path,
+                    "alias must be lowercase kebab-case within 63 chars",
+                ));
             }
             match (&account.os_user, account.uid) {
                 (Some(user), None) if is_os_user(user) => {}
                 (None, Some(_)) => {}
-                (Some(_), None) => return Err(bad(&path, "os_user 모양이 올바르지 않아요")),
-                _ => return Err(bad(&path, "os_user와 uid 중 정확히 하나를 적어야 해요")),
+                (Some(_), None) => return Err(bad(&path, "invalid os_user format")),
+                _ => return Err(bad(&path, "must specify exactly one of os_user or uid")),
             }
         }
         if let Some(socket) = &self.cli.socket
@@ -195,25 +187,28 @@ impl HostConfig {
         {
             return Err(bad(
                 "cli.socket",
-                "절대 경로이고 100바이트 이하여야 해요(유닉스 소켓 주소 한도)",
+                "must be an absolute path of at most 100 bytes (Unix socket limit)",
             ));
         }
         let mut teams: BTreeMap<&str, &str> = BTreeMap::new();
         for (alias, ws) in &self.slack.workspaces {
             let path = format!("slack.workspaces.{alias}");
             if !is_alias(alias) {
-                return Err(bad(&path, "별칭은 63자 이내 소문자 kebab-case여야 해요"));
+                return Err(bad(
+                    &path,
+                    "alias must be lowercase kebab-case within 63 chars",
+                ));
             }
             if !is_slack_id(&ws.team_id) {
-                return Err(bad(&path, "team_id 모양이 올바르지 않아요"));
+                return Err(bad(&path, "invalid team_id format"));
             }
             if ws.app_id.as_deref().is_some_and(|id| !is_slack_id(id)) {
-                return Err(bad(&path, "app_id 모양이 올바르지 않아요"));
+                return Err(bad(&path, "invalid app_id format"));
             }
             if let Some(first) = teams.insert(&ws.team_id, alias) {
                 return Err(bad(
                     &path,
-                    &format!("같은 team_id를 {first}도 써요(주체 별칭이 모호해져요)"),
+                    &format!("duplicate team_id also used by {first} (ambiguous principal alias)"),
                 ));
             }
             secret(&format!("{path}.bot_token"), &ws.bot_token)?;
@@ -227,29 +222,26 @@ impl HostConfig {
             }
             match ws.receive {
                 Receive::Socket if ws.app_token.is_none() => {
-                    return Err(bad(&path, "receive=socket이면 app_token이 필요해요"));
+                    return Err(bad(&path, "app_token is required when receive=socket"));
                 }
                 Receive::Socket => {}
-                // HTTP 수신기(Events API·버튼 요청, 서명·재전송 검사)가 아직 없다: 서명 비밀을 줘도 메시지·승인 버튼을 받지 못하므로 조용히 건너뛰지 않고 이름을 밝혀 거절한다
+                // Reject explicitly rather than silently ignoring because no Slack HTTP receiver exists.
                 Receive::Http => {
                     return Err(bad(
                         &format!("{path}.receive"),
-                        "http 수신은 아직 지원하지 않아요 — 이 워크스페이스는 socket(app_token)으로만 받을 수 있어요",
+                        "http receive is not supported yet — this workspace must use socket (app_token)",
                     ));
                 }
             }
             for (channel_alias, id) in &ws.channels {
                 let channel_path = format!("{path}.channels.{channel_alias}");
                 if !is_alias(channel_alias) || !is_slack_id(id) {
-                    return Err(bad(
-                        &channel_path,
-                        "별칭 또는 채널 ID 모양이 올바르지 않아요",
-                    ));
+                    return Err(bad(&channel_path, "invalid alias or channel ID format"));
                 }
                 if id.starts_with('D') {
                     return Err(bad(
                         &channel_path,
-                        "1:1 DM 채널은 채널이 아니라 dm 바인딩으로 받아요",
+                        "1:1 DM channels must use a dm binding, not a channel entry",
                     ));
                 }
             }
@@ -259,34 +251,43 @@ impl HostConfig {
                 || url.len() > 200
                 || url.chars().any(|c| c.is_whitespace() || c.is_control()))
         {
-            return Err(bad("admin_url", "http(s) 주소여야 하고 공백이 없어야 해요"));
+            return Err(bad(
+                "admin_url",
+                "must be an http(s) URL without whitespace or control characters",
+            ));
         }
         if let Some(listen) = &self.http.listen {
             let Ok(addr) = listen.parse::<SocketAddr>() else {
-                return Err(bad("http.listen", "host:port 모양이어야 해요"));
+                return Err(bad("http.listen", "must be in host:port format"));
             };
-            // 평문 HTTP 입구를 루프백 밖에 여는 것은 운영자가 명시해야 한다(`::ffff:127.0.0.1` 같은 매핑 주소는 본래 주소로 본다)
+            // Canonicalize IPv4-mapped IPv6 addresses such as `::ffff:127.0.0.1`.
             if !self.http.remote && !addr.ip().to_canonical().is_loopback() {
                 return Err(bad(
                     "http.listen",
-                    "루프백이 아닌 주소는 TLS 없이 열 수 없어요 — TLS를 맡는 프록시나 보호된 망 뒤에서 정말 필요하면 http.remote를 true로 명시해 주세요",
+                    "cannot bind non-loopback address without TLS — set http.remote to true only behind a TLS proxy or private network",
                 ));
             }
         }
         for (alias, endpoint) in &self.http.endpoints {
             let path = format!("http.endpoints.{alias}");
             if !is_alias(alias) {
-                return Err(bad(&path, "별칭은 63자 이내 소문자 kebab-case여야 해요"));
+                return Err(bad(
+                    &path,
+                    "alias must be lowercase kebab-case within 63 chars",
+                ));
             }
             if alias.starts_with('_') {
-                return Err(bad(&path, "예약된 이름이에요"));
+                return Err(bad(&path, "reserved name"));
             }
             for (field, text) in [
                 ("issuer", &endpoint.issuer),
                 ("audience", &endpoint.audience),
             ] {
                 if text.is_empty() || text.len() > 256 || text.chars().any(char::is_control) {
-                    return Err(bad(&path, &format!("{field}가 비었거나 너무 길어요")));
+                    return Err(bad(
+                        &path,
+                        &format!("{field} must be non-empty and at most 256 chars"),
+                    ));
                 }
             }
             secret(&format!("{path}.key"), &endpoint.key)?;
@@ -294,17 +295,16 @@ impl HostConfig {
                 .sync_wait_ms
                 .is_some_and(|ms| ms == 0 || ms > 60_000)
             {
-                return Err(bad(&path, "sync_wait_ms는 1~60000이어야 해요"));
+                return Err(bad(&path, "sync_wait_ms must be between 1 and 60000"));
             }
             if endpoint.max_token_age_secs == Some(0) {
-                return Err(bad(&path, "max_token_age_secs는 1 이상이어야 해요"));
+                return Err(bad(&path, "max_token_age_secs must be at least 1"));
             }
         }
         openai::validate(&self.http)?;
         self.limits().validate().map_err(|why| bad("limits", why))
     }
 
-    /// 한도 기본값 위에 호스트가 정한 값을 얹는다.
     pub fn limits(&self) -> Limits {
         let base = Limits::default();
         Limits {
@@ -321,7 +321,7 @@ impl HostConfig {
         }
     }
 
-    /// OpenAI 요청 본문 한도: 호스트가 `limits.body_bytes`를 정했으면 그 값(웹훅과 같다, 최대 1 MiB), 생략하면 256 KiB.
+    /// Uses explicit `limits.body_bytes` if configured (up to 1 MiB); otherwise defaults to 256 KiB.
     pub fn openai_body_bytes(&self) -> usize {
         self.limits.body_bytes.unwrap_or(openai::DEFAULT_BODY_BYTES)
     }
@@ -332,10 +332,9 @@ impl HostConfig {
             .as_deref()
             .unwrap_or(DEFAULT_LISTEN)
             .parse()
-            .expect("검사를 통과한 주소")
+            .expect("validated listen address")
     }
 
-    /// Slack team_id → (워크스페이스 별칭, 설정)
     pub fn workspace_by_team(&self, team: &str) -> Option<(&str, &SlackWorkspace)> {
         self.slack
             .workspaces
@@ -345,7 +344,7 @@ impl HostConfig {
     }
 }
 
-/// 별칭이 가리키는 OS 사용자의 uid. `os_user`는 `/usr/bin/id -u`로 푼다(셸을 거치지 않고, 옵션으로 읽힐 수 없는 이름만 통과한다).
+/// Resolves `os_user` directly via `/usr/bin/id -u` without a shell, rejecting leading `-` names.
 pub fn resolve_uid(account: &CliAccount) -> Result<u32, HostError> {
     if let Some(uid) = account.uid {
         return Ok(uid);
@@ -354,19 +353,19 @@ pub fn resolve_uid(account: &CliAccount) -> Result<u32, HostError> {
         .os_user
         .as_deref()
         .filter(|user| is_os_user(user))
-        .ok_or_else(|| HostError("OS 사용자 이름이 올바르지 않아요".into()))?;
+        .ok_or_else(|| HostError("invalid OS user name".into()))?;
     let output = std::process::Command::new("/usr/bin/id")
         .arg("-u")
         .arg(user)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
-        .map_err(|_| HostError("OS 사용자를 확인하지 못했어요(/usr/bin/id 실행 실패)".into()))?;
+        .map_err(|_| HostError("failed to resolve OS user (/usr/bin/id failed)".into()))?;
     String::from_utf8(output.stdout)
         .ok()
         .and_then(|text| text.trim().parse::<u32>().ok())
         .filter(|_| output.status.success())
-        .ok_or_else(|| HostError("호스트에 없는 OS 사용자예요".into()))
+        .ok_or_else(|| HostError("OS user does not exist on host".into()))
 }
 
 #[cfg(test)]
@@ -398,10 +397,8 @@ mod tests {
         HostConfig::from_json(json).unwrap_err().to_string()
     }
 
-    /// 평문 HTTP 입구는 루프백에서만 열린다. 루프백 밖은 운영자가 `http.remote`로 명시해야 하고, 거절은 필드 경로(`gateway.http.listen`)와 고치는 법을 밝힌다.
     #[test]
     fn a_plain_http_entrance_opens_beyond_loopback_only_when_the_operator_says_so() {
-        // 생략하면 기본 주소(루프백)라 그대로 열린다
         assert!(HostConfig::from_json("{}").is_ok());
         for local in [
             "127.0.0.1:8788",
@@ -427,12 +424,10 @@ mod tests {
             let message = rejects(&json);
             assert!(
                 message.starts_with("gateway.http.listen: ") && message.contains("http.remote"),
-                "{beyond} → {message}"
+                "{beyond} -> {message}"
             );
-            // 값(주소)은 오류에 싣지 않는다
             let ip = beyond.parse::<SocketAddr>().unwrap().ip().to_string();
             assert!(!message.contains(&ip), "{message}");
-            // 명시하면 열린다
             let json = format!(r#"{{"http":{{"listen":"{beyond}","remote":true}}}}"#);
             assert_eq!(
                 HostConfig::from_json(&json).unwrap().listen().to_string(),
@@ -440,13 +435,11 @@ mod tests {
                 "{beyond}"
             );
         }
-        // `remote: false`를 적어도 같다. 켜기만 하고 주소를 생략하면 기본 루프백 그대로다
         assert!(
             rejects(r#"{"http":{"listen":"0.0.0.0:8788","remote":false}}"#).contains("http.remote")
         );
         let host = HostConfig::from_json(r#"{"http":{"remote":true}}"#).unwrap();
         assert_eq!(host.listen().to_string(), DEFAULT_LISTEN);
-        // 불리언이 아니면 읽지 못한다(문자열 «yes»를 참으로 받지 않는다)
         assert!(
             HostConfig::from_json(r#"{"http":{"listen":"0.0.0.0:8788","remote":"yes"}}"#).is_err()
         );
@@ -465,35 +458,34 @@ mod tests {
         );
         assert!(!message.contains(&long_secret));
         for (json, needle) in [
-            (r#"{"cli":{"accounts":{"owner":{}}}}"#, "정확히 하나"),
+            (r#"{"cli":{"accounts":{"owner":{}}}}"#, "exactly one"),
             (
                 r#"{"cli":{"accounts":{"owner":{"uid":1,"os_user":"x"}}}}"#,
-                "정확히 하나",
+                "exactly one",
             ),
-            (r#"{"cli":{"accounts":{"Owner":{"uid":1}}}}"#, "별칭"),
-            (r#"{"cli":{"socket":"relative.sock"}}"#, "절대 경로"),
+            (r#"{"cli":{"accounts":{"Owner":{"uid":1}}}}"#, "alias"),
+            (r#"{"cli":{"socket":"relative.sock"}}"#, "absolute path"),
             (r#"{"http":{"listen":"nope"}}"#, "host:port"),
             (
                 r#"{"slack":{"workspaces":{"home":{"team_id":"T1","bot_token":"b"}}}}"#,
-                "app_token이 필요",
+                "app_token is required",
             ),
             (
                 r#"{"slack":{"workspaces":{"home":{"team_id":"T1","bot_token":"b","receive":"http"}}}}"#,
-                "slack.workspaces.home.receive: http 수신은 아직 지원하지 않아요",
+                "slack.workspaces.home.receive: http receive is not supported yet",
             ),
-            // 서명 비밀을 줘도 같다(받는 곳이 없으니 조용히 건너뛰지 않는다)
             (
                 r#"{"slack":{"workspaces":{"home":{"team_id":"T1","bot_token":"b","app_token":"a","signing_secret":"s","receive":"http"}}}}"#,
-                "slack.workspaces.home.receive: http 수신은 아직 지원하지 않아요",
+                "slack.workspaces.home.receive: http receive is not supported yet",
             ),
             (
                 r#"{"slack":{"workspaces":{"home":{"team_id":"T1","bot_token":"b","app_token":"a","channels":{"dm":"D123"}}}}}"#,
-                "dm 바인딩",
+                "dm binding",
             ),
-            (r#"{"limits":{"body_bytes":0}}"#, "본문 한도"),
+            (r#"{"limits":{"body_bytes":0}}"#, "body_bytes"),
             (
                 r#"{"http":{"endpoints":{"_requests":{"issuer":"i","audience":"a","key":"k"}}}}"#,
-                "별칭",
+                "alias",
             ),
             (
                 r#"{"http":{"endpoints":{"x":{"issuer":"i","audience":"a","key":"k","sync_wait_ms":0}}}}"#,
@@ -501,7 +493,7 @@ mod tests {
             ),
         ] {
             let message = rejects(json);
-            assert!(message.contains(needle), "{json} → {message}");
+            assert!(message.contains(needle), "{json} -> {message}");
         }
     }
 
@@ -512,6 +504,6 @@ mod tests {
                 "a":{"team_id":"T1","bot_token":"b","app_token":"t"},
                 "b":{"team_id":"T1","bot_token":"b","app_token":"t"}}}}"#,
         );
-        assert!(message.contains("같은 team_id"), "{message}");
+        assert!(message.contains("duplicate team_id"), "{message}");
     }
 }

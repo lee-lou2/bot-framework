@@ -1,6 +1,4 @@
-//! 운영자 인증: Host 확인(421) → 실패 한도(429) → 비밀 비교(401). 화면·조회·판정이 같은 길을 지난다.
-//! 비밀은 해시로만 쥐고 모든 항목을 상수 시간으로 견주며 값은 어디에도 싣지 않는다.
-//! 바꾸는 요청(POST)은 추가로 CSRF 방어를 거친다: 교차 출처 거절, 서버가 발급한 토큰 헤더, JSON 본문.
+//! Admin authentication middleware: Host check (421), per-IP rate limit (429), constant-time auth (401), and CSRF (403).
 
 use crate::resp::reply;
 use axum::{
@@ -18,11 +16,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// 비밀 후보 → 신원. 구현은 모든 후보를 같은 시간에 처리해야 한다(조기 반환 금지).
+/// Resolves a candidate secret to a `Viewer`; implementations must evaluate all entries in constant time.
 pub trait Authenticator: Send + Sync {
     fn identify(&self, secret: &[u8]) -> Option<Viewer>;
 
-    /// 받아 줄 신원이 하나도 없으면 거짓이다. 거짓이면 관리 라우트를 만들지 않는다(닫힌 채 시작).
+    /// When false, `router` returns `None` so admin routes stay closed.
     fn enabled(&self) -> bool {
         true
     }
@@ -32,7 +30,6 @@ pub fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-/// 해시한 뒤 XOR 누적으로 견준다(길이와 내용에 걸리는 시간이 같다).
 fn same(candidate: &[u8; 32], stored: &[u8; 32]) -> bool {
     candidate
         .iter()
@@ -41,7 +38,6 @@ fn same(candidate: &[u8; 32], stored: &[u8; 32]) -> bool {
         == 0
 }
 
-/// 시작할 때 정한 고정 비밀 표. 빈 비밀은 받지 않는다.
 #[derive(Default)]
 pub struct StaticTokens {
     entries: Vec<([u8; 32], Viewer)>,
@@ -100,7 +96,6 @@ impl Limiter {
         }
     }
 
-    /// 차단 중이면 남은 시간.
     fn check(&mut self, now: Instant) -> Result<(), Duration> {
         match self.blocked_until {
             Some(t) if now < t => Err(t - now),
@@ -113,7 +108,6 @@ impl Limiter {
         }
     }
 
-    /// 아직 기억해 둘 이유가 있는가(차단 중이거나 집계 창 안에 실패가 남음).
     fn active(&self, now: Instant) -> bool {
         self.blocked_until.is_some_and(|t| now < t)
             || self
@@ -137,8 +131,7 @@ impl Limiter {
     }
 }
 
-/// 접속 출처(피어 IP)마다 따로 세는 실패 예산: 한 출처의 실패가 다른 출처의 정상 운영자를 막지 않는다.
-/// 피어 주소를 알 수 없는 경로(`ConnectInfo` 없음)는 한 칸을 같이 쓴다. 기억하는 출처 수는 한정한다.
+/// Per-peer-IP failure budgets (shared `None` bucket when `ConnectInfo` is absent), capped at `MAX_SOURCES`.
 struct Limiters {
     by: HashMap<Option<IpAddr>, Limiter>,
     max: usize,
@@ -179,7 +172,6 @@ impl Limiters {
     }
 }
 
-/// 허용하는 `Host` 값(소문자, 포트 포함): 바인드 주소와 루프백 이름, 운영자가 더한 값.
 pub fn hosts_for(bind: SocketAddr, extra: &[String]) -> Vec<String> {
     let port = bind.port();
     let mut hosts = vec![
@@ -203,7 +195,6 @@ fn random_key() -> [u8; 32] {
     bot_core::random::bytes::<32>()
 }
 
-/// 새 운영자 비밀: 무작위 32바이트의 16진 64자(운영체제 난수). 시작할 때 만들어 메모리에만 두고 안내한다.
 pub fn new_token() -> String {
     crate::json::hex(&random_key())
 }
@@ -224,7 +215,6 @@ impl Guard {
         })
     }
 
-    /// 신원에 묶인 CSRF 토큰. 인증된 GET으로만 알 수 있어 다른 출처의 페이지는 읽을 수 없다.
     pub fn csrf(&self, viewer: &Viewer) -> String {
         let mut h = Sha256::new();
         h.update(self.csrf_key);
@@ -294,7 +284,7 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// `Authorization`에서 비밀 후보를 꺼낸다: `Bearer <값>`(CLI·시험) 또는 `Basic base64(<이름>:<값>)`(브라우저, 이름은 무시).
+/// Extracts a candidate secret from `Bearer <secret>` or `Basic base64(<user>:<secret>)` (username ignored).
 fn credential(h: &HeaderMap) -> Option<Vec<u8>> {
     let v = h.get(header::AUTHORIZATION)?.to_str().ok()?;
     if let Some(t) = v.strip_prefix("Bearer ") {
@@ -314,7 +304,6 @@ fn unauthorized() -> Response {
     r
 }
 
-/// Host 확인(421) → 실패 한도(429) → 비밀 비교(401) → 바꾸는 요청의 CSRF(403). 통과하면 `Viewer`를 요청에 싣는다.
 pub async fn guard(State(g): State<Arc<Guard>>, mut req: Request, next: Next) -> Response {
     if !g.host_ok(req.headers()) {
         return reply(StatusCode::MISDIRECTED_REQUEST, "host");
@@ -336,8 +325,7 @@ pub async fn guard(State(g): State<Arc<Guard>>, mut req: Request, next: Next) ->
         }
         return r;
     }
-    // 자격 헤더가 아예 없는 요청은 추측이 아니라 브라우저의 첫 요청(로그인 창을 띄우는 401)이므로 실패로 세지 않는다.
-    // 헤더가 있는데 맞지 않거나 읽을 수 없으면 추측으로 보고 센다.
+    // Requests without an Authorization header are initial browser prompts, not credential guesses.
     let offered = req.headers().contains_key(header::AUTHORIZATION);
     let viewer = credential(req.headers()).and_then(|c| g.auth.identify(&c));
     let Some(viewer) = viewer else {

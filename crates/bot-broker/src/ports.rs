@@ -1,4 +1,4 @@
-//! 브로커 내부 포트. 저장소·프로필·감사·효과 포트는 bot-core(`ledger`·`profile`·`port`)를 쓴다.
+//! Internal broker ports for argument sealing and sandboxed tool execution.
 
 use crate::resolve::Resolved;
 use bot_core::{
@@ -9,82 +9,76 @@ use bot_core::{
     state::{Conversation, RunOrigin},
 };
 
-/// 인자를 검증하고 정규화한 결과. `canonical`의 바이트가 곧 해시한 바이트이며 도구가 받는 바이트다.
+/// Validated and RFC 8785 canonicalized arguments; `canonical` bytes are both hashed and sent to the tool.
 #[derive(Clone, Debug)]
 pub struct Sealed {
     pub canonical: String,
     pub sha256: [u8; 32],
-    /// 명시적 목적지가 가리키는 (수신자, 내용). 결정할 수 없으면 `seal`이 거절한다.
+    /// Extracted `(recipient, content)` for explicit destinations; `seal` fails if unresolved.
     pub destination: Option<(String, String)>,
 }
 
 pub trait Sealer: Send + Sync {
-    /// 입력 스키마 검증 → 목적지 확정 → RFC 8785 정규화 → SHA-256. 실패는 `Invalid`.
     fn seal(&self, tool: &Tool, args: &JsonPayload) -> Result<Sealed, Error>;
 }
 
-/// 승인까지 끝난 호출 한 건.
 #[derive(Clone, Debug)]
 pub struct ToolJob {
     pub attempt: Attempt,
-    /// 접수 때 인증한 주체. 위임·승인·재개에도 같은 주체로 데이터 범위를 정한다.
     pub principal: PrincipalId,
-    /// 루트 접수 원장이 정한 진행 출처(`_meta["bot/trigger"]`). 위임·재개에도 보존되며 모델 인자·요청 ID·본문으로 추정하지 않는다.
+    /// Root intake origin propagated into `_meta["bot/trigger"]` across delegation and resume.
     pub origin: RunOrigin,
     pub call: CallId,
     pub tool: Resolved,
-    /// 정규화한 인자(해시한 바이트 그대로).
+    /// Exact canonical argument bytes matching the approved SHA-256 digest.
     pub args: String,
-    /// 도구가 고른(`Tool.env`) 비밀 아닌 환경 변수의 이름·값. 호출하는 에이전트의 환경에서 고정 판본과 현재 판본이 같은 값을 줄 때만
-    /// 채워진다(`resolve::selected_env`). 호스트 환경(`process.env`)으로는 채우지 않는다.
+    /// Non-secret agent env vars selected by `Tool.env` only when pinned and current revisions agree.
     pub env: Vec<(String, String)>,
-    /// `Destination::Reply`일 때 고정된 원래 대화.
+    /// Fixed origin conversation for `Destination::Reply`.
     pub reply_to: Option<Conversation>,
-    /// 원장에 기록한 샌드박스 소유 표지.
     pub owner: String,
 }
 
 #[derive(Clone, Debug)]
 pub enum Ran {
     Done(JsonPayload),
-    /// `tools/call`을 보내기 전에 실패(스폰·핸드셰이크·선언 불일치). 미실행이 입증된다.
+    /// Failed before `tools/call` was sent (spawn, handshake, or schema mismatch); proves non-execution.
     NotSent,
-    /// 서버가 호출을 실행하기 전에 확정적으로 거절했다(JSON-RPC 잘못된 요청·없는 메서드·잘못된 인자). 외부 효과는 없다.
+    /// Server deterministically rejected the call before execution (e.g., JSON-RPC `-32602..=-32600`).
     Rejected,
-    /// `tools/call`을 보내기 **전에** 이쪽이 확정적으로 거절했다(서버가 내세우는 도구 정의가 `tools.lock.yaml`과 다름·정의가 사라짐 등). 미실행이 입증되고,
-    /// 호출은 거절로 닫히며 고정 코드가 감사에 남는다(같은 호출을 다시 보내도 같다).
+    /// Broker deterministically refused before `tools/call` (e.g., pinned definition mismatch); closes as denied.
     Refused(&'static str),
-    /// 보냈으나 결과를 모른다(시간 초과·프로세스 종료·연결 끊김·서버 내부 오류).
+    /// Sent with unknown remote outcome (timeout, crash, disconnect, or internal server error).
     Unknown(&'static str),
-    /// 실행은 끝났지만 결과를 막았다(자격 노출·형식·크기).
+    /// Executed, but output was blocked (credential leak, shape, or size violation).
     Blocked(&'static str),
 }
 
 pub trait ToolRunner: Send + Sync {
-    /// 호스트가 이 서버 별칭으로 설치한 실행 파일·이미지의 고정 판본. 설치되지 않았으면 `None`.
-    /// 승인에 묶이므로 승인 뒤 설치가 바뀌면 종전 승인은 무효다.
+    /// Pinned executable/image revision bound into approvals; changing it invalidates prior approvals.
     fn installed(&self, server: &str) -> Option<String>;
-    /// 이 호스트의 샌드박스가 설치한 서버를 실행할 수 있는가. 호출을 기록하거나 자격을 풀기 전에 본다. 호출 간 상태 볼륨을 요구하는
-    /// 서버(`state: required`)를 지원하지 않으면 `Denied`다. 기본은 모두 받는다.
+
+    /// Checks whether the sandbox can run `server` (e.g., rejects `state: required` if unsupported).
     fn admit(&self, _server: &str) -> Result<(), Error> {
         Ok(())
     }
-    /// 도구가 받을 자격(`Tool.secrets`의 이름들)이 지금 이 프로필의 보관소에 있는가. 새 호출을 기록하거나 승인 카드를 만들기 **전에** 본다
-    /// (실행할 수 없는 호출로 사람에게 승인을 받지 않게). 보관소에 그 이름이 없으면 `Missing`이고, 읽지 못하면 다른 오류다(지금만일 수 있어
-    /// «없음»이 아니다). 값은 있는지만 보고 쓰거나 남기지 않는다. 기본은 확인하지 않는다.
+
+    /// Verifies declared secrets exist in the profile store before recording a call or opening an approval card.
     fn admit_secrets(&self, _profile: &ProfileId, _names: &[SecretName]) -> Reply<'_, ()> {
         Box::pin(async { Ok(()) })
     }
-    /// 이 서버로 가는 호출에 쓰는 호스트 쪽 자격 이름들(예: 원격 서버의 bearer). 도구 선언의 `secrets`와 함께 새 호출을 기록하기 전에 보관소에 있는지 본다.
-    /// 기본은 없다.
+
+    /// Host-side secrets required for `server` (e.g., remote bearer token), checked alongside `Tool.secrets`.
     fn server_secrets(&self, _server: &str) -> Vec<SecretName> {
         Vec::new()
     }
+
     fn run(&self, job: ToolJob) -> Reply<'_, Ran>;
-    /// 이전 시도가 남긴 프로세스(자식 포함)가 모두 끝났음을 확인한다. 확인하지 못하면 `Unavailable`.
+
+    /// Proves all processes from an earlier attempt have exited; returns `Unavailable` if unconfirmed.
     fn reap(&self, owner: String) -> Reply<'_, ()>;
-    /// `reap`이 성공하면 이 서버로 간 옛 호출이 **끝났다는 증명**이 되는가. 로컬 샌드박스는 프로세스 그룹이 사라진 것이 증명이다. 원격 서버는 연결을 닫아도
-    /// 원격 실행이 계속될 수 있어 증명이 아니다(`false`): 복구는 보류를 유지하고 관리자의 판정을 기다린다. 기본은 `true`다.
+
+    /// Whether `reap` proves remote work stopped (`true` for local sandboxes, `false` for remote HTTP servers).
     fn reap_proves_end(&self, _server: &str) -> bool {
         true
     }

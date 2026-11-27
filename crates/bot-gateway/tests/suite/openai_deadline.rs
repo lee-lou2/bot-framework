@@ -1,5 +1,4 @@
-//! 기다림·확인이 느릴 때의 기한과 재확인(실제 리스너, 지연 주입): 내보내기 직전 확인도 총 기한 안에 끝나야 하고, 기다리는 동안 읽은 값은 기다림이 끝난 뒤 다시 확인하며,
-//! 스트림은 조회가 멈춰도 keep-alive를 쓰고 끊김을 알아채며, 상대가 읽기를 멈췄다 풀어도 철회된 뒤에는 새 글을 쓰지 않는다.
+//! Deadline, recheck, keep-alive, hangup, and handoff boundary tests under injected latency.
 use crate::openai_support::*;
 use bot_gateway::testing::api::Fault;
 use std::sync::Arc;
@@ -10,9 +9,8 @@ const WITHIN: Duration = Duration::from_secs(10);
 #[tokio::test]
 async fn a_slow_final_check_ends_at_the_total_deadline_with_no_answer() {
     let rig = rig_with(tuned(1000, 5)).await;
-    rig.api
-        .start_as(answer("확인이 끝나기 전에 나가면 안 되는 글"));
-    // 접수가 잠깐 걸리는 사이 저장소가 느려진다: 내보내기 직전 활성 집합 확인만 기한보다 오래 걸린다
+    rig.api.start_as(answer("must not leak before final check"));
+    // Delay active-set verification past the total deadline during slow admission.
     rig.api.fault(Fault::Hang(Duration::from_millis(150)));
     let handle = spawn_chat(&rig, BUILD_KEY, Some("slow1"), ask("assistant", "q"));
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -21,7 +19,7 @@ async fn a_slow_final_check_ends_at_the_total_deadline_with_no_answer() {
     let reply = handle.await.unwrap();
     assert!(
         started.elapsed() < Duration::from_millis(1200),
-        "총 기한을 넘기지 않는다: {:?}",
+        "must respect total deadline: {:?}",
         started.elapsed()
     );
     assert_eq!(
@@ -30,14 +28,14 @@ async fn a_slow_final_check_ends_at_the_total_deadline_with_no_answer() {
         "{}",
         reply.body
     );
-    assert!(!reply.body.contains("나가면 안 되는"));
+    assert!(!reply.body.contains("must not leak"));
 }
 
 #[tokio::test]
 async fn a_slow_check_before_the_stream_opens_is_bounded_and_opens_nothing() {
     let rig = rig_with(tuned(1000, 5)).await;
     rig.api
-        .start_as(answer("스트림 전 확인이 느리면 나가면 안 되는 글"));
+        .start_as(answer("must not leak before stream opens"));
     rig.api.fault(Fault::Hang(Duration::from_millis(100)));
     let handle = spawn_chat(
         &rig,
@@ -60,14 +58,13 @@ async fn a_slow_check_before_the_stream_opens_is_bounded_and_opens_nothing() {
         "{}",
         reply.body
     );
-    assert!(!reply.body.contains("나가면 안 되는"));
+    assert!(!reply.body.contains("must not leak"));
 }
 
 #[tokio::test]
 async fn the_key_is_read_again_just_before_the_stream_opens() {
     let rig = rig_with(tuned(2000, 5)).await;
-    rig.api.start_as(answer("회전 뒤에 나가면 안 되는 글"));
-    // 접수가 느리다: 인증 뒤 접수가 끝나기 전에 키가 회전된다
+    rig.api.start_as(answer("must not leak after rotation"));
     rig.api.fault(Fault::Hang(Duration::from_millis(300)));
     let handle = spawn_chat(
         &rig,
@@ -88,16 +85,16 @@ async fn the_key_is_read_again_just_before_the_stream_opens() {
         reply.body
     );
     assert_eq!(reply.error().1, "invalid_api_key");
-    assert!(!reply.body.contains("나가면 안 되는"));
+    assert!(!reply.body.contains("must not leak"));
 }
 
 #[tokio::test]
 async fn a_list_is_rechecked_after_the_slow_read_it_waited_for() {
-    // 판본 번들 시각을 읽는 동안 키 회전·멤버 철회·집합 교체·판본 교체가 끼어든다: 옛 표로 만든 목록이 나가지 않는다
+    // Concurrent key rotation, revocation, active-set swap, or revision swap during slow bundle read.
     type Disturb = Box<dyn Fn(&Rig)>;
     let cases: Vec<(&str, Disturb, u16, &str)> = vec![
         (
-            "키 회전",
+            "key rotation",
             Box::new(|rig| {
                 rig.secrets.set(
                     "build-key",
@@ -108,7 +105,7 @@ async fn a_list_is_rechecked_after_the_slow_read_it_waited_for() {
             "invalid_api_key",
         ),
         (
-            "멤버 철회",
+            "member revocation",
             Box::new(|rig| {
                 rig.catalog.replace([fixture_shaped(Shape {
                     build_member: false,
@@ -120,13 +117,13 @@ async fn a_list_is_rechecked_after_the_slow_read_it_waited_for() {
             "access_denied",
         ),
         (
-            "다른 프로세스가 집합 교체",
+            "active set swap",
             Box::new(|rig| rig.active.set(Some("set-2"))),
             503,
             "service_unavailable",
         ),
         (
-            "판본 교체",
+            "revision swap",
             Box::new(|rig| {
                 rig.catalog
                     .replace([fixture().revision("personal-r2").build()])
@@ -160,7 +157,7 @@ async fn a_list_is_rechecked_after_the_slow_read_it_waited_for() {
         );
         assert!(
             !reply.body.contains("assistant"),
-            "{name}: 옛 표의 모델이 나가면 안 된다"
+            "{name}: stale model list must not be returned"
         );
     }
 }
@@ -212,13 +209,12 @@ async fn a_stuck_lookup_does_not_stop_the_stream_from_breathing_or_noticing_a_ha
     )
     .await;
     assert!(matches!(sse.next(WITHIN).await, Next::Data(chunk) if chunk.contains("assistant")));
-    // 이제부터 조회가 멈춘다(저장소가 응답하지 않는다)
     rig.api.delay_lookups(Duration::from_secs(30));
     let mut beats = 0;
     while beats < 3 {
         match sse.next(Duration::from_secs(3)).await {
             Next::Data(chunk) if chunk == ": keep-alive\n\n" => beats += 1,
-            other => panic!("조회가 멈춰도 keep-alive가 와야 해요: {other:?}"),
+            other => panic!("expected keep-alive while lookup is stuck: {other:?}"),
         }
     }
     assert_eq!(rig.api.runs(), 1);
@@ -226,7 +222,7 @@ async fn a_stuck_lookup_does_not_stop_the_stream_from_breathing_or_noticing_a_ha
 
 #[tokio::test]
 async fn a_hangup_during_a_stuck_lookup_is_noticed_without_waiting_for_the_next_heartbeat() {
-    // keep-alive는 기본(10초)이다: 다음 주석을 쓰다 끊김을 알아채는 길로는 이 시간 안에 알 수 없다. 끊김 자체를 지켜보아야 멈춘 조회를 곧바로 버린다.
+    // With default 10s keep-alive, disconnect detection must watch hangup directly rather than waiting for a heartbeat.
     let rig = rig_with(tuned(8000, 5)).await;
     let mut sse = Sse::open(
         &rig,
@@ -245,12 +241,12 @@ async fn a_hangup_during_a_stuck_lookup_is_noticed_without_waiting_for_the_next_
     }
     assert!(
         rig.api.dropped_lookups() >= 1,
-        "끊긴 스트림이 멈춘 조회를 계속 기다려요"
+        "disconnected stream kept waiting on stuck lookup"
     );
     assert_eq!(rig.api.runs(), 1);
 }
 
-/// 헤더 끝까지 읽고 `n`개의 데이터 청크를 읽은 뒤 멈춘다(상대가 읽지 않는 상황)
+/// Reads `n` data chunks and stops to simulate a stalled client.
 async fn read_some(sse: &mut Sse, n: usize) -> String {
     let mut text = String::new();
     for _ in 0..n {
@@ -270,15 +266,15 @@ async fn read_some(sse: &mut Sse, n: usize) -> String {
     text
 }
 
-/// 소켓 버퍼·hyper 버퍼를 한참 넘는 긴 글: 상대가 읽지 않으면 조각을 꺼내 가는 쪽(본문)이 멈춘다
+/// Exceeds socket and hyper buffers so a stalled reader pauses body polling (18 MiB of 3-byte UTF-8).
 fn huge() -> String {
-    "가".repeat(6 * 1024 * 1024)
+    "€".repeat(6 * 1024 * 1024)
 }
 
 #[tokio::test]
 async fn after_a_revocation_no_body_chunk_crosses_the_boundary_however_long_or_short_the_reader_stalled()
  {
-    // 상대가 읽기를 멈춘 사이 멤버가 철회된다. 재개한 뒤에는 그 순간 이후 **한 조각도** 본문으로 넘어가지 않고(관찰 지점이 센다) 오류 사건 하나로 닫힌다.
+    // Revoking membership while the reader is stalled must stop all further data handoffs and close with one error event.
     for stall_ms in [250u64, 1500] {
         let handoffs = Handoffs::default();
         let rig = rig_with(Setup {
@@ -296,7 +292,7 @@ async fn after_a_revocation_no_body_chunk_crosses_the_boundary_however_long_or_s
         )
         .await;
         let mut got = read_some(&mut sse, 2).await;
-        // 읽기를 멈춘다: 본문이 hyper 버퍼를 채우고 멈추도록 잠시 둔 뒤 철회한다
+        // Let hyper buffers fill while paused, then revoke membership.
         tokio::time::sleep(Duration::from_millis(400)).await;
         rig.catalog.replace([fixture_shaped(Shape {
             build_member: false,
@@ -309,9 +305,9 @@ async fn after_a_revocation_no_body_chunk_crosses_the_boundary_however_long_or_s
         assert_eq!(
             handoffs.data_after(revoked_at),
             (0, 0),
-            "{stall_ms}ms 정체: 철회 뒤에 본문 조각이 넘어갔어요"
+            "{stall_ms}ms stall: data chunk crossed boundary after revocation"
         );
-        assert_eq!(handoffs.errors(), 1, "오류 사건은 정확히 하나다");
+        assert_eq!(handoffs.errors(), 1, "expected exactly one error event");
         let mut error = None;
         for event in &rest {
             match data_json(event) {
@@ -321,10 +317,13 @@ async fn after_a_revocation_no_body_chunk_crosses_the_boundary_however_long_or_s
                         .as_str()
                         .unwrap_or_default(),
                 ),
-                None => assert_ne!(event, "data: [DONE]\n\n", "철회됐는데 정상 종료가 나갔어요"),
+                None => assert_ne!(
+                    event, "data: [DONE]\n\n",
+                    "must not emit [DONE] after revocation"
+                ),
             }
         }
-        let error = error.expect("철회 뒤 재개한 스트림은 오류 사건으로 끝나야 해요");
+        let error = error.expect("resumed stream after revocation must end with an error event");
         assert_eq!(error["error"]["code"], "access_denied");
         assert!(got.len() < text.len(), "{}/{}", got.len(), text.len());
     }
@@ -349,30 +348,29 @@ async fn after_the_deadline_no_body_chunk_crosses_the_boundary() {
     )
     .await;
     let _ = read_some(&mut sse, 2).await;
-    // 총 기한(1.5초)을 넘겨 읽지 않는다
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    // 서버의 기한은 인증 직후에 시작하므로 요청을 보낸 때보다 조금 늦다: 여유를 두고 «기한 뒤»를 잡는다
+    // Server deadline starts right after auth, so add slack when defining post-deadline.
     let deadline = started + Duration::from_millis(1700);
     let rest = sse.rest(Duration::from_secs(30)).await;
     assert_eq!(
         handoffs.data_after(deadline),
         (0, 0),
-        "기한 뒤에 본문 조각이 넘어갔어요"
+        "data chunk crossed boundary after deadline"
     );
     assert!(
         !rest.iter().any(|event| event == "data: [DONE]\n\n"),
-        "기한을 넘긴 스트림은 정상 종료로 끝날 수 없어요"
+        "expired stream must not emit [DONE]"
     );
     let last = rest
         .last()
         .and_then(|event| data_json(event))
-        .expect("오류 사건");
+        .expect("error event");
     assert_eq!(last["error"]["code"], "request_outcome_unknown");
 }
 
 #[tokio::test]
 async fn a_stalled_reader_whose_recheck_is_slow_gets_nothing_more_after_the_deadline() {
-    // 읽기를 멈췄다 푼 뒤의 재확인이 느리다(저장소 지연 + 철회): 확인을 마치지 못하면 총 기한에서 끊고 정상 종료를 쓰지 않는다
+    // Slow recheck after reader resumes must terminate at the total deadline without [DONE].
     let handoffs = Handoffs::default();
     let rig = rig_with(Setup {
         probe: Some(handoffs.probe()),
@@ -408,21 +406,21 @@ async fn a_stalled_reader_whose_recheck_is_slow_gets_nothing_more_after_the_dead
     assert_eq!(handoffs.data_after(revoked_at), (0, 0));
     assert!(
         !rest.iter().any(|event| event == "data: [DONE]\n\n"),
-        "확인하지 못했는데 정상 종료가 나갔어요"
+        "must not emit [DONE] without completing recheck"
     );
 }
 
 #[tokio::test]
 async fn the_first_chunk_and_the_tail_are_checked_at_the_boundary_too() {
-    // 철회가 첫 청크를 꺼내기 전에 일어나도(헤더 확인과 첫 청크 사이) 역할 청크조차 넘어가지 않는다
+    // Revocation between pre-header check and first chunk must block even the role chunk.
     let handoffs = Handoffs::default();
     let rig = rig_with(Setup {
         probe: Some(handoffs.probe()),
         ..tuned(3000, 5)
     })
     .await;
-    rig.api.start_as(answer("본문"));
-    // 키 보관소는 확인 한 번에 슬롯마다(3개) 읽는다: 인증 한 바퀴, 헤더 전 확인 한 바퀴를 지난 뒤(첫 조각을 꺼내는 확인의 첫 읽기부터) 철회된 상태로 만든다
+    rig.api.start_as(answer("body"));
+    // Each check reads 3 key slots; revoke after auth + pre-header check (2 * SLOTS reads).
     const SLOTS: usize = 3;
     let (catalog, reads) = (
         rig.catalog.clone(),
@@ -448,10 +446,10 @@ async fn the_first_chunk_and_the_tail_are_checked_at_the_boundary_too() {
     assert_eq!(
         handoffs.data_total(),
         0,
-        "철회됐는데 본문 조각이 넘어갔어요: {rest:?}"
+        "data chunk crossed boundary after revocation: {rest:?}"
     );
     assert_eq!(handoffs.errors(), 1);
-    let error = data_json(rest.last().unwrap()).expect("오류 사건");
+    let error = data_json(rest.last().unwrap()).expect("error event");
     assert!(
         ["access_denied", "model_not_found"].contains(&error["error"]["code"].as_str().unwrap()),
         "{error}"
@@ -479,8 +477,17 @@ async fn shutting_down_ends_a_stream_even_while_a_lookup_is_stuck() {
         "{:?}",
         started.elapsed()
     );
-    assert!(
-        rest.concat().contains("작업을 처리 중입니다."),
-        "마지막으로 확인한 상태로 안내하고 끝낸다: {rest:?}"
+    let text: String = rest
+        .iter()
+        .filter_map(|chunk| data_json(chunk))
+        .filter_map(|v| {
+            v["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(
+        text, RUNNING,
+        "shutdown should end with the last known progress notice: {rest:?}"
     );
 }

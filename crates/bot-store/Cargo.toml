@@ -17,5 +17,5 @@ tracing.workspace = true
 [dev-dependencies]
 bot-admin = { workspace = true, features = ["testing"] }
 reqwest.workspace = true
-# 실제 BrokerService를 PG 원장 위에서 돌리는 통합 시험(tests/broker_flow.rs). 운영 빌드에는 들어가지 않는다.
+# Integration test running BrokerService against the PG ledger (tests/broker_flow.rs); excluded from production builds.
 bot-broker = { workspace = true, features = ["testing"] }

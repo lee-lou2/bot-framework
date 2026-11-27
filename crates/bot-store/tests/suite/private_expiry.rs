@@ -1,5 +1,4 @@
-//! 민감 DM 전용 원장의 리스 만료(PG): 만료된 접수는 시작 여부와 관계없이 내구 보류다.
-//! 결과 기록이 재전달보다 먼저 와도, 재전달이 먼저 와도 같은 상태가 되고, 보류에서 반납·거절로 되돌리지 않는다.
+//! Private DM ledger lease expiry: expired reservations always transition to durable hold regardless of arrival order.
 
 use crate::support::{private::*, *};
 use bot_core::{id::*, ledger::*, port::*};
@@ -9,7 +8,6 @@ async fn an_expired_lease_is_held_whether_or_not_it_started_and_is_never_rerun()
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 시작 전 만료: 단순 재점유가 아니라 보류다
     let at = reserve(&db, "a", 1).await;
     db.expire_lease(&at.run).await;
     assert!(matches!(
@@ -28,7 +26,7 @@ async fn an_expired_lease_is_held_whether_or_not_it_started_and_is_never_rerun()
                 ledger(&db).finish(at.clone(), outcome).await,
                 Err(Error::Conflict)
             ),
-            "시작이 확인되지 않은 보류에서 늦게 오는 결과는 받지 않는다"
+            "unstarted hold must reject late outcomes"
         );
     }
     assert!(matches!(
@@ -56,7 +54,11 @@ async fn a_started_row_that_lost_its_lease_is_swept_without_redelivery() {
     let holds = bot_core::admin::AdminRead::holds(&db.store, &viewer, None)
         .await
         .unwrap();
-    assert_eq!(holds.len(), 1, "재전달 없이도 보류로 보인다");
+    assert_eq!(
+        holds.len(),
+        1,
+        "expired started row must appear as held without redelivery"
+    );
     assert_eq!(holds[0].call.0, format!("private:{}", at.run.0));
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit where action = 'private.held'")
@@ -68,7 +70,7 @@ async fn a_started_row_that_lost_its_lease_is_swept_without_redelivery() {
         ledger(&db).begin(request("a", 1)).await.unwrap(),
         PrivatePermit::Held
     ));
-    // 실제 시작이 확인된 행의 늦은 성공만 받는다
+    // Late completion is accepted only when start was durably recorded.
     ledger(&db)
         .finish(at, PrivateOutcome::Completed)
         .await
@@ -76,7 +78,6 @@ async fn a_started_row_that_lost_its_lease_is_swept_without_redelivery() {
     assert_eq!(row(&db).await, "succeeded:-:1:1:true");
 }
 
-/// 리스가 끝난 접수에 대해 결과 기록이 먼저 오든 재전달이 먼저 오든 같은 상태(보류)가 된다.
 async fn expired_case(db: &TestDb, name: &str, fp: u8, started_first: bool) -> Attempt {
     let at = if started_first {
         started(db, name, fp).await
@@ -113,11 +114,11 @@ async fn a_result_arriving_after_lease_expiry_before_any_redelivery_holds_instea
             .await;
         let result = ledger(&db).finish(at.clone(), outcome()).await;
         if name == "held" {
-            assert!(result.is_ok(), "{name}: 보류 보고는 받는다");
+            assert!(result.is_ok(), "{name}: Held report should succeed");
         } else {
             assert!(
                 matches!(result, Err(Error::Conflict)),
-                "{name}: 만료 뒤 반납·거절·미시작 완료는 거절"
+                "{name}: post-expiry release, rejection, or unstarted completion must conflict"
             );
         }
         assert_eq!(
@@ -127,28 +128,27 @@ async fn a_result_arriving_after_lease_expiry_before_any_redelivery_holds_instea
             ))
             .await,
             "waiting:hold",
-            "{name}: 내구 보류 상태"
+            "{name}: expected durable hold"
         );
         assert_eq!(
             db.scalar::<i64>("select count(*) from bot_audit where action = 'private.held'")
                 .await,
             held_before + 1,
-            "{name}: 보류 감사 한 줄"
+            "{name}: expected one hold audit entry"
         );
-        // 그 뒤의 재전달은 새 Start가 아니라 Held다
         assert!(
             matches!(
                 ledger(&db).begin(request(name, fp)).await.unwrap(),
                 PrivatePermit::Held
             ),
-            "{name}: 재전달은 Held"
+            "{name}: redelivery must return Held"
         );
     }
     assert!(
         db.scalar::<i64>("select count(*) from bot_runs where state = 'ready'")
             .await
             == 0,
-        "반납된 행이 없다"
+        "no row may be released back to ready"
     );
 }
 
@@ -165,14 +165,14 @@ async fn the_redelivery_first_order_gives_the_same_hold_and_rejects_the_late_res
                 ledger(&db).begin(request(name, fp)).await.unwrap(),
                 PrivatePermit::Held
             ),
-            "{name}: 재전달이 먼저면 Held"
+            "{name}: redelivery first must return Held"
         );
         assert!(
             matches!(
                 ledger(&db).finish(at.clone(), outcome()).await,
                 Err(Error::Conflict)
             ),
-            "{name}: 그 뒤의 결과 기록은 거절"
+            "{name}: late outcome must conflict"
         );
         assert_eq!(
             db.scalar::<String>(&format!(
@@ -190,7 +190,6 @@ async fn a_late_success_is_accepted_after_expiry_only_when_the_start_was_recorde
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 시작이 기록된 행: 만료 뒤 결과가 먼저 와도, 재전달·청소로 보류된 뒤에 와도 완료로 받는다
     let first = expired_case(&db, "a", 1, true).await;
     ledger(&db)
         .finish(first.clone(), PrivateOutcome::Completed)
@@ -213,7 +212,6 @@ async fn a_late_success_is_accepted_after_expiry_only_when_the_start_was_recorde
         .finish(second, PrivateOutcome::Completed)
         .await
         .unwrap();
-    // 시작이 기록되지 않은 행은 늦은 성공도 받지 않는다
     let third = expired_case(&db, "c", 3, false).await;
     assert!(matches!(
         ledger(&db).finish(third, PrivateOutcome::Completed).await,

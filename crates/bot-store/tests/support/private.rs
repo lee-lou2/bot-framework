@@ -1,4 +1,4 @@
-//! 민감 DM 전용 원장 시험 도구(private_ledger·private_expiry가 함께 쓴다).
+//! Test helpers for the private DM ledger.
 #![allow(dead_code)]
 
 use bot_core::{
@@ -41,7 +41,7 @@ pub fn ledger(db: &TestDb) -> &dyn PrivateLedger {
 pub async fn reserve(db: &TestDb, name: &str, fingerprint: u8) -> Attempt {
     match ledger(db).begin(request(name, fingerprint)).await.unwrap() {
         PrivatePermit::Start { attempt: at, .. } => at,
-        _ => panic!("처음 접수는 Start"),
+        _ => panic!("first reservation must return Start"),
     }
 }
 

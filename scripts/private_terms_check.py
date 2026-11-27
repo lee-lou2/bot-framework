@@ -44,7 +44,7 @@ class Terms:
         try:
             raw = Path(path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
-            raise Fail(f"금칙어 목록을 읽지 못했다: {error.__class__.__name__}")
+            raise Fail(f"failed to read private terms list: {error.__class__.__name__}")
         for number, line in enumerate(raw.splitlines(), 1):
             entry = line.strip()
             if not entry or entry.startswith("#"):
@@ -52,9 +52,9 @@ class Terms:
             try:
                 self._add(number, entry)
             except re.error:
-                raise Fail(f"금칙어 목록 {number}번째 줄의 정규식이 올바르지 않다")
+                raise Fail(f"invalid regex on line {number} of private terms list")
         if not (self.plain or self.regex):
-            raise Fail("금칙어 목록에 항목이 없다")
+            raise Fail("private terms list has no entries")
 
     def _add(self, number, entry):
         if entry.startswith("word:"):
@@ -98,7 +98,7 @@ class Report:
     def path(self, text):
         """A path (or ref name) as it may be shown: itself when it is clean, otherwise an opaque hash."""
         if self.terms.hits(text) or any(ord(c) < 32 or ord(c) == 127 for c in text):
-            return f"경로#{digest8(text)}"
+            return f"path#{digest8(text)}"
         return text
 
     def add(self, where, hits):
@@ -109,7 +109,7 @@ class Report:
     def text(self, where, data):
         """Scan a blob or file body: per line for text, one row for binary data."""
         if b"\0" in data:
-            self.add(f"{where} (이진)", self.terms.hits(decode(data)))
+            self.add(f"{where} (binary)", self.terms.hits(decode(data)))
             return
         for number, line in enumerate(decode(data).split("\n"), 1):
             self.add(f"{where}:{number}", self.terms.hits(line))
@@ -117,9 +117,9 @@ class Report:
     def print(self):
         rows = sorted(self.rows)
         for where, hits in rows[:REPORT_LIMIT]:
-            print(f"  {where}  [목록 {', '.join(map(str, hits))}번째 줄]")
+            print(f"  {where}  [list line {', '.join(map(str, hits))}]")
         if len(rows) > REPORT_LIMIT:
-            print(f"  … 외 {len(rows) - REPORT_LIMIT}건")
+            print(f"  ... and {len(rows) - REPORT_LIMIT} more")
 
 
 def git(args, cwd=None, git_dir=None):
@@ -128,7 +128,7 @@ def git(args, cwd=None, git_dir=None):
         cmd += ["--git-dir", str(git_dir)]
     done = subprocess.run(cmd + args, cwd=cwd, capture_output=True, env=GIT_ENV)
     if done.returncode != 0:
-        raise Fail(f"git {args[0]} 실패")
+        raise Fail(f"git {args[0]} failed")
     return done.stdout
 
 
@@ -145,13 +145,13 @@ def objects(git_dir, oids):
             while header := proc.stdout.readline():
                 parts = header.split()
                 if len(parts) != 3:
-                    raise Fail("git 객체를 읽지 못했다")
+                    raise Fail("failed to read git object")
                 body = proc.stdout.read(int(parts[2]))
                 proc.stdout.read(1)
                 seen += 1
                 yield decode(parts[0]), decode(parts[1]), body
             if proc.wait() != 0 or seen != len(oids):
-                raise Fail("git 객체를 읽지 못했다")
+                raise Fail("failed to read git object")
 
 
 def git_dir_of(root):
@@ -172,11 +172,11 @@ def scan_worktree(root, rep):
     for name in names:
         path = root / name
         shown = rep.path(name)
-        rep.add(f"작업 트리 {shown} (이름)", rep.terms.hits(name))
+        rep.add(f"worktree {shown} (name)", rep.terms.hits(name))
         if path.is_symlink():
-            rep.add(f"작업 트리 {shown} (링크 대상)", rep.terms.hits(os.readlink(path)))
+            rep.add(f"worktree {shown} (symlink target)", rep.terms.hits(os.readlink(path)))
         elif path.is_file():
-            rep.text(f"작업 트리 {shown}", path.read_bytes())
+            rep.text(f"worktree {shown}", path.read_bytes())
     return len(names)
 
 
@@ -192,19 +192,19 @@ def scan_index(root, rep):
         if name and len(fields) == 3 and fields[0] != b"160000" and os.fsdecode(name) in changed:
             staged[decode(fields[1])] = os.fsdecode(name)
     for oid, _, body in objects(git_dir_of(root), list(staged)):
-        rep.text(f"인덱스 {rep.path(staged[oid])}", body)
+        rep.text(f"index {rep.path(staged[oid])}", body)
     return len(staged)
 
 
 def scan_history(git_dir, rep):
     """Everything reachable from the refs of `git_dir`, which must be a complete (not shallow) repository."""
     if decode(git(["rev-parse", "--is-shallow-repository"], git_dir=git_dir)).strip() != "false":
-        raise Fail("얕은 복제라 이력이 잘려 있다. 전체 복제본에서 검사해야 한다")
+        raise Fail("shallow clone has truncated history; run on a full clone")
     format = "--format=%(refname)%1f%(objectname)%1f%(objecttype)"
     refs = [line.split("\x1f") for line in decode(git(["for-each-ref", format], git_dir=git_dir)).splitlines()]
     for name, _, _ in refs:
-        rep.add(f"이력 참조 {rep.path(name)} (이름)", rep.terms.hits(name))
-    # 태그 객체(태그가 태그를 가리키는 중첩 포함): 이름·태거·메시지. 첫 두 줄(object·type)은 식별자와 종류라 건너뛴다.
+        rep.add(f"history ref {rep.path(name)} (name)", rep.terms.hits(name))
+    # Tag objects (including nested tags): name, tagger, message; skip header lines 1-2 (object, type).
     pending, done = [oid for _, oid, kind in refs if kind == "tag"], set()
     while pending:
         todo = [oid for oid in dict.fromkeys(pending) if oid not in done]
@@ -212,7 +212,7 @@ def scan_history(git_dir, rep):
         for oid, _, body in objects(git_dir, todo):
             done.add(oid)
             text = decode(body)
-            rep.add(f"이력 태그 {oid[:8]} (이름·메시지)", rep.terms.hits("\n".join(text.split("\n")[2:])))
+            rep.add(f"history tag {oid[:8]} (name/message)", rep.terms.hits("\n".join(text.split("\n")[2:])))
             target = re.search(r"^object ([0-9a-f]+)$", text, re.MULTILINE)
             if target and re.search(r"^type tag$", text, re.MULTILINE):
                 pending.append(target.group(1))
@@ -225,15 +225,15 @@ def scan_history(git_dir, rep):
         if kind == "commit":
             head, _, message = decode(body).partition("\n\n")
             lines = [h for h in head.split("\n") if not h.startswith(("tree ", "parent "))]
-            rep.add(f"이력 commit {oid[:8]} (작성자·메시지)", rep.terms.hits("\n".join(lines) + "\n" + message))
+            rep.add(f"history commit {oid[:8]} (author/message)", rep.terms.hits("\n".join(lines) + "\n" + message))
             commits += 1
         elif kind == "blob":
-            where = rep.path(first_path[oid]) if first_path[oid] else "(경로 없음)"
-            rep.text(f"이력 blob {oid[:8]} {where}", body)
-    # 삭제·이름 변경으로 지금은 없는 경로까지: 모든 커밋(병합은 부모마다)이 바꾼 경로의 합집합
+            where = rep.path(first_path[oid]) if first_path[oid] else "(no path)"
+            rep.text(f"history blob {oid[:8]} {where}", body)
+    # Include deleted/renamed paths across all commits (and each merge parent).
     log = git(["log", "--all", "--full-history", "-m", "--no-renames", "--name-only", "--format=", "-z"], git_dir=git_dir)
     for path in sorted({os.fsdecode(p) for p in log.split(b"\0") if p}):
-        rep.add(f"이력 경로 {rep.path(path)} (이름)", rep.terms.hits(path))
+        rep.add(f"history path {rep.path(path)} (name)", rep.terms.hits(path))
     return len(refs), commits, len(first_path)
 
 
@@ -243,11 +243,11 @@ def parse(argv):
         if item == "--git-dir":
             git_dir = next(items, None)
             if git_dir is None:
-                raise Fail("--git-dir 뒤에 저장소 경로가 필요하다")
+                raise Fail("--git-dir requires a repository path")
         else:
             args.append(item)
     if len(args) != 1:
-        raise Fail("사용법: private_terms_check.py <금칙어 목록> [--git-dir <저장소>]")
+        raise Fail("Usage: private_terms_check.py <list> [--git-dir <repository>]")
     return args[0], git_dir
 
 
@@ -255,24 +255,24 @@ def run(argv):
     listing, history_dir = parse(argv)
     top = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, env=GIT_ENV)
     if top.returncode != 0:
-        raise Fail("git 저장소 안에서 실행해야 한다")
+        raise Fail("must run inside a git repository")
     root = Path(decode(top.stdout).strip()).resolve()
     path = Path(listing).resolve()
     if path == root or root in path.parents:
-        raise Fail("금칙어 목록이 저장소 안에 있다. 목록은 비공개이니 저장소 밖에 둔다")
+        raise Fail("private terms list is inside the repository; keep it outside")
     rep = Report(Terms(path))
     files = scan_worktree(root, rep)
     staged = scan_index(root, rep)
     refs, commits, blobs = scan_history(Path(history_dir) if history_dir else git_dir_of(root), rep)
     print(
-        f"  항목 {rep.terms.count}개 · 작업 트리 파일 {files}개 · 따로 바뀐 인덱스 {staged}개 · "
-        f"참조 {refs}개 · 커밋 {commits}개 · 이력 객체 {blobs}개를 검사했다"
+        f"  scanned terms: {rep.terms.count} · worktree files: {files} · staged-only index: {staged} · "
+        f"refs: {refs} · commits: {commits} · history objects: {blobs}"
     )
     if rep.rows:
-        print(f"금칙어 발견 {len(rep.rows)}곳 (낱말과 이름은 싣지 않는다)")
+        print(f"found {len(rep.rows)} private term match(es) (terms and names omitted)")
         rep.print()
         return 1
-    print("금칙어 없음")
+    print("no private terms found")
     return 0
 
 
@@ -281,8 +281,8 @@ def main(argv):
         return run(argv)
     except Fail as error:
         print(error, file=sys.stderr)
-    except Exception as error:  # 예상 밖의 오류도 저장소 내용을 싣지 않는다
-        print(f"검사기 내부 오류: {error.__class__.__name__}", file=sys.stderr)
+    except Exception as error:  # Never leak repository content even on unexpected errors.
+        print(f"scanner internal error: {error.__class__.__name__}", file=sys.stderr)
     return 2
 
 

@@ -1,4 +1,4 @@
-//! `SlackGateway::with_ux` 통합 시험 공용 대역(`UxStore`·`FakeAdmin`·`UnavailableActive`·`UxRig`).
+//! Shared test doubles (`UxStore`, `FakeAdmin`, `UnavailableActive`, `UxRig`) for `SlackGateway::with_ux` integration tests.
 use super::{default_secrets, host, personal};
 use bot_core::{
     command::{
@@ -28,7 +28,7 @@ use std::{
 use tokio::{sync::Semaphore, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-/// `MemoryStore`에 `progress` 제어를 얹은 시험용 저장소.
+/// `MemoryStore` wrapper with controllable per-run `RunProgress` snapshots.
 #[derive(Default)]
 pub struct UxStore {
     pub inner: Arc<MemoryStore>,
@@ -109,7 +109,7 @@ impl RunStore for UxStore {
     }
 }
 
-/// 취소 호출을 기록하고 일시 실패·동시 진입 게이트를 주입할 수 있는 시험용 `RunAdmin`.
+/// Test `RunAdmin` recording cancel calls with injectable failures and concurrency gate.
 #[derive(Default)]
 pub struct FakeAdmin {
     cancels: Mutex<Vec<(ProfileId, RunId, PrincipalId, String)>>,

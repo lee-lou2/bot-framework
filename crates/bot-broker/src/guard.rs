@@ -1,19 +1,12 @@
-//! 출력 자격 가드. 모델에게 돌려주는 결과·회신·로그에 자격이 섞이면 막거나 가린다.
-//! 코드로 강제하는 것만 둔다. 판단이 필요한 규칙은 에이전트 지침에 둔다.
-//!
-//! 두 가지 검사가 있다.
-//! - 토큰 모양: 널리 쓰는 접두사 뒤로 영숫자가 길게 이어진 글(값을 몰라도 잡는다).
-//! - 선언 자격: 호스트가 이번 호출에 실제로 넣은 값의 바이트(짧은 비밀번호도 잡는다).
+//! Output credential guard that blocks or redacts token shapes and declared credential values.
 
 use std::ops::Range;
 
-/// 가림 표시
-pub const MASK: &str = "<가림>";
+pub const MASK: &str = "<redacted>";
 
-/// 로그 가림과 일반 부분 일치의 하한. 호스트가 선언한 자격의 출력 검사에는 적용하지 않는다.
+/// Lower bound for log redaction and substring secret scans; does not apply to declared call credentials.
 const MIN_SECRET_LEN: usize = 12;
 
-/// 토큰 모양(공통 접두사·JWT) 또는 12바이트 이상인 비밀 값을 찾는다.
 pub fn leaks_secret(text: &str, secrets: &[String]) -> bool {
     !bot_core::redact::secret_spans(text).is_empty()
         || secrets
@@ -21,8 +14,7 @@ pub fn leaks_secret(text: &str, secrets: &[String]) -> bool {
             .any(|s| s.len() >= MIN_SECRET_LEN && text.contains(s.as_str()))
 }
 
-/// `needle`이 `haystack`에 들어 있는가. 실패 함수(KMP)로 최악에도 O(n+m)이다
-/// (긴 출력과 긴 자격을 가진 적대적 입력이 검사를 늘어지게 하지 못한다).
+/// KMP substring search guaranteeing O(n+m) worst-case time on adversarial output and credential sizes.
 pub(crate) fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || needle.len() > haystack.len() {
         return false;
@@ -53,18 +45,18 @@ pub(crate) fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     false
 }
 
-/// 글과 파일 원문에서 호스트가 선언한 자격의 바이트를 찾는다. 빈 값은 미설정이다.
+/// Searches raw bytes for any declared credential value (empty values are treated as unset).
 pub fn contains_credential(data: impl AsRef<[u8]>, credentials: &[Vec<u8>]) -> bool {
     let bytes = data.as_ref();
     credentials.iter().any(|value| contains_bytes(bytes, value))
 }
 
-/// 결과와 첨부에는 토큰 모양과 모든 선언 자격을 검사한다. 비밀번호는 12바이트보다 짧을 수 있다.
+/// Checks tool results and attachments for both token shapes and all declared credentials (including short passwords).
 pub fn blocks_output(text: &str, credentials: &[Vec<u8>]) -> bool {
     leaks_secret(text, &[]) || contains_credential(text, credentials)
 }
 
-/// 오류 문자열에 싣기 전에 토큰 모양을 가린다. 짧은 토큰도 단어째 가리는 보수형이다.
+/// Conservatively masks whole whitespace-delimited words matching secret shapes before embedding in error strings.
 pub fn scrub(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for word in text.split_inclusive(char::is_whitespace) {
@@ -81,8 +73,7 @@ pub fn scrub(text: &str) -> String {
     out
 }
 
-/// 로그·추적·오류에 싣기 전에 비밀을 가린다. 프로필 비밀 값과 토큰 모양인 자리만 `<가림>`으로 바꾸고
-/// 같은 문장의 나머지 글은 그대로 둔다. 가린 뒤에도 `leaks_secret`에 걸리면 글 전체를 가린다(마지막 안전장치).
+/// Replaces token shapes and profile secrets with `MASK`, falling back to full masking if `leaks_secret` still triggers.
 pub fn redact(text: &str, secrets: &[String]) -> String {
     let mut spans: Vec<Range<usize>> = bot_core::redact::secret_spans(text);
     for secret in secrets.iter().filter(|s| s.len() >= MIN_SECRET_LEN) {
@@ -118,7 +109,7 @@ pub fn redact(text: &str, secrets: &[String]) -> String {
 mod tests {
     use super::*;
 
-    // 토큰 모양 리터럴이 소스에 남지 않게(비밀 스캔 오탐 방지) 접두사를 실행 중에 이어 붙인다
+    // Assemble token-shaped strings at runtime to avoid triggering secret scanners on source literals.
     fn shaped(prefix: &str, rest: &str) -> String {
         format!("{prefix}-{rest}")
     }
@@ -130,11 +121,11 @@ mod tests {
     #[test]
     fn blocks_token_shapes_and_real_values() {
         assert!(leaks_secret(
-            &format!("토큰은 {} 예요", shaped("xoxb", "1234567890-abcdefghij")),
+            &format!("token is {} here", shaped("xoxb", "1234567890-abcdefghij")),
             &[]
         ));
         assert!(leaks_secret(
-            &format!("키 {}", shaped("xapp", "1-A0123456789-abcdef")),
+            &format!("key {}", shaped("xapp", "1-A0123456789-abcdef")),
             &[]
         ));
         assert!(leaks_secret(
@@ -142,7 +133,7 @@ mod tests {
             &[]
         ));
         assert!(leaks_secret(
-            "값은 super-secret-value-123 입니다",
+            "value is super-secret-value-123 here",
             &["super-secret-value-123".to_string()]
         ));
     }
@@ -152,7 +143,7 @@ mod tests {
         let body = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8";
         for prefix in ["ghp", "gho", "ghu", "ghs", "ghr"] {
             assert!(
-                leaks_secret(&format!("토큰은 {prefix}_{body} 예요"), &[]),
+                leaks_secret(&format!("token is {prefix}_{body} here"), &[]),
                 "{prefix}"
             );
         }
@@ -164,22 +155,22 @@ mod tests {
 
     #[test]
     fn allows_plain_explanations() {
-        assert!(!leaks_secret("봇 토큰은 xoxb- 로 시작해요", &[]));
-        assert!(!leaks_secret("sk- 접두사를 쓰는 키가 있어요", &[]));
+        assert!(!leaks_secret("bot tokens start with xoxb- prefix", &[]));
+        assert!(!leaks_secret("some keys use the sk- prefix", &[]));
         assert!(!leaks_secret(
-            "GitHub 토큰은 ghp_ 나 github_pat_ 로 시작해요",
+            "GitHub tokens start with ghp_ or github_pat_",
             &[]
         ));
-        assert!(!leaks_secret("gho_짧음 은 토큰이 아니에요", &[]));
-        assert!(!leaks_secret("평범한 답변", &["short".to_string()]));
+        assert!(!leaks_secret("gho_short is not a token", &[]));
+        assert!(!leaks_secret("plain answer", &["short".to_string()]));
     }
 
     #[test]
     fn output_checks_short_declared_passwords_and_ignores_unset_values() {
         let credentials = creds(&["", "pass1234"]);
-        assert!(blocks_output("값(pass1234)입니다", &credentials));
+        assert!(blocks_output("value(pass1234) here", &credentials));
         assert!(blocks_output(&shaped("xoxb", "1234567890"), &[]));
-        assert!(!blocks_output("일반 값 1 / 1234.5678", &credentials));
+        assert!(!blocks_output("normal value 1 / 1234.5678", &credentials));
     }
 
     #[test]
@@ -203,7 +194,6 @@ mod tests {
         let s = scrub(&format!("fail {bot} end key={key} more"));
         assert!(!s.contains(&bot) && !s.contains(&key));
         assert!(s.contains("fail") && s.contains("end"));
-        // 지역명·일반 식별자(`ASIA`, `EASTASIA`, `task-123`)는 오탐해 가리지 않는다.
         let safe = "region=ASIA-northeast1 EASTASIA ASIA task-123";
         assert_eq!(scrub(safe), safe);
     }
@@ -211,11 +201,8 @@ mod tests {
     #[test]
     fn redact_hides_only_the_token_and_keeps_the_sentence() {
         let token = shaped("xoxb", "1234567890-abcdefghij");
-        let out = redact(
-            &format!("오류: 토큰 {token} 으로 호출했는데 거절됐어요"),
-            &[],
-        );
-        assert_eq!(out, "오류: 토큰 <가림> 으로 호출했는데 거절됐어요");
+        let out = redact(&format!("error: call with token {token} was rejected"), &[]);
+        assert_eq!(out, "error: call with token <redacted> was rejected");
         assert!(!leaks_secret(&out, &[]));
     }
 
@@ -223,10 +210,10 @@ mod tests {
     fn redact_hides_every_profile_secret_occurrence() {
         let secrets = ["super-secret-value-123".to_string()];
         let out = redact(
-            "값은 super-secret-value-123 입니다 (다시: super-secret-value-123).",
+            "value is super-secret-value-123 (again: super-secret-value-123).",
             &secrets,
         );
-        assert_eq!(out, "값은 <가림> 입니다 (다시: <가림>).");
+        assert_eq!(out, "value is <redacted> (again: <redacted>).");
         assert!(!leaks_secret(&out, &secrets));
     }
 
@@ -234,19 +221,21 @@ mod tests {
     fn redact_makes_one_mask_where_a_secret_sits_inside_a_token() {
         let token = shaped("xoxb", "1234567890-abcdefghij");
         let secrets = ["1234567890-abcdefghij".to_string()];
-        assert_eq!(redact(&token, &secrets), "<가림>");
-        // 이웃한 두 비밀도 하나로 이어 가린다
+        assert_eq!(redact(&token, &secrets), "<redacted>");
         let two = ["AAAAAAAAAAAA".to_string(), "BBBBBBBBBBBB".to_string()];
-        assert_eq!(redact("AAAAAAAAAAAABBBBBBBBBBBB 끝", &two), "<가림> 끝");
+        assert_eq!(
+            redact("AAAAAAAAAAAABBBBBBBBBBBB end", &two),
+            "<redacted> end"
+        );
     }
 
     #[test]
     fn redact_leaves_plain_text_and_short_values_alone() {
         for text in [
-            "봇 토큰은 xoxb- 로 시작해요",
-            "sk- 접두사를 쓰는 키가 있어요",
-            "GitHub 토큰은 ghp_ 나 github_pat_ 로 시작해요",
-            "평범한 답변",
+            "bot tokens start with xoxb- prefix",
+            "some keys use the sk- prefix",
+            "GitHub tokens start with ghp_ or github_pat_",
+            "plain answer",
         ] {
             assert_eq!(redact(text, &["short".to_string()]), text);
         }
@@ -257,24 +246,20 @@ mod tests {
         let body = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8";
         let pat = format!("{}_{}_{}", "github_pat", "11AAAAAAA0abcdefghijkl", "rest");
         for text in [
-            format!("한글ghp_{body}한글"),
+            format!("★★ghp_{body}★★"),
             format!("a {pat} b"),
             format!(
                 "{}\n{}",
                 shaped("sk", "3dabcdefghijklmnopqrstuvwxyz"),
-                "다음 줄"
+                "next line"
             ),
         ] {
             let out = redact(&text, &[]);
             assert!(out.contains(MASK), "{text}");
             assert!(!leaks_secret(&out, &[]), "{text}");
         }
-        assert_eq!(
-            redact(&format!("한글ghp_{body}한글"), &[]),
-            "한글<가림>한글"
-        );
-        // 검사는 첫 마디만 세지만 가릴 때는 `_`로 이어진 나머지 본문까지 지운다
-        assert_eq!(redact(&format!("a {pat} b"), &[]), "a <가림> b");
+        assert_eq!(redact(&format!("★★ghp_{body}★★"), &[]), "★★<redacted>★★");
+        assert_eq!(redact(&format!("a {pat} b"), &[]), "a <redacted> b");
     }
 
     #[test]
@@ -287,9 +272,9 @@ mod tests {
             "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJhYmMifQ", "c2lnbmF0dXJlLXZhbHVl"
         );
         for secret in [&aws, &gcp, &stripe, &jwt] {
-            let line = format!("키={secret} 끝");
+            let line = format!("key={secret} end");
             assert!(blocks_output(&line, &[]), "{secret}");
-            assert_eq!(redact(&line, &[]), "키=<가림> 끝", "{secret}");
+            assert_eq!(redact(&line, &[]), "key=<redacted> end", "{secret}");
             assert!(
                 !scrub(&format!("err {secret} ok")).contains(secret),
                 "{secret}"

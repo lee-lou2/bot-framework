@@ -1,4 +1,4 @@
-//! 이름 규칙. 핵심 이름 규칙은 `bot_core::id::is_name`(kebab-case, 63자 이하, 연속·끝 하이픈 금지)을 그대로 쓴다.
+//! Re-exports canonical name and principal identity rules from `bot_core`.
 
 pub use bot_core::id::is_name;
 

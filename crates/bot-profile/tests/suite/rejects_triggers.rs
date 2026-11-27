@@ -1,4 +1,4 @@
-//! 거절 사례 표(트리거): 기본 프로필에 트리거를 더하거나 고쳐 어떤 오류 코드가 나와야 하는지 확인한다.
+//! Rejection matrix for trigger definitions and cross-references.
 
 use crate::support::{Files, append, base, check, edit};
 
@@ -15,12 +15,11 @@ fn apply(edits: &[Edit]) -> Files {
 
 fn expect(name: &str, files: &Files, code: &str) {
     match check(files) {
-        Ok(_) => panic!("{name}: 거절해야 하는데 통과했어요(기대 {code})"),
-        Err(report) => assert!(report.has(code), "{name}: 기대 {code}\n{report}"),
+        Ok(_) => panic!("{name}: expected failure with {code}"),
+        Err(report) => assert!(report.has(code), "{name}: expected {code}\n{report}"),
     }
 }
 
-/// DM 바인딩의 private 트리거가 `agenda.batch`(쓰기 도구, 승인 불필요)를 부른다. `effects`만 다르다.
 fn private_batch(effects: bool) -> Files {
     let tool = format!(
         "  - id: batch\n    class: write\n    effects: {effects}\n    scopes: [calendar.read]\n    input: {{type: object, required: [text], properties: {{text: {{type: string}}}}, additionalProperties: false}}\n"
@@ -51,33 +50,33 @@ fn rejects_trigger_mistakes() {
     ];
     let mut cases: Vec<(&str, Files, &str)> = vec![
         (
-            "잘못된 cron",
+            "invalid cron",
             apply(&[(TRIGGERS, "\"* * * * *\"", "\"61 * * * *\"")]),
             "bad-cron",
         ),
         (
-            "없는 도구",
+            "unknown tool",
             apply(&[(TRIGGERS, "agenda.list", "agenda.nope")]),
             "unknown-tool",
         ),
         (
-            "없는 주체",
+            "unknown principal",
             apply(&[(TRIGGERS, "service:morning", "service:ghost")]),
             "trigger-principal-unknown",
         ),
         (
-            "cron이 사람 주체",
+            "cron with human principal",
             apply(&[(TRIGGERS, "service:morning", "local:owner")]),
             "cron-needs-service",
         ),
         (
-            "주체에게 스코프 없음",
+            "principal lacks scope",
             apply(&[(TRIGGERS, "target: {tool: agenda.list, args: {}}", delete)]),
             "trigger-scope",
         ),
-        ("approver 없음", apply(&strong), "approver-required"),
+        ("missing approver", apply(&strong), "approver-required"),
         (
-            "서비스 승인자",
+            "service approver",
             apply(&[
                 strong[0],
                 strong[1],
@@ -90,7 +89,7 @@ fn rejects_trigger_mistakes() {
             "approver-service",
         ),
         (
-            "HTTP 주체는 승인자가 될 수 없음",
+            "HTTP principal cannot approve",
             apply(&[
                 strong[0],
                 strong[1],
@@ -108,7 +107,7 @@ fn rejects_trigger_mistakes() {
             "approver-not-human",
         ),
         (
-            "모르는 승인자",
+            "unknown approver",
             apply(&[
                 strong[0],
                 strong[1],
@@ -121,7 +120,7 @@ fn rejects_trigger_mistakes() {
             "approver-unknown",
         ),
         (
-            "고정 args가 스키마 위반",
+            "static args violate schema",
             apply(&[(
                 TRIGGERS,
                 "target: {tool: agenda.list, args: {}}",
@@ -130,117 +129,125 @@ fn rejects_trigger_mistakes() {
             "args-invalid",
         ),
         (
-            "없는 바인딩",
+            "unknown binding",
             event(
                 "  - id: chat\n    \"on\": {event: message, binding: nope}\n    target: {instruction: x}\n",
             ),
             "unknown-binding",
         ),
         (
-            "바인딩 종류 불일치",
+            "binding kind mismatch",
             event(
                 "  - id: chat\n    \"on\": {event: message, binding: desk}\n    target: {instruction: x}\n",
             ),
             "binding-kind-mismatch",
         ),
         (
-            "지원하지 않는 이벤트",
+            "unsupported event",
             event(
                 "  - id: chat\n    \"on\": {event: edited, binding: team}\n    target: {instruction: x}\n",
             ),
             "unsupported-event",
         ),
         (
-            "HTTP 경로",
+            "invalid HTTP path",
             event(
                 "  - id: hook\n    \"on\": {http: {method: POST, path: \"/a/../b\"}, binding: inbox}\n    target: {instruction: x}\n",
             ),
             "bad-http-path",
         ),
         (
-            "봉투 밖 경로",
+            "path outside envelope",
             event(
                 "  - id: chat\n    \"on\": {event: message, binding: team}\n    match: {secret.token: x}\n    target: {instruction: x}\n",
             ),
             "bad-path",
         ),
         (
-            "sync인데 지침 대상",
+            "sync with instruction target",
             event(
                 "  - id: hook\n    \"on\": {http: {method: POST, path: /a}, binding: inbox}\n    response: {mode: sync}\n    target: {instruction: x}\n",
             ),
             "sync-needs-tool",
         ),
         (
-            "이벤트 트리거에 beat",
+            "beat on event trigger",
             event(
                 "  - id: chat\n    \"on\": {event: message, binding: team}\n    beat: true\n    target: {instruction: x}\n",
             ),
             "schema",
         ),
         (
-            "이벤트 트리거에 principal",
+            "principal on event trigger",
             event(
                 "  - id: chat\n    \"on\": {event: message, binding: team}\n    principal: \"service:morning\"\n    target: {instruction: x}\n",
             ),
             "schema",
         ),
         (
-            "같은 후보군 같은 순위",
+            "duplicate order in group",
             event(
                 "  - id: a\n    \"on\": {event: message, binding: team}\n    target: {instruction: x}\n  - id: b\n    \"on\": {event: message, binding: team}\n    target: {instruction: y}\n",
             ),
             "duplicate-order",
         ),
         (
-            "private가 DM 아님",
+            "private on non-DM binding",
             event(
                 "  - id: secure\n    \"on\": {event: message, binding: team}\n    private: true\n    input: {query: body.text}\n    target: {tool: agenda.find}\n",
             ),
             "private-needs-dm",
         ),
         (
-            "private보다 일반이 앞",
+            "public trigger precedes private trigger",
             event(
                 "  - id: plain\n    \"on\": {event: message, binding: direct}\n    target: {instruction: x}\n  - id: secure\n    \"on\": {event: message, binding: direct}\n    order: 5\n    private: true\n    input: {query: body.text}\n    target: {tool: agenda.find}\n",
             ),
             "private-preempted",
         ),
         (
-            "private 도구가 승인 대상",
+            "private tool requires approval",
             event(
                 "  - id: secure\n    \"on\": {event: message, binding: direct}\n    private: true\n    input: {event: body.text}\n    target: {tool: agenda.delete}\n",
             ),
             "private-approval",
         ),
         (
-            "private 도구가 다단계(effects)",
+            "private tool uses effects",
             private_batch(true),
             "private-effects",
         ),
         (
-            "고정 args와 input 충돌",
+            "static args and input conflict",
             event(
                 "  - id: chat\n    \"on\": {event: message, binding: team}\n    input: {query: body.text}\n    target: {tool: agenda.find, args: {query: x}}\n",
             ),
             "input-key-conflict",
         ),
         (
-            "스키마에 없는 인자",
+            "unknown input arg",
             event(
                 "  - id: chat\n    \"on\": {event: message, binding: team}\n    input: {query: body.text, extra: body.x}\n    target: {tool: agenda.find}\n",
             ),
             "input-unknown-arg",
         ),
         (
-            "필수 인자를 정하는 곳이 없음",
+            "missing required input arg",
             event(
                 "  - id: chat\n    \"on\": {event: message, binding: team}\n    target: {tool: agenda.find}\n",
             ),
             "input-missing-required",
         ),
     ];
-    cases.push(("트리거 id 중복", append(base(), TRIGGERS, "  - id: morning\n    \"on\": {cron: \"* * * * *\"}\n    principal: \"service:morning\"\n    target: {tool: agenda.list, args: {}}\n"), "duplicate-trigger-id"));
+    cases.push((
+        "duplicate trigger id",
+        append(
+            base(),
+            TRIGGERS,
+            "  - id: morning\n    \"on\": {cron: \"* * * * *\"}\n    principal: \"service:morning\"\n    target: {tool: agenda.list, args: {}}\n",
+        ),
+        "duplicate-trigger-id",
+    ));
     for (name, files, code) in &cases {
         expect(name, files, code);
     }
@@ -248,7 +255,6 @@ fn rejects_trigger_mistakes() {
 
 #[test]
 fn accepts_valid_variants_of_the_same_shapes() {
-    // 같은 모양의 private 트리거라도 도구가 effects 없는 단일 실행이면 통과한다
     crate::support::ok(&private_batch(false));
     let valid_event = event(
         "  - id: chat\n    \"on\": {event: message, binding: team}\n    order: 3\n    match: {body.kind: ask}\n    input: {query: body.text}\n    target: {tool: agenda.find}\n  - id: hook\n    \"on\": {http: {method: POST, path: /agenda}, binding: inbox}\n    response: {mode: sync}\n    target: {tool: agenda.list}\n  - id: secure\n    \"on\": {event: message, binding: direct}\n    private: true\n    input: {query: body.text}\n    target: {tool: agenda.find}\n",

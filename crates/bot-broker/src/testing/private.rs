@@ -1,10 +1,4 @@
-//! `PrivateLedger` 가짜(메모리). 실제 저장소가 지켜야 할 불변식을 그대로 적었다.
-//! - 접수 키마다 한 행: 지문·에이전트·도구·대화가 같아야 재점유한다(다르면 `Conflict`).
-//! - 단계: `Reserved`(리스 점유, 미시작) → `Started`(`start` 한 번) → `Completed`/`Held`/`Rejected`.
-//! - `RetryBeforeStart`는 미시작일 때만 리스를 반납한다(시작했으면 `Conflict`). `NotSent`는 시작한 행을 반납한다.
-//!   반납된 행은 같은 입력의 재전달로 새 epoch를 받는다. 반납하지 않은 행의 재전달은 `InProgress`다.
-//! - `start`는 현재 리스(attempt·claim)·도구·지문·활성 판본을 대조하고 한 번만 커밋한다.
-//! - 시작한 행이 리스를 잃으면 `expire`로 내구 `Held`가 된다(재실행 없음).
+//! In-memory `PrivateLedger` test double mirroring store lease, fingerprint, and revision invariants.
 
 use bot_core::{
     id::*,
@@ -18,9 +12,7 @@ use std::{collections::HashMap, sync::Mutex};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
-    /// 리스를 쥐고 있다(미시작).
     Reserved,
-    /// 반납됐다(재전달이 새 epoch로 다시 점유한다).
     Released,
     Started,
     Completed,
@@ -40,7 +32,6 @@ struct Row {
     epoch: u64,
 }
 
-/// 저장한 것(원문 없음): 접수 키, 지문, 에이전트, 도구, 스코프.
 #[derive(Clone, Debug)]
 pub struct Stored {
     pub key: RequestKey,
@@ -82,37 +73,31 @@ impl MemPrivateLedger {
     pub fn new() -> Self {
         Self::default()
     }
-    /// 새 접수에 줄 시도의 바탕(저장소가 만든 private run의 시도). claim epoch는 점유할 때마다 오른다.
     pub fn set_attempt(&self, attempt: Attempt) {
         *lock(&self.base) = Some(attempt);
     }
-    /// 저장소의 활성 판본. `start`가 `checked_revision`과 명시적으로 대조한다(없으면 `Stale`).
     pub fn set_active_revision(&self, revision: &str) {
         *lock(&self.active) = Some(Revision(revision.into()));
     }
     pub fn stored(&self) -> Vec<Stored> {
         lock(&self.stored).clone()
     }
-    /// 종결·반납 기록(고정 어휘).
     pub fn outcomes(&self) -> Vec<&'static str> {
         lock(&self.outcomes).clone()
     }
-    /// 행마다 마지막 단계.
     pub fn phases(&self) -> Vec<String> {
         lock(&self.rows)
             .values()
             .map(|r| format!("{:?}", r.phase))
             .collect()
     }
-    /// 성공한 `start` 기록.
     pub fn starts(&self) -> Vec<(ToolId, [u8; 32], Revision)> {
         lock(&self.starts).clone()
     }
-    /// `start`가 판본을 대조하기 직전에 한 번씩 실행할 동작(전송 직전의 판본 교체를 흉내 낸다).
     pub fn set_before_start(&self, hook: impl Fn() + Send + Sync + 'static) {
         *lock(&self.before_start) = Some(std::sync::Arc::new(hook));
     }
-    /// 시작한 행이 리스를 잃은 것처럼 내구 보류로 바꾼다(재전달 없이 sweep).
+    /// Simulates lease-expiry sweep turning started rows into durable `Held`.
     pub fn expire_started(&self) {
         for row in lock(&self.rows).values_mut() {
             if row.phase == Phase::Started {
@@ -218,7 +203,7 @@ impl PrivateLedger for MemPrivateLedger {
             if row.tool != start.tool || row.fingerprint != start.fingerprint {
                 return Err(Error::Denied);
             }
-            // 기대 판본과 명시적으로 같아야 한다. 활성 판본을 모르면(삭제·미설정) 통과시키지 않는다.
+            // Active revision must explicitly match `checked_revision`; unset/missing fails closed.
             if lock(&self.active).as_ref() != Some(&start.checked_revision) {
                 return Err(Error::Stale);
             }

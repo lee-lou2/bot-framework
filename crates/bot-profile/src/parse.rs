@@ -1,5 +1,4 @@
-//! 파일 읽기 단계: 텍스트·YAML·스키마·front matter를 검사해 모델 조각으로 만든다.
-//! 여러 파일의 오류를 한 번에 모으고, 서로 참조하는 검사는 resolve에서 한다.
+//! Per-file parsing and schema validation into profile IR; cross-file checks run in `resolve`.
 use crate::{
     frontmatter::{self, Kind},
     issue::{Issue, Issues},
@@ -29,7 +28,7 @@ pub struct ParsedAgent {
     pub parent: Option<AgentId>,
     pub model: Option<String>,
     pub description: Option<String>,
-    /// 이 AGENT.md가 명시한 읽기 전용 내장 도구(상속하지 않는다)
+    /// Read-only built-in tools declared in this AGENT.md (not inherited).
     pub builtin: BTreeSet<Builtin>,
     pub part: String,
     pub env: BTreeMap<String, String>,
@@ -39,9 +38,7 @@ pub struct ParsedAgent {
     pub memory: Vec<MemorySeed>,
 }
 
-/// `SKILL.md` 해석 규칙 세대.
-/// - `Legacy`: 구판(`BOTPROFILE1`) 번들 복원 전용. front matter를 파싱·제거하지 않고 64 KiB 상한도 적용하지 않는다.
-/// - `Strict`: 새 폴더 검증과 `BOTPROFILE2` 복원. Agent Skills front matter 검증·제거와 64 KiB 상한을 적용한다.
+/// `SKILL.md` parsing mode: `Legacy` restores `BOTPROFILE1` bundles without front matter stripping or the 64 KiB cap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SkillMode {
     Legacy,
@@ -53,9 +50,9 @@ pub struct Parsed {
     pub rules: Option<String>,
     pub knowledge: Vec<Document>,
     pub skills: Vec<Arc<Skill>>,
-    /// 부모가 자식보다 앞선다.
+    /// Ordered parent-before-child.
     pub agents: Vec<ParsedAgent>,
-    /// `Strict` 해석에서 `SKILL.md` front matter를 제거한 스킬이 하나 이상 있는가(`BOTPROFILE2` 판본 선택 기준).
+    /// True when any skill stripped `SKILL.md` front matter in `Strict` mode (selects `BOTPROFILE2`).
     pub has_skill_front_matter: bool,
 }
 
@@ -69,7 +66,6 @@ fn text_of<'a>(tree: &'a Tree, path: &str, issues: &mut Issues) -> Option<&'a st
     }
 }
 
-/// 스키마 없이 YAML만 읽는다(번들 스키마가 없는 파일: `tools.lock.yaml`은 코드가 모양을 검사한다).
 fn yaml_value(tree: &Tree, path: &str, limits: &Limits, issues: &mut Issues) -> Option<Value> {
     let text = text_of(tree, path, issues)?;
     match yaml::parse(path, text, limits) {
@@ -96,8 +92,7 @@ pub(crate) fn yaml_of(
     found.is_empty().then_some(value)
 }
 
-/// `triggers.yaml`의 스키마 검증. `preapproved`·`human_approval` 객체 내부와 문자열 `on.cron`의
-/// 위반은 기존 고정 오류 코드(`invalid_preapproval`·`invalid_human_approval`·`bad-cron`)를 유지한다.
+/// Validates `triggers.yaml`, preserving legacy fixed codes for `preapproved`, `human_approval`, and `on.cron`.
 fn triggers_yaml(tree: &Tree, path: &str, limits: &Limits, issues: &mut Issues) -> Option<Value> {
     let value = yaml_value(tree, path, limits, issues)?;
     let found = bundled().triggers.validate(&value);
@@ -210,8 +205,7 @@ fn skills(
         .collect()
 }
 
-/// 단일 `SKILL.md` 바이트를 `Strict` 규칙(텍스트·front matter·폴더명·빈 본문·64 KiB)으로 검증한다.
-/// 성공 시 `(description, 본문, front matter 존재 여부)`를 돌려준다. `bot mcp sync` 접속 전 사전 검사도 이 함수를 쓴다.
+/// Validates a single `SKILL.md` under `Strict` rules; returns `(description, body, has_front_matter)`.
 pub(crate) fn check_skill_md(
     skill_name: &str,
     md_path: &str,
@@ -230,7 +224,7 @@ pub(crate) fn check_skill_md(
         issues.error(
             "front-matter-unclosed",
             md_path,
-            "맨 위 `---`로 연 front matter를 닫는 `---` 줄이 없어요",
+            "Front matter opened with `---` is missing a closing `---` line",
         );
         return None;
     }
@@ -240,21 +234,21 @@ pub(crate) fn check_skill_md(
     let parsed = parsed?;
     let mut ok = true;
     let has_front_matter = parsed.meta.is_some();
-    // front matter가 없는 평문 스킬은 구판과 바이트 단위로 같도록 끝 공백만 정리한다
+    // Plain skills without front matter trim only trailing whitespace for byte-level V1 compatibility.
     let body = if has_front_matter {
         parsed.body.trim()
     } else {
         parsed.body.trim_end()
     };
     if body.trim().is_empty() {
-        issues.error("empty-file", md_path, "SKILL.md에 지침이 없어요");
+        issues.error("empty-file", md_path, "SKILL.md has no instructions");
         ok = false;
     } else if body.len() > limits.max_skill_bytes {
         issues.error(
             "skill-too-large",
             md_path,
             format!(
-                "SKILL.md 본문이 {} 바이트라 한도({} 바이트)를 넘어요. 지침을 줄이거나 긴 참고 자료는 knowledge/로 옮기세요",
+                "SKILL.md body is {} bytes, exceeding limit ({} bytes); shorten instructions or move reference material to knowledge/",
                 body.len(),
                 limits.max_skill_bytes
             ),
@@ -272,9 +266,7 @@ pub(crate) fn check_skill_md(
             "skill-name-mismatch",
             md_path,
             "front matter /name",
-            format!(
-                "front matter의 name `{declared}`이(가) 스킬 폴더 이름 `{skill_name}`와 달라요"
-            ),
+            format!("front matter name `{declared}` does not match skill directory `{skill_name}`"),
         );
         ok = false;
     }
@@ -288,7 +280,7 @@ pub(crate) fn check_skill_md(
             "schema",
             md_path,
             "front matter /description",
-            "설명이 비어 있어요",
+            "description is empty",
         );
         ok = false;
     }
@@ -298,7 +290,7 @@ pub(crate) fn check_skill_md(
                 "schema",
                 md_path,
                 format!("front matter /{key}"),
-                format!("{label}가 비어 있어요"),
+                format!("{label} is empty"),
             );
             ok = false;
         }
@@ -331,19 +323,18 @@ fn skill_with_mode(
         SkillMode::Legacy => {
             let md = text_of(tree, md_path, issues)?;
             if md.trim().is_empty() {
-                issues.error("empty-file", md_path, "SKILL.md가 비어 있어요");
+                issues.error("empty-file", md_path, "SKILL.md is empty");
                 return None;
             }
             (None, md.trim_end().to_owned(), false)
         }
     };
-    // 잠금 파일은 tools.yaml이 `input`을 생략한 도구의 입력 스키마·정의 해시의 정본이다. 틀리면 그것을 쓰는 도구가 모두 막히므로 여기서 멈춘다.
     let lock = match files.lock.as_deref() {
         Some(path) if files.tools.is_none() => {
             issues.error(
                 "lock-without-tools",
                 path,
-                "tools.lock.yaml은 같은 폴더의 tools.yaml이 있어야 해요",
+                "tools.lock.yaml requires a sibling tools.yaml",
             );
             return None;
         }
@@ -394,7 +385,11 @@ fn agent(
     issues.extend(found);
     let parsed = parsed?;
     if parsed.body.trim().is_empty() {
-        issues.error("empty-file", &files.agent_md, "AGENT.md에 지침이 없어요");
+        issues.error(
+            "empty-file",
+            &files.agent_md,
+            "AGENT.md has no instructions",
+        );
         return None;
     }
     let field = |name: &str| {
@@ -408,11 +403,10 @@ fn agent(
             "schema",
             &files.agent_md,
             "front matter /description",
-            "설명이 비어 있어요",
+            "description is empty",
         );
         return None;
     }
-    // 값이 read·grep·glob 중 하나이고 중복이 없다는 것은 스키마가 이미 보증했다
     let builtin = parsed
         .meta
         .as_ref()
@@ -488,7 +482,10 @@ fn env_map(
         issues.error(
             "too-many",
             path,
-            format!("환경 변수가 너무 많아요(최대 {})", limits.max_env_vars),
+            format!(
+                "Too many environment variables (max {})",
+                limits.max_env_vars
+            ),
         );
         return BTreeMap::new();
     }
@@ -504,7 +501,7 @@ fn env_map(
                 "reserved-env",
                 path,
                 format!("/{key}"),
-                "이 이름은 쓸 수 없어요(`BOT_`·`LD_`·`DYLD_` 접두사, `PATH`, 128자 초과)",
+                "Reserved or invalid env name (`BOT_`, `LD_`, `DYLD_` prefixes, `PATH`, or > 128 chars)",
             );
             continue;
         }
@@ -514,12 +511,16 @@ fn env_map(
                 "too-large",
                 path,
                 format!("/{key}"),
-                format!("값이 너무 길어요(최대 {} 바이트)", limits.max_env_value),
+                format!("Value is too long (max {} bytes)", limits.max_env_value),
             );
             continue;
         }
         if SECRETISH.iter().any(|w| upper.contains(w)) {
-            issues.warning("env-looks-secret", path, format!("`{key}`는 비밀처럼 보여요. env.yaml에는 비밀을 넣지 말고 tools.yaml의 secrets를 쓰세요"));
+            issues.warning(
+                "env-looks-secret",
+                path,
+                format!("`{key}` looks like a secret; use tools.yaml secrets instead of env.yaml"),
+            );
         }
         out.insert(key.clone(), value.to_owned());
     }
@@ -537,7 +538,7 @@ fn seeds(
         issues.error(
             "too-many",
             &format!("agents/{}/memory", agent.0),
-            format!("기억 시드가 너무 많아요(최대 {})", limits.max_memory_seeds),
+            format!("Too many memory seeds (max {})", limits.max_memory_seeds),
         );
         return Vec::new();
     }
@@ -560,12 +561,12 @@ fn seeds(
                 "bad-identity",
                 path,
                 "front matter /owner",
-                format!("owner는 `<종류>:<이름>` 모양이어야 해요: {owner}"),
+                format!("owner must have `<kind>:<name>` format: {owner}"),
             );
             continue;
         }
         if parsed.body.trim().is_empty() {
-            issues.error("empty-file", path, "기억 시드에 내용이 없어요");
+            issues.error("empty-file", path, "Memory seed has no content");
             continue;
         }
         let visibility = match meta.get("visibility").and_then(Value::as_str) {

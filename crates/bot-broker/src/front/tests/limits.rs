@@ -1,4 +1,4 @@
-//! 요청 한도·경로·청크·연결 종료.
+//! Request limits, routing, chunked decoding, revocation, and ledger outage tests.
 
 use super::*;
 
@@ -68,7 +68,6 @@ async fn request_limits_apply_before_anything_is_run() {
             "{bad:?}"
         );
     }
-    // 머리를 끝내지 않거나 본문이 모자란 채 멈춘 연결은 시간 초과로 끊는다
     assert_eq!(
         raw(r.front.addr(), b"POST /mcp HTTP/1.1\r\nHost: x")
             .await
@@ -143,15 +142,14 @@ async fn a_client_that_leaves_mid_stream_gives_back_its_slot_and_closes_the_upst
     timeout(Duration::from_secs(5), stream.read(&mut seen))
         .await
         .unwrap()
-        .unwrap(); // 머리와 첫 이벤트가 왔다
-    // 동시성 1: 첫 스트림이 자리를 쥐는 동안 두 번째는 거절된다
+        .unwrap();
     assert_eq!(
         raw(r.front.addr(), &messages(&r, r#"{"stream":true}"#))
             .await
             .status,
         503
     );
-    drop(stream); // 클라이언트가 떠났다
+    drop(stream);
     let mut freed = false;
     for _ in 0..100 {
         r.upstream.respond_chunks(200, &[b"data: {}\n\n"], End::Eof);
@@ -165,7 +163,10 @@ async fn a_client_that_leaves_mid_stream_gives_back_its_slot_and_closes_the_upst
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(freed, "클라이언트가 떠나면 자리가 돌아와야 한다");
+    assert!(
+        freed,
+        "concurrency slot must be released after client disconnect"
+    );
 }
 
 #[tokio::test]
@@ -176,14 +177,12 @@ async fn stopping_the_front_closes_the_port() {
     assert!(TcpStream::connect(addr).await.is_err());
 }
 
-/// 응답이 끝까지 오는 것을 기다려 읽는다(연결이 닫히면 끝난다).
 async fn read_all(stream: &mut TcpStream) -> String {
     let mut all = Vec::new();
     let _ = timeout(Duration::from_secs(5), stream.read_to_end(&mut all)).await;
     String::from_utf8_lossy(&all).into_owned()
 }
 
-/// 동시성 1짜리 장치에 열어 둔 스트림 하나(머리와 첫 이벤트를 받은 상태).
 async fn open_stream(r: &Rig) -> TcpStream {
     r.upstream
         .respond_chunks(200, &[b"data: {}\n\n"], End::Hang);
@@ -208,7 +207,6 @@ fn one_slot(c: &mut ModelLimits) {
     };
 }
 
-/// 자리가 돌아왔는지: 새 세션 토큰으로 스트림을 요청해 200을 받는다.
 async fn slot_is_free(r: &Rig) -> bool {
     slot_is_free_for(r, r.attempt.clone()).await
 }
@@ -250,16 +248,18 @@ async fn revoking_the_token_ends_an_open_stream_with_one_fixed_error_and_frees_t
     );
     assert!(
         rest.ends_with("0\r\n\r\n"),
-        "스트림은 정상 종결 청크로 끝난다: {rest:?}"
+        "stream must end with a terminating chunk: {rest:?}"
     );
-    assert!(slot_is_free(&r).await, "상류를 닫고 자리를 돌려줘야 한다");
+    assert!(
+        slot_is_free(&r).await,
+        "upstream must close and free the slot"
+    );
 }
 
 #[tokio::test]
 async fn revoking_the_attempt_ends_its_stream_but_not_another_claims_session() {
     let r = rig(|_| {}, one_slot).await;
     let mut stream = open_stream(&r).await;
-    // 다른 claim의 세션(새 워커)은 거두지 않는다
     let mut newer = r.attempt.clone();
     newer.claim = Some(ClaimEpoch(2));
     r.sessions.revoke_attempt(&newer);
@@ -267,7 +267,7 @@ async fn revoking_the_attempt_ends_its_stream_but_not_another_claims_session() {
         timeout(Duration::from_millis(300), read_all(&mut stream))
             .await
             .is_err(),
-        "다른 시도를 거둬도 이 스트림은 계속된다"
+        "revoking another claim must not end this stream"
     );
     r.sessions.revoke_attempt(&r.attempt);
     assert!(read_all(&mut stream).await.contains(r#""message":"stale""#));
@@ -277,11 +277,10 @@ async fn revoking_the_attempt_ends_its_stream_but_not_another_claims_session() {
 async fn a_run_that_changed_hands_ends_its_open_stream_at_the_next_check() {
     let r = rig(|f| f.revoke_check = Duration::from_millis(50), one_slot).await;
     let mut stream = open_stream(&r).await;
-    r.ledger.bump_claim("r1"); // 새 워커가 claim을 가져갔다: 이 세션의 시도는 옛 claim이다
+    r.ledger.bump_claim("r1");
     let rest = read_all(&mut stream).await;
     assert!(rest.contains(r#""message":"stale""#), "{rest}");
     assert!(rest.ends_with("0\r\n\r\n"), "{rest:?}");
-    // 새 워커(새 claim)의 세션이 같은 주체의 동시성 자리를 얻는다: 옛 스트림의 자리는 돌아왔다
     let newer = Attempt {
         claim: Some(ClaimEpoch(r.ledger.claim_epoch("r1").0)),
         ..r.attempt.clone()
@@ -305,10 +304,9 @@ async fn a_plain_request_waiting_for_the_upstream_is_dropped_when_the_session_is
         reply.starts_with("HTTP/1.1 403") && reply.contains(r#""message":"stale""#),
         "{reply}"
     );
-    assert!(slot_is_free(&r).await, "기다리던 요청의 자리도 돌아온다");
+    assert!(slot_is_free(&r).await, "waiting request must free its slot");
 }
 
-/// 도착한 만큼을 `ms` 동안 모은다.
 async fn drain(stream: &mut TcpStream, got: &mut String, ms: u64) {
     let mut buf = [0u8; 4096];
     let until = tokio::time::Instant::now() + Duration::from_millis(ms);
@@ -320,7 +318,6 @@ async fn drain(stream: &mut TcpStream, got: &mut String, ms: u64) {
     }
 }
 
-/// 시작 이벤트, 번호 붙은 이벤트 `n`개, 정상 종결 이벤트 하나.
 fn numbered(n: usize) -> Vec<Vec<u8>> {
     [b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_n\"}}\n\n".to_vec()]
         .into_iter()
@@ -353,7 +350,6 @@ async fn an_outage_pauses_the_output_and_a_recovery_resumes_it_without_loss() {
         .await
         .unwrap();
     let mut got = String::new();
-    // 스트림이 흐르기 시작할 때까지(시간 추정 없이 조건으로) 기다린다
     for _ in 0..60 {
         if seen(&got) >= 1 {
             break;
@@ -361,14 +357,12 @@ async fn an_outage_pauses_the_output_and_a_recovery_resumes_it_without_loss() {
         drain(&mut stream, &mut got, 50).await;
     }
     assert!(seen(&got) >= 1, "{got}");
-    // 원장이 답하지 못하면 소유권을 확인할 수 없는 동안 출력이 멈춘다(상류도 읽지 않는다)
     r.ledger.set_context_down(true);
     drain(&mut stream, &mut got, 250).await;
     let paused_at = seen(&got);
     drain(&mut stream, &mut got, 400).await;
-    assert_eq!(seen(&got), paused_at, "멈춘 동안에는 늘지 않는다: {got}");
+    assert_eq!(seen(&got), paused_at, "output must stay paused: {got}");
     assert!(paused_at < 8, "{got}");
-    // 확인이 돌아오면 이어서 모두 나온다(빠진 것도, 오류 이벤트도 없다)
     r.ledger.set_context_down(false);
     drain(&mut stream, &mut got, 1500).await;
     assert_eq!(seen(&got), 8, "{got}");
@@ -394,7 +388,7 @@ async fn an_outage_past_the_grace_closes_the_stream_with_one_fixed_error() {
         "{rest:?}"
     );
     r.ledger.set_context_down(false);
-    assert!(slot_is_free(&r).await, "닫은 뒤 자리는 돌아온다");
+    assert!(slot_is_free(&r).await, "slot must be released after close");
 }
 
 #[tokio::test]
@@ -430,7 +424,6 @@ async fn a_plain_response_is_held_back_while_ownership_cannot_be_confirmed() {
         let (addr, request) = (r.front.addr(), messages(r, r#"{"messages":[]}"#));
         tokio::spawn(async move { raw(addr, &request).await })
     };
-    // 응답이 오기 전에 원장이 멎고 기한을 넘긴다: 응답을 내보내지 않고 고정 오류로 닫는다
     let waiting = ask(&r);
     tokio::time::sleep(Duration::from_millis(80)).await;
     r.ledger.set_context_down(true);
@@ -441,7 +434,6 @@ async fn a_plain_response_is_held_back_while_ownership_cannot_be_confirmed() {
         "{}",
         reply.body
     );
-    // 기한 안에 확인이 돌아오면 받아 둔 응답을 그대로 준다
     r.ledger.set_context_down(false);
     let waiting = ask(&r);
     tokio::time::sleep(Duration::from_millis(80)).await;
@@ -454,7 +446,7 @@ async fn a_plain_response_is_held_back_while_ownership_cannot_be_confirmed() {
 
 #[tokio::test]
 async fn a_slow_ledger_and_a_fast_stream_still_notice_a_lost_claim() {
-    // 원장이 한 번 답하는 데(100ms) 걸리는 동안 이벤트가 10ms마다 온다: 이벤트마다 확인이 취소되면 영영 끝나지 않는다
+    // Events arrive every 10ms while ledger checks take 100ms; verifies checks are not cancelled per event.
     let r = rig(
         |f| {
             f.revoke_check = Duration::from_millis(20);
@@ -475,11 +467,11 @@ async fn a_slow_ledger_and_a_fast_stream_still_notice_a_lost_claim() {
         .unwrap();
     let mut got = String::new();
     drain(&mut stream, &mut got, 600).await;
-    assert!(seen(&got) >= 5, "스트림은 흐르고 있다: {}", seen(&got));
+    assert!(seen(&got) >= 5, "stream should be flowing: {}", seen(&got));
     r.ledger.bump_claim("r1");
     drain(&mut stream, &mut got, 2_000).await;
     assert!(got.contains(r#""message":"stale""#), "{got}");
-    assert!(seen(&got) < 250, "끝까지 흘러갔다: {}", seen(&got));
+    assert!(seen(&got) < 250, "stream ran to completion: {}", seen(&got));
 }
 
 #[tokio::test]
@@ -494,7 +486,7 @@ async fn an_outage_seen_while_waiting_for_the_upstream_holds_back_the_head_and_t
     .await;
     let events = numbered(3);
     let chunks: Vec<&[u8]> = events.iter().map(Vec::as_slice).collect();
-    r.upstream.set_delay(Duration::from_millis(300)); // 상류 응답 머리가 늦게 온다
+    r.upstream.set_delay(Duration::from_millis(300));
     r.upstream.respond_chunks(200, &chunks, End::Eof);
     let mut stream = TcpStream::connect(r.front.addr()).await.unwrap();
     stream
@@ -502,14 +494,13 @@ async fn an_outage_seen_while_waiting_for_the_upstream_holds_back_the_head_and_t
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(60)).await;
-    r.ledger.set_context_down(true); // 머리를 기다리는 동안 원장이 멎는다
+    r.ledger.set_context_down(true);
     let mut got = String::new();
-    drain(&mut stream, &mut got, 420).await; // 상류 머리(300ms)가 온 뒤에도
+    drain(&mut stream, &mut got, 420).await;
     assert!(
         got.is_empty(),
-        "확인할 수 없는 동안에는 머리도 본문도 나가지 않는다: {got}"
+        "neither headers nor body may flush while unverified: {got}"
     );
-    // 확인이 돌아오면 이어서 모두 나온다
     r.ledger.set_context_down(false);
     drain(&mut stream, &mut got, 800).await;
     assert!(got.starts_with("HTTP/1.1 200") && seen(&got) == 3, "{got}");
@@ -544,7 +535,7 @@ async fn an_outage_that_outlasts_the_grace_while_waiting_closes_with_one_fixed_e
 
 #[tokio::test]
 async fn a_routine_check_that_runs_past_its_own_cap_is_a_timeout_even_if_it_succeeds() {
-    // 정상 상태의 정기 조회에도 상한이 있다: 상한(max(주기, 1s))을 넘겨 끝난 성공은 받아들이지 않고, 그 사이 유예까지 지났으면 만료다
+    // Routine ownership checks cap at max(revoke_check, 1s); a stalled poll exceeding that cap expires grace.
     let r = rig(
         |f| {
             f.revoke_check = Duration::from_millis(20);
@@ -570,13 +561,12 @@ async fn a_routine_check_that_runs_past_its_own_cap_is_a_timeout_even_if_it_succ
         drain(&mut stream, &mut got, 50).await;
     }
     assert!(seen(&got) >= 1, "{got}");
-    // 다음 정기 조회가 스레드를 붙잡고 상한(1s)을 넘겨 성공한다
     r.ledger.set_context_block(Duration::from_millis(1_150));
     drain(&mut stream, &mut got, 4_000).await;
     r.ledger.set_context_block(Duration::ZERO);
     assert!(
         got.contains(r#""message":"unavailable""#) && seen(&got) < 390,
-        "{} 건: {}",
+        "{} events: {}",
         seen(&got),
         &got[got.len().saturating_sub(300)..]
     );

@@ -1,15 +1,9 @@
-//! 모델 제공자 프록시. 모델 샌드박스는 비밀도 네트워크도 없이 브로커가 연 한 통로로만 모델을 쓴다.
+//! Model provider proxy enforcing host-side secret isolation, alias rewriting, and leak checks.
 //!
-//! 브로커가 호스트에서 대신 호출한다. 제공자 키는 이 모듈 안에서만 풀려 상류 요청 머리에만 들어가고
-//! 샌드박스로 가는 응답에는 어떤 경로로도 실리지 않는다.
-//! - 제공자는 운영자가 프로필마다 허용한 목록에서만 고른다. 목록 밖이면 접속하지 않는다.
-//! - 상류 모델 이름은 운영자의 별칭 표로 정한다(샌드박스가 보낸 `model`은 덮어쓴다).
-//! - 메시지마다 run·세대·claim을 원장에 대조한다. 옛 소유자의 요청은 상류까지 가지 않는다.
-//! - 샌드박스가 보낸 머리는 운영자가 제공자마다 허용한 이름만 모양을 검사해 넘긴다(예: API 판본).
-//! - 응답에 키가 섞여 있으면 막고, 상류 오류의 본문은 상태만 남겨 돌려준다.
-//!
-//! 스트리밍(SSE)은 `forward_stream`이 이벤트 단위로 검사하며 중계한다(`stream` 모듈). 실제 HTTP(TLS) 전송은
-//! `Upstream` 포트를 구현하는 쪽(조립하는 곳)이 맡는다.
+//! Sandboxes have neither keys nor direct network access. Provider keys are resolved here and
+//! attached only to upstream headers; responses (and SSE streams via `stream`) are scanned for
+//! leaked credentials before returning. Every request checks run/generation/claim in the ledger
+//! and pins the upstream model name from the operator's alias map.
 
 mod stream;
 mod vet;
@@ -44,25 +38,25 @@ use tokio::time::timeout;
 pub struct Provider {
     pub endpoint: HostPort,
     pub path: String,
-    /// 프로필 이름공간의 자격 이름. 값은 상류 요청 머리에만 들어간다.
+    /// Profile-scoped secret name attached only to upstream request headers.
     pub secret: SecretName,
-    /// 키를 싣는 머리 이름(`authorization`, `x-api-key` 등)과 값 앞 접두(`Bearer` 등).
+    /// Header name (e.g. `authorization`, `x-api-key`) and optional value prefix (e.g. `Bearer`).
     pub header: String,
     pub scheme: Option<String>,
-    /// 비밀이 아닌 고정 머리(API 판본 등).
+    /// Fixed non-secret upstream headers (e.g. API version).
     pub headers: Vec<(String, String)>,
-    /// 샌드박스가 보낸 머리 중 그대로 넘길 이름(소문자, 예: `anthropic-version`). 이 밖의 머리는 버린다.
+    /// Lowercase sandbox header names permitted to pass through (all others are dropped).
     pub forward_headers: Vec<String>,
-    /// 모델 별칭 → 상류 모델 이름.
+    /// Model alias -> upstream model ID.
     pub models: BTreeMap<String, String>,
-    /// 기본 허용 목록에 더해 이 제공자가 받는 최상위 요청 필드(운영자가 정한다).
+    /// Additional operator-permitted top-level request body fields beyond the base allowlist.
     pub body_fields: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ModelHost {
     pub providers: BTreeMap<String, Provider>,
-    /// 프로필 → 운영자가 허용한 제공자 이름.
+    /// Profile -> operator-allowed provider names.
     pub allow: BTreeMap<ProfileId, BTreeSet<String>>,
 }
 
@@ -72,7 +66,6 @@ pub struct ModelLimits {
     pub max_response: usize,
     pub timeout: Duration,
     pub rate: RateConfig,
-    /// 스트림: 조각 사이 최대 대기, 전체 수명, 이벤트 하나·전체 크기.
     pub stream_idle: Duration,
     pub stream_total: Duration,
     pub max_event: usize,
@@ -98,12 +91,11 @@ impl Default for ModelLimits {
     }
 }
 
-/// 샌드박스가 보낸 모델 요청. `alias`는 호스트가 세션에 고정한 프로필의 모델 별칭이다.
+/// Model request from the sandbox; `alias` is pinned to the session by the host.
 pub struct ModelRequest {
     pub attempt: Attempt,
     pub alias: String,
     pub body: JsonPayload,
-    /// 샌드박스가 보낸 머리. 제공자가 허용한 이름만 넘어간다.
     pub headers: Vec<(String, String)>,
 }
 
@@ -124,10 +116,10 @@ pub struct UpstreamResponse {
     pub body: Vec<u8>,
 }
 
-/// 상류(모델 제공자)로 보내는 전송 포트. TLS·재시도 금지(숨은 재전송은 쓰지 않는다)는 구현이 지킨다.
+/// Upstream transport port; implementations enforce TLS and perform no hidden retries.
 pub trait Upstream: Send + Sync {
     fn send(&self, request: UpstreamRequest) -> Reply<'_, UpstreamResponse>;
-    /// 본문을 조각 단위로 흘려 받는다(SSE). 응답 머리를 받으면 돌려준다.
+    /// Streams response chunks (SSE) once response headers arrive.
     fn stream(&self, request: UpstreamRequest) -> Reply<'_, UpstreamStream>;
 }
 
@@ -140,14 +132,14 @@ pub struct ModelProxy {
     limits: ModelLimits,
 }
 
-/// 상류 호출 직전까지 마친 것. `slot`은 호출이 끝날 때까지 동시성 자리를 쥔다.
+/// Holds the concurrency slot until the upstream call finishes.
 struct Prepared {
     slot: Slot,
     request: UpstreamRequest,
     key: Vec<u8>,
 }
 
-/// 머리 값은 보이는 ASCII만, 512바이트까지.
+/// Printable ASCII only, up to 512 bytes.
 fn header_value_ok(value: &str) -> bool {
     value.len() <= 512 && value.bytes().all(|b| (0x20..0x7f).contains(&b))
 }
@@ -171,7 +163,7 @@ impl ModelProxy {
         }
     }
 
-    /// 프로필이 허용한 제공자 중 이 별칭을 가진 것 하나와 상류 모델 이름. 없거나 둘 이상이면 `None`.
+    /// Resolves a unique allowed provider and upstream model for `(profile, alias)`; returns `None` if missing or ambiguous.
     fn provider(&self, profile: &ProfileId, alias: &str) -> Option<(&Provider, &String)> {
         let allowed = self.host.allow.get(profile)?;
         let mut found = allowed
@@ -182,12 +174,11 @@ impl ModelProxy {
         found.next().is_none().then_some(first)
     }
 
-    /// 이 시도가 지금도 현재 claim을 쥐고 있는지 원장에 대조한다(세션이 도구 목록 같은 읽기에서도 같은 기준을 쓰게 한다).
+    /// Verifies that `attempt` still holds the active claim in the ledger.
     pub async fn verify(&self, attempt: Attempt) -> Result<bot_core::state::RunContext, Error> {
         self.ledger.context(attempt).await
     }
 
-    /// 세대·권한 확인, 제공자 선택, 속도 제한, 요청 본문·머리 구성, 키 해석까지.
     async fn prepare(&self, req: ModelRequest, streaming: bool) -> Result<Prepared, Error> {
         let profile = req.attempt.profile.clone();
         let ctx = self.ledger.context(req.attempt).await?;
@@ -256,7 +247,7 @@ impl ModelProxy {
         self.response_body(response, &key)
     }
 
-    /// 스트리밍 요청(`stream: true`)을 중계한다. 상류가 오류 상태로 답하면 상태만 담은 고정 본문 하나를 돌려준다.
+    /// Relays a streaming (`stream: true`) request; upstream errors collapse to a fixed status payload.
     pub async fn forward_stream(&self, req: ModelRequest) -> Result<ModelStream, Error> {
         let Prepared { slot, request, key } = self.prepare(req, true).await?;
         let upstream = timeout(self.limits.timeout, self.upstream.stream(request))
@@ -265,7 +256,7 @@ impl ModelProxy {
         Ok(ModelStream::new(upstream, key, self.limits, slot))
     }
 
-    /// 요청 본문: 엄격히 읽고, 상류 모델 이름으로 덮고, 스트리밍 여부를 요청 종류와 맞추고, 정규화한다.
+    /// Parses strictly, validates fields, pins the upstream model, enforces streaming mode, and canonicalizes.
     fn request_body(
         &self,
         body: &JsonPayload,
@@ -292,7 +283,7 @@ impl ModelProxy {
         canonicalize(&Value::Object(map)).ok_or(Error::Invalid)
     }
 
-    /// 응답: 크기·형식·키 노출을 검사한다. 상류 오류는 상태만 남긴다.
+    /// Checks response size, JSON validity, and credential leaks; strips upstream error bodies to status only.
     fn response_body(
         &self,
         response: UpstreamResponse,
@@ -313,7 +304,7 @@ impl ModelProxy {
         }
         let text = String::from_utf8(response.body).map_err(|_| Error::Unavailable)?;
         let decoded = parse(&text).ok_or(Error::Unavailable)?;
-        // 이스케이프(`p`…)로 쓴 키는 원문 바이트에 보이지 않으므로 디코딩한 키·문자열 값도 검사한다.
+        // Scan decoded strings and keys as well so JSON-escaped credentials cannot bypass the raw byte check.
         if decoded_leaks(&decoded, key) {
             return Err(Error::Denied);
         }
@@ -324,7 +315,7 @@ impl ModelProxy {
     }
 }
 
-/// 디코딩한 JSON의 모든 키와 문자열 값에 키가 들어 있는가.
+/// Returns true if any decoded JSON key or string value contains `key`.
 pub(crate) fn decoded_leaks(value: &Value, key: &[u8]) -> bool {
     let hit = |text: &str| contains_credential(text.as_bytes(), &[key.to_vec()]);
     match value {

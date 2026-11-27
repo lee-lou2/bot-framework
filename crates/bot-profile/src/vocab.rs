@@ -1,19 +1,16 @@
-//! 스키마 어휘 검사. 지원하는 키워드만 쓰였는지, 모양이 맞는지, `pattern`이 공통 문법인지 본다.
-//! 하나라도 어긋나면 활성화를 거절한다(일부만 검증하고 통과시키지 않는다).
+//! JSON Schema vocabulary, shape, and portable regex syntax checks for bundled and tool input schemas.
 use regex::{Regex, RegexBuilder};
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// 번들 스키마만 쓰는 "이 값 자체가 입력 스키마여야 한다" 참조(tools.schema.json의 input).
+/// Bundled-only meta-schema reference validating that a property value is itself a supported input schema.
 pub const META_REF: &str = "https://json-schema.org/draft/2020-12/schema";
 pub const MAX_DEPTH: usize = 64;
 const MAX_PATTERN: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Dialect {
-    /// 번들한 스키마(schemas/v1)가 쓰는 어휘
     Bundled,
-    /// 도구 `input`: docs/plugins.md가 정한 어휘만
     Input,
 }
 
@@ -38,7 +35,7 @@ const INPUT_KEYS: &[&str] = &[
     "title",
     "description",
     "default",
-    // 주석 키워드: 받아들이되 검증에는 쓰지 않는다(실제 MCP 서버의 입력 스키마가 흔히 싣는다)
+    // Annotation keywords accepted without enforcing them during validation (common in MCP tool schemas).
     "$schema",
     "$comment",
     "examples",
@@ -46,7 +43,7 @@ const INPUT_KEYS: &[&str] = &[
     "deprecated",
     "readOnly",
     "writeOnly",
-    // MCP Streamable HTTP: 이 인자의 값을 `Mcp-Param-<이름>` 머리로 되풀이한다(주석일 뿐 검증에는 영향이 없다). 값은 HTTP 필드 이름 토큰이다.
+    // MCP Streamable HTTP annotation forwarding the argument as `Mcp-Param-<name>`; value must be an HTTP header token.
     "x-mcp-header",
 ];
 const BUNDLED_EXTRA: &[&str] = &[
@@ -70,7 +67,7 @@ const TYPES: &[&str] = &[
     "null", "boolean", "object", "array", "string", "number", "integer",
 ];
 
-/// RFC 9110 `token`(`tchar`)으로만 이뤄진 1~64자.
+/// RFC 9110 `token` (`tchar`), 1..=64 ASCII bytes.
 fn header_token(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 64
@@ -83,8 +80,8 @@ fn escape(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
 
-/// 어휘 검사에서 찾은 문제 하나. `code`는 고정 이름이고 `pointer`는 문제가 있는 스키마 자리(JSON 포인터)다. `message`는 사람이 읽는 설명이며 **스키마 안의 글(키워드·패턴 등)을
-/// 되풀이할 수 있다** — 출처를 믿을 수 없는 스키마(서버가 내세운 정의)의 진단에는 `code`와 `pointer`만 쓴다.
+/// Vocabulary violation with stable `code` and JSON `pointer`; `message` may echo schema text,
+/// so diagnostics for untrusted server schemas must use `code` and `pointer` only.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Problem {
     pub code: &'static str,
@@ -93,7 +90,6 @@ pub struct Problem {
 }
 
 impl Problem {
-    /// 옛 한 줄 모양(`<포인터>: <설명>`)
     pub fn line(&self) -> String {
         let at = if self.pointer.is_empty() {
             "/"
@@ -151,10 +147,10 @@ impl Walk<'_> {
         let obj = match node {
             Value::Bool(_) if self.dialect == Dialect::Bundled || depth > 0 => return,
             Value::Object(o) => o,
-            _ => return self.bad(ptr, "shape", "스키마는 객체여야 해요"),
+            _ => return self.bad(ptr, "shape", "schema must be an object"),
         };
         if depth > MAX_DEPTH {
-            return self.bad(ptr, "too-deep", "스키마가 너무 깊어요");
+            return self.bad(ptr, "too-deep", "schema is too deeply nested");
         }
         let mut subs: Vec<(String, &Value)> = Vec::new();
         for (key, value) in obj {
@@ -162,50 +158,58 @@ impl Walk<'_> {
                 self.bad(
                     ptr,
                     "unsupported-keyword",
-                    format!("지원하지 않는 키워드 `{key}`"),
+                    format!("unsupported keyword `{key}`"),
                 );
                 continue;
             }
             let at = |name: &str| format!("{ptr}/{name}");
             match key.as_str() {
                 "type" => self.type_keyword(value, ptr),
-                "enum" if !value.is_array() => self.bad(ptr, "shape", "enum은 배열이어야 해요"),
+                "enum" if !value.is_array() => self.bad(ptr, "shape", "enum must be an array"),
                 "required"
                     if !value
                         .as_array()
                         .is_some_and(|a| a.iter().all(Value::is_string)) =>
                 {
-                    self.bad(ptr, "shape", "required는 문자열 배열이어야 해요");
+                    self.bad(ptr, "shape", "required must be an array of strings");
                 }
                 "uniqueItems" if !value.is_boolean() => {
-                    self.bad(ptr, "shape", "uniqueItems는 true/false여야 해요")
+                    self.bad(ptr, "shape", "uniqueItems must be a boolean")
                 }
                 "minProperties" | "maxProperties" | "minItems" | "maxItems" | "minLength"
                 | "maxLength"
                     if value.as_u64().is_none() =>
                 {
-                    self.bad(ptr, "shape", format!("{key}는 0 이상의 정수여야 해요"));
+                    self.bad(
+                        ptr,
+                        "shape",
+                        format!("{key} must be a non-negative integer"),
+                    );
                 }
                 "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum"
                     if value.as_f64().is_none() =>
                 {
-                    self.bad(ptr, "shape", format!("{key}는 숫자여야 해요"));
+                    self.bad(ptr, "shape", format!("{key} must be a number"));
                 }
                 "multipleOf" if value.as_f64().is_none_or(|m| m <= 0.0) => {
-                    self.bad(ptr, "shape", "multipleOf는 0보다 큰 숫자여야 해요");
+                    self.bad(ptr, "shape", "multipleOf must be a number greater than 0");
                 }
                 "pattern" => self.pattern(value, ptr),
                 "$schema" | "$comment" | "format" if !value.is_string() => {
-                    self.bad(ptr, "shape", format!("{key}는 글이어야 해요"));
+                    self.bad(ptr, "shape", format!("{key} must be a string"));
                 }
                 "examples" if !value.is_array() => {
-                    self.bad(ptr, "shape", "examples는 배열이어야 해요")
+                    self.bad(ptr, "shape", "examples must be an array")
                 }
                 "deprecated" | "readOnly" | "writeOnly" if !value.is_boolean() => {
-                    self.bad(ptr, "shape", format!("{key}는 true/false여야 해요"));
+                    self.bad(ptr, "shape", format!("{key} must be a boolean"));
                 }
                 "x-mcp-header" if !value.as_str().is_some_and(header_token) => {
-                    self.bad(ptr, "bad-header-name", "x-mcp-header는 HTTP 필드 이름으로 쓸 수 있는 글자(영숫자와 `-` `_` 등 64자 이하)여야 해요");
+                    self.bad(
+                        ptr,
+                        "bad-header-name",
+                        "x-mcp-header must be a valid HTTP header token (1..=64 RFC 9110 token chars)",
+                    );
                 }
                 "$ref" => self.reference(value, ptr),
                 "properties" | "$defs" | "definitions" => match value.as_object() {
@@ -213,7 +217,7 @@ impl Walk<'_> {
                         map.iter()
                             .map(|(k, v)| (at(&format!("{key}/{}", escape(k))), v)),
                     ),
-                    None => self.bad(ptr, "shape", format!("{key}는 객체여야 해요")),
+                    None => self.bad(ptr, "shape", format!("{key} must be an object")),
                 },
                 "additionalProperties"
                 | "propertyNames"
@@ -232,11 +236,7 @@ impl Walk<'_> {
                                 .map(|(i, v)| (at(&format!("{key}/{i}")), v)),
                         );
                     }
-                    _ => self.bad(
-                        ptr,
-                        "shape",
-                        format!("{key}는 비어 있지 않은 배열이어야 해요"),
-                    ),
+                    _ => self.bad(ptr, "shape", format!("{key} must be a non-empty array")),
                 },
                 _ => {}
             }
@@ -258,7 +258,7 @@ impl Walk<'_> {
             1
         };
         if names.is_empty() || names.len() != count || names.iter().any(|n| !TYPES.contains(n)) {
-            self.bad(ptr, "bad-type", format!("type이 올바르지 않아요: {value}"));
+            self.bad(ptr, "bad-type", format!("invalid type: {value}"));
         }
     }
 
@@ -269,15 +269,15 @@ impl Walk<'_> {
             Some(r) => self.bad(
                 ptr,
                 "bad-ref",
-                format!("참조할 수 없어요(같은 문서의 `#/…`만 가능): {r}"),
+                format!("unresolvable $ref (only local `#/...` pointers are allowed): {r}"),
             ),
-            None => self.bad(ptr, "bad-ref", "$ref는 문자열이어야 해요"),
+            None => self.bad(ptr, "bad-ref", "$ref must be a string"),
         }
     }
 
     fn pattern(&mut self, value: &Value, ptr: &str) {
         let Some(p) = value.as_str() else {
-            return self.bad(ptr, "bad-pattern", "pattern은 문자열이어야 해요");
+            return self.bad(ptr, "bad-pattern", "pattern must be a string");
         };
         if self.patterns.contains_key(p) {
             return;
@@ -289,27 +289,23 @@ impl Walk<'_> {
             Ok(re) => {
                 self.patterns.insert(p.to_owned(), re);
             }
-            Err(e) => self.bad(
-                ptr,
-                "bad-pattern",
-                format!("pattern `{p}`을 쓸 수 없어요: {e}"),
-            ),
+            Err(e) => self.bad(ptr, "bad-pattern", format!("invalid pattern `{p}`: {e}")),
         }
     }
 }
 
-/// Rust regex와 다른 엔진(ECMAScript·PCRE·Python)이 같은 뜻으로 읽는 문법만 허용한다.
-/// 글자 모음·경계 이스케이프(`\d \w \s \b`)는 엔진마다 유니코드 범위가 달라 막고 명시적 클래스를 쓰게 한다.
+/// Restricts regexes to syntax portable across Rust `regex`, ECMAScript, PCRE, and Python
+/// (rejecting `\d`, `\w`, `\s`, `\b` whose Unicode ranges vary across engines).
 fn common_syntax(p: &str) -> Result<(), String> {
     if p.chars().count() > MAX_PATTERN {
-        return Err(format!("{MAX_PATTERN}자를 넘어요"));
+        return Err(format!("exceeds {MAX_PATTERN} characters"));
     }
     let c: Vec<char> = p.chars().collect();
     let (mut i, mut in_class) = (0, false);
     while i < c.len() {
         match (c[i], in_class) {
             ('\\', _) => {
-                let next = *c.get(i + 1).ok_or("끝이 `\\`로 끝나요")?;
+                let next = *c.get(i + 1).ok_or("trailing `\\` escape")?;
                 let ok = if in_class {
                     "\\-][^./nrt"
                 } else {
@@ -317,17 +313,17 @@ fn common_syntax(p: &str) -> Result<(), String> {
                 };
                 if !ok.contains(next) {
                     let hint = if "dDwWsSbB".contains(next) {
-                        "(`[0-9]`처럼 명시적 클래스를 쓰세요)"
+                        " (use an explicit class such as `[0-9]`)"
                     } else {
                         ""
                     };
-                    return Err(format!("`\\{next}`는 공통 문법이 아니에요{hint}"));
+                    return Err(format!("`\\{next}` is not portable regex syntax{hint}"));
                 }
                 i += 1;
             }
             ('(', false) if c.get(i + 1) == Some(&'?') && c.get(i + 2) != Some(&':') => {
                 return Err(
-                    "`(?:` 말고 `(?`로 시작하는 그룹(플래그·lookaround·이름)은 쓸 수 없어요".into(),
+                    "`(?` groups other than `(?:` (flags, lookarounds, named groups) are not allowed".into(),
                 );
             }
             ('[', false) => {
@@ -336,20 +332,28 @@ fn common_syntax(p: &str) -> Result<(), String> {
                     i += 1;
                 }
                 if c.get(i + 1) == Some(&']') {
-                    return Err("`[]`·`[^]`처럼 `]`로 시작하는 클래스는 엔진마다 달라요".into());
+                    return Err(
+                        "character classes starting with `]` (`[]`, `[^]`) differ across regex engines".into(),
+                    );
                 }
             }
-            ('[', true) => return Err("클래스 안의 `[`는 쓸 수 없어요(`\\[`로 쓰세요)".into()),
+            ('[', true) => {
+                return Err(
+                    "unescaped `[` inside character class is not allowed (use `\\[`)".into(),
+                );
+            }
             (']', true) => in_class = false,
             ('&' | '~' | '-', true) if c.get(i + 1) == Some(&c[i]) => {
-                return Err("클래스 안의 집합 연산(`&&` `--` `~~`)은 쓸 수 없어요".into());
+                return Err(
+                    "character class set operators (`&&`, `--`, `~~`) are not allowed".into(),
+                );
             }
             _ => {}
         }
         i += 1;
     }
     if in_class {
-        Err("`[`가 닫히지 않았어요".into())
+        Err("unclosed `[` in character class".into())
     } else {
         Ok(())
     }
@@ -373,7 +377,7 @@ mod tests {
                            "o": {"anyOf": [{"type": "null"}, {"type": "string"}]}},
             "required": ["a"], "additionalProperties": false, "allOf": [{"required": ["a"]}], "oneOf": [{"type": "object"}]});
         assert!(input(ok).is_ok());
-        // `$ref`·`$defs`는 어휘 검사 앞에서 `Schema::compile_input`이 펼친다: 어휘 검사 자체는 남은 `$ref`를 받지 않는다
+        // `$ref`/`$defs` are expanded before vocabulary checks by `Schema::compile_input`, so raw vocab rejects them.
         for key in [
             "$ref",
             "$defs",
@@ -450,13 +454,16 @@ mod tests {
         ] {
             assert!(input(doc.clone()).is_err(), "{doc}");
         }
-        assert!(input(json!(true)).is_err(), "최상위 스키마는 객체여야 해요");
+        assert!(
+            input(json!(true)).is_err(),
+            "top-level schema must be an object"
+        );
     }
 
     #[test]
     fn annotation_keywords_are_accepted_but_never_checked_against_the_value() {
         let doc = json!({
-            "$schema": "http://json-schema.org/draft-07/schema#", "$comment": "생성한 스키마",
+            "$schema": "http://json-schema.org/draft-07/schema#", "$comment": "generated schema",
             "type": "object", "title": "t", "description": "d", "examples": [{"a": "x"}],
             "properties": {
                 "a": {"type": "string", "format": "uri", "deprecated": true, "readOnly": false,
@@ -464,7 +471,6 @@ mod tests {
             }
         });
         assert!(input(doc).is_ok());
-        // 모양이 틀린 주석은 거절한다
         for bad in [
             json!({"type": "object", "$schema": {}}),
             json!({"type": "object", "format": 1}),
@@ -495,7 +501,7 @@ mod tests {
         ] {
             assert!(input(with(bad.clone())).is_err(), "{bad}");
         }
-        // 다른 `x-` 키는 여전히 어휘 밖이다
+        // Other `x-` extension keys remain outside the vocabulary.
         assert!(input(json!({"type": "object", "x-other": 1})).is_err());
     }
 }

@@ -1,14 +1,14 @@
 ---
 name: report-format
-description: 보고할 때 결론·근거·다음 행동·확인하지 못한 것 순서로 쓴다
+description: Structure reports in order (Conclusion, Evidence, Next Actions, Unknowns)
 ---
-# 보고 형식
+# Report Format
 
-프로필 `skills/`에 둔 스킬은 모든 에이전트에게 보인다. 팀 전체가 같은 모양으로 보고하게 하는 규칙을 둔다.
+Skills under profile `skills/` are visible to every agent so the whole team reports in a consistent structure.
 
-1. **결론**: 한두 문장.
-2. **근거**: 파일·문서·일정 같은 출처를 목록으로.
-3. **다음 행동**: 누가, 무엇을, 언제까지. 없으면 "없음".
-4. **확인하지 못한 것**: 추측과 사실을 가른다.
+1. **Conclusion**: One or two sentences.
+2. **Evidence**: Bullet list of sources (files, docs, schedule entries).
+3. **Next Actions**: Who does what by when; write "None" if there are none.
+4. **Unknowns**: Separate confirmed facts from assumptions.
 
-길이는 화면 하나(약 15줄) 안으로 한다. 하위 에이전트의 보고를 합칠 때도 이 순서를 유지한다.
+Keep reports within one screen (about 15 lines), and preserve this order when merging sub-agent reports.

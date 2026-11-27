@@ -13,7 +13,7 @@ async fn oversize_plan_is_permanent_without_a_second_model_request() {
             ..call("agenda.list", args.clone())
         });
         api.script(calls(kind, "", batch.into(), None));
-        let run = w.accept("large-plan", "일정 조회").await;
+        let run = w.accept("large-plan", "List agenda").await;
         let worker = w.worker(&w.pg.store, models(kind, &api), config());
         assert_eq!(worker.run_once().await, Some(Outcome::Failed(Retry::Dead)));
         assert_eq!(run_error(&w, &run).await, "invalid_checkpoint");
@@ -33,7 +33,7 @@ async fn the_result_checkpoint_accepts_one_mib_and_rejects_one_more_byte_after_o
     let kind = ApiKind::Anthropic;
     for bytes in [LIMIT, LIMIT + 1] {
         let Some(w) = world().await else { return };
-        let run = w.accept("large-result", "일정 삭제").await;
+        let run = w.accept("large-result", "Delete agenda").await;
         let api = FakeApi::start().await;
         let tool = "agenda.delete";
         let args = json!({"event": "e1"});
@@ -44,10 +44,10 @@ async fn the_result_checkpoint_accepts_one_mib_and_rejects_one_more_byte_after_o
             vec![call(tool, args.clone())],
             None,
         ));
-        api.script(text(kind, "완료", None));
+        api.script(text(kind, "Done", None));
         let worker = w.worker(&w.pg.store, models(kind, &api), config());
         assert_eq!(worker.run_once().await, Some(Outcome::Parked));
-        // 실제 교환 형식의 고정 부분(공급자 상태 포함)을 재서 도구 결과를 정확한 경계까지 채운다.
+        // Measure the fixed serialized envelope (including provider state) to hit the exact 1 MiB boundary.
         let plan: serde_json::Value = serde_json::from_str(
             &w.pg
                 .scalar::<String>("select body from bot_steps where key = 'turn-0'")
@@ -103,10 +103,10 @@ async fn an_unavailable_result_checkpoint_retries_using_the_committed_call() {
     let kind = ApiKind::Anthropic;
     let api = FakeApi::start().await;
     api.script(calls(kind, "", vec![call("agenda.list", json!({}))], None));
-    api.script(text(kind, "완료", None));
-    let run = w.accept("store-outage", "일정 조회").await;
+    api.script(text(kind, "Done", None));
+    let run = w.accept("store-outage", "List agenda").await;
     let worker = w.worker(&w.pg.store, models(kind, &api), config());
-    // 계획·도구 영수증은 커밋되고 결과 체크포인트 쓰기만 저장소 장애로 롤백된다.
+    // Allow plan and call receipt to commit, then fail only the result checkpoint insert with SQLSTATE 08006.
     w.pg.sql("create function fail_end() returns trigger language plpgsql as $$ begin raise sqlstate '08006'; end $$").await;
     w.pg.sql("create trigger fail_end before insert on bot_steps for each row when (new.key = 'end-0') execute function fail_end()").await;
     assert!(matches!(

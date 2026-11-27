@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""투명 프록시: 두 공식 SDK의 `base_url`을 이 프록시로 두면 입구에 **실제로 간 요청**(SDK 재시도 포함)의 수·상태·핵심 헤더를 입구를 믿지 않고 센다. 돌아오는 모든 응답(JSON·SSE 조각·오류)은
-공식 OpenAPI(고정 커밋)로 그 자리에서 검사한다 — 양 SDK·원시 요청 어느 쪽 출력이든 빠지지 않는다. 요청 본문과 키는 기록하지 않는다(경로·상태·고정 헤더 이름만). SSE는 받는 대로 흘려 보낸다.
-
-사용: wire_proxy.py <입구 포트> [프록시 포트]   첫 줄에 프록시 포트를 찍는다. 검사하려면 WIRE_VALIDATE=1(jsonschema 필요).
-조회: GET /__wire/log · GET /__wire/summary · POST /__wire/reset(기록) · POST /__wire/reset-all(집계까지). /v1 밖이라 입구와 겹치지 않는다."""
+"""Transparent loopback wire proxy that counts actual requests (including SDK retries) and validates every JSON/SSE/error response against the pinned OpenAI OpenAPI schema without logging bodies or keys.
+Usage: wire_proxy.py <upstream_port> [proxy_port]   Prints bound port on line 1. Set WIRE_VALIDATE=1 to enable schema validation.
+Endpoints: GET /__wire/log, GET /__wire/summary, POST /__wire/reset (log only), POST /__wire/reset-all (log and counters)."""
 import http.client
 import json
 import os
@@ -40,7 +38,6 @@ def check(entry, name, instance, where=""):
 
 
 def validate(entry, ctype, body):
-    """응답 하나를 경로·상태로 정한 스키마로 검사한다(SSE는 `data:` 한 줄씩)."""
     if SCHEMA is None:
         return
     path, status = entry["path"].split("?")[0], entry["status"]
@@ -59,20 +56,20 @@ def validate(entry, ctype, body):
             check(entry, name, json.loads(body))
         except ValueError:
             with LOCK:
-                SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": name, "problems": ["본문이 JSON이 아니다"]})
+                SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": name, "problems": ["body is not valid JSON"]})
         return
     text = body.decode("utf-8", errors="replace")
     events = [e for e in text.split("\n\n") if e != ""]
     if not text.endswith("\n\n"):
         with LOCK:
-            SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": "sse", "problems": ["마지막 이벤트가 빈 줄로 끝나지 않는다"]})
+            SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": "sse", "problems": ["final SSE event does not end with a blank line"]})
     for event in events:
         if event.startswith(":"):
             with LOCK:
                 SUMMARY["sse"]["keepalive"] += 1
             if event != ": keep-alive":
                 with LOCK:
-                    SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": "sse", "problems": [f"주석 줄이 keep-alive가 아니다: {event[:40]}"]})
+                    SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": "sse", "problems": [f"unexpected SSE comment: {event[:40]}"]})
         elif event.startswith("data: ") and "\n" not in event:
             payload = event[len("data: "):]
             if payload == "[DONE]":
@@ -83,12 +80,12 @@ def validate(entry, ctype, body):
                 chunk = json.loads(payload)
             except ValueError:
                 with LOCK:
-                    SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": "sse", "problems": ["data가 JSON이 아니다"]})
+                    SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": "sse", "problems": ["SSE data payload is not valid JSON"]})
                 continue
             check(entry, "ErrorResponse" if "error" in chunk else "CreateChatCompletionStreamResponse", chunk, "(sse)")
         else:
             with LOCK:
-                SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": "sse", "problems": [f"틀에 맞지 않는 이벤트: {event[:40]!r}"]})
+                SUMMARY["violations"].append({"n": entry["n"], "path": entry["path"], "schema": "sse", "problems": [f"malformed SSE event: {event[:40]!r}"]})
 
 
 class Proxy(BaseHTTPRequestHandler):
@@ -101,13 +98,13 @@ class Proxy(BaseHTTPRequestHandler):
         if self.path.startswith("/__wire/"):
             with LOCK:
                 if self.path in ("/__wire/reset", "/__wire/reset-all"):
-                    LOG.clear()  # reset은 기록만 비운다(시험마다), reset-all은 검사 집계까지(실행을 시작할 때 한 번)
+                    LOG.clear()  # /reset clears per-test log; /reset-all resets suite-wide counters.
                     if self.path.endswith("-all"):
                         SUMMARY.update({"validated": {}, "violations": [], "statuses": {}, "sse": {"keepalive": 0, "done": 0}})
                     return self.reply(200, b"{}")
                 return self.reply(200, json.dumps(LOG if self.path == "/__wire/log" else {**SUMMARY, "requests": len(LOG)}).encode())
         chunked = (self.headers.get("Transfer-Encoding") or "").lower() == "chunked"
-        if chunked:  # 청크 본문은 조각 그대로 읽어 같은 모양으로 넘긴다(입구가 실제로 받은 바이트로 한도를 세는지 보려고)
+        if chunked:  # Preserve chunked framing so upstream body-limit tests verify received-byte accounting.
             pieces = []
             while True:
                 size = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
@@ -120,7 +117,7 @@ class Proxy(BaseHTTPRequestHandler):
         else:
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
-        headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]  # 같은 이름의 헤더 줄이 겹쳐도 그대로 전달한다
+        headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]  # Preserve duplicate headers verbatim.
         entry = {"method": self.command, "path": self.path, "req": {h: self.headers.get(h) for h in REQ_HEADERS if self.headers.get(h) is not None}}
         with LOCK:
             entry["n"] = len(LOG) + 1
@@ -155,7 +152,7 @@ class Proxy(BaseHTTPRequestHandler):
         self.end_headers()
         kept, size = [], 0
         try:
-            while True:  # 받는 대로 흘려 보낸다(SSE 지연 없음)
+            while True:  # Stream bytes immediately to avoid buffering SSE events.
                 chunk = reply.read1(65536) if hasattr(reply, "read1") else reply.read(65536)
                 if not chunk:
                     break
@@ -165,7 +162,7 @@ class Proxy(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
-            entry["client_closed"] = True  # 클라이언트가 먼저 끊었다: 끝까지 못 읽은 본문은 검사하지 않는다
+            entry["client_closed"] = True  # Skip schema check on truncated bodies after client disconnect.
         else:
             validate(entry, reply.getheader("content-type") or "", b"".join(kept))
         self.close_connection = True

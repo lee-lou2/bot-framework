@@ -1,5 +1,4 @@
-//! 적용된 마이그레이션은 바꾸지 않는다(SQLx 검사합). 바뀐 스키마는 새 번호로만 추가한다.
-//! 이전 판(0006까지) DB 위로 0007이 제자리에서 올라가는지, 이전 행의 해석이 안전한지 본다.
+//! Deployed migration immutability (SQLx SHA-384 checksums) and in-place upgrade tests.
 
 use crate::support::*;
 use bot_core::command::memory_share_hash;
@@ -14,7 +13,7 @@ use bot_core::{
 };
 use sha2::{Digest, Sha256, Sha384};
 
-/// 0001~0006의 SHA-384(SQLx가 적용 기록에 남기는 검사합). 이 값이 바뀌면 이미 적용한 DB가 기동을 거절한다.
+/// Frozen SHA-384 checksums for migrations 0001..0006; changing any breaks startup on deployed DBs.
 const FROZEN: [(&str, &str, &str); 6] = [
     (
         "0001_runs",
@@ -55,7 +54,7 @@ fn applied_migrations_keep_their_checksums() {
         let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
             hex, expected,
-            "{name}은 이미 적용된 마이그레이션이다: 바꾸지 말고 새 번호를 추가한다"
+            "{name} is already deployed: do not edit it; add a new numbered migration instead"
         );
     }
 }
@@ -66,7 +65,6 @@ async fn a_database_at_the_previous_version_upgrades_in_place() {
         return;
     };
     db.publish().await;
-    // 이전 판이 만든 행: HTTP 접수 한 건(경로 열 없음)과 미종결 민감 접수 한 건(시작 표시 없음)
     let mut old_http = accept_as(
         "personal",
         "old-http",
@@ -100,7 +98,7 @@ async fn a_database_at_the_previous_version_upgrades_in_place() {
     else {
         panic!("Start")
     };
-    // 0007 이전 모양으로 되돌린다(열·제약 제거, 적용 기록 삭제)
+    // Roll schema back to pre-0007 layout to test in-place upgrade.
     for sql in [
         "alter table bot_requests drop constraint bot_requests_http_all_or_none, drop column http_method, drop column http_path, drop column http_response",
         "alter table bot_runs drop column private_started_ms",
@@ -110,14 +108,14 @@ async fn a_database_at_the_previous_version_upgrades_in_place() {
         db.sql(sql).await;
     }
 
+    db.store.migrate().await.expect("0007 must apply in place");
     db.store
         .migrate()
         .await
-        .expect("0007이 제자리에서 올라간다");
-    db.store.migrate().await.expect("다시 돌려도 그대로다");
+        .expect("re-running migrate must be idempotent");
     db.reconnect().await;
 
-    // 이전 HTTP 행은 경로 정보 없이(None) 읽히고, 경로가 붙은 재전달은 같은 요청이 아니다(충돌)
+    // Legacy HTTP row has no route info and conflicts with a route-bearing redelivery.
     let key = RequestKey {
         profile: profile_id(),
         binding: old_http.event.binding.clone(),
@@ -136,7 +134,7 @@ async fn a_database_at_the_previous_version_upgrades_in_place() {
         Err(Error::Conflict)
     ));
 
-    // 이전 미종결 민감 접수는 시작 안 함으로 추측하지 않는다: 리스가 끝나면 보류가 되고 늦은 성공도 받지 않는다
+    // Legacy unfinished private run with null `private_started_ms` must hold on lease expiry.
     assert!(
         db.scalar::<bool>("select private_started_ms is null from bot_runs where private")
             .await
@@ -164,9 +162,8 @@ async fn old_id_only_share_approvals_are_voided_unconsumed_and_their_runs_woken(
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 이전 판이 연 기억 공유 승인: 항목 ID만 묶은 해시로 승인을 기다리는 실행
     let cli = run_in(&db, "cli", OWNER, ConversationKind::Cli).await;
-    let id = create(&db, &cli, "옛 카드의 메모").await;
+    let id = create(&db, &cli, "legacy card note").await;
     let old_hash: [u8; 32] = Sha256::digest(format!(r#"{{"id":"{}"}}"#, id.0).as_bytes()).into();
     calls(&db)
         .begin(
@@ -187,7 +184,6 @@ async fn old_id_only_share_approvals_are_voided_unconsumed_and_their_runs_woken(
         .await
         .unwrap();
     assert_eq!(state_of_run(&db, &cli.attempt.run).await, "waiting");
-    // 0008 이전 모양으로 되돌린다(열 복원, 적용 기록 삭제)
     for sql in [
         "alter table bot_approvals add column memory_id text, add column memory_sha256 bytea",
         "delete from _sqlx_migrations where version in (8, 9)",
@@ -198,13 +194,13 @@ async fn old_id_only_share_approvals_are_voided_unconsumed_and_their_runs_woken(
     db.store
         .migrate()
         .await
-        .expect("0008이 제자리에서 올라간다");
+        .expect("0008 and 0009 must apply in place");
 
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_approvals where nonce = 'old-card'")
             .await,
         0,
-        "옛 승인은 소비되지 않은 채 무효가 되어 시작 전 호출과 함께 정리된다(0008 무효화 → 0009 정리)"
+        "legacy share approval voided (0008) and cleaned up with unstarted call (0009)"
     );
     assert_eq!(
         db.scalar::<String>(&format!(
@@ -213,20 +209,19 @@ async fn old_id_only_share_approvals_are_voided_unconsumed_and_their_runs_woken(
         ))
         .await,
         "private",
-        "공유는 일어나지 않았다"
+        "memory must remain private"
     );
     assert_eq!(
         state_of_run(&db, &cli.attempt.run).await,
         "ready",
-        "기다리던 실행을 깨워 새 카드로 잇는다"
+        "waiting run wakes up to re-request approval"
     );
     let resumed = runs(&db).claim().await.unwrap().unwrap();
     assert_eq!(
         resumed.attempt.generation, cli.attempt.generation,
-        "같은 세대로 재개한다"
+        "resumes in the same generation"
     );
-    // 같은 호출 ID로 새 지문을 begin하고 새 카드(새 승인)를 열 수 있다: 시작 전 옛 호출은 정리됐다
-    let new_hash = memory_share_hash(&id, &Sha256::digest("옛 카드의 메모".as_bytes()).into());
+    let new_hash = memory_share_hash(&id, &Sha256::digest("legacy card note".as_bytes()).into());
     calls(&db)
         .begin(
             resumed.attempt.clone(),
@@ -235,7 +230,7 @@ async fn old_id_only_share_approvals_are_voided_unconsumed_and_their_runs_woken(
             new_hash,
         )
         .await
-        .expect("같은 호출 ID가 새 지문으로 충돌 없이 시작된다");
+        .expect("reusing call ID with new content-bound digest must succeed");
     let card = Approval {
         tool: tool("memory.share"),
         args_sha256: new_hash,
@@ -248,7 +243,6 @@ async fn old_id_only_share_approvals_are_voided_unconsumed_and_their_runs_woken(
         "pending"
     );
     assert_eq!(state_of_run(&db, &cli.attempt.run).await, "waiting");
-    // 이미 시작했거나 끝난 호출은 건드리지 않는다
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_calls where state in ('started', 'done')")
             .await,
@@ -261,7 +255,7 @@ async fn an_old_form_held_call_with_started_steps_shows_judgeable_holds_after_th
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 이전 판의 모양: 호출은 보류인데 영수증 없는 단계가 started로 남아 운영자 보류 목록이 비어 있다
+    // Simulate pre-0010 state: held call with unreceipted `started` steps hidden from admin holds.
     let run = leased(&db, "old-hold").await;
     begin_call(&db, &run.attempt, "c1").await;
     calls(&db)
@@ -300,16 +294,17 @@ async fn an_old_form_held_call_with_started_steps_shows_judgeable_holds_after_th
             .await
             .unwrap()
             .is_empty(),
-        "이전 모양에서는 보류 카드가 0건이다(run만 기다린다)"
+        "pre-0010 layout shows 0 holds while the run waits"
     );
     assert_eq!(state_of_run(&db, &run.attempt.run).await, "waiting");
 
-    db.store
-        .migrate()
-        .await
-        .expect("0010이 제자리에서 올라간다");
+    db.store.migrate().await.expect("0010 must apply in place");
     let holds = AdminRead::holds(&db.store, &viewer, None).await.unwrap();
-    assert_eq!(holds.len(), 1, "미판정 보류 호출이 보류 카드로 보인다");
+    assert_eq!(
+        holds.len(),
+        1,
+        "unresolved held call appears in admin holds"
+    );
     assert_eq!(holds[0].steps.len(), 2);
     assert!(holds[0].steps.iter().all(|s| {
         s.state == bot_core::state::EffectState::Held && s.reason.as_deref() == Some("timeout")

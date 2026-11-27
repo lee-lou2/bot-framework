@@ -1,8 +1,7 @@
-//! `bot mcp sync`가 대상 프로필과 스킬을 정하는 길. `validate`와 같은 로더 규칙을 그대로 쓴다: 루트 목록(루트 자체는 링크여도 되지만 그 아래 링크·낱개 파일·이름 규칙 위반은
-//! 거절), 프로필 트리(링크·특수 파일·하드링크·과대 입력 거절, 파일은 한 번만 읽어 메모리에 고정), 폴더 구조, `profile.yaml`의 스키마와 `id`=폴더 이름,
-//! 그리고 대상 스킬의 `SKILL.md`(텍스트·front matter·폴더명 일치·빈 본문·단일 64 KiB 상한).
-//! 프로필 전체의 의미 검사(상속 스킬 합계·참조·권한)는 하지 않는다 — 아직 잠금이 없는 스킬이 프로필 검증을 막아 첫 동기화를 못 하게 하지 않는다. 프로필과 대상 스킬을 확정하지 못하면
-//! 호출하는 쪽은 서버에 접속하지도 자격을 읽지도 않는다.
+//! Resolves and validates a target profile and skill directory for `bot mcp sync` and `bot add tool`.
+//!
+//! Enforces the same root scan, tree read, layout, `profile.yaml` (`id == folder`), and target `SKILL.md`
+//! rules as `validate`, while skipping whole-profile semantic checks so an unlocked skill can run its first sync.
 use crate::{
     issue::{Issue, Issues},
     layout::{self, SkillFiles},
@@ -16,20 +15,16 @@ use bot_core::id::ProfileId;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
-/// 확정한 프로필과 스킬. 바이트는 트리를 읽을 때 고정한 것이다(디스크를 다시 읽지 않는다).
+/// Validated profile and skill bytes captured in a single read (never re-read from disk).
 #[derive(Debug)]
 pub struct Located {
-    /// `profile.yaml`의 `id`(폴더 이름과 같다)
     pub profile: ProfileId,
-    /// 프로필 폴더(루트 아래 실제 경로)
     pub profile_dir: PathBuf,
-    /// 프로필 폴더 기준 스킬 폴더 경로(`agents/main/skills/weather`)
+    /// Skill directory path relative to `profile_dir` (e.g. `agents/main/skills/weather`).
     pub skill: String,
-    /// 스킬 폴더 이름
     pub name: String,
     pub skill_md: Vec<u8>,
     pub tools_yaml: Vec<u8>,
-    /// 읽은 프로필의 총 바이트와 그 안의 기존 잠금 바이트
     total: u64,
     old_lock: u64,
 }
@@ -38,12 +33,12 @@ fn refuse(code: &'static str, path: &Path, message: &str) -> Vec<Issue> {
     vec![Issue::error(code, path.display().to_string(), message)]
 }
 
-/// `dir`을 루트 기준 상대 경로로(링크를 풀지 않는다). 루트 밖이거나 `..`가 들어 있으면 `None`.
+/// Computes `dir` relative to `root` without following symlinks; returns `None` if outside `root` or containing `..`.
 fn below_root(root: &Path, dir: &Path) -> Option<PathBuf> {
     let absolute = std::path::absolute(dir).ok()?;
     let canonical = std::fs::canonicalize(root).ok()?;
     let given = std::path::absolute(root).ok()?;
-    // 준 루트를 먼저 본다: 정규 루트를 먼저 보면 `<정규 루트>/../<링크>/…`가 `..`로 시작하는 상대 경로로 잘린다
+    // Check `given` before `canonical` so a symlinked root does not produce a leading `..` path.
     let rel = absolute
         .strip_prefix(&given)
         .or_else(|_| absolute.strip_prefix(&canonical))
@@ -53,7 +48,6 @@ fn below_root(root: &Path, dir: &Path) -> Option<PathBuf> {
         .then(|| rel.to_path_buf())
 }
 
-/// `root`(BOT_PROFILES) 아래 스킬 폴더 `dir`의 프로필과 스킬을 확정한다. 문제는 모두 고정 코드가 있는 항목이다.
 pub fn locate_skill(root: &Path, dir: &Path, limits: &Limits) -> Result<Located, Vec<Issue>> {
     let mut issues = Issues::new(limits.max_issues);
     let listed = scan::list_profiles(root, limits, &mut issues);
@@ -64,7 +58,7 @@ pub fn locate_skill(root: &Path, dir: &Path, limits: &Limits) -> Result<Located,
         refuse(
             "not-a-skill",
             dir,
-            "BOT_PROFILES 아래 프로필의 스킬 폴더(`<프로필>/skills/<이름>` 또는 `<프로필>/agents/…/skills/<이름>`)가 아니에요",
+            "not a skill directory under BOT_PROFILES (`<profile>/skills/<name>` or `<profile>/agents/.../skills/<name>`)",
         )
     };
     let rel = below_root(root, dir).ok_or_else(not_a_skill)?;
@@ -77,7 +71,6 @@ pub fn locate_skill(root: &Path, dir: &Path, limits: &Limits) -> Result<Located,
         .into_iter()
         .find(|(name, _)| *name == folder)
         .ok_or_else(not_a_skill)?;
-    // 프로필 트리: 링크·특수 파일·하드링크·크기 한도는 `validate`와 같은 스캔이 거절한다
     let tree = scan::read_tree(&profile_dir, "", limits, &mut issues);
     if issues.has_errors() {
         return Err(issues.into_vec());
@@ -86,7 +79,7 @@ pub fn locate_skill(root: &Path, dir: &Path, limits: &Limits) -> Result<Located,
     if issues.has_errors() {
         return Err(issues.into_vec());
     }
-    // `profile.yaml`: 번들 스키마를 통과하고 `id`가 폴더 이름과 같아야 한다(자격은 이 프로필의 보관소에서 읽는다)
+    // Validate `profile.yaml` and `id == folder` before reading credentials from this profile's secret namespace.
     let value = parse::yaml_of(
         &tree,
         "profile.yaml",
@@ -113,10 +106,9 @@ pub fn locate_skill(root: &Path, dir: &Path, limits: &Limits) -> Result<Located,
         return Err(refuse(
             "missing-file",
             dir,
-            "스킬 폴더에 SKILL.md와 tools.yaml이 있어야 해요",
+            "skill directory must contain both SKILL.md and tools.yaml",
         ));
     };
-    // 대상 스킬의 SKILL.md를 접속·자격 조회 전에 `validate`와 같은 규칙으로 검증한다
     let _ = parse::check_skill_md(&skill.name, skill_md_path, skill_md, limits, &mut issues);
     if issues.has_errors() {
         return Err(issues
@@ -138,29 +130,27 @@ pub fn locate_skill(root: &Path, dir: &Path, limits: &Limits) -> Result<Located,
 }
 
 impl Located {
-    /// 새 `tools.lock.yaml`을 프로필을 읽을 때와 같은 검사로 읽어 본다: 파일 크기 한도(YAML 256 KiB)·프로필 총 크기, 텍스트 규칙, YAML 한도(값 하나 64 KiB 등),
-    /// 잠금의 모양과 해시, `tools.yaml`과의 짝(`input` 생략·서버 이름·`lock-name-mismatch`·입력 스키마 어휘). 통과해야 쓴다.
+    /// Validates candidate `tools.lock.yaml` bytes against the same size, YAML, hash, and schema checks as profile loading.
     pub fn verify_lock(&self, lock: &[u8], limits: &Limits) -> Result<(), Vec<Issue>> {
         let path = format!("{}/{}", self.skill, crate::lock::FILE);
         if lock.len() as u64 > limits.max_yaml_bytes {
             return Err(vec![Issue::error(
                 "yaml-too-large",
                 path,
-                "tools.lock.yaml이 한도를 넘어요 — 선언하는 도구를 줄이세요",
+                "tools.lock.yaml exceeds the size limit — reduce the number of declared tools",
             )]);
         }
         if self.total.saturating_sub(self.old_lock) + lock.len() as u64 > limits.max_profile_bytes {
             return Err(vec![Issue::error(
                 "too-large-total",
                 path,
-                "프로필이 너무 커져요",
+                "profile exceeds the total size limit",
             )]);
         }
         check_skill(&self.name, &self.skill_md, &self.tools_yaml, lock, limits)
     }
 }
 
-/// 스킬 하나의 파일 셋(SKILL.md·tools.yaml·tools.lock.yaml)을 프로필을 읽을 때의 스킬 해석(`parse::skill`)으로 읽어 본다.
 pub fn check_skill(
     name: &str,
     skill_md: &[u8],
@@ -199,7 +189,7 @@ pub fn check_skill(
             vec![Issue::error(
                 "skill-unreadable",
                 dir,
-                "스킬을 읽을 수 없어요",
+                "failed to read skill",
             )]
         } else {
             errors
@@ -208,7 +198,6 @@ pub fn check_skill(
     Ok(())
 }
 
-/// `tools.yaml` 한 파일을 프로필 로더와 같은 규칙으로 해석한 결과(`bot add tool` 검증·병합용).
 #[derive(Debug)]
 pub struct ToolsDoc {
     pub server: String,
@@ -216,8 +205,7 @@ pub struct ToolsDoc {
     pub value: Value,
 }
 
-/// `tools.yaml` 바이트를 텍스트·YAML·번들 `tools.schema.json`으로 읽고 검증한다.
-/// `check_rules`가 참이면 `tools::parse`(예약 ID·중복·`input`/잠금·egress·destination)까지 검사한다.
+/// Parses and validates `tools.yaml` bytes against the bundled schema and optionally full `tools::parse` rules.
 pub fn parse_tools_yaml(
     skill: &str,
     path: &str,

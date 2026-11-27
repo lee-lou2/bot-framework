@@ -1,4 +1,4 @@
-//! 사용자 예약 발화 시험(가짜 저장소): 현재 판본으로 다시 보는 멤버·바인딩·에이전트·권한, at·cron의 다음 일, 놓친 발생의 순서, 수렴.
+//! User-schedule firing tests covering current-revision re-checks, one-shot/cron planning, and fake store harnesses.
 
 use super::{Scheduler, UserTick, user::plan};
 use crate::host::{SchedulerConfig, SchedulerDeps};
@@ -34,7 +34,6 @@ fn scopes(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// 저장소가 없는 구성(정적 시험이 사용자 예약을 보지 않는다).
 pub(super) struct NoUsers;
 
 impl UserSchedules for NoUsers {
@@ -73,7 +72,6 @@ impl UserSchedules for NoUsers {
     }
 }
 
-/// 프로필 판본을 주는 카탈로그(없으면 비활성).
 #[derive(Default)]
 pub(super) struct FixedCatalog(pub Mutex<Option<Arc<Snapshot>>>);
 
@@ -92,21 +90,17 @@ impl ProfileCatalog for FixedCatalog {
     }
 }
 
-/// 확인할 예약을 주고 받은 `advance`를 기록하는 가짜 사용자 예약 저장소.
 pub(super) struct FakeUsers {
     now: SystemTime,
     pub(super) due: Mutex<Vec<DueSchedule>>,
     pub(super) advanced: Mutex<Vec<AdvanceSchedule>>,
     pub(super) reply: Mutex<Vec<Result<Option<RunId>, Error>>>,
-    /// 있으면 실제 저장소처럼 답한다: 발화 명령에만 이 run을 주고 닫기·기다림에는 None을 준다(`reply`는 쓰지 않는다)
+    /// When set, returns `Ok(Some(run))` for `Fire` commands and `Ok(None)` otherwise (bypassing `reply`).
     pub(super) fires: Mutex<Option<RunId>>,
-    /// 있으면 `due`가 이 오류로 답한다(옛 집합에 묶인 핸들)
     pub(super) due_error: Mutex<Option<Error>>,
-    /// `due`가 받은 `after`(이어 읽을 자리)를 부른 순서대로
     pub(super) asked: Mutex<Vec<Option<DueKey>>>,
-    /// 저장된 cron을 읽지 못한 행: 바퀴의 첫 쪽에 실려 오고, 닫기에 성공하면 사라진다
     pub(super) unreadable: Mutex<Vec<UnreadableSchedule>>,
-    /// 켜면 행이 실제 저장소처럼 움직인다: 발화하면 커서가 그 발생으로 앞서고 다음 확인 시각(`at` = 이 가짜의 정렬 키)이 다음 발생으로 가며, 다음 확인 시각이 지금보다 뒤이거나 마지막 발생이거나 닫히거나 기다리게 되면 더는 확인 대상이 아니다
+    /// When true, `advance` updates due rows in place like the real store (re-sorting fired rows forward).
     pub(super) moves: Mutex<bool>,
 }
 
@@ -125,7 +119,6 @@ impl FakeUsers {
         })
     }
 
-    /// 저장소가 성공으로 받은 명령이 행에 미치는 영향. 닫은 손상 행은 사라지고, `moves`가 켜져 있으면 확인 대상 행이 움직인다.
     fn settle(&self, command: &AdvanceSchedule) {
         let same =
             |profile: &ProfileId, id: &ScheduleId| *profile == command.profile && *id == command.id;
@@ -188,7 +181,6 @@ impl UserSchedules for FakeUsers {
         };
         let order = |p: &DuePos| (p.at, p.profile.clone(), p.id.clone());
         due.sort_by_key(|s| order(&pos(s)));
-        // 실제 저장소와 같다: 바퀴의 끝은 바퀴를 시작할 때 마지막 행으로 고정하고, 한 행을 더 읽어 남았는지 본다
         let end = match &after {
             Some(key) => Some(key.end.clone()),
             None => due.last().map(pos),
@@ -320,7 +312,7 @@ pub(super) fn due(timing: Timing, cursor: SystemTime) -> DueSchedule {
         ceiling: scopes(&["run", "calendar.read", "calendar.delete"]),
         spec: ScheduleSpec {
             timing,
-            instruction: "확인".into(),
+            instruction: "Check status".into(),
             quiet: false,
             destination: None,
         },
@@ -339,7 +331,7 @@ pub(super) fn cron(expression: &str, zone: &str) -> Timing {
 fn fire(next: NextOccurrence) -> (SystemTime, Option<SystemTime>, BTreeSet<String>) {
     match next {
         NextOccurrence::Fire { at, next, scopes } => (at, next, scopes),
-        _ => panic!("발화여야 한다"),
+        _ => panic!("expected NextOccurrence::Fire"),
     }
 }
 
@@ -355,13 +347,12 @@ fn a_one_shot_fires_with_the_scopes_it_still_has_and_waits_if_early() {
     );
     assert_eq!(revision, Some(Revision("r5".into())));
     let (fired, after, got) = fire(next);
-    assert_eq!((fired, after), (at, None), "한 번짜리는 마지막 발생");
+    assert_eq!((fired, after), (at, None), "one-shot has no next firing");
     assert_eq!(
         got,
         scopes(&["run", "calendar.read"]),
-        "만든 때의 상한(calendar.delete 포함) ∩ 지금 소유자 권한"
+        "ceiling intersected with current owner scopes"
     );
-    // 호스트 시계가 앞서 가면 예정 시각까지 기다린다
     let early = utc(2026, 11, 24, 3, 5);
     let (_, next) = plan(
         &due(Timing::At(early), utc(2026, 11, 24, 2, 0)),
@@ -375,14 +366,12 @@ fn a_one_shot_fires_with_the_scopes_it_still_has_and_waits_if_early() {
 fn a_cron_schedule_waits_for_a_future_first_occurrence_then_fires_oldest_first() {
     let snap = snapshot(&["local:owner"], true);
     let daily = cron("0 9 * * *", "UTC");
-    // 첫 발생이 미래: 커서를 넘기지 않고 그 시각까지 기다린다
     let (_, next) = plan(
         &due(daily.clone(), utc(2026, 11, 24, 3, 0)),
         Some(&snap),
         utc(2026, 11, 24, 3, 0),
     );
     assert!(matches!(next, NextOccurrence::WaitUntil(t) if t == utc(2026, 11, 24, 9, 0)));
-    // 사흘 밀렸다: 가장 오래된 발생부터 하나씩, 다음 확인은 그다음 발생
     let (_, next) = plan(
         &due(daily, utc(2026, 11, 21, 9, 0)),
         Some(&snap),
@@ -402,7 +391,6 @@ fn a_revoked_member_binding_agent_or_run_permission_and_an_unreadable_zone_close
             utc(2026, 11, 24, 2, 0),
         )
     };
-    // 프로필이 비활성이면 판본 없이 닫는다
     let (revision, next) = plan(&one_shot(), None, now);
     assert_eq!(revision, None);
     assert!(matches!(
@@ -414,31 +402,31 @@ fn a_revoked_member_binding_agent_or_run_permission_and_an_unreadable_zone_close
         assert_eq!(
             revision,
             Some(Revision("r5".into())),
-            "닫는 판정도 확인한 판본으로 한다"
+            "close decision must carry the checked revision"
         );
         matches!(next, NextOccurrence::Close(_))
     };
-    assert!(closed(&snapshot(&[], true), one_shot()), "멤버 탈퇴");
+    assert!(closed(&snapshot(&[], true), one_shot()), "member removed");
     assert!(
         closed(&snapshot(&["local:owner"], false), one_shot()),
-        "바인딩 삭제"
+        "binding removed"
     );
     let mut other = one_shot();
     other.agent = AgentId("gone".into());
     assert!(
         closed(&snapshot(&["local:owner"], true), other),
-        "에이전트 삭제"
+        "agent removed"
     );
     let mut no_run = one_shot();
     no_run.ceiling = scopes(&["calendar.read"]);
     assert!(
         closed(&snapshot(&["local:owner"], true), no_run),
-        "run 없는 상한"
+        "ceiling lacks run scope"
     );
     let bad_zone = due(cron("0 9 * * *", "Mars/Olympus"), utc(2026, 11, 24, 0, 0));
     assert!(
         closed(&snapshot(&["local:owner"], true), bad_zone),
-        "해석할 수 없는 시간대"
+        "unparsable timezone"
     );
 }
 
@@ -473,11 +461,11 @@ async fn each_pass_advances_every_due_schedule_with_the_cursor_it_read_and_count
     three.id = ScheduleId("s3".into());
     three.owner = PrincipalId("local:gone".into());
     let users = FakeUsers::new(now, vec![one.clone(), two, three]);
-    users.reply.lock().unwrap().extend([
-        Ok(None),                        // s3: 닫음
-        Ok(None),                        // s2: 기다림
-        Ok(Some(RunId("run-1".into()))), // s1: 접수
-    ]);
+    users
+        .reply
+        .lock()
+        .unwrap()
+        .extend([Ok(None), Ok(None), Ok(Some(RunId("run-1".into())))]);
     let s = scheduler(&users, Some(snapshot(&["local:owner"], true)), 10);
     let tick = s.tick_users().await.unwrap();
     assert_eq!(
@@ -499,7 +487,6 @@ async fn each_pass_advances_every_due_schedule_with_the_cursor_it_read_and_count
         );
         assert_eq!(advanced[0].checked_revision, Some(Revision("r5".into())));
     }
-    // 한 번에 다 못 보면(배치보다 많다) 곧바로 다시 점검한다
     let mut third = one.clone();
     third.id = ScheduleId("s9".into());
     let users = FakeUsers::new(now, vec![one.clone(), one, third]);
@@ -528,9 +515,8 @@ async fn a_stale_or_refused_advance_does_not_stop_the_other_schedules_but_unavai
     ]);
     let s = scheduler(&users, Some(snapshot(&["local:owner"], true)), 10);
     let tick = s.tick_users().await.unwrap();
-    assert_eq!(tick.fired, 1, "앞의 둘은 건너뛰고 셋째는 접수한다");
+    assert_eq!(tick.fired, 1, "first two skipped, third admitted");
     assert_eq!(users.advanced.lock().unwrap().len(), 3);
-    // 저장소가 응답하지 못하면 오류(다음 점검에서 이어 간다)
     let users = FakeUsers::new(
         now,
         vec![due(

@@ -1,4 +1,4 @@
-//! 가짜 상류의 SSE 응답과 상류가 받은 요청을 읽는 도구.
+//! FakeUpstream SSE response builders and request inspection helpers.
 #![allow(dead_code)]
 
 use bot_broker::testing::FakeUpstream;
@@ -18,7 +18,6 @@ fn message_start(message: &str, input_tokens: u32) -> Vec<u8> {
     )
 }
 
-/// 모델이 도구 하나를 부르는 응답(입력 JSON은 한 조각으로).
 pub fn tool_turn(message: &str, tool_id: &str, name: &str, input: &str) -> Vec<Vec<u8>> {
     vec![
         message_start(message, 5),
@@ -47,7 +46,6 @@ pub fn tool_turn(message: &str, tool_id: &str, name: &str, input: &str) -> Vec<V
     ]
 }
 
-/// 도구 결과를 받은 뒤(또는 도구 없이) 마무리 글을 내는 응답.
 pub fn final_turn(message: &str, text: &str) -> Vec<Vec<u8>> {
     vec![
         message_start(message, 9),
@@ -74,16 +72,14 @@ pub fn final_turn(message: &str, text: &str) -> Vec<Vec<u8>> {
     ]
 }
 
-/// 상류가 받은 요청 본문들
 pub fn bodies(upstream: &FakeUpstream) -> Vec<Value> {
     upstream
         .requests()
         .into_iter()
-        .map(|seen| serde_json::from_str(&seen.3).expect("요청 본문은 JSON"))
+        .map(|seen| serde_json::from_str(&seen.3).expect("request body must be JSON"))
         .collect()
 }
 
-/// 요청 본문에서 `tool_use_id`의 `tool_result` 글(블록 글을 이어 붙인 것). 없으면 None.
 pub fn result_text(body: &Value, tool_use_id: &str) -> Option<String> {
     for message in body["messages"].as_array()? {
         let Some(blocks) = message["content"].as_array() else {
@@ -106,22 +102,19 @@ pub fn result_text(body: &Value, tool_use_id: &str) -> Option<String> {
     None
 }
 
-/// 지금까지 상류가 받은 요청 중 `tool_use_id`의 도구 결과 글
 pub fn tool_result(upstream: &FakeUpstream, tool_use_id: &str) -> Option<String> {
     bodies(upstream)
         .iter()
         .find_map(|body| result_text(body, tool_use_id))
 }
 
-/// `schedule.create` 결과 글(`{"schedule":"<ID>"}`)에서 예약 ID
 pub fn id_in(result: &str) -> String {
     serde_json::from_str::<Value>(result)
         .ok()
         .and_then(|value| value["schedule"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| panic!("도구 결과에 schedule이 없어요: {result}"))
+        .unwrap_or_else(|| panic!("tool result missing schedule field: {result}"))
 }
 
-/// UNIX 초 → `YYYY-MM-DDTHH:MM:SSZ`
 pub fn rfc3339(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
@@ -142,7 +135,6 @@ pub fn rfc3339(secs: u64) -> String {
     )
 }
 
-/// 지금부터 `after` 뒤의 시각(`at` 인자용)
 pub fn in_secs(after: u64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

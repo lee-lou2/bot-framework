@@ -1,4 +1,4 @@
-//! 카드 청소와 실패 종결. 승인·감사·안내는 한 트랜잭션으로 쓴다.
+//! Owner-DM approval card sweep and failure closure (approval, audit, and origin notice in one commit).
 
 use super::{CardKey, Locks, MAX_ATTEMPTS, can_open, key_of, lock_attempt, now_ms};
 use crate::{
@@ -20,22 +20,20 @@ use bot_core::{
 };
 use sqlx::{Row, postgres::PgRow};
 
-/// 미발송 열(`bot_deliveries.unsent`)에 저장하는 낱말.
 const UNSENT_WORD: &str = "dm_unavailable";
-/// `sending`이 이보다 오래되면 올라갔는지 불명으로 닫는다(자동 재게시 0).
+/// Close `sending` jobs older than this as uncertain (`Held`) without auto-reposting.
 const SENDING_MS: i64 = 120_000;
 
-/// 닫는 이유(작업 열 `closed_reason`).
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum Closing {
     Unavailable,
     Held,
-    /// 올리기 전에 승인 경로가 어긋났다(HTTP 출처 전용): 판정 낱말 그대로 저장한다.
+    /// Route drifted before posting (HTTP-origin only); stored as `ApprovalBlock::code`.
     Blocked(ApprovalBlock),
 }
 
 impl Closing {
-    /// 원래 채널·스레드에 남기는 안내: 올릴 수 없다고 확정했으면 그렇게, 불명이면 확인하지 못했다고만 말한다. 승인 경로 판정은 HTTP 출처 전용이라 채널 안내가 없다.
+    /// Fixed public notice for the originating channel; omitted for HTTP-origin route blocks.
     fn notice(self) -> Option<&'static str> {
         match self {
             Closing::Unavailable | Closing::Blocked(ApprovalBlock::ApprovalDmUnavailable) => {
@@ -56,7 +54,6 @@ impl Closing {
         }
     }
 
-    /// 감사 행의 (행동, 판정 낱말).
     fn audit(self) -> (&'static str, &'static str) {
         match self {
             Closing::Blocked(why) if why != ApprovalBlock::ApprovalDmUnavailable => {
@@ -68,7 +65,7 @@ impl Closing {
 }
 
 impl Store {
-    /// 낡은 작업 정리. 객관적으로 닫힌 승인은 한 문장으로 처리하고 이후 후보는 잠금 뒤 다시 판정한다.
+    /// Closes objectively stale jobs in bulk, then settles stuck `sending`/exhausted jobs under lock.
     pub(super) async fn card_sweep(&self) -> R<()> {
         sqlx::query(
             "update bot_card_jobs j
@@ -109,7 +106,6 @@ impl Store {
         self.close_card(tx, locks, &key.nonce, closing, now).await
     }
 
-    /// 점유한 작업의 전달 실패나 전송 전 경로 판정.
     pub(super) async fn card_close(&self, key: &CardKey, closing: Closing) -> R<()> {
         let mut tx = self.begin_authorized().await?;
         let locks = lock_attempt(&mut tx, key).await?;
@@ -127,7 +123,7 @@ impl Store {
         self.close_card(tx, locks, &key.nonce, closing, now).await
     }
 
-    /// 잠금 안에서 판단한 사유로 작업과 승인을 닫는다. 생성 승인은 실행을 깨우고 전송 승인은 이번 발생을 미발송으로 끝낸다.
+    /// Closes the card job and approval under lock, settling delivery drafts as unsent or waking waiting runs.
     pub(super) async fn close_card(
         &self,
         mut tx: Tx<'_>,
@@ -147,7 +143,7 @@ impl Store {
             return Ok(());
         }
         let (profile, run_id) = (locks.run.row.profile.clone(), locks.run.row.id.clone());
-        // 승인은 소유자의 결정이 아니라 시스템이 거절한 것으로 닫는다
+        // Closed by system delivery failure, not an owner decision.
         sqlx::query(
             "update bot_approvals set state = 'denied', decided_by = 'system', decided_ms = bot_now_ms() where nonce = $1",
         )
@@ -170,7 +166,7 @@ impl Store {
         };
         let mut audits = Vec::new();
         if drafted && locks.run.row.parent.is_none() {
-            // 전송 승인: 이번 발생만 미발송으로 끝낸다(영수증을 한 번 만들고 초안 본문은 지운다)
+            // Delivery approval: drop the draft body and settle this occurrence as unsent.
             let receipt = serde_json::json!({ "status": APPROVAL_DM_UNAVAILABLE }).to_string();
             let set = locks.active.as_deref().ok_or(Error::Stale)?;
             drop_draft(
@@ -191,7 +187,7 @@ impl Store {
             )
             .await?;
         } else {
-            // 생성 승인(과 그 밖): 기다리던 run을 깨운다. 호출은 거절된 승인을 만나 `Denied`로 끝난다
+            // Other approvals: wake the run so the call observes the denied approval.
             wake_waiters(&mut tx, &profile, &run_id).await?;
         }
         sqlx::query(
@@ -203,8 +199,7 @@ impl Store {
         .bind(closing.word())
         .execute(&mut *tx)
         .await?;
-        // 요청자는 요청이 닫혔다는 사실을 알아야 한다: 원래 채널·스레드에 한 줄만(초안·수신자·해시·승인 식별자 없음). 닫는 커밋이 한 번이라 재전달에도 한 번이다.
-        // HTTP 출처 실행에는 원래 채널이 없어 쌓이는 줄이 없다(`push_reply_into`는 직접·채널 대화에만 쌓는다)
+        // Post one fixed notice to the originating channel (no-op for HTTP-origin runs).
         if let Some(text) = closing.notice() {
             let notice = replies::answer(&JsonPayload(
                 serde_json::json!({ "text": text }).to_string(),

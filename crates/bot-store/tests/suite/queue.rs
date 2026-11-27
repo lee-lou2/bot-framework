@@ -51,7 +51,7 @@ async fn claims_oldest_first_and_raises_the_generation() {
         claimed.push(got.attempt.clone());
         assert_eq!(&got.attempt.run, run);
         assert_eq!(got.attempt.generation, Generation(1));
-        assert_eq!(got.root, got.attempt.run, "루트 run은 자기 자신이 뿌리");
+        assert_eq!(got.root, got.attempt.run, "root run is its own root");
         assert_eq!(got.principal.0, "local:owner");
         assert_eq!(got.agent.0, "main");
         assert_eq!(got.conversation.kind, ConversationKind::Cli);
@@ -60,9 +60,11 @@ async fn claims_oldest_first_and_raises_the_generation() {
         assert_eq!(got.work.revision.0, "r1");
         assert!(got.work.steps.is_empty());
     }
-    assert!(db.store.claim().await.unwrap().is_none(), "줄이 비면 None");
+    assert!(
+        db.store.claim().await.unwrap().is_none(),
+        "empty queue returns None"
+    );
 
-    // 실패 뒤 다시 집으면 세대가 오른다
     let first = &runs[0];
     let attempt = claimed[0].clone();
     assert_eq!((&attempt.run, attempt.generation), (first, Generation(1)));
@@ -92,7 +94,6 @@ async fn due_retry_precedes_newer_ready_arrivals() {
         .unwrap();
     let backlog = accepted(&db, "backlog").await;
     let locked = accepted(&db, "locked").await;
-    // 잠긴 작업과 그다음 작업은 현재 유입보다 먼저 준비됐다.
     db.sql(&format!(
         "update bot_runs set not_before_ms = 2 where id = '{}'",
         backlog.0
@@ -116,7 +117,7 @@ async fn due_retry_precedes_newer_ready_arrivals() {
         accepted(&db, &format!("fresh-{i}")).await;
         let got = db.store.claim().await.unwrap().unwrap();
         assert_eq!(&got.attempt.run, expected);
-        db.store.finish(got.attempt, done("완료")).await.unwrap();
+        db.store.finish(got.attempt, done("done")).await.unwrap();
     }
     tx.rollback().await.unwrap();
     assert_eq!(db.store.claim().await.unwrap().unwrap().attempt.run, locked);
@@ -146,7 +147,7 @@ async fn resuming_an_old_run_puts_it_behind_an_already_due_retry() {
             old.attempt.profile,
             old.attempt.run.clone(),
             PrincipalId("local:owner".into()),
-            "확인".into(),
+            "check".into(),
         )
         .await
         .unwrap();
@@ -185,19 +186,18 @@ async fn rejects_writes_from_expired_owner() {
     let old = db.store.claim().await.unwrap().unwrap();
     assert!(
         db.store.renew(old.attempt.clone()).await.is_ok(),
-        "살아 있는 리스는 갱신된다"
+        "live lease should renew"
     );
 
     db.expire_lease(&run).await;
     assert!(
         stale(db.store.renew(old.attempt.clone()).await),
-        "리스가 끝나면 회수 전이라도 거절"
+        "expired lease must be rejected even before reclaim"
     );
     let new = worker_b.claim().await.unwrap().unwrap();
     assert_eq!(new.attempt.generation, Generation(2));
     assert_eq!(new.attempt.run, run);
 
-    // 옛 소유자의 모든 쓰기는 새 소유자를 덮지 못한다
     assert!(stale(db.store.renew(old.attempt.clone()).await));
     let step = Step {
         key: "model-1".into(),
@@ -244,7 +244,7 @@ async fn lease_expiry_consumes_attempts_then_dead_letters() {
     assert_eq!(
         second.attempt.generation,
         Generation(2),
-        "인계는 세대를 올린다"
+        "reclaim bumps generation"
     );
     assert_eq!(db.scalar::<i32>("select attempts from bot_runs").await, 1);
     assert_eq!(
@@ -256,7 +256,7 @@ async fn lease_expiry_consumes_attempts_then_dead_letters() {
     db.expire_lease(&run).await;
     assert!(
         db.store.claim().await.unwrap().is_none(),
-        "한도에 닿으면 집지 않고 dead letter"
+        "reaching max_attempts dead-letters instead of reclaiming"
     );
     assert_eq!(state_of(&db, &run).await, "dead");
     assert_eq!(
@@ -288,14 +288,17 @@ async fn retries_with_backoff_then_dead_letters() {
             .await
             .unwrap()
         else {
-            panic!("재시도여야 한다 (실패 {})", failures + 1)
+            panic!("expected retry on failure {}", failures + 1)
         };
         let secs = wait.as_secs_f64();
-        assert!((low..=high).contains(&secs), "지수 백오프 ±25%: {secs}");
+        assert!(
+            (low..=high).contains(&secs),
+            "exponential backoff +-25%: {secs}"
+        );
         assert_eq!(state_of(&db, &run).await, "retry");
         assert!(
             db.store.claim().await.unwrap().is_none(),
-            "대기 시간 전에는 집지 않는다"
+            "not claimable before backoff expires"
         );
         db.make_due(&run).await;
     }
@@ -332,7 +335,7 @@ async fn permanent_failure_goes_dead_at_once() {
     assert!(db.store.claim().await.unwrap().is_none());
     assert!(
         stale(db.store.finish(got.attempt.clone(), done("x")).await),
-        "끝난 run에는 더 쓸 수 없다"
+        "finished run must reject further writes"
     );
 }
 
@@ -362,7 +365,7 @@ async fn claims_each_run_once_under_concurrency() {
     }
     claimed.sort_by(|a, b| a.0.cmp(&b.0));
     expected.sort_by(|a, b| a.0.cmp(&b.0));
-    assert_eq!(claimed, expected, "모든 run이 정확히 한 번씩 집힌다");
+    assert_eq!(claimed, expected, "every run must be claimed exactly once");
 }
 
 #[tokio::test]
@@ -391,7 +394,6 @@ async fn checkpoint_is_idempotent_and_rejects_changed_content() {
     assert!(matches!(changed, Err(Error::Conflict)));
     assert_eq!(db.scalar::<i64>("select count(*) from bot_steps").await, 1);
 
-    // 다시 집으면 체크포인트가 순서대로 들어 있다
     db.store
         .checkpoint(
             got.attempt.clone(),
@@ -417,7 +419,6 @@ async fn finish_records_result_and_reply_in_one_commit() {
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // Slack DM 같은 푸시 대화: 회신 행이 결과와 같은 커밋으로 쌓인다
     let dm = accept_as(
         "personal",
         "req-fin",
@@ -446,7 +447,7 @@ async fn finish_records_result_and_reply_in_one_commit() {
     );
     assert!(
         stale(db.store.finish(got.attempt.clone(), done("again")).await),
-        "같은 완료의 반복은 거절"
+        "duplicate finish must be rejected"
     );
     assert_eq!(db.scalar::<i64>("select count(*) from bot_outbox").await, 2);
     assert_eq!(
@@ -455,7 +456,7 @@ async fn finish_records_result_and_reply_in_one_commit() {
         1
     );
 
-    // CLI·HTTP는 결과를 상태 조회로 가져가고, 예약에는 대화가 없다: 회신 행이 없다
+    // Pull conversations (CLI, HTTP) and scheduled runs do not enqueue outbox rows.
     for (request, kind) in [
         ("cli", ConversationKind::Cli),
         ("http", ConversationKind::Http),
@@ -487,7 +488,7 @@ async fn finish_rejects_malformed_replies_and_keeps_the_lease() {
         .await
         .unwrap();
     let got = db.store.claim().await.unwrap().unwrap();
-    let long = format!("{{\"text\":\"{}\"}}", "가".repeat(12_001));
+    let long = format!("{{\"text\":\"{}\"}}", "€".repeat(12_001));
     let bad = [
         r#"{"approval":{"nonce":"n","title":"t","lines":[]}}"#,
         r#"{"text":"ok","extra":1}"#,
@@ -537,10 +538,10 @@ async fn history_reads_only_the_same_conversation() {
     };
     let mut ids = Vec::new();
     for (request, conv, text) in [
-        ("a", "owner", "첫째"),
-        ("b", "other", "남의 것"),
-        ("c", "owner", "둘째"),
-        ("d", "owner", "지금"),
+        ("a", "owner", "first"),
+        ("b", "other", "someone else's"),
+        ("c", "owner", "second"),
+        ("d", "owner", "now"),
     ] {
         let id = db.store.accept(ask(request, conv, text)).await.unwrap();
         db.sql(&format!(
@@ -551,7 +552,6 @@ async fn history_reads_only_the_same_conversation() {
         .await;
         ids.push(id);
     }
-    // 앞의 셋을 차례로 끝내고(답 = "답: <입력>"), 마지막 run의 맥락에서 이력을 읽는다
     for _ in 0..3 {
         let got = db.store.claim().await.unwrap().unwrap();
         let input = db
@@ -565,7 +565,7 @@ async fn history_reads_only_the_same_conversation() {
             .trim_end_matches("\"}")
             .to_owned();
         db.store
-            .finish(got.attempt, done(&format!("답: {text}")))
+            .finish(got.attempt, done(&format!("reply: {text}")))
             .await
             .unwrap();
     }
@@ -573,6 +573,6 @@ async fn history_reads_only_the_same_conversation() {
     assert_eq!(last.attempt.run, ids[3]);
     let turns = db.store.history(last.attempt, 10).await.unwrap();
     let texts: Vec<_> = turns.iter().map(|t| t.text.as_str()).collect();
-    assert_eq!(texts, ["첫째", "답: 첫째", "둘째", "답: 둘째"]);
+    assert_eq!(texts, ["first", "reply: first", "second", "reply: second"]);
     assert!(turns[0].from.is_some() && turns[1].from.is_none());
 }

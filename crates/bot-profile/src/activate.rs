@@ -1,16 +1,13 @@
-//! 활성화 검사: 프로필이 가리키는 별칭이 운영자가 호스트에 등록한 것인지 본다.
-//! 바이트만으로 정해지지 않는 사실이라 판본에는 넣지 않고, 활성화할 때마다 확인한다.
+//! Activation checks validating profile aliases against the host catalog.
 use crate::{hint, host::HostCatalog, issue::Issues};
 use bot_core::profile::{Adapter, Snapshot};
 use std::collections::BTreeSet;
 
-/// 에이전트 하나의 AGENT.md 경로(`main/research` → `agents/main/agents/research/AGENT.md`).
 fn agent_file(id: &str) -> String {
     let parts: Vec<&str> = id.split('/').collect();
     format!("agents/{}/AGENT.md", parts.join("/agents/"))
 }
 
-/// 허용되지 않은 모델 별칭을 어디서 정했는가: 프로필의 `model`이면 `profile.yaml`, 에이전트가 자기 AGENT.md로 바꾼 것이면 그 파일(부모에게서 물려받은 값은 건너뛴다).
 fn model_places(snap: &Snapshot, alias: &str) -> Vec<String> {
     let mut places = Vec::new();
     if snap.model == alias {
@@ -31,8 +28,7 @@ fn model_places(snap: &Snapshot, alias: &str) -> Vec<String> {
     places
 }
 
-/// HTTP 입구 별칭이 호스트에 등록돼 있고 종류(웹훅/OpenAI)가 바인딩과 맞는지 본다.
-/// 새 API의 `/v1`과 경로가 겹치는 웹훅 별칭 `v1`은 OpenAI 입구와 함께 켜지 못한다(단독으로는 옛 그대로 쓴다).
+/// Webhook alias `v1` conflicts with the OpenAI `/v1` route when any OpenAI endpoint is configured.
 fn http_endpoint(host: &HostCatalog, endpoint: &str, openai: bool, at: &str, issues: &mut Issues) {
     let (is_webhook, is_openai) = (
         host.http_endpoints.contains(endpoint),
@@ -43,21 +39,21 @@ fn http_endpoint(host: &HostCatalog, endpoint: &str, openai: bool, at: &str, iss
             "unknown-endpoint",
             "profile.yaml",
             at,
-            format!("호스트에 등록하지 않은 HTTP 입구예요: {endpoint}"),
+            format!("HTTP endpoint is not registered on this host: {endpoint}"),
         );
     } else if openai && !is_openai {
         issues.error_at(
             "endpoint-kind-mismatch",
             "profile.yaml",
             at,
-            format!("HTTP 입구 `{endpoint}`는 호스트에서 웹훅(`kind: webhook`)으로 등록돼 있어요. `model`이 있는 OpenAI 바인딩은 `kind: openai` 입구에만 연결해요"),
+            format!("HTTP endpoint `{endpoint}` is registered as a webhook (`kind: webhook`). OpenAI bindings with `model` require a `kind: openai` endpoint."),
         );
     } else if !openai && !is_webhook {
         issues.error_at(
             "endpoint-kind-mismatch",
             "profile.yaml",
             at,
-            format!("HTTP 입구 `{endpoint}`는 호스트에서 OpenAI 호환(`kind: openai`)으로 등록돼 있어요. `model`이 없는 웹훅 바인딩은 웹훅 입구에만 연결해요"),
+            format!("HTTP endpoint `{endpoint}` is registered as OpenAI-compatible (`kind: openai`). Webhook bindings without `model` require a webhook endpoint."),
         );
     }
     if !openai && endpoint == "v1" && !host.openai_endpoints.is_empty() {
@@ -65,12 +61,11 @@ fn http_endpoint(host: &HostCatalog, endpoint: &str, openai: bool, at: &str, iss
             "webhook-v1-conflict",
             "profile.yaml",
             at,
-            "웹훅 입구 별칭 `v1`은 OpenAI 호환 API의 `/v1` 경로와 겹쳐서 함께 켤 수 없어요. 웹훅 별칭을 다른 이름(예: `hooks`)으로 바꾸고 호스트 설정과 프로필의 `endpoint`를 함께 고쳐 주세요",
+            "Webhook endpoint alias `v1` conflicts with the OpenAI-compatible `/v1` route and cannot be enabled alongside OpenAI endpoints. Rename the webhook alias (e.g. `hooks`) in both host config and profile `endpoint`.",
         );
     }
 }
 
-/// 원격(Streamable HTTP) 서버의 도구: 접속 대상이 도구 선언 ∩ 운영자 상한의 허용 목록에 정확히 있어야 하고, 로컬 전용인 단계 원장·자격·환경 변수는 쓸 수 없다.
 fn remote_tool(
     host: &HostCatalog,
     profile: &str,
@@ -84,14 +79,14 @@ fn remote_tool(
         issues.error(
             "remote-effects",
             file,
-            format!("{id}: 원격 서버의 도구는 `effects: true`를 쓸 수 없어요(단계 원장은 로컬 서버에서만 지원해요)"),
+            format!("{id}: remote server tools cannot enable `effects: true` (effect ledger is local-only)"),
         );
     }
     if !tool.secrets.is_empty() || !tool.env.is_empty() {
         issues.error(
             "remote-tool-config",
             file,
-            format!("{id}: 원격 서버의 도구는 `secrets`·`env`를 쓸 수 없어요(인증은 호스트 설정의 `auth`로 해요)"),
+            format!("{id}: remote server tools cannot declare `secrets` or `env` (configure auth via host `auth`)"),
         );
     }
     if !host
@@ -101,12 +96,11 @@ fn remote_tool(
         issues.error(
             "remote-egress",
             file,
-            format!("{id}: 원격 서버 주소 `{target}`가 이 도구의 `egress`(와 운영자 상한 `egress.{profile}`)에 없어요 — 정확히 그 `호스트:포트`를 적으세요"),
+            format!("{id}: remote server target `{target}` is missing from tool `egress` (intersected with host `egress.{profile}`); declare the exact `host:port`"),
         );
     }
 }
 
-/// 도구의 실효 호출 시간 한도(선언 또는 기본 60초)가 호스트 천장을 넘으면 활성화를 거절한다. 천장만 올려도 선언하지 않은 도구는 계속 60초다.
 fn timeout_cap(
     host: &HostCatalog,
     id: &str,
@@ -120,17 +114,17 @@ fn timeout_cap(
     }
     let fix = if tool.timeout_secs.is_some() {
         format!(
-            "도구의 `timeout_secs`를 {cap} 이하로 줄이거나 호스트 설정의 `limits.tool_call_max_secs`를 {secs} 이상으로 올리세요"
+            "reduce tool `timeout_secs` to <= {cap} or raise host `limits.tool_call_max_secs` to >= {secs}"
         )
     } else {
         format!(
-            "`timeout_secs`를 선언하지 않으면 기본 {secs}초가 적용돼요 — 이 도구에 {cap} 이하의 `timeout_secs`를 선언하거나 호스트 설정의 `limits.tool_call_max_secs`를 {secs} 이상으로 올리세요"
+            "omitted `timeout_secs` defaults to {secs}s; set `timeout_secs` <= {cap} on this tool or raise host `limits.tool_call_max_secs` to >= {secs}"
         )
     };
     issues.error(
         "tool-timeout-over-cap",
         file,
-        format!("{id}: 호출 시간 한도 {secs}초가 호스트 천장 {cap}초를 넘어요. {fix}"),
+        format!("{id}: effective timeout {secs}s exceeds host cap {cap}s ({fix})"),
     );
 }
 
@@ -145,18 +139,18 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
     {
         let fix = if allowed.is_empty() {
             format!(
-                "호스트 설정(BOT_HOST_CONFIG)의 `models.{profile}`이 비어 있어요. 예: `\"models\": {{\"{profile}\": [\"{model}\"]}}`"
+                "`models.{profile}` in host config (BOT_HOST_CONFIG) is empty. Example: `\"models\": {{\"{profile}\": [\"{model}\"]}}`"
             )
         } else {
             let meant = hint::nearest(model, allowed.iter().copied())
-                .map_or(String::new(), |m| format!(" 혹시 `{m}`인가요?"));
+                .map_or(String::new(), |m| format!(" Did you mean `{m}`?"));
             format!(
-                "이 프로필에 허용된 별칭: {}.{meant} 새 별칭을 쓰려면 호스트 설정(BOT_HOST_CONFIG)의 `models.{profile}` 목록에 `{model}`을(를) 더하세요",
+                "Allowed aliases: {}.{meant} To allow a new alias, add `{model}` to `models.{profile}` in host config (BOT_HOST_CONFIG).",
                 allowed.join(", ")
             )
         };
         let message =
-            format!("모델 별칭 `{model}`는 프로필 `{profile}`에 허용되지 않았어요. {fix}");
+            format!("Model alias `{model}` is not allowed for profile `{profile}`. {fix}");
         for place in model_places(snap, model) {
             issues.error_at("model-not-allowed", &place, "/model", message.clone());
         }
@@ -171,20 +165,20 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
             "profile.yaml",
             "/super_admins",
             format!(
-                "슈퍼 관리자 `{}`는 호스트 설정(`super_admins.{profile}`)에 허용되지 않았어요",
+                "Super admin `{}` is not allowed by host config (`super_admins.{profile}`)",
                 admin.0
             ),
         );
     }
     for (id, binding) in &snap.bindings {
-        let at = format!("바인딩 {}", id.0);
+        let at = format!("binding {}", id.0);
         match &binding.source {
             Adapter::Cli { account } if !host.cli_accounts.contains(account) => {
                 issues.error_at(
                     "unknown-account",
                     "profile.yaml",
                     &at,
-                    format!("호스트에 등록하지 않은 CLI 계정이에요: {account}"),
+                    format!("CLI account is not registered on this host: {account}"),
                 );
             }
             Adapter::SlackChannel {
@@ -194,14 +188,14 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                     "unknown-workspace",
                     "profile.yaml",
                     &at,
-                    format!("호스트에 등록하지 않은 Slack 워크스페이스예요: {workspace}"),
+                    format!("Slack workspace is not registered on this host: {workspace}"),
                 ),
                 Some(ws) if !ws.channels.contains(channel) => {
                     issues.error_at(
                         "unknown-channel",
                         "profile.yaml",
                         &at,
-                        format!("워크스페이스 {workspace}에 등록하지 않은 채널이에요: {channel}"),
+                        format!("Channel is not registered in workspace {workspace}: {channel}"),
                     );
                 }
                 Some(_) => {}
@@ -211,14 +205,14 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                     "unknown-workspace",
                     "profile.yaml",
                     &at,
-                    format!("호스트에 등록하지 않은 Slack 워크스페이스예요: {workspace}"),
+                    format!("Slack workspace is not registered on this host: {workspace}"),
                 ),
                 Some(ws) if !ws.dm => {
                     issues.error_at(
                         "dm-not-allowed",
                         "profile.yaml",
                         &at,
-                        format!("워크스페이스 {workspace}는 DM 입구를 허용하지 않아요"),
+                        format!("Workspace {workspace} does not allow DM ingress"),
                     );
                 }
                 Some(_) => {}
@@ -231,8 +225,8 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                 ..
             } => {
                 http_endpoint(host, endpoint, true, &at, issues);
-                // 승인 매핑은 프로필의 지정이고 키 슬롯은 호스트의 자격 발급이다. 슬롯이 없는 주체의 매핑은 인증 권한을 주지 않으므로 오류가 아니라 경고다
-                // (한 멤버의 마지막 슬롯을 빼면서 프로필 수정까지 요구하면 철회하려던 옛 설정이 활성화 실패로 계속 살아 있다). 오타는 이 경고로 알린다.
+                // Warning rather than error: revoking a member's last key slot must not block
+                // re-activation and leave previously active config running.
                 if let Some(subjects) = host.openai_endpoints.get(endpoint) {
                     let prefix = format!("http:{endpoint}/");
                     for requester in approvers.keys() {
@@ -242,7 +236,7 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                                 "approver-key-unknown",
                                 "profile.yaml",
                                 format!(
-                                    "{at}: 승인 매핑의 HTTP 주체 `{}`를 가리키는 키 슬롯이 호스트 입구 `{endpoint}`에 없어요. 이 주체는 키가 있어야 호출할 수 있어요(호스트 설정의 `keys.<슬롯>.subject`를 확인하세요)",
+                                    "{at}: no key slot on endpoint `{endpoint}` maps to HTTP principal `{}` (check `keys.<slot>.subject` in host config)",
                                     requester.0
                                 ),
                             );
@@ -267,7 +261,10 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                 issues.error(
                     "missing-server",
                     &file,
-                    format!("{}: 호스트에 설치하지 않은 서버예요: {}", id.0, tool.server),
+                    format!(
+                        "{}: server is not installed on this host: {}",
+                        id.0, tool.server
+                    ),
                 );
             }
             if let Some(target) = host.remote_servers.get(&tool.server) {
@@ -280,7 +277,7 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                 issues.warning(
                     "egress-narrowed",
                     &file,
-                    format!("{}: 운영자 상한 밖이라 막히는 호스트 {dropped:?}", id.0),
+                    format!("{}: egress host(s) blocked by host cap: {dropped:?}", id.0),
                 );
             }
         }

@@ -16,7 +16,6 @@ fn exactly_one_standard_bearer_header_is_read() {
     assert_eq!(presented(&headers(&[&format!("Bearer {KEY}")])), Some(KEY));
     assert_eq!(presented(&headers(&[&format!("bearer {KEY}")])), Some(KEY));
     assert_eq!(presented(&headers(&[&format!("BEARER {KEY}")])), Some(KEY));
-    // 헤더가 없거나 둘 이상이면 어느 것도 믿지 않는다(같은 값이어도)
     assert_eq!(presented(&HeaderMap::new()), None);
     let one = format!("Bearer {KEY}");
     assert_eq!(presented(&headers(&[&one, &one])), None);
@@ -48,7 +47,6 @@ fn other_schemes_and_malformed_values_are_not_keys() {
 fn a_key_is_ascii_without_spaces_and_between_32_and_256_bytes() {
     let ok = |n: usize| presented(&headers(&[&format!("Bearer {}", "k".repeat(n))])).is_some();
     assert!(!ok(31) && ok(32) && ok(256) && !ok(257));
-    // 비ASCII 바이트·제어 문자는 헤더 값으로 들어와도 키가 아니다
     let mut map = HeaderMap::new();
     map.append(
         header::AUTHORIZATION,

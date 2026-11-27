@@ -1,5 +1,4 @@
-//! 봇이 참여했다고 확인된 Slack 스레드의 증거(`bot_slack_threads`, `thread_reply` 이벤트용). 확인된 게시 영수증이나 인증된 자기 봇 메시지만 기록한다.
-//! 키는 (프로필, 바인딩, 팀, 봇, 채널, 루트 ts)라 설치(워크스페이스·봇)나 바인딩이 바뀌면 옛 증거는 다른 소유가 된다.
+//! Records verified bot-participating Slack threads (`bot_slack_threads`) scoped to `(profile, binding, team, bot, channel, root_ts)`.
 
 use crate::{
     codec::*,
@@ -7,7 +6,7 @@ use crate::{
 };
 use bot_core::slack::BotThread;
 
-/// Slack ts(`초.마이크로초`)인가: 숫자 둘을 점으로 이은 짧은 글
+/// Validates Slack `<secs>.<micros>` timestamp format.
 fn ts_ok(ts: &str) -> bool {
     ts.len() <= 32
         && ts.split_once('.').is_some_and(|(a, b)| {
@@ -24,7 +23,6 @@ fn checked(t: &BotThread) -> R<()> {
 }
 
 impl Store {
-    /// 이 스레드에 봇이 참여했다고 기록한다(이미 있으면 그대로).
     pub(crate) async fn thread_note(&self, t: &BotThread) -> R<()> {
         checked(t)?;
         sqlx::query(
@@ -42,7 +40,6 @@ impl Store {
         Ok(())
     }
 
-    /// 기록돼 있는가. 모양이 틀린 키는 기록될 수 없으니 «없다»(`false`)다.
     pub(crate) async fn thread_known(&self, t: &BotThread) -> R<bool> {
         if checked(t).is_err() {
             return Ok(false);

@@ -1,8 +1,8 @@
-// 수동 점검(공개 CI는 돌리지 않는다): 보류 판정은 «첫 확인에 고정»된다. 단계 A에 영수증을 적고 첫 확인을 누른 뒤 다른 곳에서 A가 처리되면,
-// 둘째 누름이 같은 영수증을 B에 기록하면 안 된다.
-// 실행: 데모 서버를 띄우고(`DEMO_PORT=18790 cargo run -p bot-admin --example demo`), 시스템 Chrome과 playwright-core가 있는 곳에서
-//   PLAYWRIGHT_CORE=<playwright-core/index.mjs 경로> PORT=18790 node tests/browser/hold_pin.mjs
-// 데모 데이터는 메모리라 한 번 돌린 뒤에는 서버를 다시 시작해야 한다. 순수 규칙은 tests/js(cargo test가 노드로 돌린다)가 맡는다.
+// Manual check (skipped in public CI): hold resolution pins to the first confirmation.
+// If step A is resolved elsewhere after arming a receipt, the second press must not write it to step B.
+// Run against the demo server (`DEMO_PORT=18790 cargo run -p bot-admin --example demo`) with Chrome + playwright-core:
+//   PLAYWRIGHT_CORE=<path/to/playwright-core/index.mjs> PORT=18790 node tests/browser/hold_pin.mjs
+// Demo state is in-memory; restart the server between runs. Pure rules are tested in tests/js via `cargo test`.
 import { pathToFileURL } from "node:url";
 const pw = await import(pathToFileURL(process.env.PLAYWRIGHT_CORE).href);
 const chromium = pw.chromium ?? pw.default.chromium;
@@ -21,59 +21,59 @@ await p.waitForSelector("#tabs [role=tab]");
 await p.click("#tab-decide"); await p.waitForTimeout(900);
 const card = p.locator("article.hcard").first();
 const select = card.locator("select");
-ok("보류 단계 두 개를 고를 수 있다", (await select.locator("option").count()) === 2);
+ok("two held steps are selectable", (await select.locator("option").count()) === 2);
 const first = await select.inputValue();
-ok("기본 선택은 첫 보류 단계 e-2", first === "e-2", first);
+ok("default selection is first held step e-2", first === "e-2", first);
 const form = card.locator("form").first();
 await form.locator("input").fill("RCPT-FOR-A");
-await form.locator("button[type=submit]").click(); // 첫 확인: 단계 e-2에 고정
+await form.locator("button[type=submit]").click(); // first press pins step e-2
 await p.waitForTimeout(700);
-ok("첫 확인 요약이 단계 e-2를 가리킨다", /notify|e-2/.test((await form.textContent()) || ""));
-// 다른 운영자가 e-2를 먼저 처리한다(같은 서버에 직접 요청).
+ok("confirmation summary points to step e-2", /notify|e-2/.test((await form.textContent()) || ""));
+// Another operator resolves e-2 directly on the same server.
 const other = await p.evaluate(async () => {
   const me = await (await fetch("/v1/admin/me", { credentials: "same-origin" })).json();
   const r = await fetch("/v1/admin/holds/personal/r-4/c-9/resolve", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-Bot-Csrf": me.csrf }, body: JSON.stringify({ verdict: "confirmed", receipt: "OTHER-OPERATOR", effect: "e-2", hold_id: "h-e-2" }) });
   return r.status;
 });
-ok("다른 운영자의 e-2 처리가 성공한다", other === 200, String(other));
-posts.length = 0; // 이 시점까지의 POST는 «다른 운영자»의 요청이다. 이후 이 화면이 보내는 것만 센다.
-// 이 화면의 목록을 다시 불러오게 한다: 승인 카드를 처리하면 app.refresh(true)가 돈다.
-await p.getByRole("button", { name: /^승인$/ }).first().click();
+ok("other operator resolves e-2", other === 200, String(other));
+posts.length = 0; // exclude the other operator's POST; count only requests from this UI
+// Trigger app.refresh(true) by deciding an approval card.
+await p.getByRole("button", { name: /^Approve$/ }).first().click();
 await p.waitForTimeout(1500);
 const card2 = p.locator("article.hcard").first();
 const text = (await card2.textContent()) || "";
-ok("갱신 뒤 e-3만 남아 있다(선택 목록에 e-2가 없다)", (await card2.locator("select").count()) === 0 && /archive/.test(text), text.replace(/\s+/g, " ").slice(0, 100));
+ok("after refresh only e-3 remains (no select for e-2)", (await card2.locator("select").count()) === 0 && /archive/.test(text), text.replace(/\s+/g, " ").slice(0, 100));
 const stillArmed = await card2.locator("button[type=submit]").first().textContent();
-ok("확인이 해제되고 버튼이 처음 문구로 돌아간다", !/한 번 더/.test(stillArmed || ""), stillArmed);
+ok("arming disarms and button returns to initial label", !/again/i.test(stillArmed || ""), stillArmed);
 const typed = await card2.locator("form").first().locator("input").inputValue();
-ok("입력한 영수증도 지워진다", typed === "", JSON.stringify(typed));
-ok("다시 확인하라는 안내가 보인다", /이미 다른 곳에서 처리/.test(text));
-// 운영자가 무심코 한 번 더 누르는 경우: 입력이 비어 있어 기록되지 않는다.
+ok("entered receipt is cleared", typed === "", JSON.stringify(typed));
+ok("re-check notice is visible", /already.*elsewhere|cleared/i.test(text));
+// Accidental second click sends nothing because the input was cleared.
 await card2.locator("form").first().locator("button[type=submit]").click();
 await p.waitForTimeout(500);
-ok("둘째 누름은 아무것도 보내지 않는다(빈 입력 거절)", posts.length === 0, JSON.stringify(posts));
+ok("second click sends nothing (empty input rejected)", posts.length === 0, JSON.stringify(posts));
 const state = await p.evaluate(async () => ((await (await fetch("/v1/admin/holds", { credentials: "same-origin" })).json()).items[0]?.steps ?? []).map((s) => s.effect + ":" + s.state + ":" + (s.receipt || "")));
-ok("e-3에는 어떤 영수증도 기록되지 않았다(보류가 그대로 남아 있다)", state.includes("e-3:held:"), state.length ? state.join(" ") : "보류가 닫혔다 — e-3이 판정됐다");
-// 마지막 단계에서 호출 전체 보류로 바뀌면 기존 영수증을 보존하고 호출 ID에 한 번만 판정한다.
+ok("e-3 remains held with no receipt recorded", state.includes("e-3:held:"), state.length ? state.join(" ") : "hold closed — e-3 was resolved");
+// Transitioning from the last step to the call-wide hold keeps prior receipts and settles once on the call hold ID.
 async function submitReceipt(form, receipt) {
   await form.locator("input").fill(receipt);
   const send = form.locator("button[type=submit]");
   await send.click();
-  await p.waitForTimeout(650); // 화면의 두 번 누름 보호 시간(600ms)
+  await p.waitForTimeout(650); // past the UI's 600ms double-click guard
   await Promise.all([p.waitForResponse((r) => r.url().includes("/resolve") && r.request().method() === "POST" && r.ok()), send.click()]);
 }
 await submitReceipt(card2.locator("form").first(), "ARCHIVE-RECEIPT");
-const final = p.locator("article.hcard").filter({ hasText: "호출 최종 결과" });
+const final = p.locator("article.hcard").filter({ hasText: /final.*result/i });
 await final.waitFor();
-ok("최종 호출에는 전체 영수증 폼 하나만 있다", await final.locator("form").count() === 1 && await final.getByText("미실행으로 판정", { exact: true }).count() === 0);
-ok("호출 카드에 기존 단계 영수증이 남는다", await final.getByText("file-17", { exact: true }).count() === 1 && await final.getByText("ARCHIVE-RECEIPT", { exact: true }).count() === 1);
+ok("final call card has only the whole-call receipt form", await final.locator("form").count() === 1 && await final.getByText(/not executed/i).count() === 0);
+ok("final call card preserves prior step receipts", await final.getByText("file-17", { exact: true }).count() === 1 && await final.getByText("ARCHIVE-RECEIPT", { exact: true }).count() === 1);
 await submitReceipt(final.locator("form"), "CALL-RECEIPT");
 await final.waitFor({ state: "detached" });
 const whole = posts.at(-1);
-ok("호출 전체 식별자로 최종 영수증을 보낸다", !whole.effect && whole.hold_id !== "h-e-3" && !!whole.hold_id && whole.receipt === "CALL-RECEIPT");
-ok("콘솔 오류·경고 0건", logs.length === 0, logs.join("|"));
+ok("final receipt posts against the call-wide hold ID", !whole.effect && whole.hold_id !== "h-e-3" && !!whole.hold_id && whole.receipt === "CALL-RECEIPT");
+ok("zero console errors or warnings", logs.length === 0, logs.join("|"));
 await b.close();
 for (const [s, n, e] of out) console.log(s, n, e ? "— " + e : "");
 const failed = out.some(([s]) => s === "FAIL");
-console.log(failed ? "\n결과: 실패 있음" : "\n결과: 모두 통과");
+console.log(failed ? "\nResult: failures found" : "\nResult: all passed");
 if (failed) process.exitCode = 1;

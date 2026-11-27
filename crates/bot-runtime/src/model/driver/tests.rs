@@ -1,4 +1,4 @@
-//! CLI 구동 시험: 가짜 샌드박스로 정상 종료 · 결과 없는 종료 · 무출력 · 전체 시간 · 취소를 본다.
+//! CLI driver tests: clean exit, stderr error classification, idle/total timeouts, and cancellation during spawn.
 
 use super::*;
 use crate::model::{FakeSandbox, Script};
@@ -15,7 +15,6 @@ use std::{
     time::Duration,
 };
 
-/// 줄을 모아 두었다가 `DONE` 줄이 오면 결과가 있다고 본다.
 #[derive(Default)]
 struct Collect {
     lines: Vec<String>,
@@ -89,7 +88,7 @@ async fn returns_the_parsers_result_when_the_process_finishes() {
         (out.text.as_str(), out.usage.output_tokens),
         ("a|b|DONE", 2)
     );
-    assert_eq!(sandbox.killed(), 0, "정상 종료는 죽이지 않는다");
+    assert_eq!(sandbox.killed(), 0, "clean exit must not kill process");
 }
 
 #[tokio::test]
@@ -165,7 +164,7 @@ async fn the_total_limit_stops_a_chatty_process() {
     assert_eq!(
         error,
         ModelError::Timeout,
-        "출력이 계속 와도 전체 시간은 지킨다"
+        "total limit must still fire despite continuous output"
     );
     assert!(error.transient());
     assert_eq!(sandbox.killed(), 1);
@@ -242,7 +241,6 @@ fn classify_maps_statuses_and_phrases_to_fixed_codes() {
         ("read ECONNRESET", None, ("network", true)),
         ("Invalid API key", Some(401), ("model_error", false)),
         ("", None, ("model_error", false)),
-        // 공급자의 출력 토큰 상한(CLI 2.1.331 문구): 다시 해도 같으므로 일시 실패가 아니다
         (
             "API Error: Claude's response exceeded the 128000 output token maximum. To configure this behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.",
             None,
@@ -254,7 +252,6 @@ fn classify_maps_statuses_and_phrases_to_fixed_codes() {
     assert!(is_transient("503") && !is_transient("401 Unauthorized"));
 }
 
-/// 띄우는 데 `delay`가 걸리는 샌드박스(뜨는 중인 VM): 시작한 횟수와, 끝내지 못한 채 버려진 횟수를 센다.
 struct Slow {
     delay: Duration,
     inner: FakeSandbox,
@@ -273,7 +270,6 @@ impl Slow {
     }
 }
 
-/// 시작이 끝나기 전에 버려지면 센다.
 struct Pending(Option<Arc<AtomicUsize>>);
 
 impl Drop for Pending {
@@ -304,7 +300,6 @@ impl Sandbox<ModelSpec> for Slow {
 
 #[tokio::test]
 async fn a_cancel_during_a_slow_spawn_returns_at_once_and_drops_the_start() {
-    // 점검이 오래 걸리거나 VM이 뜨는 중이어도 종료 반납 신호가 실행기를 끊는다(예전에는 시작이 끝나기를 기다렸다)
     let sandbox = Slow::new(Duration::from_secs(30), [Script::output("DONE")]);
     let (tx, rx) = watch::channel(false);
     let canceller = tokio::spawn(async move {
@@ -324,11 +319,11 @@ async fn a_cancel_during_a_slow_spawn_returns_at_once_and_drops_the_start() {
     assert_eq!(
         sandbox.abandoned.load(Ordering::SeqCst),
         1,
-        "취소가 이기면 시작을 버린다(아무것도 띄우지 않는다)"
+        "cancelled spawn must be dropped before launching"
     );
     assert!(
         sandbox.inner.specs().is_empty(),
-        "시작이 끝나지 않았으니 프로세스는 없다"
+        "no process should be spawned after cancel"
     );
     canceller.await.unwrap();
 }
@@ -374,7 +369,11 @@ async fn a_spawn_that_finishes_in_time_is_used_and_a_later_cancel_still_kills_it
         ModelError::Cancelled
     );
     assert_eq!(sandbox.abandoned.load(Ordering::SeqCst), 0);
-    assert_eq!(sandbox.inner.killed(), 1, "받은 프로세스는 끝낸다");
+    assert_eq!(
+        sandbox.inner.killed(),
+        1,
+        "spawned process must be killed on cancel"
+    );
     canceller.await.unwrap();
 }
 

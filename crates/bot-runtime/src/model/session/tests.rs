@@ -1,4 +1,4 @@
-//! 세션 복구 규약 시험. 표본은 실제 CLI(2.1.331)가 가짜 상류와 주고받으며 남긴 대화 줄을 줄인 것이다.
+//! Session journal and restoration protocol tests using a captured Claude Code 2.1.331 fixture.
 
 use super::*;
 use bot_core::{
@@ -19,7 +19,6 @@ fn journal(next: u64) -> Journal {
     Journal::new(next, BTreeMap::new(), RELAY.into())
 }
 
-/// 표본 앞쪽 `n`줄을 먹인 쓰기 쪽(0: 사용자, 1·2: 첨부, 3: 도구를 부른 응답 msg_1).
 fn fed(n: usize) -> Journal {
     let mut j = journal(0);
     for line in &lines()[..n] {
@@ -43,7 +42,6 @@ fn keys(plan: &Plan) -> Vec<&str> {
     plan.steps.iter().map(|s| s.key.as_str()).collect()
 }
 
-/// 도구 하나를 부르는 응답 줄 / 그 결과 줄(최소 모양).
 fn assistant(uuid: &str, parent: &str, message: &str, tool: &str, name: &str) -> String {
     json!({"type":"assistant","uuid":uuid,"parentUuid":parent,
         "message":{"id":message,"role":"assistant","content":[{"type":"tool_use","id":tool,"name":name,"input":{}}]}})
@@ -74,10 +72,10 @@ fn the_session_id_and_project_dir_are_deterministic() {
     assert_eq!(id, session_id(&p, &r));
     assert_ne!(id, session_id(&p, &RunId("run-2".into())));
     assert_eq!(id.len(), 36);
-    assert_eq!(id.as_bytes()[14], b'5', "UUID 버전 자리");
+    assert_eq!(id.as_bytes()[14], b'5', "UUID version nibble");
     assert!(
         matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
-        "변종 자리"
+        "UUID variant nibble"
     );
     assert_eq!(project_dir("/bot"), "-bot");
     assert_eq!(
@@ -101,7 +99,7 @@ fn a_batch_is_made_only_when_the_front_confirmed_exactly_the_tools_in_the_sessio
             "cli-use-toolu_probe1",
             "cli-group-3"
         ],
-        "줄 → 계획 → 그룹(마지막), turn은 응답의 첫 assistant 줄 번호"
+        "records -> uses -> group (last), anchored at first assistant line"
     );
     assert!(plan.verify.is_empty());
     let used: CliUse = serde_json::from_str(&plan.steps[4].body.0).unwrap();
@@ -121,7 +119,6 @@ fn a_batch_is_made_only_when_the_front_confirmed_exactly_the_tools_in_the_sessio
         (3, vec!["toolu_probe1".to_owned()])
     );
 
-    // 다른 ID·이름·입력·개수는 쓰지 않는다
     let mut other = probe_response();
     other.uses[0].id = "toolu_other".into();
     assert_eq!(j.plan(&other).unwrap_err(), Refused::Mismatch);
@@ -140,12 +137,11 @@ fn a_batch_is_made_only_when_the_front_confirmed_exactly_the_tools_in_the_sessio
     assert_eq!(
         j.plan(&longer).unwrap_err(),
         Refused::Incomplete,
-        "프런트가 본 도구가 더 있으면 세션 줄이 더 올 때까지 기다린다"
+        "must wait for remaining session lines when front saw more tools"
     );
     let mut unknown = probe_response();
     unknown.id = "msg_unknown".into();
     assert_eq!(j.plan(&unknown).unwrap_err(), Refused::Mismatch);
-    // 줄에 더 있는 도구는 프런트가 확인하지 않았다
     let mut two = fed(4);
     two.feed(&assistant(
         "u9",
@@ -160,7 +156,7 @@ fn a_batch_is_made_only_when_the_front_confirmed_exactly_the_tools_in_the_sessio
 #[test]
 fn a_response_split_over_lines_keeps_its_first_line_as_the_turn_and_one_slot_per_tool() {
     let mut j = journal(10);
-    let text = json!({"type":"assistant","uuid":"a0","parentUuid":"p","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"먼저"}]}});
+    let text = json!({"type":"assistant","uuid":"a0","parentUuid":"p","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"first"}]}});
     j.feed(&text.to_string());
     j.feed(&assistant("a1", "a0", "m1", "t1", "mcp__relay__one"));
     j.feed(&assistant("a2", "a1", "m1", "t2", "mcp__relay__two"));
@@ -186,7 +182,7 @@ fn a_response_split_over_lines_keeps_its_first_line_as_the_turn_and_one_slot_per
     assert_eq!(
         (t2.seq, t2.turn, t2.pos),
         (12, 10, 1),
-        "줄은 12번, 응답은 10번에서 시작, 둘째 도구"
+        "line 12, response anchored at turn 10, second tool"
     );
 }
 
@@ -200,7 +196,6 @@ fn a_batch_ends_before_the_next_response_and_the_numbering_continues() {
     j.feed(&result("r1", "a1", "tA"));
     j.feed(&assistant("a2", "r1", "mB", "tB", "mcp__relay__two"));
     assert_eq!(j.oldest(), Some("mA"));
-    // 더 오래된 응답이 먼저다
     assert_eq!(
         j.plan(&response("mB", "tB", "mcp__relay__two"))
             .unwrap_err(),
@@ -216,7 +211,7 @@ fn a_batch_ends_before_the_next_response_and_the_numbering_continues() {
             "cli-use-tA",
             "cli-group-1"
         ],
-        "다음 응답(번호 3)의 첫 줄 앞까지"
+        "stops before the first line of the next response (seq 3)"
     );
     assert_eq!(
         first
@@ -225,7 +220,7 @@ fn a_batch_ends_before_the_next_response_and_the_numbering_continues() {
             .map(|p| (p.turn, p.pos, p.tool_use.id.as_str()))
             .collect::<Vec<_>>(),
         [(1, 0, "tA")],
-        "묶음에 든 릴레이 도구의 결과 줄은 원장에서 끝났는지 확인한다(원래 계획 그대로)"
+        "relay tool results in the batch must be verified against the ledger"
     );
     j.applied(&first);
     assert_eq!(j.oldest(), Some("mB"));
@@ -241,8 +236,10 @@ fn only_relay_results_are_checked_against_the_ledger_and_unplaceable_ones_are_re
     j.feed(&result("r1", "a1", "tRead"));
     j.feed(&assistant("a2", "r1", "mB", "tB", "mcp__relay__two"));
     let plan = j.plan(&response("mA", "tRead", "Read")).unwrap();
-    assert!(plan.verify.is_empty(), "VM 내장 도구의 결과는 원장에 없다");
-    // 어느 도구의 결과인지 알 수 없는 줄은 쓰지 않는다
+    assert!(
+        plan.verify.is_empty(),
+        "VM built-in results are not in the ledger"
+    );
     let mut j = journal(0);
     j.feed(&result("r0", "p", "tGhost"));
     j.feed(&assistant("a1", "r0", "mA", "tA", "mcp__relay__one"));
@@ -269,7 +266,7 @@ fn noise_and_oversized_lines_do_not_reach_the_batch() {
     assert_eq!(
         j.feed(lines()[0]),
         Fed::Skipped,
-        "얼린 뒤에는 아무것도 쓰지 않는다"
+        "frozen journal ignores subsequent lines"
     );
     assert_eq!(j.oldest(), None);
 }
@@ -281,26 +278,22 @@ fn a_frozen_journal_is_stuck_only_when_a_relay_call_could_not_be_saved() {
             "content":[{"type":"tool_use","id":id,"name":name,"input":{}}]}})
         .to_string()
     };
-    // 확인을 기다리던 릴레이 응답이 있는 채로 얼리면 막힌 것이다
     let mut j = journal(0);
     j.feed(&tool_line("t1", "mcp__relay__nothing"));
     assert!(j.unsaved_relay());
     j.freeze(Why::Unsaved);
     assert_eq!(j.stuck(), Some(Why::Unsaved));
-    // VM 내장 도구만 기다리고 있었다면 막힌 것이 없다
     let mut j = journal(0);
     j.feed(&tool_line("t2", "Read"));
     assert!(!j.unsaved_relay());
     j.freeze(Why::Unsaved);
     assert_eq!(j.stuck(), None);
-    // 얼린 뒤에 릴레이 도구를 부르는 줄이 오면 막힌다. 내장 도구나 글만 있는 줄은 아니다
     j.feed(&tool_line("t3", "Bash"));
     assert_eq!(j.stuck(), None);
     j.feed(r#"{"type":"user","uuid":"x","message":{"role":"user","content":"\"tool_use\""}}"#);
     assert_eq!(j.stuck(), None);
     j.feed(&tool_line("t4", "mcp__relay__nothing"));
     assert_eq!(j.stuck(), Some(Why::Unsaved));
-    // 상한을 넘는 줄이 곧 릴레이 호출이면 그 호출도 막힌 것이고, 사유는 다시 해도 같다는 뜻이다
     let mut j = journal(0);
     let huge =
         json!({"type":"assistant","uuid":"h","message":{"id":"m-h","role":"assistant","content":[
@@ -311,7 +304,6 @@ fn a_frozen_journal_is_stuck_only_when_a_relay_call_could_not_be_saved() {
     assert_eq!(j.stuck(), Some(Why::TooLarge));
 }
 
-/// 표본 앞 `n`줄을 쓰고 프런트가 확인한 묶음의 체크포인트 목록.
 fn saved_steps(n: usize) -> Vec<Step> {
     fed(n).plan(&probe_response()).unwrap().steps
 }
@@ -319,7 +311,7 @@ fn saved_steps(n: usize) -> Vec<Step> {
 #[test]
 fn restore_rebuilds_the_chain_up_to_the_last_group_and_reports_the_pending_slots() {
     let steps = saved_steps(4);
-    let saved = restore(&steps).unwrap().expect("그룹이 있다");
+    let saved = restore(&steps).unwrap().expect("group present");
     assert_eq!(
         saved.lines.iter().map(String::as_str).collect::<Vec<_>>(),
         lines()[..4]
@@ -338,13 +330,11 @@ fn restore_rebuilds_the_chain_up_to_the_last_group_and_reports_the_pending_slots
     assert_eq!(saved.last_uuid, "cf3bcfae-3ae9-4dbb-94dd-7fb7c1abaf9f");
     assert_eq!(saved.known["toolu_probe1"].name, "mcp__relay__nothing");
 
-    // 결과 줄(CLI가 쓴 것이든 호스트가 이은 것이든)이 이어져 있으면 채울 것이 없다
     let mut answered = steps.clone();
     answered.push(rec_step(4, lines()[4]));
     let saved = restore(&answered).unwrap().unwrap();
     assert_eq!(saved.lines.len(), 5);
     assert!(saved.pending().is_empty());
-    // 그룹이 없으면 처음부터 시작한다
     let no_group: Vec<Step> = steps
         .iter()
         .filter(|s| !s.key.starts_with("cli-group-"))
@@ -363,7 +353,7 @@ fn restore_rejects_gaps_missing_plans_and_plans_that_differ_from_the_lines() {
     assert_eq!(
         restore(&drop_key("cli-rec-1")),
         Err(Corrupt),
-        "줄 번호가 이어지지 않는다"
+        "sequence gap must fail"
     );
     let mut bad = steps.clone();
     bad[0].body = JsonPayload("not json".into());
@@ -371,7 +361,6 @@ fn restore_rejects_gaps_missing_plans_and_plans_that_differ_from_the_lines() {
     let mut not_text = steps.clone();
     not_text[1].body = JsonPayload("{}".into());
     assert_eq!(restore(&not_text), Err(Corrupt));
-    // `cli-use`가 줄과 다른 이름·입력·자리를 말한다
     for patch in [
         json!({"seq":3,"turn":3,"pos":0,"name":"mcp__relay__other","input":{"x":1}}),
         json!({"seq":3,"turn":3,"pos":0,"name":"mcp__relay__nothing","input":{"x":2}}),
@@ -386,7 +375,6 @@ fn restore_rejects_gaps_missing_plans_and_plans_that_differ_from_the_lines() {
         changed[at].body = JsonPayload(patch.to_string());
         assert_eq!(restore(&changed), Err(Corrupt), "{patch}");
     }
-    // 그룹의 turn이 키와 다르다
     let mut renamed = steps.clone();
     let at = renamed
         .iter()
@@ -414,7 +402,7 @@ fn an_older_response_with_an_unanswered_tool_is_corrupt() {
     assert_eq!(
         restore(&steps),
         Err(Corrupt),
-        "tA의 결과 없이 다음 응답이 있다"
+        "next response without prior tool result must be rejected"
     );
 }
 
@@ -424,7 +412,7 @@ fn result_lines_chain_after_the_last_line_and_are_deterministic() {
     let session = "ca6aa50b-17a1-438b-ac2d-3b9068a34c34";
     let outcomes = vec![(
         "toolu_probe1".to_owned(),
-        ToolOutput::from_payload(r#"{"content":[{"type":"text","text":"끝"}],"isError":false}"#),
+        ToolOutput::from_payload(r#"{"content":[{"type":"text","text":"done"}],"isError":false}"#),
     )];
     let a = result_line(&saved, session, &outcomes, "2026-11-24T05:00:00.000Z").unwrap();
     let b = result_line(&saved, session, &outcomes, "2026-11-24T05:00:09.000Z").unwrap();
@@ -432,7 +420,7 @@ fn result_lines_chain_after_the_last_line_and_are_deterministic() {
         serde_json::from_str(&a).unwrap(),
         serde_json::from_str(&b).unwrap(),
     );
-    assert_eq!(va["uuid"], vb["uuid"], "같은 입력이면 같은 uuid");
+    assert_eq!(va["uuid"], vb["uuid"], "same inputs produce the same uuid");
     assert_eq!(va["parentUuid"], "cf3bcfae-3ae9-4dbb-94dd-7fb7c1abaf9f");
     assert_eq!(va["sessionId"], session);
     assert_eq!(va["cwd"], "/bot");
@@ -440,13 +428,11 @@ fn result_lines_chain_after_the_last_line_and_are_deterministic() {
     let block = &va["message"]["content"][0];
     assert_eq!(block["type"], "tool_result");
     assert_eq!(block["tool_use_id"], "toolu_probe1");
-    assert_eq!(block["content"], json!([{"type":"text","text":"끝"}]));
+    assert_eq!(block["content"], json!([{"type":"text","text":"done"}]));
     assert_eq!(block["is_error"], false);
-    // 줄로서 체인을 이어 받을 수 있다: 뒤에 붙여 복원하면 채울 것이 없다
     let mut steps = saved_steps(4);
     steps.push(rec_step(4, &a));
     assert!(restore(&steps).unwrap().unwrap().pending().is_empty());
-    // 오류 결과는 is_error로 간다. 채울 것이 없으면 줄도 없다
     let notice = vec![("toolu_probe1".to_owned(), ToolOutput::notice("denied"))];
     let line: Value =
         serde_json::from_str(&result_line(&saved, session, &notice, "t").unwrap()).unwrap();
@@ -471,7 +457,6 @@ fn too_many_unconfirmed_lines_freeze_the_journal() {
         json!({"type":"user","uuid":"over","message":{"role":"user","content":"x"}}).to_string();
     assert_eq!(j.feed(&line), Fed::Frozen);
     assert!(j.frozen());
-    // 바이트 합계 상한도 같다
     let mut j = journal(0);
     let chunk = "y".repeat(800 * 1024);
     let mut frozen_at = None;

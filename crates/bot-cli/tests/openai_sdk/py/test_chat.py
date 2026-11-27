@@ -1,4 +1,4 @@
-"""공식 Python SDK로 chat completions(비스트리밍): 응답 필드·usage 알려짐/모름·finish_reason(긴 정상 응답과 실제 제한 종료 구분)·같은 키 중복 실행 0·요청 필드 표."""
+"""Official Python SDK non-streaming chat completion tests: schema fields, usage, finish_reason, idempotency, and request validation."""
 import json
 import unittest
 
@@ -8,8 +8,9 @@ from common import *
 
 TOOL = {"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {}}}}
 NULLABLE_FIELDS = sorted(SCHEMA.request_nullable - {"stream", "stream_options", "metadata", "audio", "modalities", "prediction", "reasoning_effort", "service_tier"})
-NOT_NULLABLE_UNSUPPORTED = ("tools", "tool_choice", "functions", "function_call")  # 지원하지 않는 필드이고 공식 스키마가 null을 허용하지 않는다 → null이어도 거절
-REFUSED = {  # 이름 → (추가 본문 조각, 오류의 param)
+# Unsupported fields that are non-nullable in the official schema must be rejected even when null.
+NOT_NULLABLE_UNSUPPORTED = ("tools", "tool_choice", "functions", "function_call")
+REFUSED = {
     "max_tokens": ({"max_tokens": 64}, "max_tokens"), "max_completion_tokens": ({"max_completion_tokens": 64}, "max_completion_tokens"), "stop": ({"stop": ["###"]}, "stop"),
     "n": ({"n": 2}, "n"), "tools": ({"tools": [TOOL]}, "tools"), "tool_choice": ({"tool_choice": "auto"}, "tool_choice"), "functions": ({"functions": [TOOL["function"]]}, "functions"),
     "function_call": ({"function_call": "auto"}, "function_call"), "parallel_tool_calls": ({"parallel_tool_calls": True}, "parallel_tool_calls"), "logprobs": ({"logprobs": True}, "logprobs"),
@@ -31,7 +32,7 @@ class Answer(Wired):
         self.assertEqual(data["choices"], [{"index": 0, "message": {"role": "assistant", "content": ANSWER, "refusal": None}, "finish_reason": "stop", "logprobs": None}])
         self.assertEqual(data["usage"], {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13})
         generated = reply.headers["idempotency-key"]
-        self.assertGreaterEqual(len(generated), 16, "키가 없으면 서버가 난수 키를 만들어 응답 헤더로 돌려준다")
+        self.assertGreaterEqual(len(generated), 16, "server must synthesize an Idempotency-Key when omitted")
         self.assertTrue(reply.headers["x-request-id"])
         self.assertEqual((d.runs, d.model_calls), (1, 1))
         parsed = reply.parse()
@@ -42,23 +43,23 @@ class Answer(Wired):
         reply = client().chat.completions.with_raw_response.create(model=MODEL, messages=USER)
         data = reply.http_response.json()
         SCHEMA.check("CreateChatCompletionResponse", data)
-        self.assertNotIn("usage", data, "usage: null도 0도 아니라 키 자체가 없다")
+        self.assertNotIn("usage", data, "unmeasured usage must be omitted")
         self.assertIsNone(reply.parse().usage)
 
     def test_a_long_normal_answer_under_the_host_cap_is_stop_in_full(self):
-        long_text = ("긴 답변 " * 1500).rstrip()  # 6000자: 길지만 정상 종료(end_turn)다
+        long_text = ("long reply " * 600).rstrip()
         script(text=long_text, stop="end_turn")
         whole = client().chat.completions.create(model=MODEL, messages=USER)
         self.assertEqual((whole.choices[0].finish_reason, whole.choices[0].message.content), ("stop", long_text))
 
     def test_an_answer_over_the_host_cap_is_clipped_and_says_length(self):
-        script(text=("가" * (HOST_CAP + 500)), stop="end_turn")
+        script(text=("★" * (HOST_CAP + 500)), stop="end_turn")
         clipped = client().chat.completions.create(model=MODEL, messages=USER)
         self.assertEqual(clipped.choices[0].finish_reason, "length")
-        self.assertEqual(clipped.choices[0].message.content, "가" * HOST_CAP, "조용히 자르지 않고 length로 알린다")
+        self.assertEqual(clipped.choices[0].message.content, "★" * HOST_CAP, "clipped replies must report finish_reason=length")
 
     def test_a_provider_limit_stop_that_leaves_no_final_answer_is_422_run_failed(self):
-        script(text="잘린 답", stop="max_tokens")
+        script(text="truncated reply", stop="max_tokens")
         with Delta() as d:
             status, headers, body = raw("POST", "/chat/completions", body=chat_body())
         self.assertEqual(status, 422, body[:200])
@@ -77,8 +78,8 @@ class Answer(Wired):
         send = lambda c=None: (c or client()).chat.completions.with_raw_response.create(model=MODEL, messages=USER, extra_headers={"Idempotency-Key": key})
         with Delta() as d:
             first, second = send(), send()
-            third = send(client(ROTATED))  # 같은 주체의 다른 키 슬롯으로도 같은 작업을 찾는다
-        self.assertEqual((d.runs, d.model_calls), (1, 1), "같은 키는 한 번만 실행된다")
+            third = send(client(ROTATED))
+        self.assertEqual((d.runs, d.model_calls), (1, 1), "same key must execute only once")
         bodies = [r.http_response.json() for r in (first, second, third)]
         self.assertEqual(bodies[0], bodies[1])
         self.assertEqual(bodies[0], bodies[2])
@@ -89,7 +90,7 @@ class Answer(Wired):
             client().chat.completions.create(model=MODEL, messages=USER, extra_headers={"x-stainless-retry-count": "1"})
         assert_error(self, {"error": caught.exception.body}, 400, "invalid_request_error", "idempotency_key_required")
         self.assertEqual((d.runs, d.model_calls), (0, 0))
-        script(text=ANSWER)  # 재시도 표지가 0이거나 키가 있으면 평소처럼 접수한다
+        script(text=ANSWER)
         self.assertEqual(client().chat.completions.create(model=MODEL, messages=USER, extra_headers={"x-stainless-retry-count": "0"}).choices[0].message.content, ANSWER)
 
     def test_the_same_key_with_another_request_is_a_conflict_and_runs_nothing(self):
@@ -98,20 +99,20 @@ class Answer(Wired):
         client().chat.completions.create(model=MODEL, messages=USER, extra_headers={"Idempotency-Key": key})
         with Delta() as d:
             with self.assertRaises(openai.BadRequestError) as caught:
-                client().chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "다른 질문"}], extra_headers={"Idempotency-Key": key})
+                client().chat.completions.create(model=MODEL, messages=[{"role": "user", "content": "another question"}], extra_headers={"Idempotency-Key": key})
         assert_error(self, {"error": caught.exception.body}, 400, "invalid_request_error", "idempotency_key_conflict")
         self.assertEqual((d.runs, d.model_calls), (0, 0))
 
     def test_another_subject_using_the_same_key_and_body_gets_its_own_run_and_never_the_first_answer(self):
-        script(text="첫 번째 주체의 답")
-        script(text="두 번째 주체의 답")
+        script(text="first subject reply")
+        script(text="second subject reply")
         key = fresh_key()
         send = lambda api_key: client(api_key).chat.completions.create(model=MODEL, messages=USER, extra_headers={"Idempotency-Key": key})
         with Delta() as d:
             mine, theirs = send(KEY), send(OTHER)
-        self.assertEqual((mine.choices[0].message.content, theirs.choices[0].message.content), ("첫 번째 주체의 답", "두 번째 주체의 답"))
+        self.assertEqual((mine.choices[0].message.content, theirs.choices[0].message.content), ("first subject reply", "second subject reply"))
         self.assertNotEqual(mine.id, theirs.id)
-        self.assertEqual((d.runs, d.model_calls), (2, 2), "멱등 키는 주체마다 따로다: 남의 키로 내 결과를 읽거나 내 작업에 붙을 수 없다")
+        self.assertEqual((d.runs, d.model_calls), (2, 2), "idempotency keys are scoped per subject")
 
     def test_the_same_key_may_change_only_presentation_options(self):
         script(text=ANSWER)
@@ -119,12 +120,12 @@ class Answer(Wired):
         first = client().chat.completions.create(model=MODEL, messages=USER, extra_headers={"Idempotency-Key": key})
         with Delta() as d:
             again = client().chat.completions.create(model=MODEL, messages=USER, user="someone", metadata={"k": "v"}, extra_headers={"Idempotency-Key": key})
-        self.assertEqual((again.id, d.runs), (first.id, 0), "user·metadata는 의미 지문에 들지 않는다")
+        self.assertEqual((again.id, d.runs), (first.id, 0), "user and metadata are excluded from the semantic fingerprint")
 
     def test_accepted_shapes_and_ignored_options(self):
         script(text=ANSWER)
         messages = [{"role": "system", "content": "s"}, {"role": "developer", "content": "d"}, {"role": "user", "name": "kim", "content": [{"type": "text", "text": "t"}]},
-                    {"role": "assistant", "content": "a"}, {"role": "user", "content": "마지막 질문"}]
+                    {"role": "assistant", "content": "a"}, {"role": "user", "content": "final question"}]
         reply = client().chat.completions.create(model=MODEL, messages=messages, temperature=0.2, top_p=0.9, seed=7, user="e2e", metadata={"k": "v"}, store=False, n=1,
                                                  response_format={"type": "text"}, extra_body={name: None for name in NULLABLE_FIELDS if name not in ("temperature", "top_p", "seed", "n", "store")})
         self.assertEqual(reply.choices[0].message.content, ANSWER)
@@ -153,7 +154,7 @@ class Answer(Wired):
             "assistant tool_calls": [{"role": "user", "content": "q"}, {"role": "assistant", "content": None, "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}],
             "image part": [{"role": "user", "content": [{"type": "text", "text": "t"}, {"type": "image_url", "image_url": {"url": "https://example.test/x.png"}}]}],
             "audio part": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}]}],
-            "unknown message field": [{"role": "user", "content": "q", "surprise": 1}],  # 아래에서 param이 가장 가까운 알려진 부모 경로 `messages[0]`인지 본다
+            "unknown message field": [{"role": "user", "content": "q", "surprise": 1}],
             "function role": [{"role": "user", "content": "q"}, {"role": "function", "name": "f", "content": "r"}],
         }
         for label, messages in cases.items():
@@ -161,7 +162,7 @@ class Answer(Wired):
                 with Delta() as d, self.assertRaises(openai.BadRequestError) as caught:
                     client().chat.completions.create(model=MODEL, messages=messages)
                 assert_error(self, {"error": caught.exception.body}, 400, "invalid_request_error", "unsupported_parameter", **({"param": "messages[0]"} if label == "unknown message field" else {}))
-                self.assertNotIn("surprise", json.dumps(caught.exception.body), "지어낸 이름은 오류에 반사하지 않는다")
+                self.assertNotIn("surprise", json.dumps(caught.exception.body), "unknown field names must not be echoed")
                 self.assertEqual((d.runs, d.model_calls), (0, 0))
 
     def test_malformed_requests_are_invalid_request(self):

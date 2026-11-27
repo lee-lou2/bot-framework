@@ -1,6 +1,4 @@
-//! 프런트가 모델에 돌려주는 **모든** 거절은 그 호출의 확정 결과다: 검증된 CLI 위치에서 실행 전에 거절하면 모델이 볼 단어를 run 체크포인트의 표식으로 **먼저**
-//! 남기고 그 뒤에만 돌려준다. 같은 위치의 재전달·재개는 표식을 실행 전에 읽어 그 단어를 재생하고(정상 거절은 시도 횟수를 쓰지 않는다), 같은 위치의 동시 재전달이
-//! 거절과 실행으로 둘 다 끝나지 않는다. 저장소 장애·한도가 아닌 `Unavailable`·소유권 상실·시작한 호출은 봉인하지 않는다.
+//! Every pre-execution refusal at a verified CLI position is sealed as a checkpoint marker before returning, replayed on redelivery, and serialized against concurrent calls.
 
 use super::{
     cli::{OWNER_RUN, call, record},
@@ -24,7 +22,6 @@ use std::sync::{
 
 const SAY: &str = r#"{"text":"hi"}"#;
 
-/// 브로커의 답을 시험이 바꿔 끼운다: 주입한 오류가 있으면 실제 브로커를 부르지 않고 그 오류를 돌려준다.
 #[derive(Clone, Copy)]
 pub(super) enum Inject {
     Missing,
@@ -68,7 +65,7 @@ impl Broker for Wrapped {
     fn call(&self, call: ToolCall) -> Reply<'_, CallResult> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let injected = *self.error.lock().unwrap();
-        let inner = self.inner.lock().unwrap().clone().expect("브로커");
+        let inner = self.inner.lock().unwrap().clone().expect("broker");
         Box::pin(async move {
             match injected {
                 Some(error) => Err(error.error()),
@@ -83,7 +80,7 @@ impl Broker for Wrapped {
         actor: bot_core::id::PrincipalId,
         allow: bool,
     ) -> Reply<'_, ()> {
-        let inner = self.inner.lock().unwrap().clone().expect("브로커");
+        let inner = self.inner.lock().unwrap().clone().expect("broker");
         Box::pin(async move { inner.decide(nonce, actor, allow).await })
     }
 }
@@ -139,17 +136,17 @@ async fn a_denial_a_conflict_and_a_stale_condition_are_sealed_before_their_word_
             .iter()
             .map(|(turn, _, _, _, refusal)| (CallId(format!("cli-{turn}-0")), *refusal))
             .collect::<Vec<_>>(),
-        "거절마다 그 단어의 표식이 하나씩이다"
+        "one refusal marker per refused position"
     );
     for (turn, ..) in cases {
         assert!(
             r.ledger
                 .step_keys(OWNER_RUN)
                 .contains(&marker(&format!("cli-{turn}-0"))),
-            "표식은 run 체크포인트에 남는다"
+            "marker must persist in run checkpoints"
         );
     }
-    // 같은 위치의 재전달·재개: 실행할 수 있는 상태가 돼도 브로커를 부르지 않고 모델이 본 그 단어를 재생한다
+    // Redelivery replays the sealed code without calling the broker even after the condition clears.
     wrapped.fail_with(None);
     let before = wrapped.calls();
     for (_, id, _, expected, _) in cases {
@@ -158,15 +155,15 @@ async fn a_denial_a_conflict_and_a_stale_condition_are_sealed_before_their_word_
     assert_eq!(
         wrapped.calls(),
         before,
-        "표식이 있는 위치는 브로커를 부르지 않는다"
+        "sealed position must not call broker"
     );
     assert!(r.runner.jobs().is_empty());
     assert_eq!(
         r.turns.refusals().len(),
         3,
-        "재생은 표식을 다시 쓰지 않는다"
+        "replay must not rewrite the marker"
     );
-    // 새 위치(모델이 새로 한 호출)는 지금 조건으로 판정해 실행한다
+    // A new position is evaluated under current conditions.
     record(&r, 9, &[("toolu_n", "echo_say", SAY)]);
     let reply = rpc(&r, &call("toolu_n", "echo_say", SAY)).await;
     assert!(reply.body.contains("ok"), "{}", reply.body);
@@ -181,14 +178,13 @@ async fn a_storage_failure_is_never_sealed_and_the_retry_runs_the_call() {
     assert_eq!(word(&r, "toolu_a", "echo_say", SAY).await, "unavailable");
     assert!(
         r.turns.refusals().is_empty(),
-        "한도가 거절한 것이 아니면 표식은 없다"
+        "non-limit unavailable must not be sealed"
     );
-    // 저장소가 돌아오면 같은 위치를 다시 판정해 실행한다
     wrapped.fail_with(None);
     let reply = rpc(&r, &call("toolu_a", "echo_say", SAY)).await;
     assert!(reply.body.contains("ok"), "{}", reply.body);
     assert_eq!(r.runner.jobs().len(), 1);
-    // 계획과 대조하지 않은 위치(없는 계획)·사전 판정이 아니라고 하는 `Missing`·`Invalid`도 봉인하지 않는다
+    // Unconfirmed Missing/Invalid responses are not sealed.
     record(&r, 8, &[("toolu_m", "echo_say", SAY)]);
     for (injected, expected) in [
         (Inject::Missing, "unknown_tool"),
@@ -205,14 +201,12 @@ async fn a_claim_lost_before_the_marker_is_written_leaves_no_marker_and_the_stal
     let (r, wrapped) = injected_rig().await;
     record(&r, 4, &[("toolu_a", "echo_say", SAY)]);
     wrapped.fail_with(Some(Inject::Denied));
-    // 브로커가 거절한 뒤 표식을 쓰기 전에 claim이 넘어갔다: 쓰지 못하고 `stale`이다(새 claim이 같은 위치를 처음부터 판정한다)
     r.turns.fail_refusals_with(Some(Error::Stale));
     assert_eq!(word(&r, "toolu_a", "echo_say", SAY).await, "stale");
     assert!(r.turns.refusals().is_empty());
     assert!(!r.ledger.step_keys(OWNER_RUN).contains(&marker("cli-4-0")));
 }
 
-/// 표식을 읽지 못하는 호출 ID 원천(저장소 장애를 흉내 낸다): 나머지는 실제 `PlannedCalls`다.
 struct Flaky {
     inner: PlannedCalls,
     unreadable: Arc<AtomicBool>,
@@ -263,14 +257,13 @@ async fn an_existing_marker_is_read_before_anything_runs_and_an_unreadable_one_r
         )
     };
     let r = rig_full(|_| {}, |_| {}, flaky, Config::default(), wrapper(&wrapped)).await;
-    // 이미 표식이 있는 위치: 브로커도 실행기도 부르지 않고 그 단어를 재생한다(다른 프로세스·이전 시도가 남긴 표식)
     record(&r, 4, &[("toolu_a", "echo_say", SAY)]);
     r.ledger
         .add_step(OWNER_RUN, &marker("cli-4-0"), r#""denied""#);
     assert_eq!(word(&r, "toolu_a", "echo_say", SAY).await, "denied");
     assert_eq!(wrapped.calls(), 0);
     assert!(r.runner.jobs().is_empty());
-    // 표식을 읽지 못하면 있는지 없는지 모르니 실행하지 않는다
+    // Unreadable marker fails closed without executing.
     record(&r, 8, &[("toolu_b", "echo_say", SAY)]);
     unreadable.store(true, Ordering::SeqCst);
     assert_eq!(word(&r, "toolu_b", "echo_say", SAY).await, "unavailable");
@@ -300,15 +293,14 @@ async fn a_limit_that_really_refused_is_sealed_as_unavailable_and_replayed_after
     record(&r, 4, &[("toolu_a", "echo_say", SAY)]);
     let reply = rpc(&r, &call("toolu_a", "echo_say", SAY)).await;
     assert!(reply.body.contains("ok"), "{}", reply.body);
-    // 두 번째 위치는 한도에 걸린다(Open 기록이 이미 있는 일반 흐름): 모델이 본 `unavailable`이 이 위치의 확정 결과다
     record(&r, 8, &[("toolu_b", "echo_say", SAY)]);
     assert_eq!(word(&r, "toolu_b", "echo_say", SAY).await, "unavailable");
     assert_eq!(
         r.turns.refusals(),
         vec![(CallId("cli-8-0".into()), CliRefusal::RateLimited)]
     );
-    assert!(r.ledger.has_call(OWNER_RUN, "cli-8-0"), "기록은 열려 있다");
-    // 자리가 돌아와도 같은 위치는 재생한다(실행하지 않는다). 새 위치만 실행한다
+    assert!(r.ledger.has_call(OWNER_RUN, "cli-8-0"), "call stays open");
+    // After refill, the sealed position still replays while a new position executes.
     r.clock.advance(Duration::from_secs(60));
     assert_eq!(word(&r, "toolu_b", "echo_say", SAY).await, "unavailable");
     assert_eq!(r.runner.jobs().len(), 1);
@@ -338,7 +330,7 @@ async fn the_limit_in_front_of_the_secret_check_is_sealed_without_any_ledger_rec
     r.runner.miss_secret("mail-token");
     record(&r, 4, &[("toolu_a", "echo_keyed", "{}")]);
     assert_eq!(word(&r, "toolu_a", "echo_keyed", "{}").await, "denied");
-    // 한도는 자격 확인보다 먼저다: 기록도 보관소 조회도 없이 돌려보낸 자리도 봉인한다
+    // Rate limit runs before secret check and seals even without a ledger record.
     record(&r, 8, &[("toolu_b", "echo_keyed", "{}")]);
     assert_eq!(word(&r, "toolu_b", "echo_keyed", "{}").await, "unavailable");
     assert_eq!(
@@ -352,14 +344,14 @@ async fn the_limit_in_front_of_the_secret_check_is_sealed_without_any_ledger_rec
     assert_eq!(
         r.runner.secret_checks().len(),
         1,
-        "한도에 걸린 호출은 보관소를 읽지 않았다"
+        "rate-limited call must not check secret store"
     );
 }
 
 #[tokio::test]
 async fn a_stale_condition_is_sealed_only_under_a_live_claim() {
     let r = rig_with(|_| {}, |_| {}, judged(300)).await;
-    // 실행을 시작하기 직전에 활성 판본이 바뀌었다: 호출은 열려 있고 claim은 살아 있다 → `stale`이 이 위치의 확정 결과다
+    // Active revision changed before start while claim is still live: seal stale.
     record(&r, 4, &[("toolu_a", "echo_say", SAY)]);
     let ledger = r.ledger.clone();
     r.ledger
@@ -370,7 +362,7 @@ async fn a_stale_condition_is_sealed_only_under_a_live_claim() {
         vec![(CallId("cli-4-0".into()), CliRefusal::Stale)]
     );
     assert!(r.runner.jobs().is_empty());
-    // claim을 잃으면 같은 `stale`이어도 표식을 쓸 수 없다(새 claim이 같은 위치를 처음부터 판정한다)
+    // Lost claim cannot write a refusal marker.
     let r = rig_with(|_| {}, |_| {}, judged(300)).await;
     record(&r, 4, &[("toolu_a", "echo_say", SAY)]);
     let ledger = r.ledger.clone();
@@ -384,13 +376,12 @@ async fn a_stale_condition_is_sealed_only_under_a_live_claim() {
 #[tokio::test]
 async fn a_host_only_tool_name_and_a_bad_builtin_input_are_sealed_at_their_verified_positions() {
     let r = rig_with(|_| {}, |_| {}, judged(300)).await;
-    // 호스트 전용 ID: 모델이 부를 수 없다(`unknown_tool`)
+    // Host-only tool ID cannot be called by the model.
     record(&r, 4, &[("toolu_x", "schedule_deliver", "{}")]);
     assert_eq!(
         word(&r, "toolu_x", "schedule_deliver", "{}").await,
         "unknown_tool"
     );
-    // 내장 예약 도구의 틀린 입력(구조·지나간 시각)은 기록 전에 거절되고 확정이다
     let scopes = ["run", "echo.use", "echo.drop", "schedule.create"];
     r.catalog.publish(
         snapshot("personal", "r1")
@@ -426,14 +417,12 @@ async fn a_host_only_tool_name_and_a_bad_builtin_input_are_sealed_at_their_verif
             (CallId("cli-12-0".into()), CliRefusal::Invalid),
         ]
     );
-    // 틀린 입력은 호출을 기록하지 않았다
     assert!(!r.ledger.has_call(OWNER_RUN, "cli-8-0"));
-    // 같은 위치는 몇 번을 다시 받아도 모델이 본 단어를 재생한다(모델은 새 호출로 다시 해야 한다)
     assert_eq!(
         word(&r, "toolu_z", "schedule_create", past).await,
         "invalid"
     );
-    assert_eq!(r.turns.refusals().len(), 3, "표식은 위치마다 한 번이다");
+    assert_eq!(r.turns.refusals().len(), 3, "one marker per position");
 }
 
 fn position(call: &str) -> Key {
@@ -449,7 +438,7 @@ async fn until_waiting(r: &Rig, call: &str, count: usize) {
     while r.front.shared.slots.waiting(&position(call)) != count {
         assert!(
             started.elapsed() < Duration::from_secs(10),
-            "{call}: 문 앞에서 기다리는 요청이 {count}이 되지 않는다"
+            "{call}: timed out waiting for {count} waiter(s) on slot"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -461,7 +450,7 @@ async fn a_concurrent_redelivery_waits_for_a_refusal_in_flight_and_replays_it_in
     let (r, wrapped) = injected_rig().await;
     let r = Arc::new(r);
     record(&r, 4, &[("toolu_a", "echo_say", SAY)]);
-    // 먼저 온 요청이 거절을 확정하고 표식을 쓰는 중이다(문을 쥔 채 멈춘다)
+    // First request pauses while persisting its refusal marker, holding the slot.
     wrapped.fail_with(Some(Inject::Denied));
     let gate = r.turns.hold_next_refusal();
     let first = {
@@ -469,20 +458,22 @@ async fn a_concurrent_redelivery_waits_for_a_refusal_in_flight_and_replays_it_in
         tokio::spawn(async move { word(&r, "toolu_a", "echo_say", SAY).await })
     };
     r.turns.refusal_entered().await;
-    // 같은 위치의 재전달이 도착한다. 이제 실행할 수 있는 상태다. 그래도 문 앞에서 기다린다
+    // Concurrent redelivery waits on the slot even after the injected failure clears.
     wrapped.fail_with(None);
     let second = {
         let r = r.clone();
         tokio::spawn(async move { word(&r, "toolu_a", "echo_say", SAY).await })
     };
     until_waiting(&r, "cli-4-0", 1).await;
-    assert!(r.runner.jobs().is_empty(), "기다리는 동안 실행하지 않는다");
+    assert!(
+        r.runner.jobs().is_empty(),
+        "must not execute while waiting on slot"
+    );
     assert_eq!(wrapped.calls(), 1);
-    // 표식이 쓰이면 기다리던 요청은 같은 단어를 재생한다: 거절과 실행으로 둘 다 끝나지 않는다
     gate.add_permits(1);
     assert_eq!(first.await.unwrap(), "denied");
     assert_eq!(second.await.unwrap(), "denied");
-    assert_eq!(wrapped.calls(), 1, "재전달은 브로커를 부르지 않았다");
+    assert_eq!(wrapped.calls(), 1, "redelivery must not call broker");
     assert!(r.runner.jobs().is_empty());
     assert_eq!(r.turns.refusals().len(), 1);
 }
@@ -501,7 +492,7 @@ async fn a_concurrent_redelivery_waits_for_the_running_call_and_gets_its_result_
     while r.runner.jobs().is_empty() {
         assert!(
             started.elapsed() < Duration::from_secs(10),
-            "실행이 시작되지 않는다"
+            "runner did not start execution"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -516,7 +507,7 @@ async fn a_concurrent_redelivery_waits_for_the_running_call_and_gets_its_result_
         first.contains("ok") && second.contains("ok"),
         "{first} / {second}"
     );
-    assert_eq!(r.runner.jobs().len(), 1, "같은 위치는 한 번만 실행했다");
+    assert_eq!(r.runner.jobs().len(), 1, "same position must run only once");
     assert!(r.turns.refusals().is_empty());
 }
 
@@ -537,11 +528,10 @@ async fn positions_that_differ_never_wait_for_each_other() {
     while r.runner.jobs().is_empty() {
         assert!(
             started.elapsed() < Duration::from_secs(10),
-            "실행이 시작되지 않는다"
+            "runner did not start execution"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    // 첫 호출이 실행 중이어도 다른 위치는 기다리지 않는다
     let other = rpc(&r, &call("toolu_b", "echo_say", SAY)).await;
     assert!(other.body.contains("ok"), "{}", other.body);
     assert_eq!(r.front.shared.slots.waiting(&position("cli-4-1")), 0);

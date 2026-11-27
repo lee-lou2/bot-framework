@@ -30,7 +30,7 @@ async fn the_first_request_may_send_and_a_repeat_never_may() {
         say(&c, UPLOAD).await,
         r#"{"v":1,"id":"1","state":"started","effect":"e-1","send":true}"#
     );
-    // 전송 여부가 불명인 started는 held, send=false
+    // Ambiguous started step transitions to held with send=false.
     assert_eq!(
         say(&c, UPLOAD).await,
         r#"{"v":1,"id":"1","state":"held","effect":"e-1","receipt":"response_unknown","send":false}"#
@@ -59,7 +59,6 @@ async fn a_confirmed_step_returns_its_receipt_and_is_never_sent_again() {
         say(&c, UPLOAD).await,
         r#"{"v":1,"id":"1","state":"confirmed","effect":"e-1","receipt":"file-17","send":false}"#
     );
-    // 같은 영수증을 다시 보고해도 결과는 같다. 다른 영수증은 충돌이다.
     let again = r#"{"v":1,"id":"3","method":"effect.status","effect":"e-1","outcome":"confirmed","receipt":"file-17"}"#;
     assert!(say(&c, again).await.contains(r#""state":"confirmed""#));
     let other = r#"{"v":1,"id":"4","method":"effect.status","effect":"e-1","outcome":"confirmed","receipt":"file-99"}"#;
@@ -79,7 +78,7 @@ async fn the_same_step_with_other_arguments_conflicts() {
         say(&c, other).await,
         r#"{"v":1,"id":"9","error":"conflict"}"#
     );
-    // 인자 글의 표기나 키 순서가 달라도 같은 인자다
+    // Key ordering is canonicalized.
     let same = r#"{"v":1,"id":"8","method":"effect.request","step":"upload","args":{"target":"inbox","file":"summary"}}"#;
     assert!(say(&c, same).await.contains(r#""state":"held""#));
 }
@@ -140,7 +139,7 @@ async fn a_late_generation_cannot_touch_the_journal() {
     journal.set_generation("r1", 1);
     let old = channel(&journal, 1);
     say(&old, UPLOAD).await;
-    journal.set_generation("r1", 2); // 워커 인계
+    journal.set_generation("r1", 2);
     assert_eq!(
         say(&old, UPLOAD).await,
         r#"{"v":1,"id":"1","error":"stale"}"#
@@ -150,9 +149,8 @@ async fn a_late_generation_cannot_touch_the_journal() {
     assert_eq!(
         journal.states()[0].1,
         EffectState::Started,
-        "늦은 보고는 원장을 바꾸지 못한다"
+        "stale report must not mutate the journal"
     );
-    // 새 세대는 같은 호출·같은 단계로 이어 간다
     let fresh = channel(&journal, 2);
     assert!(say(&fresh, UPLOAD).await.contains(r#""state":"held""#));
 }
@@ -215,7 +213,7 @@ async fn malformed_frames_get_a_classification_only() {
             r#"{"v":1,"id":"1","method":"effect.request","step":"s","args":{"n":9007199254740993}}"#,
             r#"{"v":1,"id":"1","error":"invalid"}"#,
         ),
-        // 모호한 프레임은 어느 부분도 믿지 않는다(번호도 싣지 않는다)
+        // Ambiguous frames (duplicate keys) are untrusted and omit the request id.
         (
             r#"{"v":1,"id":"1","method":"effect.request","step":"s","args":{"a":1,"a":2}}"#,
             r#"{"v":1,"error":"invalid"}"#,
@@ -234,7 +232,7 @@ async fn malformed_frames_get_a_classification_only() {
     }
     assert!(
         journal.states().is_empty(),
-        "잘못된 프레임은 원장에 아무것도 남기지 않는다"
+        "malformed frames must not write to the journal"
     );
 }
 
@@ -291,11 +289,10 @@ async fn an_oversized_frame_closes_the_channel() {
     assert!(journal.states().is_empty());
 }
 
-// ---- 조회 양식: `effect.status{step,args}` ----
+// ---- Lookup form: `effect.status{step,args}` ----
 
 pub(super) const LOOK: &str = r#"{"v":1,"id":"7","method":"effect.status","step":"upload","args":{"target":"inbox","file":"summary"}}"#;
 
-/// 같은 run·도구의 다른 호출 채널.
 fn channel_for(journal: &Arc<MemJournal>, call: &str, tool: &str) -> EffectChannel {
     EffectChannel::new(
         journal.clone(),
@@ -318,8 +315,8 @@ async fn a_lookup_of_a_step_that_was_never_requested_says_none_and_writes_nothin
         say(&c, LOOK).await,
         r#"{"v":1,"id":"7","state":"none","send":false}"#
     );
-    assert_eq!(journal.step_count(), 0, "조회는 단계를 만들지 않는다");
-    // 조회가 효과 ID를 쓰지 않았다: 첫 요청이 그대로 첫 효과이고 전송을 허가한다
+    assert_eq!(journal.step_count(), 0, "lookup must not create a step");
+    // Lookup did not allocate an effect ID, so the first request still gets e-1 with send=true.
     assert_eq!(
         say(&c, UPLOAD).await,
         r#"{"v":1,"id":"1","state":"started","effect":"e-1","send":true}"#
@@ -331,7 +328,7 @@ async fn a_lookup_reads_each_state_without_changing_it_or_permitting_a_send() {
     let journal = Arc::new(MemJournal::new());
     let c = channel(&journal, 1);
     say(&c, UPLOAD).await;
-    // 시작만 한 단계: 조회는 `started`로 읽고 보류로 바꾸지 않는다(같은 단계를 다시 `request`하는 것만 보류로 바꾼다)
+    // Lookup reads started without transitioning to held (only a repeat request transitions to held).
     for _ in 0..3 {
         assert_eq!(
             say(&c, LOOK).await,
@@ -342,7 +339,6 @@ async fn a_lookup_reads_each_state_without_changing_it_or_permitting_a_send() {
         journal.states(),
         vec![("upload".to_string(), EffectState::Started, None)]
     );
-    // 확정·거절·보류와 영수증
     say(&c, r#"{"v":1,"id":"2","method":"effect.status","effect":"e-1","outcome":"confirmed","receipt":"file-17"}"#).await;
     assert_eq!(
         say(&c, LOOK).await,
@@ -355,9 +351,9 @@ async fn a_lookup_reads_each_state_without_changing_it_or_permitting_a_send() {
     assert_eq!(
         say(&c, LOOK).await,
         r#"{"v":1,"id":"7","state":"held","effect":"e-1","send":false}"#,
-        "수신처 영수증이 아닌 보류 사유 코드는 조회 응답에 싣지 않는다"
+        "held reason code is not a destination receipt and must be omitted from lookup"
     );
-    // 효과 ID 양식의 기존 응답은 그대로 사유 코드를 싣는다
+    // Effect-ID status form still includes the hold reason code.
     assert_eq!(
         say(
             &c,
@@ -386,11 +382,9 @@ async fn a_lookup_uses_the_same_canonical_arguments_as_the_request_and_a_differe
     let journal = Arc::new(MemJournal::new());
     let c = channel(&journal, 1);
     say(&c, UPLOAD).await;
-    // 키 순서·공백이 달라도 같은 인자다(LOOK은 키 순서가 UPLOAD와 다르다)
     assert!(say(&c, LOOK).await.contains(r#""state":"started""#));
     let spaced = r#"{ "v":1, "id":"8", "method":"effect.status", "step":"upload", "args":{ "file" : "summary", "target":"inbox" } }"#;
     assert!(say(&c, spaced).await.contains(r#""state":"started""#));
-    // 인자가 다르면 충돌이고 원장은 그대로다
     let different = r#"{"v":1,"id":"9","method":"effect.status","step":"upload","args":{"file":"other","target":"inbox"}}"#;
     assert_eq!(
         say(&c, different).await,
@@ -400,7 +394,6 @@ async fn a_lookup_uses_the_same_canonical_arguments_as_the_request_and_a_differe
         journal.states(),
         vec![("upload".to_string(), EffectState::Started, None)]
     );
-    // 다른 단계 이름은 없는 단계다
     let step = r#"{"v":1,"id":"6","method":"effect.status","step":"notify","args":{"file":"summary","target":"inbox"}}"#;
     assert_eq!(
         say(&c, step).await,
@@ -414,13 +407,12 @@ async fn a_lookup_only_sees_the_call_its_channel_was_opened_for_and_never_takes_
     let journal = Arc::new(MemJournal::new());
     let mine = channel_for(&journal, "c1", "agenda.sync");
     say(&mine, UPLOAD).await;
-    // 다른 호출의 채널은 같은 단계 이름·인자로도 이 호출의 단계를 보지 못한다
     let other = channel_for(&journal, "c2", "agenda.sync");
     assert_eq!(
         say(&other, LOOK).await,
         r#"{"v":1,"id":"7","state":"none","send":false}"#
     );
-    // 프레임이 호출·시도·도구·run을 지정해도 읽지 않는다(채널이 정한 값만 쓴다)
+    // Frame-supplied call/attempt/tool/run fields are ignored in favor of channel bindings.
     let forged = r#"{"v":1,"id":"5","method":"effect.status","step":"upload","args":{"target":"inbox","file":"summary"},"call":"c1","run":"r1","attempt":{"generation":1},"tool":"agenda.sync"}"#;
     assert_eq!(
         say(&other, forged).await,
@@ -436,7 +428,6 @@ async fn a_lookup_checks_the_tool_the_channel_was_opened_for() {
     let right = channel_for(&journal, "c1", "agenda.sync");
     say(&right, UPLOAD).await;
     assert!(say(&right, LOOK).await.contains(r#""state":"started""#));
-    // 호출 ID는 같아도 도구가 다른 채널은 원장이 거절한다
     let wrong = channel_for(&journal, "c1", "agenda.delete");
     assert_eq!(
         say(&wrong, LOOK).await,
@@ -450,12 +441,11 @@ async fn a_lookup_obeys_the_generation_fence_and_reports_an_unreadable_journal()
     journal.set_generation("r1", 1);
     let old = channel(&journal, 1);
     say(&old, UPLOAD).await;
-    journal.set_generation("r1", 2); // 워커 인계
+    journal.set_generation("r1", 2);
     assert_eq!(say(&old, LOOK).await, r#"{"v":1,"id":"7","error":"stale"}"#);
-    // 새 세대는 같은 단계를 읽는다
     let fresh = channel(&journal, 2);
     assert!(say(&fresh, LOOK).await.contains(r#""state":"started""#));
-    // 원장을 읽지 못하면 없다고 하지 않고 읽지 못했다고 한다
+    // Unreadable journal returns unavailable rather than none.
     journal.lookup_down(true);
     assert_eq!(
         say(&fresh, LOOK).await,
@@ -470,16 +460,16 @@ async fn mixing_the_two_status_forms_or_leaving_one_half_out_is_invalid_and_chan
     say(&c, UPLOAD).await;
     let before = journal.states();
     let cases = [
-        // 조회 양식에 효과 ID·결과·영수증·사유를 섞었다: 어느 쪽도 믿지 않는다
+        // Mixed lookup and effect-ID/outcome/receipt/reason fields.
         r#"{"v":1,"id":"1","method":"effect.status","step":"upload","args":{"file":"summary","target":"inbox"},"effect":"e-1"}"#,
         r#"{"v":1,"id":"1","method":"effect.status","step":"upload","args":{"file":"summary","target":"inbox"},"outcome":"confirmed","receipt":"x"}"#,
         r#"{"v":1,"id":"1","method":"effect.status","step":"upload","args":{"file":"summary","target":"inbox"},"receipt":"x"}"#,
         r#"{"v":1,"id":"1","method":"effect.status","step":"upload","args":{"file":"summary","target":"inbox"},"reason":"x"}"#,
         r#"{"v":1,"id":"1","method":"effect.status","effect":"e-1","outcome":"confirmed","receipt":"x","step":"upload","args":{}}"#,
-        // 반쪽 양식
+        // Incomplete lookup forms.
         r#"{"v":1,"id":"1","method":"effect.status","step":"upload"}"#,
         r#"{"v":1,"id":"1","method":"effect.status","args":{"file":"summary","target":"inbox"}}"#,
-        // 잘못된 단계 이름·인자
+        // Invalid step name or args.
         r#"{"v":1,"id":"1","method":"effect.status","step":"Upload","args":{}}"#,
         r#"{"v":1,"id":"1","method":"effect.status","step":"upload","args":[1]}"#,
         r#"{"v":1,"id":"1","method":"effect.status","step":"upload","args":{"n":9007199254740993}}"#,
@@ -492,7 +482,7 @@ async fn mixing_the_two_status_forms_or_leaving_one_half_out_is_invalid_and_chan
             "{frame}"
         );
     }
-    // 모호한 프레임(같은 키 두 번)은 번호도 싣지 않는다
+    // Duplicate keys are ambiguous and omit the request id.
     assert_eq!(
         say(
             &c,
@@ -504,9 +494,8 @@ async fn mixing_the_two_status_forms_or_leaving_one_half_out_is_invalid_and_chan
     assert_eq!(
         journal.states(),
         before,
-        "섞인 프레임은 원장에 아무것도 남기지 않는다"
+        "mixed frames must not mutate the journal"
     );
-    // 기존 효과 ID 양식은 그대로다
     assert_eq!(
         say(
             &c,

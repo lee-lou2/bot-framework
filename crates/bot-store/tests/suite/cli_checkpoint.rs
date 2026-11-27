@@ -1,4 +1,4 @@
-//! 한 모델 차례를 읽는 프로세스는 커밋된 레코드·도구·그룹만 본다.
+//! Readers of a model turn observe only committed records, tool uses, and groups.
 
 use crate::support::*;
 use bot_core::{
@@ -215,7 +215,11 @@ async fn a_conflicting_or_stale_writer_cannot_leave_part_of_a_cli_turn() {
         Err(Error::Conflict)
     ));
     let after = calls(&db).context(run.attempt.clone()).await.unwrap();
-    assert_eq!(after.work.steps.len(), 1, "첫 rec까지 롤백해야 한다");
+    assert_eq!(
+        after.work.steps.len(),
+        1,
+        "batch conflict must roll back earlier steps"
+    );
     assert_eq!(after.work.steps[0].key, original.key);
 
     let next = db.takeover(&run.attempt.run).await;
@@ -242,7 +246,10 @@ async fn a_conflicting_or_stale_writer_cannot_leave_part_of_a_cli_turn() {
     let saved = calls(&db).context(next.attempt).await.unwrap().work.steps;
     assert_eq!(saved.len(), batch.len());
     for step in &batch {
-        let found = saved.iter().find(|s| s.key == step.key).expect("모든 key");
+        let found = saved
+            .iter()
+            .find(|s| s.key == step.key)
+            .expect("missing step key");
         let value = |s: &Step| serde_json::from_str::<serde_json::Value>(&s.body.0).unwrap();
         assert_eq!(value(found), value(step));
     }

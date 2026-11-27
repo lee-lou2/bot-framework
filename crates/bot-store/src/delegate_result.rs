@@ -1,4 +1,4 @@
-//! 완료한 자식의 저장 결과를 현재 위임 권한으로 읽는다.
+//! Reads a completed delegated child run's stored result under the parent's current scopes.
 use crate::{active::guard_active, codec::canonical, db::Store, finish::lock_leased};
 use bot_core::{
     command::{Delegate, JsonPayload},

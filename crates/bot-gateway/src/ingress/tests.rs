@@ -148,16 +148,18 @@ fn accepted(run: &str) -> Admission {
 async fn chat_goes_to_the_bound_agent_with_the_requesters_scope_snapshot() {
     let rig = rig(base());
     assert_eq!(
-        rig.ingress.admit(cli_chat("r1", "오늘 일정 알려줘")).await,
+        rig.ingress
+            .admit(cli_chat("r1", "Show today's agenda"))
+            .await,
         accepted("run-1")
     );
     let records = rig.store.accepted();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].target, "agent main 오늘 일정 알려줘");
+    assert_eq!(records[0].target, "agent main Show today's agenda");
     assert_eq!(records[0].scopes, ["calendar.read", "run"]);
     assert_eq!(records[0].approver.as_deref(), Some("local:owner"));
     assert_eq!(records[0].revision, "personal-r1");
-    assert_eq!(records[0].body, r#"{"text":"오늘 일정 알려줘"}"#);
+    assert_eq!(records[0].body, r#"{"text":"Show today's agenda"}"#);
     assert_eq!(records[0].reply_transport, None);
 }
 
@@ -177,24 +179,21 @@ async fn the_same_request_is_accepted_once_and_a_changed_one_conflicts() {
 #[tokio::test]
 async fn unregistered_unknown_and_unauthorised_inputs_never_reach_the_store() {
     let rig = rig(base());
-    // 멤버가 아닌 Slack 사용자
     assert_eq!(
         rig.ingress.admit(slack_dm("U9", "e1", "hi")).await,
         Admission::Rejected(Rejection::Unregistered)
     );
-    // 등록되지 않은 입구(다른 uid)
     let mut stranger = cli_chat("r1", "hi");
     stranger.real = Real::Cli {
         uid: 999,
         profile: ProfileId("personal".into()),
     };
     assert_eq!(rig.ingress.admit(stranger).await, Admission::Ignored);
-    // 멤버이지만 run 스코프가 없으면 에이전트 대화를 시작할 수 없다
+    // Member lacks `run` scope, so agent conversation is forbidden.
     assert_eq!(
         rig.ingress.admit(slack_dm("U2", "e2", "hi")).await,
         Admission::Rejected(Rejection::Forbidden)
     );
-    // 빈 글은 접수하지 않는다
     assert_eq!(
         rig.ingress.admit(cli_chat("r3", "   ")).await,
         Admission::Rejected(Rejection::Invalid)
@@ -215,13 +214,12 @@ async fn limits_apply_per_principal_and_per_entrance() {
     assert!(
         matches!(blocked, Admission::Rejected(Rejection::RateLimited(wait)) if wait.as_secs() >= 1)
     );
-    // 다른 주체의 예산은 그대로다
     assert!(matches!(
         rig.ingress.admit(slack_dm("U1", "e1", "hi")).await,
         Admission::Accepted { .. }
     ));
 
-    // 입구 한도는 미등록 시도도 센다
+    // Per-entrance limit counts unregistered attempts as well.
     let rig = rig_with(base(), |host| host.limits.per_entrance_per_min = Some(2));
     for n in 0..2 {
         assert_eq!(
@@ -299,11 +297,10 @@ async fn overlapping_http_triggers_run_only_the_first_match_with_mapped_args() {
         records[1].target,
         r#"tool main agenda.list {"event":"e-2"}"#
     );
-    // 서비스 주체는 승인자가 될 수 없다
+    // Service principals cannot be designated as human approvers.
     assert_eq!(records[0].approver, None);
     assert_eq!(records[0].scopes, ["calendar.delete"]);
 
-    // 경로가 없는 본문은 호출하지 않고, 맞는 트리거가 없는 경로는 NoRoute
     assert_eq!(
         rig.ingress
             .admit(post("h3", json!({"action": "cancel"})))
@@ -327,31 +324,30 @@ async fn instruction_triggers_send_their_fixed_instruction_and_keep_the_body_as_
             "inbox",
             "POST",
             "/ask",
-            TriggerTarget::Instruction("요약해".into()),
+            TriggerTarget::Instruction("Summarize".into()),
         )
     };
-    // run 스코프가 없는 서비스 주체는 에이전트 지시를 시작할 수 없다
     let denied = rig(base().trigger("main", ask()));
-    let request = http_post("http:inbox/svc", "h1", "/ask", json!({"topic": "일정"}));
+    let request = http_post("http:inbox/svc", "h1", "/ask", json!({"topic": "agenda"}));
     assert_eq!(
         denied.ingress.admit(request).await,
         Admission::Rejected(Rejection::Forbidden)
     );
     assert!(denied.store.accepted().is_empty());
-    // run 스코프가 있는 주체는 접수되고, 본문은 지시가 아니라 입력으로 남는다
+
     let allowed = rig(base()
         .member("http:inbox/boss", &["owner"])
         .trigger("main", ask()));
-    let request = http_post("http:inbox/boss", "h2", "/ask", json!({"topic": "일정"}));
+    let request = http_post("http:inbox/boss", "h2", "/ask", json!({"topic": "agenda"}));
     assert_eq!(allowed.ingress.admit(request).await, accepted("run-1"));
     let record = &allowed.store.accepted()[0];
-    assert_eq!(record.target, "agent main 요약해");
-    assert_eq!(record.body, r#"{"topic":"일정"}"#);
+    assert_eq!(record.target, "agent main Summarize");
+    assert_eq!(record.body, r#"{"topic":"agenda"}"#);
 }
 
 #[tokio::test]
 async fn routes_private_dm_before_queue() {
-    let marker = "합성-민감-표식-7f3a";
+    let marker = "synthetic-sensitive-marker-7f3a";
     let mut private = event_trigger("secure", "direct", tool_target("inbox.receive", "{}"));
     private.private = true;
     private.input.insert("text".into(), "body.text".into());
@@ -361,7 +357,6 @@ async fn routes_private_dm_before_queue() {
         rig.ingress.admit(slack_dm("U1", "ev-1", marker)).await,
         Admission::Private
     );
-    // 일반 큐에는 아무것도 없고, 지정 도구 입구만 원문을 받았다
     assert!(rig.store.accepted().is_empty());
     assert_eq!(
         rig.private.received(),
@@ -370,26 +365,24 @@ async fn routes_private_dm_before_queue() {
             format!(r#"{{"text":"{marker}"}}"#)
         )]
     );
-    // 같은 이벤트가 다시 와도 전달은 한 건
     assert_eq!(
         rig.ingress.admit(slack_dm("U1", "ev-1", marker)).await,
         Admission::Private
     );
     assert_eq!(rig.private.received().len(), 1);
 
-    // 전용 입구가 실패하면 ack하지 않고(Slack 재전달) 일반 대화로 넘기지 않는다
+    // Private intake failure must stay unsettled (no ack) and never fall through to normal chat.
     rig.private.fail_next(Error::Unavailable);
     let failed = rig.ingress.admit(slack_dm("U1", "ev-2", marker)).await;
     assert_eq!(failed, Admission::Rejected(Rejection::Unavailable));
     assert!(!failed.settled());
     assert!(rig.store.accepted().is_empty());
-    // 멤버가 아니면 전용 입구에도 닿지 않는다
+
     assert_eq!(
         rig.ingress.admit(slack_dm("U9", "ev-3", marker)).await,
         Admission::Rejected(Rejection::Unregistered)
     );
     assert_eq!(rig.private.received().len(), 1);
-    // 어떤 경로로도 원문이 일반 접수 기록에 없다
     for record in rig.store.accepted() {
         assert!(!record.body.contains(marker) && !record.target.contains(marker));
     }
@@ -405,7 +398,9 @@ async fn private_pass_uses_distinct_request_id_for_normal_dm() {
 
     rig.private.pass_next();
     assert_eq!(
-        rig.ingress.admit(slack_dm("U1", "D1.100.1", "안녕?")).await,
+        rig.ingress
+            .admit(slack_dm("U1", "D1.100.1", "hello?"))
+            .await,
         accepted("run-1")
     );
     let record = &rig.store.accepted()[0];
@@ -414,7 +409,7 @@ async fn private_pass_uses_distinct_request_id_for_normal_dm() {
         record.reply_transport,
         Some(bot_core::intake::PushTransportId::SLACK)
     );
-    assert_eq!(record.target, "agent main 안녕?");
+    assert_eq!(record.target, "agent main hello?");
 }
 
 #[derive(Default)]
@@ -440,8 +435,10 @@ async fn only_the_selected_private_trigger_may_release_the_event() {
     open.id = "open".into();
     open.order = 1;
     open.private_pass = true;
-    open.conditions
-        .insert("body.text".into(), JsonPayload(r#""일반 질문""#.into()));
+    open.conditions.insert(
+        "body.text".into(),
+        JsonPayload(r#""general question""#.into()),
+    );
     let rig = rig_with(
         base().trigger("main", open).trigger("main", closed),
         |host| {
@@ -457,11 +454,13 @@ async fn only_the_selected_private_trigger_may_release_the_event() {
     )
     .with_uid_resolver(|account| Ok(account.uid.unwrap()));
     assert_eq!(
-        ingress.admit(slack_dm("U1", "ev-1", "민감 질문")).await,
+        ingress
+            .admit(slack_dm("U1", "ev-1", "sensitive question"))
+            .await,
         Admission::Rejected(Rejection::Forbidden)
     );
     assert!(rig.store.accepted().is_empty());
-    let public = || slack_dm("U1", "ev-2", "일반 질문");
+    let public = || slack_dm("U1", "ev-2", "general question");
     rig.store.fail_next(Error::Unavailable);
     assert!(!ingress.admit(public()).await.settled());
     for _ in 0..2 {
@@ -472,7 +471,7 @@ async fn only_the_selected_private_trigger_may_release_the_event() {
     changed.attachments.push("slack:home/F1".into());
     ingress.admit(changed).await;
     let mut changed = public();
-    changed.body["detail"] = json!("매핑하지 않은 값");
+    changed.body["detail"] = json!("unmapped value");
     ingress.admit(changed).await;
     let calls = private.0.lock().unwrap();
     assert_eq!(calls[0].0, "closed");
@@ -510,7 +509,7 @@ async fn private_pass_fingerprint_binds_the_authenticated_slack_event() {
         event_id: "Ev1".into(),
         reaction: None,
     };
-    // 봉투는 고정해 인증된 원천의 차이만 비교한다.
+    // Keep envelope fixed to isolate differences in the authenticated Slack source.
     for event in [
         source.clone(),
         source.clone(),
@@ -524,7 +523,7 @@ async fn private_pass_fingerprint_binds_the_authenticated_slack_event() {
         },
     ] {
         ingress
-            .admit_sourced(&routes, slack_dm("U1", "D1.100.1", "질문"), Some(event))
+            .admit_sourced(&routes, slack_dm("U1", "D1.100.1", "question"), Some(event))
             .await;
     }
     let calls = private.0.lock().unwrap();

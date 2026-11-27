@@ -1,1 +1,1 @@
-일정 목록은 list로 조회한다. delete는 사용자가 확인한 일정 ID 하나에만 사용한다.
+Use `list` to view events. Use `delete` only for a single event ID confirmed by the user.

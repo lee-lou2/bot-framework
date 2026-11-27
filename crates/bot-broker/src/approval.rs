@@ -1,22 +1,28 @@
-//! 승인: 결합값 비교·nonce·승인 카드. 상태 전이는 원장이 한다(`bot_core::ledger::CallLedger`).
-//!
-//! 승인은 run·세대·호출 ID·프로필·요청자·승인자·위험 등급·정책 판본·도구 판본·인자 해시·이유에 묶인다.
-//! 하나라도 달라지면 종전 승인은 무효이고 새 조건을 표시해 다시 승인받는다.
+//! Approval binding comparison, nonce generation, and card rendering.
 
 use crate::{
     classify::{Class, risk_code},
     sys::Entropy,
     text::{hex, json_quote, labeled_lines},
 };
-use bot_core::{command::JsonPayload, id::*, port::Error, state::Approval};
+use bot_core::{
+    cards::{
+        LABEL_APPROVER, LABEL_ARGS, LABEL_BODY, LABEL_CONTENT, LABEL_MEMORY_ID, LABEL_REASON,
+        LABEL_RECIPIENT, LABEL_REQUESTER, LABEL_RISK, LABEL_SHARE_SCOPE, LABEL_TOOL,
+    },
+    command::JsonPayload,
+    id::*,
+    port::Error,
+    state::Approval,
+};
 
-/// 승인 카드 상한. 저장소·게이트웨이의 카드 검증과 같은 값이다.
+/// Card size limits shared with store and gateway validation.
 pub const MAX_LINES: usize = 20;
 pub const MAX_LINE_BYTES: usize = 500;
 pub const MAX_TITLE_BYTES: usize = 200;
 
-/// 저장된 승인이 지금 다시 계산한 결합값과 같은가. nonce와 만료는 비교하지 않는다(조회 키·시각 검사).
-/// `Approval`에 필드가 늘면 컴파일이 멈추도록 모든 필드를 꺼내 쓴다.
+/// Checks whether a stored approval matches the recomputed binding (ignoring `nonce` and `expires_at`).
+/// Destructures every field so adding a field to `Approval` forces updating this check.
 pub fn same_binding(stored: &Approval, expected: &Approval) -> bool {
     let Approval {
         nonce: _,
@@ -44,7 +50,7 @@ pub fn same_binding(stored: &Approval, expected: &Approval) -> bool {
         args_sha256: want_hash,
         expires_at: _,
     } = expected;
-    // 승인은 (프로필, run, 세대)에 묶인다. claim epoch는 정상 재개마다 바뀌므로 비교하지 않는다.
+    // Bound to (profile, run, generation); claim epoch changes across normal resumes.
     attempt.same_generation(want_attempt)
         && call == want_call
         && requester == want_requester
@@ -56,16 +62,15 @@ pub fn same_binding(stored: &Approval, expected: &Approval) -> bool {
         && args_sha256 == want_hash
 }
 
-/// 일회용 nonce(128비트, 소문자 16진 32자).
+/// Generates a 128-bit lowercase hex approval nonce.
 pub fn new_nonce(entropy: &dyn Entropy) -> Option<ApprovalId> {
     let mut bytes = [0u8; 16];
     entropy.fill(&mut bytes).then(|| ApprovalId(hex(&bytes)))
 }
 
-/// 승인 카드. 승인자가 보는 값은 모두 브로커가 검증한 인자에서 만든다.
-/// 모델이 만든 값(수신자·내용)은 JSON 문자열로 이스케이프해 한 줄에 담고(줄바꿈으로 위험 등급·승인자 줄을
-/// 흉내 낼 수 없다), 긴 값은 이어지는 줄에 자르지 않고 담는다. 다 담을 수 없으면 `Invalid`다.
-/// 형식: `{"approval":{"nonce","title","lines"}}`.
+/// Renders a tool approval card (`{"approval":{"nonce","title","lines"}}`).
+/// Model-supplied fields are JSON-escaped to prevent forged header lines; long values wrap onto
+/// continuation lines without truncation and fail with `Invalid` if the card exceeds limits.
 pub fn render_card(
     nonce: &ApprovalId,
     tool: &ToolId,
@@ -75,24 +80,24 @@ pub fn render_card(
     args: &str,
     destination: Option<&(String, String)>,
 ) -> Result<JsonPayload, Error> {
-    let title = format!("승인 요청: {}", tool.0);
+    let title = format!("Approval request: {}", tool.0);
     let reasons: Vec<&str> = class.reasons.iter().map(|r| r.code()).collect();
     let mut lines = vec![
-        format!("도구: {}", tool.0),
-        format!("위험: {}", risk_code(class.risk)),
-        format!("이유: {}", reasons.join(", ")),
-        format!("요청자: {}", requester.0),
-        format!("승인자: {}", approver.0),
+        format!("{LABEL_TOOL}: {}", tool.0),
+        format!("{LABEL_RISK}: {}", risk_code(class.risk)),
+        format!("{LABEL_REASON}: {}", reasons.join(", ")),
+        format!("{LABEL_REQUESTER}: {}", requester.0),
+        format!("{LABEL_APPROVER}: {}", approver.0),
     ];
     let mut push = |label: &str, value: &str| -> Result<(), Error> {
         lines.extend(labeled_lines(label, value, MAX_LINE_BYTES).ok_or(Error::Invalid)?);
         Ok(())
     };
     if let Some((recipient, content)) = destination {
-        push("받는 곳", &json_quote(recipient))?;
-        push("내용", &json_quote(content))?;
+        push(LABEL_RECIPIENT, &json_quote(recipient))?;
+        push(LABEL_CONTENT, &json_quote(content))?;
     }
-    push("인자", args)?;
+    push(LABEL_ARGS, args)?;
     if lines.len() > MAX_LINES
         || title.len() > MAX_TITLE_BYTES
         || lines.iter().any(|line| line.len() > MAX_LINE_BYTES)
@@ -108,14 +113,13 @@ pub fn render_card(
     )))
 }
 
-/// 승인 카드의 `label` 행 값(첫 줄은 `라벨: 값 조각`, 이어지는 줄은 공백 두 칸으로 시작해 이어 붙인 것). 카드는 브로커가 연 승인에 저장된 것이라
-/// 판정 때 그 안의 문서를 다시 읽을 수 있다(문서의 해시는 승인에 묶여 있다). 행이 없거나 둘 이상이거나 카드를 읽을 수 없으면 `None`이다.
+/// Extracts the reassembled value for a single `label` from a rendered card.
 pub fn card_value(card: &JsonPayload, label: &str) -> Option<String> {
     bot_core::cards::extract_line(&card.0, label)
 }
 
-/// 기억 공유 카드. 소유자가 승인으로 보는 본문 전체를 담는다(자르거나 요약하지 않는다). 다 담을 수 없으면 `Invalid`다.
-/// 본문은 JSON 문자열로 이스케이프해 한 줄 묶음에 담으므로 줄바꿈으로 가짜 머리줄을 만들 수 없다.
+/// Renders a memory share approval card containing the full JSON-escaped body; fails with `Invalid`
+/// rather than truncating so the approver reviews the exact hash-bound text.
 pub fn render_memory_card(
     nonce: &ApprovalId,
     class: &Class,
@@ -126,16 +130,18 @@ pub fn render_memory_card(
 ) -> Result<JsonPayload, Error> {
     let reasons: Vec<&str> = class.reasons.iter().map(|r| r.code()).collect();
     let mut lines = vec![
-        "도구: memory.share".to_owned(),
-        format!("위험: {}", risk_code(class.risk)),
-        format!("이유: {}", reasons.join(", ")),
-        format!("요청자: {}", requester.0),
-        format!("승인자: {}", approver.0),
-        format!("기억 ID: {}", id.0),
-        "공유 범위: 프로필 전체(지금은 나만 볼 수 있다)".to_owned(),
+        format!("{LABEL_TOOL}: memory.share"),
+        format!("{LABEL_RISK}: {}", risk_code(class.risk)),
+        format!("{LABEL_REASON}: {}", reasons.join(", ")),
+        format!("{LABEL_REQUESTER}: {}", requester.0),
+        format!("{LABEL_APPROVER}: {}", approver.0),
+        format!("{LABEL_MEMORY_ID}: {}", id.0),
+        format!("{LABEL_SHARE_SCOPE}: Profile-wide (currently private to you)"),
     ];
-    lines.extend(labeled_lines("본문", &json_quote(text), MAX_LINE_BYTES).ok_or(Error::Invalid)?);
-    let title = "기억 공유 승인";
+    lines.extend(
+        labeled_lines(LABEL_BODY, &json_quote(text), MAX_LINE_BYTES).ok_or(Error::Invalid)?,
+    );
+    let title = "Memory share approval";
     if lines.len() > MAX_LINES || lines.iter().any(|line| line.len() > MAX_LINE_BYTES) {
         return Err(Error::Invalid);
     }
@@ -148,8 +154,7 @@ pub fn render_memory_card(
     )))
 }
 
-/// 예약 회신 전송 카드의 줄. 머리줄 다음에 `전송 초안` 한 행(이어지는 조각 결합)에 승인 문서 전체를 그대로 담는다. 실제 줄 한도
-/// (20줄·줄당 500바이트)를 넘으면 `None`이다 — 일부만 보여 주고 승인을 받지 않는다.
+/// Builds scheduled delivery card lines containing the entire approval document; returns `None` if limits are exceeded.
 pub fn delivery_lines(
     class: &Class,
     requester: &PrincipalId,
@@ -158,11 +163,11 @@ pub fn delivery_lines(
 ) -> Option<Vec<String>> {
     let reasons: Vec<&str> = class.reasons.iter().map(|r| r.code()).collect();
     let mut lines = vec![
-        "도구: schedule.deliver".to_owned(),
-        format!("위험: {}", risk_code(class.risk)),
-        format!("이유: {}", reasons.join(", ")),
-        format!("요청자: {}", requester.0),
-        format!("승인자: {}", approver.0),
+        format!("{LABEL_TOOL}: schedule.deliver"),
+        format!("{LABEL_RISK}: {}", risk_code(class.risk)),
+        format!("{LABEL_REASON}: {}", reasons.join(", ")),
+        format!("{LABEL_REQUESTER}: {}", requester.0),
+        format!("{LABEL_APPROVER}: {}", approver.0),
     ];
     lines.extend(labeled_lines(
         bot_core::schedule::DELIVERY_CARD_LABEL,
@@ -173,7 +178,6 @@ pub fn delivery_lines(
         .then_some(lines)
 }
 
-/// 예약 회신 전송 카드(수신자와 모든 답의 내용이 든 승인 문서 전체를 보여 준다).
 pub fn render_delivery_card(
     nonce: &ApprovalId,
     class: &Class,
@@ -186,7 +190,7 @@ pub fn render_delivery_card(
     Ok(JsonPayload(format!(
         "{{\"approval\":{{\"nonce\":{},\"title\":{},\"lines\":[{}]}}}}",
         json_quote(&nonce.0),
-        json_quote("예약 회신 전송 승인"),
+        json_quote("Scheduled delivery approval"),
         lines.join(",")
     )))
 }
@@ -320,39 +324,36 @@ mod tests {
     fn card_carries_nonce_title_and_one_line_per_fact() {
         let card = card(
             r#"{"body":"hi","to":"bob"}"#,
-            Some(&("bob".to_string(), "hi\n위험: read".to_string())),
+            Some(&("bob".to_string(), "hi\nRisk: read".to_string())),
         )
         .unwrap()
         .0;
-        assert!(
-            card.starts_with(
-                r#"{"approval":{"nonce":"abc","title":"승인 요청: mail.send","lines":["#
-            )
-        );
-        assert!(card.contains(
-            r#""도구: mail.send","위험: irreversible","이유: irreversible, private_recall","#
+        assert!(card.starts_with(
+            r#"{"approval":{"nonce":"abc","title":"Approval request: mail.send","lines":["#
         ));
-        assert!(card.contains(r#""요청자: local:owner","승인자: local:owner","#));
-        assert!(card.contains(r#""받는 곳: \"bob\"""#));
-        // 모델이 만든 줄바꿈은 이스케이프돼 가짜 헤더 줄을 만들 수 없다
-        assert!(card.contains(r#""내용: \"hi\\n위험: read\"""#));
-        assert!(card.ends_with(r#""인자: {\"body\":\"hi\",\"to\":\"bob\"}"]}}"#));
+        assert!(card.contains(
+            r#""Tool: mail.send","Risk: irreversible","Reason: irreversible, private_recall","#
+        ));
+        assert!(card.contains(r#""Requester: local:owner","Approver: local:owner","#));
+        assert!(card.contains(r#""Recipient: \"bob\"""#));
+        assert!(card.contains(r#""Content: \"hi\\nRisk: read\"""#));
+        assert!(card.ends_with(r#""Args: {\"body\":\"hi\",\"to\":\"bob\"}"]}}"#));
         assert!(!card.contains('\n'));
     }
 
     #[test]
     fn a_long_value_is_continued_not_truncated() {
-        let content = "가".repeat(400); // 1200바이트 → 이어지는 줄
+        let content = "€".repeat(400); // 1200 bytes across continuation lines
         let text = card("{}", Some(&("bob".to_string(), content.clone())))
             .unwrap()
             .0;
-        assert_eq!(text.matches("가").count(), 400);
-        assert!(text.contains(r#","  가"#));
+        assert_eq!(text.matches("€").count(), 400);
+        assert!(text.contains(r#","  €"#));
     }
 
     #[test]
     fn a_card_that_cannot_show_everything_is_refused() {
-        let huge = "가".repeat(4000); // 12000바이트: 20줄에 담기지 않는다
+        let huge = "€".repeat(4000); // 12000 bytes exceeds the 20-line cap
         assert!(matches!(card(&huge, None), Err(Error::Invalid)));
     }
 }

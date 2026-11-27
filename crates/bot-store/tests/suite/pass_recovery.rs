@@ -1,5 +1,4 @@
-//! 넘김(`bot/pass`)의 복구·경합: 커서 커밋 전 강제 종료와 인계, 같은 접수·같은 넘김의 동시 전달, 후보가 아닌 호출의 표식, 이미 움직인 커서.
-//! 모두 «호출·답은 한 번, 커서는 한 칸»을 지킨다. 도구·설정은 `support/pass.rs`.
+//! `bot/pass` recovery and race tests: pre-commit crash handover, concurrent duplicates, non-candidate markers, and moved cursors.
 
 use crate::support::{pass::*, *};
 use bot_broker::ports::Ran;
@@ -13,8 +12,6 @@ use bot_core::{
     state::ConversationKind,
 };
 
-/// 커서를 커밋하기 전에 시도가 죽었다(도구가 도는 중에 사라짐): 인계받은 다음 시도는 **같은 후보**에서 다시 시작하고(커서는 그대로),
-/// 죽은 시도의 늦은 넘김은 막힌다. 후보 호출 자리는 하나라 다음 후보·기본 대화는 불리지 않는다.
 #[tokio::test]
 async fn a_crash_before_the_cursor_commit_resumes_at_the_same_candidate_and_the_late_pass_is_fenced()
  {
@@ -29,7 +26,7 @@ async fn a_crash_before_the_cursor_commit_resumes_at_the_same_candidate_and_the_
     )
     .await;
     let dead = runs(&db).claim().await.unwrap().unwrap();
-    // 첫 시도의 도구가 도는 중에 프로세스가 사라진다: 실행이 시작된 것을 본 뒤 호출 future를 버린다
+    // Drop the in-flight tool future mid-run to simulate a crash before cursor commit.
     let gate = rig.runner.hold_next();
     let mut inflight = Box::pin(call_at(&rig, &dead));
     let started = async {
@@ -38,7 +35,7 @@ async fn a_crash_before_the_cursor_commit_resumes_at_the_same_candidate_and_the_
         }
     };
     tokio::select! {
-        done = &mut inflight => panic!("붙잡힌 실행이 끝났다: {done:?}"),
+        done = &mut inflight => panic!("held runner finished unexpectedly: {done:?}"),
         () = started => {}
     }
     drop(inflight);
@@ -48,11 +45,10 @@ async fn a_crash_before_the_cursor_commit_resumes_at_the_same_candidate_and_the_
     assert_eq!(
         (alive.work.pass_pos, &alive.work.target),
         (Some(0), &tool_target("agenda.list")),
-        "커서는 그대로다"
+        "cursor must stay at candidate 0"
     );
     assert!(alive.attempt.generation.0 > dead.attempt.generation.0);
 
-    // 죽은 시도가 뒤늦게 넘기려 해도 막힌다 — 커서·감사 변화 0
     let late = calls(&db)
         .finish_pass(
             FinishCall {
@@ -70,7 +66,6 @@ async fn a_crash_before_the_cursor_commit_resumes_at_the_same_candidate_and_the_
         "select count(*) from bot_audit where action in ('call.pass', 'trigger.next')";
     assert_eq!(db.scalar::<i64>(pass_audits).await, 0);
 
-    // 인계 시도는 같은 후보를 읽기로 다시 돌려 넘기고, 커서는 한 칸만 간다(기본 대화는 아직 아니다)
     rig.runner.script(Ran::Done(JsonPayload(PASS.into())));
     assert!(matches!(
         call_at(&rig, &alive).await,
@@ -86,11 +81,10 @@ async fn a_crash_before_the_cursor_commit_resumes_at_the_same_candidate_and_the_
     assert_eq!(
         rig.runner.jobs().len(),
         2,
-        "죽은 시도의 실행과 인계 시도의 재실행"
+        "dead attempt execution plus handover rerun"
     );
 }
 
-/// 같은 접수가 동시에 두 번 들어오고(재전달) 같은 시도가 같은 넘김을 동시에 두 번 보낸다: run 하나, 넘김 한 번, 커서 한 칸.
 #[tokio::test]
 async fn concurrent_duplicate_deliveries_pass_once_and_run_the_default_once() {
     let Some(db) = TestDb::new().await else {
@@ -104,7 +98,7 @@ async fn concurrent_duplicate_deliveries_pass_once_and_run_the_default_once() {
         accept_chain(&db, "r1", make()),
         accept_chain(&db, "r1", make())
     );
-    assert_eq!(a, b, "동시에 온 같은 접수는 한 run이다");
+    assert_eq!(a, b, "concurrent duplicate intakes converge to one run");
     assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 1);
 
     let ctx = runs(&db).claim().await.unwrap().unwrap();
@@ -124,12 +118,11 @@ async fn concurrent_duplicate_deliveries_pass_once_and_run_the_default_once() {
         ("ready".into(), Some(1), "(agent)".into())
     );
 
-    // 기본 대화는 한 번만 집힌다
     let default = runs(&db).claim().await.unwrap().unwrap();
     assert_eq!(default.work.target, default_target());
     assert!(
         runs(&db).claim().await.unwrap().is_none(),
-        "기본 대화를 두 번 집을 수 없다"
+        "default target cannot be claimed twice"
     );
 }
 
@@ -142,7 +135,6 @@ async fn run_of(db: &TestDb) -> RunId {
     )
 }
 
-/// 사슬이 있는 run이라도 현재 후보의 직접 호출 ID가 아닌 호출의 표식은 해석하지 않는다: 떼어 내기만 하고 커서·감사는 그대로다.
 #[tokio::test]
 async fn a_marker_on_a_call_that_is_not_the_current_candidate_is_only_stripped() {
     let Some(db) = TestDb::new().await else {
@@ -167,23 +159,22 @@ async fn a_marker_on_a_call_that_is_not_the_current_candidate_is_only_stripped()
         })
         .await;
     let Ok(CallResult::Done(JsonPayload(body))) = other else {
-        panic!("일반 결과여야 한다: {other:?}");
+        panic!("expected normal Done result: {other:?}");
     };
     assert!(
         !body.contains("bot/pass"),
-        "표식은 결과에 남지 않는다: {body}"
+        "marker must be stripped from result: {body}"
     );
     assert_eq!(
         run_state(&db, &run).await,
         ("leased".into(), Some(0), "agenda.list".into()),
-        "커서·대상은 그대로(시도는 계속 리스를 쥔다)"
+        "cursor and target stay unchanged"
     );
     let pass_audits =
         "select count(*) from bot_audit where action in ('call.pass', 'trigger.next')";
     assert_eq!(db.scalar::<i64>(pass_audits).await, 0);
 }
 
-/// 도구가 도는 사이에 커서가 이미 움직였다면 같은 위치의 넘김은 거절된다(앞으로 두 칸 가지 않는다).
 #[tokio::test]
 async fn a_pass_for_a_cursor_that_already_moved_is_refused() {
     let Some(db) = TestDb::new().await else {
@@ -215,14 +206,13 @@ async fn a_pass_for_a_cursor_that_already_moved_is_refused() {
     assert_eq!(
         run_state(&db, &run).await.1,
         Some(1),
-        "커서는 더 가지 않았다"
+        "cursor must not advance further"
     );
     let pass_audits =
         "select count(*) from bot_audit where action in ('call.pass', 'trigger.next')";
     assert_eq!(db.scalar::<i64>(pass_audits).await, 0);
 }
 
-/// 반응은 후보가 모두 넘기면 기본 에이전트가 고정 형식의 사건 입력을 **정확히 한 번** 받는다: 같은 이벤트가 (바인딩이 바뀐 채) 다시 와도 새 run도 새 기본 호출도 없다.
 #[tokio::test]
 async fn a_reaction_chain_that_passes_everywhere_calls_the_default_agent_once_even_when_redelivered()
  {
@@ -271,18 +261,17 @@ async fn a_reaction_chain_that_passes_everywhere_calls_the_default_agent_once_ev
         let ctx = runs(&db).claim().await.unwrap().unwrap();
         assert!(matches!(call_at(&rig, &ctx).await, Ok(CallResult::Passed)));
     }
-    // 마지막 후보까지 넘겼다: 기본 에이전트가 고정 형식 입력으로 한 번 불린다
     let last = runs(&db).claim().await.unwrap().unwrap();
     assert_eq!(last.work.target, default);
     runs(&db).finish(last.attempt, done("ok")).await.unwrap();
     assert_eq!(run_state(&db, &run).await.0, "succeeded");
 
-    // 같은 이벤트의 재전달(바인딩 이름이 바뀐 뒤): 같은 run이고, 새 접수·새 기본 호출이 없다
+    // Redelivery under a renamed binding converges to the same run without re-running candidates.
     let (command, extras) = deliver("desk2");
     assert_eq!(runs(&db).accept_with(command, extras).await.unwrap(), run);
     assert!(runs(&db).claim().await.unwrap().is_none());
     assert_eq!(db.scalar::<i64>("select count(*) from bot_runs").await, 1);
-    assert_eq!(rig.runner.jobs().len(), 2, "후보마다 한 번씩만 실행했다");
+    assert_eq!(rig.runner.jobs().len(), 2, "each candidate ran once");
     let actions = audit_actions(&db).await;
     let count = |name: &str| actions.iter().filter(|a| *a == name).count();
     assert_eq!((count("run.accept"), count("trigger.select")), (1, 1));

@@ -1,6 +1,5 @@
-//! 시험 제어·관찰 창구(루프백 HTTP, 공식 SDK 시험 프로세스가 부른다): `POST /__ctl/script`로 모델이 다음 요청에 할 일을 정하고, `GET /__ctl/stats`로 서버 쪽 수를 읽는다.
-//! 수는 입구가 아니라 저장소(PG)와 모델 상류에서 센다: 작업 `runs`(OpenAI 입구로 접수한 요청 행)·`active`(끝나지 않은 입구 작업)·`model_calls`(상류가 받은 요청)·`tool_runs`(승인이 필요한 쓰기 도구가
-//! 호출 원장에서 시작된 수)·`tool_reads`(읽기 도구 실행 수)·`queued`(시험이 쌓았는데 아직 소비되지 않은 모델 응답).
+//! Loopback HTTP control endpoint for external OpenAI SDK tests (`POST /__ctl/script`, `GET /__ctl/stats`).
+//! Counts come directly from PostgreSQL and FakeUpstream: `runs`, `active`, `model_calls`, `tool_runs`, `tool_reads`, and `queued`.
 use super::plan;
 use crate::claude_support::Rig;
 use bot_broker::testing::FakeUpstream;
@@ -19,7 +18,6 @@ use tokio::{
 };
 
 const RUNS: &str = "select count(*) from {s}.bot_requests where api_endpoint is not null";
-/// 승인이 필요한 쓰기 도구(`remove`)가 실제로 시작·끝난 수와 읽기 도구(`list`)가 실행된 수: 호출 원장(PG)이 증거다
 const WRITES: &str =
     "select count(*) from {s}.bot_calls where tool like '%remove' and state in ('started', 'done')";
 const READS: &str =
@@ -62,18 +60,15 @@ impl Control {
         }
     }
 
-    /// 모델이 다음 요청에 할 일을 정한다(SDK 시험이 `POST /__ctl/script`로 하는 것과 같다)
     pub fn script(&self, plan: &Value) {
         let added = plan::push(&self.state.upstream, plan);
         self.state.pushed.fetch_add(added, Ordering::SeqCst);
     }
 
-    /// 지금의 서버 쪽 수(`runs`·`active`·`model_calls`·`tool_runs`·`queued`)
     pub async fn stats(&self) -> Value {
         stats(&self.state).await
     }
 
-    /// 시험 프로세스에 건넬 창구 주소(`…/__ctl`)
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}/__ctl", self.port)
     }
@@ -93,7 +88,7 @@ fn count(state: &State, sql: &str) -> u64 {
     String::from_utf8_lossy(&out.stdout)
         .trim()
         .parse()
-        .unwrap_or_else(|_| panic!("조회 실패: {}", String::from_utf8_lossy(&out.stderr)))
+        .unwrap_or_else(|_| panic!("query failed: {}", String::from_utf8_lossy(&out.stderr)))
 }
 
 async fn stats(state: &Arc<State>) -> Value {
@@ -163,7 +158,7 @@ async fn handle(mut socket: TcpStream, state: Arc<State>) {
                 state.pushed.fetch_add(added, Ordering::SeqCst);
                 (200, json!({"queued": added}))
             }
-            Err(_) => (400, json!({"error": "본문이 JSON이 아니다"})),
+            Err(_) => (400, json!({"error": "request body is not JSON"})),
         },
         _ => (404, json!({})),
     };

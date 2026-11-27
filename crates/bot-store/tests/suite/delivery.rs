@@ -1,4 +1,4 @@
-//! 예약 회신(PG): 동결한 초안만 소유자가 승인한 뒤 목적지 outbox로 쌓이고 run이 끝난다. 승인 문서의 SHA-256은 저장된 바이트에서 다시 계산한다.
+//! Scheduled delivery drafts: freeze once, verify stored-byte SHA-256 on approval/enqueue, and prevent replay.
 
 use crate::support::{delivery::*, *};
 use bot_core::{
@@ -14,11 +14,11 @@ async fn frozen(db: &TestDb, run: &RunContext) -> bot_core::schedule::DeliveryDr
     replies(db)
         .draft(
             run.attempt.clone(),
-            Some(answers(&["아침 요약", "두 번째 답"])),
+            Some(answers(&["morning summary", "second reply"])),
         )
         .await
         .unwrap()
-        .expect("초안")
+        .expect("draft")
 }
 
 #[tokio::test]
@@ -42,9 +42,9 @@ async fn a_draft_is_frozen_once_from_the_raw_answers_and_reread_from_the_stored_
             .await,
         first.sha256().unwrap().to_vec()
     );
-    // 한 번 동결하면 다른 답을 내도 같은 초안이다(재개한 시도가 다른 답을 만들어도 승인한 것만 보낸다)
+    // Once frozen, later attempts cannot replace the approved draft.
     let again = replies(&db)
-        .draft(run.attempt.clone(), Some(answers(&["다른 답"])))
+        .draft(run.attempt.clone(), Some(answers(&["other reply"])))
         .await
         .unwrap()
         .unwrap();
@@ -73,7 +73,7 @@ async fn a_run_without_a_destination_or_a_quiet_success_needs_no_draft() {
     let plain = run_in(&db, "p1", OWNER, ConversationKind::Direct).await;
     assert!(
         replies(&db)
-            .draft(plain.attempt.clone(), Some(answers(&["답"])))
+            .draft(plain.attempt.clone(), Some(answers(&["reply"])))
             .await
             .unwrap()
             .is_none()
@@ -86,10 +86,9 @@ async fn a_run_without_a_destination_or_a_quiet_success_needs_no_draft() {
             .is_none()
     );
     runs(&db)
-        .finish(plain.attempt.clone(), answers(&["답"]))
+        .finish(plain.attempt.clone(), answers(&["reply"]))
         .await
         .unwrap();
-    // 조용한 예약 성공(첨부 없음)은 보낼 것이 없다: 초안 없이 일반 완료가 답 없이 끝낸다
     let quiet = destination_run_as(&db, "q1", ConversationKind::Direct).await;
     db.sql(&format!(
         "update bot_runs set quiet = true where id = '{}'",
@@ -98,13 +97,13 @@ async fn a_run_without_a_destination_or_a_quiet_success_needs_no_draft() {
     .await;
     assert!(
         replies(&db)
-            .draft(quiet.attempt.clone(), Some(answers(&["<조용히>"])))
+            .draft(quiet.attempt.clone(), Some(answers(&["<quiet>"])))
             .await
             .unwrap()
             .is_none()
     );
     runs(&db)
-        .finish(quiet.attempt.clone(), answers(&["<조용히>"]))
+        .finish(quiet.attempt.clone(), answers(&["<quiet>"]))
         .await
         .unwrap();
     assert_eq!(
@@ -131,13 +130,12 @@ async fn a_normal_finish_cannot_complete_a_destination_run_and_bad_answers_freez
         return;
     };
     let run = destination_run(&db, ConversationKind::Direct).await;
-    // 승인 없이 일반 완료로 원래 대화에 답을 돌리지 못한다
     assert!(matches!(
-        runs(&db).finish(run.attempt.clone(), done("답")).await,
+        runs(&db).finish(run.attempt.clone(), done("reply")).await,
         Err(Error::Conflict)
     ));
     assert_eq!(state_of_run(&db, &run.attempt.run).await, "leased");
-    // 중복 키(JSONB로 가면 하나로 합쳐진다)·다른 MIME 첨부·빈 답은 동결하지 않는다
+    // Reject duplicate keys, disallowed MIME attachments, invalid base64, and approval payloads.
     for raw in [
         r#"{"text":"a","text":"b"}"#,
         r#"{"text":"x","attachments":[{"name":"a.png","type":"image/png","data":"AA=="}]}"#,
@@ -169,7 +167,7 @@ async fn a_normal_finish_cannot_complete_a_destination_run_and_bad_answers_freez
                 .await,
             Err(Error::Invalid)
         ),
-        "답이 없으면 보낼 것이 없다"
+        "empty answers cannot be frozen"
     );
     assert_eq!(
         db.scalar::<String>("select state from bot_deliveries")
@@ -184,7 +182,7 @@ async fn the_approved_draft_reaches_the_destination_and_ends_the_run_in_one_comm
         return;
     };
     let run = destination_run(&db, ConversationKind::Direct).await;
-    // 원래 회신 어댑터와 승인한 명시 목적지의 어댑터는 서로 다를 수 있다.
+    // Origin reply transport and explicit destination transport may differ.
     sqlx::query("update bot_runs set reply_transport = 'test-push' where profile = $1 and id = $2")
         .bind(&run.attempt.profile.0)
         .bind(&run.attempt.run.0)
@@ -192,9 +190,8 @@ async fn the_approved_draft_reaches_the_destination_and_ends_the_run_in_one_comm
         .await
         .unwrap();
     let (draft, approval) =
-        request_delivery(&db, &run, answers(&["아침 요약", "두 번째 답"])).await;
+        request_delivery(&db, &run, answers(&["morning summary", "second reply"])).await;
     assert_eq!(state_of_run(&db, &run.attempt.run).await, "waiting");
-    // 호출은 동결한 초안의 지문으로 봉인돼 있고, 승인 전에는 아무것도 보내지 않는다
     assert_eq!(
         db.scalar::<Vec<u8>>("select args_sha256 from bot_calls where call = 'schedule-deliver'")
             .await,
@@ -211,9 +208,8 @@ async fn the_approved_draft_reaches_the_destination_and_ends_the_run_in_one_comm
             attempt.run.0
         ))
         .await,
-        r#"{"text":"아침 요약/두 번째 답"}"#
+        r#"{"text":"morning summary/second reply"}"#
     );
-    // 목적지 outbox: 순서대로 두 건, 요청자는 소유자, 같은 run·고정 호출 ID
     let sent: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
         "select binding, conv_kind, conv_id, thread, body from bot_outbox where conv_id = 'D9' order by seq",
     )
@@ -224,14 +220,14 @@ async fn the_approved_draft_reaches_the_destination_and_ends_the_run_in_one_comm
     assert_eq!(sent[0].0, "slack");
     assert_eq!(sent[0].1, "direct");
     assert_eq!(sent[0].3.as_deref(), Some("t1"));
-    assert_eq!(sent[0].4, r#"{"text":"아침 요약"}"#);
-    assert_eq!(sent[1].4, r#"{"text":"두 번째 답"}"#);
+    assert_eq!(sent[0].4, r#"{"text":"morning summary"}"#);
+    assert_eq!(sent[1].4, r#"{"text":"second reply"}"#);
     assert_eq!(
         db.scalar::<String>("select principal from bot_outbox where conv_id = 'D9' limit 1")
             .await,
         OWNER
     );
-    // 원래 대화에는 답이 가지 않는다(승인 카드 한 건만 있다)
+    // Origin conversation holds only the approval card.
     assert_eq!(outbox_rows(&db, "c1").await, 1);
     assert_eq!(
         db.scalar::<String>("select transport from bot_outbox where conv_id = 'c1'")
@@ -245,7 +241,6 @@ async fn the_approved_draft_reaches_the_destination_and_ends_the_run_in_one_comm
         .await,
         2
     );
-    // 승인 소비·호출 완료·초안 확정·감사가 같은 커밋이다
     assert_eq!(
         calls(&db)
             .approval(approval.nonce.clone())
@@ -283,7 +278,7 @@ async fn a_second_enqueue_sends_nothing_more() {
         return;
     };
     let run = destination_run(&db, ConversationKind::Direct).await;
-    let (_, approval) = request_delivery(&db, &run, answers(&["하나"])).await;
+    let (_, approval) = request_delivery(&db, &run, answers(&["first"])).await;
     let (attempt, start) = approved_start(&db, &approval).await;
     let again = StartCall {
         approval: start.approval.clone(),
@@ -291,7 +286,6 @@ async fn a_second_enqueue_sends_nothing_more() {
     };
     replies(&db).enqueue(start).await.unwrap();
     assert_eq!(outbox_rows(&db, "D9").await, 1);
-    // run이 끝났으므로 같은 호출을 다시 내도 이어지지 않는다(이중 발송 없음)
     assert!(matches!(
         replies(&db).enqueue(again).await,
         Err(Error::Stale)
@@ -306,7 +300,7 @@ async fn a_tampered_draft_a_changed_activation_or_an_unapproved_call_sends_nothi
         return;
     };
     let run = destination_run(&db, ConversationKind::Direct).await;
-    let (_, approval) = request_delivery(&db, &run, answers(&["보낼 답"])).await;
+    let (_, approval) = request_delivery(&db, &run, answers(&["draft reply"])).await;
     let (attempt, start) = approved_start(&db, &approval).await;
     let again = |start: &StartCall| StartCall {
         approval: start.approval.clone(),
@@ -327,7 +321,6 @@ async fn a_tampered_draft_a_changed_activation_or_an_unapproved_call_sends_nothi
         }
     };
 
-    // 승인 없이는 시작하지 못한다(승인한 호출을 가리키고 있다)
     let mut missing = again(&start);
     missing.approval = None;
     assert!(matches!(
@@ -336,18 +329,18 @@ async fn a_tampered_draft_a_changed_activation_or_an_unapproved_call_sends_nothi
     ));
     nothing_happened(&db).await;
 
-    // 저장된 답이 바뀌면 PG가 다시 계산한 지문이 달라 보내지 않는다
-    db.sql(r#"update bot_deliveries set answers = array['{"text":"바뀐 답"}']"#)
+    // Recomputed digest over stored answers detects tampering.
+    db.sql(r#"update bot_deliveries set answers = array['{"text":"tampered reply"}']"#)
         .await;
     assert!(matches!(
         replies(&db).enqueue(again(&start)).await,
         Err(Error::Conflict)
     ));
     nothing_happened(&db).await;
-    db.sql(r#"update bot_deliveries set answers = array['{"text":"보낼 답"}']"#)
+    db.sql(r#"update bot_deliveries set answers = array['{"text":"draft reply"}']"#)
         .await;
 
-    // 수신자 매핑이 바뀐 활성 집합이면 이 초안은 보내지 않는다(다시 읽어도 마찬가지다)
+    // Changing the active set invalidates the draft pinned to the old mapping.
     db.sql("update bot_active set revision = 'set-2'").await;
     assert!(matches!(
         replies(&db).enqueue(again(&start)).await,
@@ -369,7 +362,6 @@ async fn a_tampered_draft_a_changed_activation_or_an_unapproved_call_sends_nothi
     );
     assert_eq!(state_of_run(&db, &attempt.run).await, "leased");
 
-    // 바로잡으면 같은 승인으로 한 번 보낸다
     replies(&db).enqueue(start).await.unwrap();
     assert_eq!(outbox_rows(&db, "D9").await, 1);
 }
@@ -381,7 +373,6 @@ async fn the_delivery_call_and_its_approval_only_open_against_the_frozen_draft_a
     };
     let run = destination_run(&db, ConversationKind::Direct).await;
     let at = run.attempt.clone();
-    // 초안이 없으면 호출을 기록하지 못한다. 호출 ID와 도구도 서로만 쓴다
     assert!(is_conflict(
         calls(&db)
             .begin(at.clone(), call(DELIVER_CALL), tool(DELIVER_TOOL), [3; 32])
@@ -401,7 +392,6 @@ async fn the_delivery_call_and_its_approval_only_open_against_the_frozen_draft_a
     ));
     let draft = frozen(&db, &run).await;
     let hash = draft.sha256().unwrap();
-    // 초안과 다른 내용의 호출은 기록하지 못한다
     assert!(is_conflict(
         calls(&db)
             .begin(at.clone(), call(DELIVER_CALL), tool(DELIVER_TOOL), [3; 32])
@@ -413,12 +403,11 @@ async fn the_delivery_call_and_its_approval_only_open_against_the_frozen_draft_a
         .unwrap();
     let document = draft.approval_json().unwrap();
     let approval = delivery_approval(&at, "n1", hash);
-    // 카드가 초안을 그대로 보이지 않거나(다른 문서·조각 누락) 승인 지문이 다르면 열지 못한다
     for card in [
-        card_for("n1", &document.replace("아침 요약", "다른 요약")),
+        card_for("n1", &document.replace("morning summary", "other summary")),
         card_for("n1", &document[..document.len() / 2]),
         JsonPayload(
-            r#"{"approval":{"nonce":"n1","title":"승인","lines":["도구: schedule.deliver"]}}"#
+            r#"{"approval":{"nonce":"n1","title":"Approval","lines":["Tool: schedule.deliver"]}}"#
                 .into(),
         ),
     ] {
@@ -434,7 +423,6 @@ async fn the_delivery_call_and_its_approval_only_open_against_the_frozen_draft_a
             .open_approval(open_delivery(&other_hash, &document))
             .await
     ));
-    // 승인자는 예약을 만든 소유자 본인이다(다른 사람·요청자와 다른 승인자는 거절)
     for (requester, approver) in [(OWNER, "local:other"), ("local:other", OWNER)] {
         let mut forged = delivery_approval(&at, "n1", hash);
         forged.requester = PrincipalId(requester.into());
@@ -470,9 +458,8 @@ async fn an_earlier_occurrences_approval_cannot_deliver_a_later_occurrence() {
         return;
     };
     let first = destination_run(&db, ConversationKind::Direct).await;
-    let (_, approval) = request_delivery(&db, &first, answers(&["첫 발화"])).await;
+    let (_, approval) = request_delivery(&db, &first, answers(&["first firing"])).await;
     let (_, first_start) = approved_start(&db, &approval).await;
-    // 같은 예약의 다음 발화: 같은 호출 ID(`schedule-deliver`)지만 다른 run이다
     runs(&db)
         .accept(accept_as(
             "personal",
@@ -480,7 +467,7 @@ async fn an_earlier_occurrences_approval_cannot_deliver_a_later_occurrence() {
             OWNER,
             ConversationKind::Direct,
             "c1",
-            "다음",
+            "next",
         ))
         .await
         .unwrap();
@@ -493,7 +480,7 @@ async fn an_earlier_occurrences_approval_cannot_deliver_a_later_occurrence() {
     .await;
     let (draft, second_approval) = {
         let draft = replies(&db)
-            .draft(second.attempt.clone(), Some(answers(&["둘째 발화"])))
+            .draft(second.attempt.clone(), Some(answers(&["second firing"])))
             .await
             .unwrap()
             .unwrap();
@@ -514,7 +501,6 @@ async fn an_earlier_occurrences_approval_cannot_deliver_a_later_occurrence() {
         (draft, approval)
     };
     let _ = (draft, second_approval);
-    // 첫 발화의 승인으로는 둘째 run을 보내지 못한다
     let stolen = StartCall {
         approval: first_start.approval,
         ..start_call(&second.attempt, DELIVER_CALL, None)

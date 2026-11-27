@@ -1,9 +1,5 @@
-//! 관측 내보내기 HTTP/HTTPS POST 클라이언트.
-//!
-//! - 평문 `http://`는 기존 최소 `TcpStream` 경로를 유지해 `localhost`·`*.localhost` 루프백 고정과 사설망 제한(`remote`)을 그대로 지킨다.
-//! - `https://`는 `reqwest`(rustls + OS 루트 인증서)로 TLS 전송한다: 리다이렉트·재시도·연결 재사용을 끄고, 헤더는 `sensitive`로 표시하며,
-//!   `localhost`·`*.localhost`는 이름 해석기 없이 루프백으로 고정한다.
-//! - 오류에는 주소·경로·헤더 값을 싣지 않고 고정 분류 낱말(`connect`·`timeout`·`io`·`status`·`config`)만 돌려준다.
+//! HTTP/HTTPS POST transport for observability exporters with localhost loopback pinning and fixed error codes.
+//! Plain `http://` uses raw `TcpStream`; `https://` uses `reqwest` without redirects, retries, or connection pooling.
 
 use reqwest::{
     dns::{Addrs, Name, Resolve, Resolving},
@@ -67,14 +63,13 @@ fn local_ip(ip: IpAddr) -> bool {
 }
 
 impl Target {
-    /// `http(s)://호스트[:포트][/경로]`만 받는다. 사용자 정보·쿼리·조각·제어 문자는 거절한다.
     pub(crate) fn parse_with_default(url: &str, default_path: &str) -> Result<Self, &'static str> {
         let (scheme, default_port, rest) = if let Some(rest) = url.strip_prefix("https://") {
             (Scheme::Https, 443, rest)
         } else if let Some(rest) = url.strip_prefix("http://") {
             (Scheme::Http, 80, rest)
         } else {
-            return Err("http:// 또는 https:// 주소만 지원한다");
+            return Err("only http:// and https:// URLs are supported");
         };
         let (authority, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
@@ -84,19 +79,19 @@ impl Target {
             || path.bytes().any(|b| b < 0x20 || b == 0x7f)
             || authority.contains('@')
         {
-            return Err("주소에 사용자 정보·쿼리·조각을 넣을 수 없다");
+            return Err("URL must not contain userinfo, query, fragment, or control characters");
         }
         let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-            let (h, tail) = v6.split_once(']').ok_or("잘못된 IPv6 주소")?;
+            let (h, tail) = v6.split_once(']').ok_or("invalid IPv6 address")?;
             if h.parse::<Ipv6Addr>().is_err() {
-                return Err("잘못된 IPv6 주소");
+                return Err("invalid IPv6 address");
             }
             let port = if tail.is_empty() {
                 None
             } else if let Some(p) = tail.strip_prefix(':') {
                 Some(p)
             } else {
-                return Err("잘못된 IPv6 주소");
+                return Err("invalid IPv6 address");
             };
             (h, port)
         } else {
@@ -105,7 +100,7 @@ impl Target {
                 None => (authority, None),
             };
             if !host_ok(h) {
-                return Err("잘못된 호스트");
+                return Err("invalid host");
             }
             (h, port)
         };
@@ -114,7 +109,7 @@ impl Target {
                 .parse::<u16>()
                 .ok()
                 .filter(|p| *p != 0)
-                .ok_or("잘못된 포트")?,
+                .ok_or("invalid port")?,
             None => default_port,
         };
         Ok(Self {
@@ -125,7 +120,6 @@ impl Target {
         })
     }
 
-    /// 평문으로 보내도 사설망 안에 머무는 주소인가: 루프백·사설(RFC 1918)·링크 로컬·IPv6 고유 로컬 IP 리터럴, 그리고 `localhost`·`*.localhost`.
     pub(crate) fn stays_local(&self) -> bool {
         match self.host.parse::<IpAddr>() {
             Ok(ip) => local_ip(ip),
@@ -133,7 +127,6 @@ impl Target {
         }
     }
 
-    /// 루프백 주소인가(로컬 목 서버 등 인증 키 생략 허용 판정에 쓴다).
     pub(crate) fn is_loopback(&self) -> bool {
         match self.host.parse::<IpAddr>() {
             Ok(ip) => loopback_ip(ip),
@@ -141,7 +134,7 @@ impl Target {
         }
     }
 
-    /// 이름 해석 없이 접속할 주소(있으면). `localhost`·`*.localhost`는 시스템 해석기를 거치지 않고 루프백으로 고정한다.
+    /// Pins `localhost` and `*.localhost` to loopback addresses without consulting the OS resolver.
     pub(crate) fn dial(&self) -> Option<Vec<SocketAddr>> {
         match self.host.parse::<IpAddr>() {
             Ok(ip) => Some(vec![SocketAddr::new(ip, self.port)]),
@@ -153,7 +146,6 @@ impl Target {
         }
     }
 
-    /// 표시용 출처(`호스트:포트`). 경로와 헤더는 싣지 않는다.
     pub(crate) fn origin(&self) -> String {
         if self.host.contains(':') {
             format!("[{}]:{}", self.host, self.port)
@@ -162,7 +154,6 @@ impl Target {
         }
     }
 
-    /// 정규화한 요청 URL(`https://호스트:포트/경로`).
     pub(crate) fn url(&self) -> String {
         let prefix = match self.scheme {
             Scheme::Http => "http",
@@ -172,7 +163,7 @@ impl Target {
     }
 }
 
-/// 전송 클라이언트가 직접 설정하는 예약 헤더(중복·스머글링 방지).
+/// Transport-owned headers rejected from user config to prevent duplication and request smuggling.
 pub(crate) fn is_reserved_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -180,7 +171,6 @@ pub(crate) fn is_reserved_header(name: &str) -> bool {
     )
 }
 
-/// 헤더 이름·값 검사: 이름은 예약어가 아닌 `[A-Za-z0-9-]`, 값은 인쇄 가능한 ASCII(탭 포함)만 허용한다.
 pub(crate) fn header_ok(name: &str, value: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -192,7 +182,7 @@ pub(crate) fn header_ok(name: &str, value: &str) -> bool {
             .all(|c| c == b'\t' || (0x20..0x7f).contains(&c))
 }
 
-/// `https://` 요청용 DNS 리졸버: `localhost`·`*.localhost`는 시스템 해석기를 거치지 않고 루프백으로 고정한다.
+/// DNS resolver for `https://` that pins `localhost` and `*.localhost` to loopback without OS resolution.
 struct LoopbackPinResolver;
 
 impl Resolve for LoopbackPinResolver {
@@ -221,7 +211,6 @@ struct HttpsPair {
     local: reqwest::Client,
 }
 
-/// HTTP/HTTPS 공용 클라이언트. `https://` 대상이 있을 때만 TLS 클라이언트를 초기화한다.
 #[derive(Clone)]
 pub(crate) struct Client {
     https: Option<HttpsPair>,
@@ -238,11 +227,10 @@ impl Client {
         }
     }
 
-    /// 시험용: 로컬 자체 서명 TLS 수집기 인증서를 신뢰 목록에 더한다.
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn with_root_pem(pem: &[u8]) -> Result<Self, String> {
         let cert = reqwest::Certificate::from_pem(pem)
-            .map_err(|_| "시험용 TLS 인증서를 읽지 못했다".to_owned())?;
+            .map_err(|_| "failed to parse test TLS certificate".to_owned())?;
         Self::build(Some(cert))
     }
 
@@ -260,9 +248,9 @@ impl Client {
             if let Some(cert) = extra_root.clone() {
                 builder = builder.add_root_certificate(cert);
             }
-            builder
-                .build()
-                .map_err(|_| "관측 HTTPS 클라이언트를 초기화하지 못했다(CA 인증서 확인)".to_owned())
+            builder.build().map_err(|_| {
+                "failed to initialize observability HTTPS client (check CA certificates)".to_owned()
+            })
         };
         Ok(Self {
             https: Some(HttpsPair {
@@ -272,7 +260,6 @@ impl Client {
         })
     }
 
-    /// 한 번 보낸다. 성공은 2xx뿐이고 실패는 고정 분류 낱말(`connect`·`timeout`·`io`·`status`·`config`) 중 하나다.
     pub(crate) async fn post(
         &self,
         t: &Target,
@@ -382,7 +369,7 @@ async fn post_plain_http(
     .unwrap_or(Err("timeout"))
 }
 
-/// RFC 9112 상태 줄(`HTTP/1.x <코드>[ 사유]\r\n`)에서 상태 코드를 읽는다. 사유 문구가 비어 있어도 받아들인다.
+/// Parses an RFC 9112 status line (`HTTP/1.x <code>[ reason]\r\n`), allowing an empty reason phrase.
 fn parse_status_line(buf: &[u8]) -> Option<u16> {
     let end = buf.windows(2).position(|w| w == b"\r\n")?;
     let line = String::from_utf8_lossy(&buf[..end]);
@@ -400,11 +387,11 @@ mod tests {
     use super::*;
 
     fn target(url: &str) -> Target {
-        Target::parse_with_default(url, "/v1/traces").expect("정상")
+        Target::parse_with_default(url, "/v1/traces").expect("valid")
     }
 
     fn addrs(list: &[&str]) -> Option<Vec<SocketAddr>> {
-        Some(list.iter().map(|a| a.parse().expect("주소")).collect())
+        Some(list.iter().map(|a| a.parse().expect("addr")).collect())
     }
 
     #[test]
@@ -471,7 +458,7 @@ mod tests {
             assert_eq!(
                 t.dial(),
                 addrs(&["127.0.0.1:4318", "[::1]:4318"]),
-                "{url}: 루프백 둘(IPv4 먼저)로 고정"
+                "{url}: pinned to loopback (IPv4 first)"
             );
         }
         let t = target("http://Collector.localhost:4318/x");
@@ -514,7 +501,7 @@ mod tests {
             ("a", "v\r\nX: y"),
             ("a", "v\n"),
             ("a", "v\0"),
-            ("a", "비ASCII"),
+            ("a", "non-ASCII-€"),
             ("Host", "evil.example"),
             ("Content-Type", "text/plain"),
             ("Content-Length", "0"),
@@ -544,7 +531,6 @@ mod tests {
             post_plain_http(&t, "application/json", &[], b"{}", Duration::from_secs(5)).await
         }
 
-        // RFC 9112: 사유 문구가 없는 상태 줄(`HTTP/1.1 200\r\n`)도 정상 응답으로 읽는다
         assert_eq!(
             send(b"HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n").await,
             Ok(())

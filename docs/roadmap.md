@@ -1,91 +1,91 @@
-# 로드맵과 공개 수락 기준
+# Roadmap & Public Acceptance Criteria
 
-로컬 데모와 각 역할의 수락 기준을 정리한다. PostgreSQL 시험은 시험 전용 DB의 접속 주소를 `BOT_TEST_DATABASE_URL`로 받는다. [배포 점검](release.md)
+English | [한국어](ko/roadmap.md)
 
-| 순서 | 소유 크레이트 | 수락 시험 |
+Acceptance gates for the local demo and every runtime role. PostgreSQL tests read a dedicated test database URL from `BOT_TEST_DATABASE_URL`. ([Release Checklist](release.md))
+
+| Stage | Owner Crates | Acceptance Criteria |
 |---|---|---|
-| 1. 프로필 | bot-profile, bot-core | 공개 checkout 단독 빌드. 같은 바이너리에 두 번째 프로필·손자 역할 추가. 잘못된 링크·중복 바인딩·누락된 서버를 반영 전에 거절한다. |
-| 2. 큐와 예약 | bot-store, bot-runtime | 워커·스케줄러 각각 두 개로 같은 요청·cron 접수, 리스 인계, DST·중단 후 복구, dead letter 재개, 중복 없는 부모 깨우기를 확인한다. |
-| 3. 도구 | bot-broker | 모델에는 비밀·네트워크가 없고 도구에는 선언한 자격·호스트만 있다. 형제 도구 자격 노출, 프록시 우회, 다른 주체 승인, 인자 변경·재생·권한 철회를 거절한다. |
-| 4. 입구와 회신 | bot-gateway, bot-runtime, bot-cli | CLI·Slack·HTTP에서 인증된 접수와 원래 대화의 회신을 확인한다. 미등록 사용자·속도 초과는 거절한다. 위임·기억은 프로필/소유자 경계를 지킨다. |
-| 5. 운영 | bot-broker, bot-store, bot-admin | 단일 삭제와 다단계 도구를 전송 전후에 중단한다. 원래 영수증 또는 held, 자동 중복 전송 0건을 확인한다. UI의 보류·감사 체인, OTLP 장애, 백업 복원을 검사한다. |
-| 6. 공개 | bot-cli | 깨끗한 환경에서 README의 로컬 데모를 재현한다. CLI 대화, cron 직접 호출(모델 호출 0회), 본인 승인 후 단일 삭제가 all 및 분리 실행에서 같아야 한다. |
+| 1. Profiles | `bot-profile`, `bot-core` | Standalone build from public checkout. Add a second profile and grandchild agent on the same binary. Reject broken links, duplicate bindings, and missing servers before activation. |
+| 2. Queue & Schedules | `bot-store`, `bot-runtime` | With two workers and two schedulers: idempotent request/cron intake, lease takeover, DST & outage catch-up, dead-letter resume, and duplicate-free parent wakeup. |
+| 3. Tools | `bot-broker` | Models have zero secrets and no network; tools receive only declared secrets and egress hosts. Reject sibling-secret leaks, proxy bypasses, cross-principal approvals, argument tampering, replays, and revoked scopes. |
+| 4. Ingress & Replies | `bot-gateway`, `bot-runtime`, `bot-cli` | Verified intake and origin replies across CLI, Slack, and HTTP. Reject unregistered users and rate-limit breaches. Delegation and memory enforce profile/owner boundaries. |
+| 5. Operations | `bot-broker`, `bot-store`, `bot-admin` | Interrupt single-step delete and multi-step tools before and after send: verify original receipt or `held`, zero automatic duplicate sends. Verify Admin UI holds, audit chain, OTLP failure tolerance, and backup restore. |
+| 6. Public Demo | `bot-cli` | Reproduce the README local demo on a clean host: CLI chat, direct cron call (0 model calls), and self-approved single delete behave identically in `--role all` and split-role modes. |
 
-## 보안·복구 수락 시험
+## Security & Recovery Acceptance Matrix
 
-| 조건 | 기대 결과 |
+| Scenario | Required Outcome |
 |---|---|
-| 두 프로필에 같은 이름·다른 값의 합성 자격을 등록 | 각 도구는 자기 값만 받고 다른 네임스페이스 경로를 거절한다. 운영자 egress 상한 밖과 미허용 모델 제공자에는 접속하지 않는다. |
-| 같은 서비스 내 다른 수신자에게 메시지 전송 | 수신자·본문을 표시한 별도 승인 전 전송 0건. 승인 후 본문·첨부·수신자를 바꿔도 전송 0건. |
-| 대기 중 위험 상향 또는 워커 세대 교체 | 옛 버튼·채널 거절. 새 승인 한 번만 소비한다. |
-| 겹치는 이벤트 두 개, 민감 DM, 같은 HTTP 요청 재조회 | 가장 앞선 도구만 올바른 인자로 실행. 민감 DM은 기본 비공개. 선택한 `private_pass: true` 트리거의 유효한 빈 PASS만 원래 질문·첨부 참조를 일반 대화에 한 번 접수한다. 동기 status/body 또는 202 후 동일 결과를 받는다. |
-| 쓰기 직전 워커 소실 | 옛 도구 종료와 미실행 증거 확인 전 재실행 0건. 확인 후 같은 _meta 호출 ID로 재개한다. |
-| 단계 확정 뒤 호출 최종 응답 유실 | 보류 목록에서 기존 단계 영수증을 보존하고 호출 전체 영수증으로만 재개한다. 전체 미실행 판정은 거절하고 취소는 열린 도구 보류를 닫는다. |
-| 위임과 취소가 경합하거나 완료가 늦게 도착함 | 앞서 커밋된 위임까지 취소에 포함하고 뒤늦은 위임은 거절한다. 취소가 먼저 커밋되면 늦은 완료의 새 회신은 0건이고 부모는 한 번 깨어난다. |
-| 일시 실패와 리스 만료로 시도 한도 소진 | 마지막에 소모한 횟수까지 `dead` 행에 기록하고 운영자 재개로 0부터 다시 시작한다. |
-| PG에서 시도 한도 1, 활성 집합 교체 잠금으로 반납 시간 초과 | 교체 커밋 뒤 만료 리스를 새 워커가 점유해 시도 0으로 성공한다. 같은 집합에서 다시 만료되거나 구판 행에 집합 기록이 없으면 시도 하나를 쓴다. |
-| 만료 beat와 새 이벤트 유입 | 만료된 beat는 같은 직렬 키의 소유권을 유지한다. 기한이 된 재시도·만료 리스와 새 작업을 처리 가능 시각 순으로 점유하며 잠긴 행은 건너뛴다. |
-| 점유할 실행의 대상이 손상됨 | 원문과 고정 사유를 남겨 해당 실행을 격리하고 대기 부모와 무관한 실행을 진행시킨다. DB 오류가 생기면 점유를 되돌린다. |
-| 체크포인트 한도와 완료 충돌 | 저장소 문서 상한 1 MiB를 넘긴 계획·결과와 같은 입력으로 되풀이되는 완료 충돌은 한 시도에서 끝난다. 저장소 일시 장애에는 저장한 계획·영수증으로 재개한다. |
-| 같은 집합의 워커에 SIGTERM, 시도 한도 1 | 8초 유예 뒤 프로세스 종료와 세션 회수를 거쳐 ready·시도 0이 된다. 다른 워커가 이어서 성공한다. 옛 claim의 반납으로 새 소유자 행이 바뀌는 경우는 0건이다. |
-| 반복 예약 발화 전 수신 경로 철회 | PG에서 사유별 감사 낱말을 확인한다. `unrouted`만 원래 대화에 고정 안내 한 건을 남긴다. 두 스케줄러의 경합·재시도에도 동일하다. |
-| 도구가 단계 영수증 사전 조회 중 중단 | 같은 호출에서 다시 조회하면 `none`이고 단계·보류·감사는 0건이다. 기존 단계의 다른 인자는 `conflict`, 확정된 단계는 같은 영수증을 반환한다. |
-| PG에서 관리자가 보류 단계를 미실행으로 판정하고 워커 재개 | 조회는 `held`·`resolution:"not_executed"`·`send:false`. 같은 단계의 첫 재점유만 `send:true`이고 판정이 소비된다. 같은 세대의 옛 claim은 `stale`, 미등록 호출은 `denied`, 등록된 호출의 없는 단계는 `none`. 서로 다른 프로필이 같은 ID를 써도 영수증은 격리된다. |
-| PG에서 운영자가 실행 상세를 보고 재개·취소 | 일반 루트에만 적용한다. 성공 응답을 잃어 같은 명령을 다시 보내도 전이와 명령 감사는 한 번이다. 이전 점유의 명령은 현재 점유를 취소하지 못한다. 취소는 하위 트리에 적용하며 미판정 보류는 판정 화면으로 안내한다. |
-| 에이전트별 내장 도구 확인 | 생략·빈 목록·선언 없는 자식은 0개, 명시한 역할만 지정한 읽기 도구를 쓴다. 셸·쓰기·웹 선언은 활성화 전에 거절한다. |
-| 실제 Claude CLI와 가짜 모델로 스트리밍 → MCP 도구 → 모델 왕복 | 도구 실행 1회, 공급자 키와 세션 토큰이 각자 경계 안에 머문다. 모델 VM의 네트워크·파일 격리는 별도 실환경 시험으로 확인한다. |
-| 실제 Claude CLI·가짜 상류·PG에서 쓰기 승인 대기 중 worker 교체 | 새 HOME에서 같은 세션 재개. 승인 소비·도구 실행·영수증은 각 1건이고, 후속 모델 차례에도 원래 도구 사용 ID와 실제 결과가 이어진다. |
-| 같은 조건에서 부모가 MCP로 직계 자식에게 위임 | 워커 한 개로 자식이 완료된다. 부모를 다시 시작해도 자식 run·실행은 각 1건이다. 모델이 원래 위임에 연결된 자식 결과를 받는다. |
-| 같은 도구·같은 인자를 두 번 계획하고 한 요청을 중복 전달 | 서로 다른 위치는 각각 실행되고, 같은 위치의 재전달은 그 호출의 기존 결과만 돌려준다. |
-| 보류 판정 응답 유실 후 같은 회신·도구·단계가 다시 보류됨 | 첫 발생 ID의 재전송은 기존 성공을 반환하고 감사 1건을 유지한다. 새 발생은 별도 판정까지 미결이다. |
-| 본인의 DM·CLI, 다른 사용자, 채널, 위임 자식에서 기억 검색 | 본인 DM·CLI에서만 private 항목을 읽는다. 채널에서는 부모·자식의 모델 입력과 답변 모두에 개인 기억이 섞이지 않는다. |
-| private 기억 조회 뒤 검색 도구 호출 | 재시작·위임 뒤에도 전송 인자에 대한 승인 전 외부 요청 0건 |
-| private DM 수신·재전달 | 지정 도구만 한 번 실행한다. 기본 비공개에서는 입력·결과 원문이 원장·모델·추적에 남지 않는다. 선택한 `private_pass: true`의 유효한 빈 PASS를 커밋한 뒤 일반 접수 전에 멈추면 동일 판본·트리거·지문 비밀에서 같은 이벤트를 재전달해 `:pass`로 한 번 접수한다. 시작 전 실패는 동일 입력으로 재점유하고 불명·만료는 재전달 없이 보류한다. |
-| 타인이 기억 소유자 지정·수정·삭제 시도 | owner는 인증 주체로 고정되고 타인 항목 변경 0건 |
-| 기억을 profile로 공유 | 소유자만 본문 전체를 확인한다. 카드 이후 편집하면 미소비·미공유, 성공 응답 유실 후 재시도해도 공유 감사 1건 |
+| Same-named synthetic secret with different values in two profiles | Each tool receives only its own value and rejects cross-namespace paths. Connections outside operator egress caps or disallowed model providers are blocked. |
+| Sending a message to a different recipient on the same service | Zero sends before a separate approval displaying recipient and body; zero sends if body, attachment, or recipient changes after approval. |
+| Risk escalation or worker generation change while awaiting approval | Old buttons/channels rejected; new approval consumed at most once. |
+| Overlapping events, private DM, repeated HTTP query | Only the earliest tool runs with valid args. Private DMs stay private by default; only a valid empty PASS from a selected `private_pass: true` trigger creates one regular run with the original question and attachment refs. HTTP returns consistent sync status/body or `202` followed by the identical result. |
+| Worker crash immediately before external write | Zero re-executions until the old tool exits and non-execution is verified; resumes with the same `_meta` call ID afterward. |
+| Final call response lost after step confirmation | Hold queue preserves committed step receipts and resumes only via a call-level receipt; whole-call `not_executed` is rejected, and cancel closes open tool holds. |
+| Race between delegation and cancel, or late completion | Cancellation covers already-committed children and rejects late delegations. If cancel commits first, late completions emit zero replies and wake the parent once. |
+| Retry budget exhausted by transient errors and lease expiries | Final attempt count recorded on the `dead` row; operator resume restarts from attempt 0. |
+| Retry limit 1 in PG; shutdown handover times out on active-set swap lock | After swap commits, a new worker claims the expired lease and succeeds at attempt 0. Re-expiring on the same set or lacking set metadata consumes one attempt. |
+| Expired `beat` vs incoming events | Expired beat keeps serialization-key ownership. Due retries, expired leases, and new runs are claimed by ready timestamp while skipping locked rows. |
+| Corrupted target on claimed run | Quarantines only that run with raw payload and fixed reason; unrelated runs and waiting parents proceed. DB errors roll back the claim. |
+| Checkpoint cap & finish conflict | Plans/results exceeding the 1 MiB store cap and repeated finish conflicts terminate in one attempt; transient store errors resume from saved plans/receipts. |
+| `SIGTERM` to a worker on the same active set (retry limit 1) | After 8 s grace, exits and revokes sessions, returning the run to `ready` at attempt 0; another worker completes it. Zero writes from the stale claim overwrite the new owner. |
+| Reply route revoked before recurring schedule fires | PG records per-reason audit codes; only `unrouted` posts one fixed notice to the origin chat, even under dual-scheduler races/retries. |
+| Tool aborts during step-receipt pre-lookup | Re-lookup on the same call returns `none` with zero steps, holds, or audits. Different args on an existing step return `conflict`; confirmed steps return the original receipt. |
+| Admin resolves held step as `not_executed` and worker resumes | Lookup returns `held`, `resolution:"not_executed"`, `send:false`. Only the first re-claim on that step gets `send:true` and consumes the resolution. Stale same-gen claims get `stale`, unregistered calls `denied`, missing steps `none`, and cross-profile IDs stay isolated. |
+| Operator resumes/cancels from run detail in PG | Root normal runs only. Retrying a command whose response was lost transitions and audits once. Earlier claims cannot cancel a newer claim. Cancel cascades to subtrees; unresolved holds direct to the hold screen. |
+| Per-agent built-in tool gating | Omitted, empty, or undeclared children get zero built-ins; only explicitly listed roles get `read`. Shell, write, and web declarations fail before activation. |
+| Real Claude CLI + mock model streaming -> MCP tool -> model round-trip | Exactly 1 tool execution; provider keys and session tokens stay within their boundaries. Model VM network/FS isolation is verified in separate host tests. |
+| Real Claude CLI + mock upstream + PG worker swap during write approval | Resumes same session in a fresh `HOME`: 1 approval consumption, 1 tool execution, 1 receipt; follow-up model turn keeps the original tool-use ID and real result. |
+| Same setup with parent delegating via MCP to direct child | Single worker completes child; restarting parent leaves 1 child run and 1 execution, delivering the child result back to the original delegation. |
+| Same tool & args planned twice plus duplicate request delivery | Distinct positions each run once; redelivery at the same position returns its cached result. |
+| Hold decision response lost, then same reply/tool/step held again | Retrying the first occurrence ID returns cached success with 1 audit; the new occurrence stays open until decided separately. |
+| Memory search across own DM/CLI, other users, channels, and delegated children | Only own DM/CLI reads `private` items; channels never leak private memory into parent or child model prompts or replies. |
+| Search tool called after reading `private` memory | Zero external requests before approval of outbound arguments, even across restarts or delegations. |
+| Private DM intake and redelivery | Runs only the designated tool once; default private mode keeps raw input/output out of ledgers, models, and traces. Crashing between a valid empty PASS (`private_pass: true`) and regular intake redelivers once under `:pass` on the same revision/trigger/secret. Pre-start failures reclaim with identical input; uncertain/expired calls hold without redelivery. |
+| Attempt by another user to set/edit/delete memory owner | `owner` stays bound to the authenticated principal; zero mutations to other users' items. |
+| Sharing memory to `profile` scope | Only the owner inspects full content; editing after card creation leaves it unconsumed/unshared; retrying after a lost response emits 1 share audit. |
 
-공개 CI는 fmt·Clippy·시험·스키마/예시 대조·Cargo가 생성하는 Cargo.lock을 제외한 파일 600줄 제한·허용 라이선스(MIT·Apache-2.0·BSD-2/3-Clause·ISC·Unicode-3.0·Zlib·BSL-1.0)·비밀 스캔을 수행한다. 릴리스 전 Git 이력도 스캔한다. 실제 프로필과 비공개 식별자 사전은 로컬 공개 경계 검사에만 사용한다. 운영 전환은 별도로 무발송 리허설과 원복 시험을 거친다.
+Public CI enforces `rustfmt`, Clippy, tests, schema/example validation, a 600-line file limit (excluding generated `Cargo.lock`), allowed licenses (`MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Unicode-3.0`, `Zlib`, `BSL-1.0`), and secret scanning (including pre-release Git history). Real profiles and private identifier dictionaries run only in local release checks; production cutovers additionally pass dry-run and rollback rehearsals.
 
-## 공개 전 추가 수락 시험
+## Additional Pre-Release Verification
 
-CLI가 명시 목적지를 거절해도 시도 한도 1에서 정상 종료하는 경로는 `claude_attempts`로 확인한다. 위임 인자 오류도 같은 표식으로 기록하는 일이 남았다. 재배포 시 고정 판본 복원과 손상된 예약의 개별 종료는 실제 PostgreSQL로 검증한다. [수락 기준](reliability.md)
+- CLI explicit-destination refusals exiting cleanly at retry limit 1 are tracked via `claude_attempts`; recording delegation-arg errors under the same marker remains open. Pinned-revision restoration on redeploy and isolated termination of corrupted schedules are verified against real PostgreSQL. ([Reliability](reliability.md))
+- **Conversational schedules:** One-shot and recurring CLI schedules processed by two schedulers — verify 1 creation per redelivery, 1 run per due tick, cancel-vs-intake races, DST, member revocation, cross-user query/cancel denial, and explicit `<quiet>` completion.
+- **Slack explicit-destination schedules:** `schedule.create` targeting a registered channel in the same profile requires owner approval to create the schedule and a second approval per firing before emitting one outbox reply (0 rows before each approval). Removing the channel stops future firings/deliveries; CLI/HTTP entrances reject explicit destinations.
+- **Owner-DM approval cards when general DM ingress is off:** Creating a schedule from a public channel opens each of the two cards once in the owner's DM and posts one status line (posted / failed / uncertain) in the origin channel. Clicks from other users/DMs or missing DM receipts produce 0 consumptions and 0 deliveries; redeliveries do not duplicate cards, notices, or sends. ([Reliability](reliability.md))
+- **Tool follow-up checks:** Interrupting immediately before/after result persistence preserves the ledger receipt alongside one one-shot schedule and halts at the chain cap.
+- **Tool config precedence:** Verify parent settings, child overrides, and sibling isolation on real tools; reject secret env collisions and missing required keys before launch.
+- **Persistent tool files:** Validate behind an opt-in adapter (owner-only read across restarts, cross-server/model block, symlink-escape prevention, concurrent writes, hard quota) before migrating profiles that require it.
 
-- 대화의 일회·반복 예약을 CLI에서 만들고 두 스케줄러로 처리한다. 재전달당 생성 1건, 예정 시각당 run 1건, 취소와 접수 경합, DST, 멤버 철회, 타인의 조회·취소, 명시한 무응답을 확인한다.
-- 가짜 Slack 입구에서 `schedule.create`로 같은 프로필의 등록 채널을 지정한다. 소유자의 첫 승인으로 예약 하나가 생기고, 발화 후 두 번째 승인으로 목적지 outbox에 답 하나가 생긴다. 각 승인 전에는 해당 행이 0건이다. 등록부에서 채널을 뺀 뒤에는 새 발화·발송이 0건이고, CLI·HTTP 입구에서 명시 목적지를 주면 생성이 0건이다.
-- 실제 PG와 가짜 Slack에서 일반 DM 입구를 끈 채 공개 채널에서 예약한다. 두 카드는 소유자 DM에서만 각각 한 번 열린다. 원래 채널에는 게시 확인, 확정 실패, 게시 여부 불명 중 해당 결과의 안내 한 줄만 남는다. 다른 사용자·DM에서 클릭하거나 DM 영수증을 잃으면 승인 소비와 목적지 발송은 0건이다. 같은 게시 결과나 버튼을 재전달해도 카드·안내·발송이 늘지 않는다. [승인 DM 수락 기준](reliability.md#slack-소유자에게-승인-카드를-전달할-때)
-- 도구의 후속 확인 요청을 결과 저장 직전·직후에 중단한다. 같은 원장 영수증과 일회 예약이 함께 남고, 연쇄 한도에서 추가 생성이 멈춘다.
-- 실제 도구에서 부모 설정·자식 재정의·형제 설정을 대조한다. 선언한 값만 보이며, 비밀 환경 이름과 충돌하거나 필요한 값이 빠지면 실행 전에 거절한다.
-- 영구 도구 파일은 별도 선택 어댑터로 검증한다. 재시작 후 소유 서버만 읽기, 다른 서버·모델의 읽기/쓰기 차단, 링크 탈출 차단, 동시 쓰기와 하드 용량 상한이 수락 조건이다. 이를 요구하는 프로필은 어댑터 검증 뒤에 이관한다.
+## Post-v2.0 Model Settings
 
-## v2.0 이후 모델 설정
+- `providers.<alias>` supports `effort` across `claude-cli` (default `medium`, 8,192 max output tokens), `anthropic-api`, and `openai-api`, plus `max_tokens` (and `max_completion_tokens` on `openai-api`). Future work adds per-agent `effort` and output-token overrides bounded by host caps.
+- Pi CLI (`kind: "pi"`) is unsupported in v2.0: unused runner code was removed (preserved in Git history) and `kind: "pi"` remains rejected in host config until isolation, resumption, and session-token boundaries are validated.
 
-호스트 `providers.<별칭>`에서는 `claude-cli`·`anthropic-api`·`openai-api` 모두 `effort`를 설정할 수 있고(`claude-cli`는 생략 시 `medium`, 최대 출력 8,192토큰), API 직접 호출은 `max_tokens`(`openai-api`는 `max_completion_tokens` 포함)도 설정할 수 있다. 이후에는 운영자가 정한 호스트 상한 안에서 에이전트마다 `effort`와 최대 출력 토큰 수를 개별 재정의할 수 있게 한다.
+## Time Library Migration
 
-v2.0에서 Pi CLI는 지원하지 않는다. 조립 경로가 없던 실행기 코드는 저장소에서 지웠고(Git 이력에 남아 있다), 호스트 설정의 `kind: "pi"`는 계속 거절한다. 다시 지원하려면 격리·재개 어댑터와 세션 토큰 보호를 먼저 검증한다.
+Before the next maintenance release, migrate cron iteration and backward catch-up to `jiff`, drop SQLx's `chrono` feature in favor of SQLx's `time` types, and diff DST gaps, repeated wall-clock times, half-hour offsets, persisted UTC cursor resumptions, and dual-scheduler schedules against the current implementation. Once `chrono` and `chrono-tz` leave the dependency tree, remove both maintenance exceptions and re-run all four `cargo-deny` checks. ([RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543.html) · [RUSTSEC-2026-0555](https://rustsec.org/advisories/RUSTSEC-2026-0555.html))
 
-## 시간 라이브러리 교체
+## Deferred Decisions
 
-다음 유지보수 릴리스 전에 cron의 순회·역방향 따라잡기를 jiff로 옮기고 SQLx의 chrono 기능을 제거한다. DB 변환이 필요한 곳은 SQLx의 time 타입을 사용한다. DST 누락·반복 시각·반시간 전환, 이미 저장한 UTC 커서 재개, 두 스케줄러의 발생 목록을 기존 판본과 대조한다. 의존 트리에서 chrono와 chrono-tz가 빠지면 두 유지보수 중단 예외를 삭제하고 네 종류의 cargo-deny 검사를 다시 실행한다. [chrono 권고](https://rustsec.org/advisories/RUSTSEC-2026-0543.html) · [chrono-tz 권고](https://rustsec.org/advisories/RUSTSEC-2026-0555.html)
+Items deliberately left out of current scope, with explicit revisit triggers so partial implementations are not added ad hoc.
 
-## 미룬 결정
-
-검토했지만 현재 범위에서 의도적으로 구현하지 않은 항목이다. 같은 논의를 되풀이하거나 맥락 없이 반쪽만 도입하지 않도록 이유와 재검토 조건을 남긴다.
-
-| 항목 | 지금 하지 않는 이유 | 다시 검토할 조건 |
+| Decision | Why Deferred | Revisit Trigger |
 |---|---|---|
-| 승인 기한을 DB 시계로 판정 | 브로커(`crates/bot-broker/src/service/gate.rs`, `crates/bot-broker/src/service/decide.rs`)가 로컬 시계로 만료를 계산·확인하고 저장소가 DB 시계로 소비·만료를 판정하지만, `OpenApproval`과 `CallLedger` 포트·카드·시험 대역까지 함께 바뀌어 영향 범위가 넓다. 현재는 호스트 간 NTP 시계 동기를 전제로 둔다. | 시계 오차를 허용하기 어려운 다중 호스트 브로커 배포에서 승인 조기·지연 만료가 관측되거나, `CallLedger::open_approval` 계약을 바꿀 때 |
-| 만료 정리의 묶음 처리 | `crates/bot-store/src/queue.rs`가 점유 직전에 만료 승인을 건수 상한 없이 순회하며 run별 `FOR UPDATE`를 기다린다(`crates/bot-store/src/approvals.rs`). 한정 배치와 잠긴 행 건너뛰기(`SKIP LOCKED`)를 넣으려면 단일 워커 재방문 주기와 전용 부분 색인까지 함께 검증해야 한다. | 대량 만료나 잠긴 run 대기로 점유 지연이 관측되거나, `bot_approvals`·`bot_runs` 만료 스캔이 DB 병목으로 잡힐 때 |
-| 닫힌 cron 구간의 끝 소진 처리 | 마지막 발생과 구간 끝(`until_ms`) 사이에 발생이 없는 닫힌 구간은 `until_ms > cursor_ms`가 남아 구판 번들을 계속 고정한다(`crates/bot-store/src/schedule.rs`, `crates/bot-store/src/profile_bundles.rs`). 커서를 잘못 앞당기면 예약 발생을 영구 누락하므로 `ScheduleStore` 확장과 경계·유한 배치 회귀 시험이 먼저 갖춰져야 한다. | 스케줄 정의 변경 뒤 발생 없는 닫힌 구간 때문에 구판 번들 해제가 막히는 운영 사례가 누적되거나, `ScheduleStore` 포트를 확장할 때 |
-| cron의 DST 벽시계 "한 번만" 정책 | 같은 5칸 cron 식도 실제 분마다 도는 작업과 현지 날짜별 1회 보고서를 식만으로 구분할 수 없어 기본 동작(`crates/bot-runtime/src/cron.rs`)을 바꾸면 기존 예약과 커서 의미가 깨진다. 벽시계 기준 1회 보장은 별도 선택 필드·구간 정의·승인 봉인·마이그레이션을 함께 추가해야 한다. | DST 전환이 있는 시간대에서 일일 보고·알림 예약의 연 2회 누락·중복을 막아야 하는 명시적 요구가 생길 때(선택 필드로 도입) |
-| 예약 명시 목적지의 발송자 열 | 일반 회신과 outbox는 발송자 키(`reply_transport`·`transport`)를 저장하지만, 예약 명시 목적지는 현재 호스트 등록부가 Slack 채널 바인딩만 허용해 `crates/bot-store/src/delivery.rs`에서 `slack`으로 고정한다. 지금 열을 늘리면 예약·전송 표와 승인 봉인 형식·재검증 경로가 사용처 없이 먼저 복잡해진다. | Slack 외의 두 번째 push 발송자를 예약 명시 목적지로 허용할 때(`ScheduleRoutes` 반환값과 승인 봉인에 발송자 식별자를 함께 고정) |
-| 토큰 예산의 강제 | 현재는 턴·시간 한도와 출력 토큰 상한만 두고, `usage`를 보고하지 않는 서버나 Claude CLI 프록시·직접 API 두 경로를 아우르는 저장소 예산기가 없다. 모델별 가격표에 기대는 비용 환산도 유지 부담이 크다. | 다회전 실행이나 깊은 위임에서 토큰 과다 소비를 실행·프로필 단위로 차단해야 할 때(단가 없는 토큰 수 상한과 두 실행 경로 공통 누적·미보고 정책 정의) |
-| 모델이 직접 쓰는 기억 도구(`memory.save`·`memory.forget`) | 저장소의 `MemoryStore::change`를 모델에 바로 열면 프롬프트 주입으로 개인 기억이 지속 오염되거나 중복 저장될 수 있다. 1:1 대화 한정, 본인 승인 여부, 개수·크기 상한과 호출 멱등 계약을 함께 확정해야 안전하게 공개할 수 있다. | 대화 중 모델이 기억을 직접 저장·삭제해야 하는 요구가 확정되고, 본인 승인·멱등 커밋·소유자별 한도 계약을 정할 때 |
-| `bot eval`(프로필 평가 실행) | 운영 바이너리에 시험 대역(`testing` 기능)을 넣지 않는 경계와 맞물려 선택 기능으로 둘지 별도 크레이트로 뺄지 구조 결정이 필요하다. 현재는 `bot validate`와 `bot map --json` 출력 비교로 권한 상한·도구 노출 회귀를 먼저 점검할 수 있다. | 프로필 작성자가 DB·외부 API 없이 시나리오별 인가·승인·거절 궤적을 CI에서 검증해야 하는 수요가 반복될 때 |
-| `bot validate --json` | 프로필 검증은 고정 코드(`Issue.code`)를 내지만 호스트 설정 검증은 아직 자유 문장 오류라, 기계 판독용 JSON 출력 스키마와 오류 코드 호환 계약을 먼저 고정해야 한다. | 외부 편집기나 CI 도구가 `bot validate` 출력을 기계적으로 파싱할 수요가 생겨 출력 스키마와 호스트 오류 코드 체계를 고정할 때 |
-| `host.schema.json`(호스트 설정의 JSON Schema) | 호스트 설정은 여러 모듈에 걸친 의미·경로·활성화 지문 검사가 본체이고, 설정 키의 문서 누락은 `.github/scripts/docs_contract.py`가 이미 감시한다. 9개 설정 모듈의 파싱을 스키마 우선으로 재편하는 비용이 당장 얻는 효용보다 크다. | 편집기 자동완성이나 외부 배포 도구가 `host.json` 구조 스키마를 요구하거나, 호스트 설정 파싱의 중복 키 검사를 일괄 정리할 때 |
-| 포트 계약 시험 묶음(testkit) | 브로커 전용 대역은 순환 의존 때문에 별도 크레이트로 빼기 어렵고, `bot-core` 포트 기준 대역과 PostgreSQL 공용 적합성 시험 매크로를 만들려면 여러 크레이트의 시험 구조를 함께 옮겨야 한다. | 가짜 저장소와 실제 PostgreSQL 구현의 동작 어긋남이 반복되거나, `bot-core` 포트의 두 번째 영속 백엔드를 도입할 때 |
-| clippy의 함수 길이 임계 | 현재는 `.github/scripts/check_contracts.py`가 파일 600줄 상한을 강제한다. `clippy.toml`에 함수 길이·인지 복잡도 임계를 켜면 기존 긴 함수들의 정리 계획과 단계적 하향 기준을 함께 관리해야 한다. | 파일 600줄 안에서 단일 함수 비대화나 높은 복잡도가 리뷰·유지보수 병목으로 반복될 때(현 최댓값 기준 설정 후 단계 하향) |
-| Linux에서의 모델 VM | Linux에서는 VM 없이 모델 프로세스 공격면이 없는 직접 API 경로(`anthropic-api`·`openai-api`)로 운영할 수 있고, `claude-cli`용 Linux VM 어댑터는 격리·네트워크 차단·세션 재개를 실환경에서 별도 검증해야 한다. | Linux 호스트에서 직접 API 대신 로컬 모델 CLI(`claude-cli`)를 격리 실행해야 하는 운영 수요가 확정될 때 |
-| MCP 클라이언트 라이브러리 도입 검토 | 자체 MCP 클라이언트(`crates/bot-broker/src/mcp.rs`, `crates/bot-broker/src/mcp/`)는 크기·헤더·정의 해시 잠금 등 하드닝 시험을 통과하며 동작 중이고, 외부 라이브러리가 이 보안 제약을 그대로 지킬 수 있는지 검증 스파이크가 아직 없다. | MCP 규격 갱신(새 전송 방식·인증·프로토콜 판본) 추종 비용이 자체 클라이언트 유지비를 넘을 때(기존 하드닝 시험 통과를 전제로 스파이크 후 결정) |
-| 보존 기간 정책(감사·원장·outbox 삭제) | 감사 체인·미판정 보류·재접수 중복 방지 키·참조 중인 판본을 성급히 삭제하면 중복 실행이나 감사 단절이 생긴다. 대상 표별 보존 경계와 외래 키·재전달 안전성을 먼저 확정해야 한다. | 종결된 실행·체크포인트·outbox 이력 누적으로 DB 용량이나 조회 성능에 부담이 관측될 때(참조 없는 종결 행의 dry-run 집계 후 단계적 도입) |
-| 스킬의 단계적 공개(필요할 때만 본문 적재) | 모델이 스킬 본문을 필요할 때만 읽게 하려면 새 읽기 경계(내장 도구·참조 파일 규칙·스캔 한도)와 판본 해시 규칙이 함께 바뀌어야 한다. 현재는 `SKILL.md` front matter의 `description`을 구조체에 보관하고 본문(front matter 제외)을 에이전트별 64 KiB 상한 안에서 시스템 프롬프트(`crates/bot-runtime/src/context.rs`)에 싣는 단순 구조로 충분하다. | 에이전트당 스킬 수나 본문 합계가 64 KiB 상한을 자주 넘겨, 요약(`description`)만 먼저 주고 필요할 때 본문을 불러오는 구조가 실측상 필요해질 때 |
+| DB-clock approval expiry | Broker (`crates/bot-broker/src/service/gate.rs`, `crates/bot-broker/src/service/decide.rs`) checks expiry on local clocks while store enforces DB clocks; unifying requires changing `OpenApproval`, `CallLedger`, cards, and test doubles. Assumes NTP sync across hosts. | Clock-skew expiry anomalies on multi-host brokers, or when changing `CallLedger::open_approval`. |
+| Batched approval expiry sweeps | `crates/bot-store/src/queue.rs` sweeps all expired approvals before claiming and waits on per-run `FOR UPDATE` (`crates/bot-store/src/approvals.rs`). Bounded batches with `SKIP LOCKED` need revisit cadence and partial-index tuning. | Claim latency from mass expiries or lock contention shows up in DB profiling. |
+| Exhausting empty closed cron intervals | Closed windows with no firing before `until_ms` keep `until_ms > cursor_ms`, pinning old bundles (`crates/bot-store/src/schedule.rs`, `crates/bot-store/src/profile_bundles.rs`). Advancing cursors unsafely risks permanent missed ticks; needs `ScheduleStore` extension and boundary tests. | Uncollected old bundles from edited schedules become an operational issue, or when extending `ScheduleStore`. |
+| Cron DST wall-clock "once" policy | A 5-field cron expression cannot distinguish every-minute jobs from once-per-local-day reports; altering `crates/bot-runtime/src/cron.rs` defaults breaks existing cursors. Needs an opt-in field, interval semantics, approval sealing, and migration. | Explicit demand to avoid twice-yearly DST skips/duplicates for daily reports. |
+| Explicit schedule destination transport column | General replies and outbox store `reply_transport`/`transport`, whereas explicit schedule destinations only allow Slack channel bindings and hardcode `slack` in `crates/bot-store/src/delivery.rs`. Adding a column prematurely complicates seals and re-validation. | Adding a second push transport for explicit scheduled destinations (`ScheduleRoutes` + approval seals). |
+| Enforced token budgets | Currently bounded by turn/time limits and output-token caps; no cross-path store budgeter covers non-reporting upstreams or both CLI proxy and direct API paths, and per-model pricing tables are high-maintenance. | Need to hard-cap token spend per run/profile across deep delegations with a price-free token limit and unreported-usage policy. |
+| Model-callable memory writes (`memory.save`, `memory.forget`) | Exposing `MemoryStore::change` directly risks persistent prompt-injection poisoning or duplicates. Needs 1:1-only scoping, owner approval, per-owner quotas, and idempotency contracts first. | Confirmed requirement for in-chat model memory writes with full approval/quota/idempotency rules. |
+| `bot eval` (offline profile evaluation) | Intersects the boundary excluding `testing` doubles from production binaries (optional feature vs separate crate). Today `bot validate` and `bot map --json` diffs catch scope/tool regressions. | Recurring CI demand to test scenario auth/approval/denial trajectories without DB or external APIs. |
+| `bot validate --json` | Profile checks emit stable `Issue.code` values, but host config errors remain free-form strings; needs a versioned JSON schema and host error-code contract first. | Editors or CI pipelines need machine-readable validation output. |
+| `host.schema.json` | Host validation is mostly semantic/path/fingerprint checks across 9 modules, and `.github/scripts/docs_contract.py` already guards documented keys. Rewriting parsing schema-first costs more than it returns today. | External tools demand autocomplete/schema validation for `host.json`, or during a duplicate-key parser consolidation. |
+| Port conformance testkit | Broker doubles hit circular-dependency constraints; extracting `bot-core` fakes and shared PG conformance macros requires restructuring tests across multiple crates. | Repeated drift between fake stores and PostgreSQL, or adding a second persistence backend. |
+| Clippy function-length thresholds | `.github/scripts/check_contracts.py` already enforces the 600-line file cap. Enabling `clippy.toml` length/complexity thresholds requires a phased ratcheting plan for existing functions. | Oversized single functions inside 600-line files become a recurring review bottleneck. |
+| Model VMs on Linux | Linux hosts can run zero-VM direct APIs (`anthropic-api`, `openai-api`); a Linux `claude-cli` VM adapter needs dedicated isolation, network-block, and resume verification. | Confirmed operational need to run local `claude-cli` on Linux instead of direct APIs. |
+| External MCP client library | The in-house client (`crates/bot-broker/src/mcp.rs`, `crates/bot-broker/src/mcp/`) passes size, header, and schema-hash-pinning hardening tests; no spike yet proves an external crate preserves these guarantees. | Tracking new MCP transports/auth/versions costs more than maintaining the internal client (gated on passing existing hardening tests). |
+| Data retention / pruning policy | Prematurely purging audit chains, open holds, idempotency keys, or referenced revisions risks duplicate runs or broken audits; requires per-table boundaries and redelivery-safety proofs. | Completed run, checkpoint, or outbox growth measurably impacts DB storage or query latency (start with dry-run counts of unreferenced terminal rows). |
+| Progressive skill body loading | Loading skill bodies lazily changes read boundaries, scan limits, and revision hashing. Keeping `SKILL.md` front matter `description` in structs and injecting bodies within the 64 KiB per-agent cap (`crates/bot-runtime/src/context.rs`) is currently sufficient. | Agents routinely hit the 64 KiB skill body cap and measurements justify summary-first lazy loading. |

@@ -1,4 +1,4 @@
-//! 사용자 예약(PG): 만든 run에서 신원을 복원해 생성·취소와 호출 완료·감사를 한 커밋으로, 한도, 목록, 자동 후속 확인.
+//! User schedules (PG): identity restoration from the run, atomic create/cancel with call completion and audit, quotas, listing, and wake depth.
 
 use crate::support::{schedule::*, *};
 use bot_core::{command::*, id::*, ledger::*, port::*, schedule::*, state::*};
@@ -21,7 +21,6 @@ async fn creating_restores_identity_from_the_run_commits_the_call_and_replays_id
     let spec = spec_in(&db, 3_600_000).await;
     let id = make(&db, &run, "c1", spec.clone()).await.unwrap();
 
-    // 신원은 호출자가 아니라 run에서 복원한다
     assert_eq!(column::<String>(&db, &id, "owner").await, OWNER);
     assert_eq!(column::<String>(&db, &id, "agent").await, "main");
     assert_eq!(column::<String>(&db, &id, "origin_binding").await, "desk");
@@ -33,7 +32,6 @@ async fn creating_restores_identity_from_the_run_commits_the_call_and_replays_id
     );
     assert_eq!(column::<String>(&db, &id, "state").await, "active");
     assert_eq!(column::<i16>(&db, &id, "wake_depth").await, 0);
-    // 호출은 같은 커밋에서 끝났고 결과는 예약 ID다
     let result = db
         .scalar::<String>("select result from bot_calls where call = 'c1'")
         .await;
@@ -41,7 +39,6 @@ async fn creating_restores_identity_from_the_run_commits_the_call_and_replays_id
     assert_eq!(audits(&db, "schedule.create").await, 1);
     assert_eq!(audits(&db, "call.done").await, 1);
 
-    // 완료한 호출의 재접수는 같은 예약이다(새로 만들지 않는다)
     let again = users(&db)
         .create(start_call(&run.attempt, "c1", None), spec)
         .await
@@ -61,12 +58,15 @@ async fn bad_input_unapproved_destinations_and_http_callers_leave_no_trace() {
     };
     let run = run_in(&db, "r1", OWNER, ConversationKind::Direct).await;
     let now = db.now_ms().await;
-    let past = plain(Timing::At(at(now - 1000)), "지난 일");
+    let past = plain(Timing::At(at(now - 1000)), "past task");
     assert!(matches!(
         make(&db, &run, "c1", past).await,
         Err(Error::Invalid)
     ));
-    let far = plain(Timing::At(at(now + 10 * 366 * 24 * 3_600_000)), "먼 일");
+    let far = plain(
+        Timing::At(at(now + 10 * 366 * 24 * 3_600_000)),
+        "far future task",
+    );
     assert!(matches!(
         make(&db, &run, "c2", far).await,
         Err(Error::Invalid)
@@ -76,7 +76,7 @@ async fn bad_input_unapproved_destinations_and_http_callers_leave_no_trace() {
         make(&db, &run, "c3", zone).await,
         Err(Error::Invalid)
     ));
-    for text in ["", "  \n", &"가".repeat(MAX_INSTRUCTION_BYTES), "a\0b"] {
+    for text in ["", "  \n", &"€".repeat(MAX_INSTRUCTION_BYTES), "a\0b"] {
         let mut spec = spec_in(&db, 60_000).await;
         spec.instruction = text.into();
         assert!(
@@ -84,7 +84,6 @@ async fn bad_input_unapproved_destinations_and_http_callers_leave_no_trace() {
             "{text:?}"
         );
     }
-    // 다른 수신자에게 가는 예약은 승인한 호출이어야 한다
     let mut spec = spec_in(&db, 60_000).await;
     spec.destination = Some(DeliveryTarget {
         binding: BindingId("slack".into()),
@@ -108,9 +107,8 @@ async fn bad_input_unapproved_destinations_and_http_callers_leave_no_trace() {
         db.scalar::<i64>("select count(*) from bot_calls where state = 'done'")
             .await,
         0,
-        "거절한 예약은 호출을 끝내지 않는다"
+        "denied schedule creation must not complete the call"
     );
-    // HTTP 호출자에게는 나중에 보낼 길이 없다
     let http = run_in(&db, "r2", "http:caller", ConversationKind::Http).await;
     let spec = spec_in(&db, 60_000).await;
     assert!(matches!(
@@ -135,11 +133,9 @@ async fn the_active_limit_counts_one_owner_across_calls_and_frees_on_cancel() {
         make(&db, &run, "over", spec).await,
         Err(Error::Denied)
     ));
-    // 취소하면 자리가 난다
     cancel_with(&db, &run, "cancel-1", &ids[0]).await.unwrap();
     let spec = spec_in(&db, 90_000).await;
     assert!(make(&db, &run, "again", spec).await.is_ok());
-    // 다른 소유자의 한도는 따로다
     let other = run_in(&db, "r2", "local:guest", ConversationKind::Direct).await;
     let spec = spec_in(&db, 90_000).await;
     assert!(make(&db, &other, "g1", spec).await.is_ok());
@@ -155,7 +151,6 @@ async fn only_the_owner_cancels_and_cancelling_twice_changes_nothing() {
     let id = make(&db, &run, "c1", spec).await.unwrap();
     let guest = run_in(&db, "r2", "local:guest", ConversationKind::Direct).await;
     begin_tool(&db, &guest, "x1", "schedule.cancel", cancel_hash(&id)).await;
-    // 남의 예약과 없는 예약은 같다
     assert!(matches!(
         users(&db)
             .cancel(start_call(&guest.attempt, "x1", None), id.clone())
@@ -167,14 +162,12 @@ async fn only_the_owner_cancels_and_cancelling_twice_changes_nothing() {
     cancel_with(&db, &run, "k1", &id).await.unwrap();
     assert_eq!(column::<String>(&db, &id, "state").await, "canceled");
     assert!(column::<Option<i64>>(&db, &id, "next_ms").await.is_none());
-    // 같은 호출의 재접수도, 새 호출의 두 번째 취소도 아무것도 바꾸지 않는다
     users(&db)
         .cancel(start_call(&run.attempt, "k1", None), id.clone())
         .await
         .unwrap();
     cancel_with(&db, &run, "k2", &id).await.unwrap();
     assert_eq!(audits(&db, "schedule.cancel").await, 2);
-    // 같은 호출을 다른 예약의 취소로 재사용하면 충돌이다
     let other = make(&db, &run, "c2", spec_in(&db, 60_000).await)
         .await
         .unwrap();
@@ -217,7 +210,6 @@ async fn the_list_is_mine_only_in_id_order_and_needs_the_current_claim_and_revis
     assert!(list.iter().any(
         |s| matches!(s.timing, Timing::Cron { ref timezone, .. } if timezone == "Asia/Seoul")
     ));
-    // 낡은 판본·옛 세대는 읽지 못한다
     assert!(matches!(
         users(&db)
             .list(run.attempt.clone(), Revision("r0".into()))
@@ -230,7 +222,6 @@ async fn the_list_is_mine_only_in_id_order_and_needs_the_current_claim_and_revis
         users(&db).list(old, Revision("r1".into())).await,
         Err(Error::Stale)
     ));
-    // 취소한 예약은 목록에서 빠진다
     cancel_with(&db, &run, "k1", &ids[0]).await.unwrap();
     let list = users(&db)
         .list(run.attempt.clone(), Revision("r1".into()))
@@ -252,7 +243,7 @@ async fn a_wake_keeps_the_tool_result_with_one_follow_up_per_call_and_the_chain_
         .unwrap();
     let wake = |depth_secs: i64, now: i64| Wake {
         at: at(now + depth_secs),
-        instruction: "결과를 확인해".into(),
+        instruction: "check the result".into(),
         quiet: true,
     };
     let now = db.now_ms().await;
@@ -274,7 +265,6 @@ async fn a_wake_keeps_the_tool_result_with_one_follow_up_per_call_and_the_chain_
         calls(&db).begin(run.attempt.clone(), call("t1"), tool("web.search"), [1; 32]).await.unwrap().phase,
         CallPhase::Done(ref r) if r.0 == r#"{"started":true}"#
     ));
-    // 재전달은 같은 후속 예약이다
     let again = users(&db)
         .finish_with_wake(
             run.attempt.clone(),
@@ -291,7 +281,6 @@ async fn a_wake_keeps_the_tool_result_with_one_follow_up_per_call_and_the_chain_
             .await,
         1
     );
-    // 시작하지 않은 호출·낡은 판본은 받지 않는다
     begin_call(&db, &run.attempt, "t2").await;
     assert!(matches!(
         users(&db)
@@ -321,7 +310,6 @@ async fn a_wake_keeps_the_tool_result_with_one_follow_up_per_call_and_the_chain_
             .await,
         Err(Error::Stale)
     ));
-    // 연쇄가 이미 8이면 더 만들지 않는다(도구 결과는 일반 완료로 남긴다)
     db.sql("update bot_runs set wake_depth = 8").await;
     assert!(matches!(
         users(&db)

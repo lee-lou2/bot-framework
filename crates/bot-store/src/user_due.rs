@@ -1,6 +1,6 @@
-//! 사용자 예약의 발화: `due`가 DB 시각까지 확인할 예약을 읽고, `advance`가 발생 접수(run 생성)·커서·다음 확인 시각을 **한 커밋**으로 쓴다.
-//! cron 계산·시간대·DST와 현재 판본(멤버·바인딩·에이전트·권한) 확인은 스케줄러 몫이고, 저장소는 판본 보호·커서·발생 유일키·취소와의 직렬화를 맡는다.
-//! 잠금 순서: 활성 판본 → 예약 행. 같은 발생(프로필·예약·예정 시각)은 언제나 같은 run으로 수렴한다.
+//! User schedule firing: keyset-paginated `due` scans and atomic `advance` (fire, wait, or close).
+//!
+//! Lock order: active revision -> (origin run, when posting a close notice) -> schedule row -> audit head.
 
 use crate::{
     accept::{check, insert_run},
@@ -22,7 +22,6 @@ use serde_json::json;
 use sqlx::{Row, postgres::PgRow};
 use std::collections::BTreeSet;
 
-/// 행의 `(다음 확인 시각, 프로필, ID)` 자리.
 fn pos_of(row: &PgRow) -> DuePos {
     DuePos {
         at: ms_to_time(row.get("next_ms")),
@@ -31,7 +30,7 @@ fn pos_of(row: &PgRow) -> DuePos {
     }
 }
 
-/// 행의 시각 정의. 읽을 수 없는 cron(저장은 됐지만 지금 해석기가 받지 않는다)이나 맞지 않는 열 조합은 None이다 — 그 한 행만 따로 닫는다.
+/// Parses stored timing; returns `None` on corrupt/unparseable rows so callers can close just that schedule.
 fn timing_of(row: &PgRow) -> Option<Timing> {
     match (
         row.get::<Option<i64>, _>("at_ms"),
@@ -46,7 +45,7 @@ fn timing_of(row: &PgRow) -> Option<Timing> {
     }
 }
 
-/// 행을 읽는다. 저장된 값을 읽을 수 없으면(저장소 장애가 아니라 값이 지금 해석되지 않는다) 닫을 사유를 돌려준다: 시각 정의가 먼저, 그다음 목적지.
+/// Decodes a schedule row, returning `Ok(Err(reason))` for corrupt data (timing checked before destination).
 fn due_of(row: &PgRow) -> R<Result<DueSchedule, CloseReason>> {
     let Some(timing) = timing_of(row) else {
         return Ok(Err(CloseReason::InvalidTiming));
@@ -73,7 +72,7 @@ fn due_of(row: &PgRow) -> R<Result<DueSchedule, CloseReason>> {
     }))
 }
 
-/// 발화한 run의 접수 명령: 저장된 정의와 원래 대화에서 만든다(호출자가 바꿔 끼울 수 없다).
+/// Builds the run's `Accept` command strictly from stored schedule and origin fields.
 fn accept_of(
     row: &PgRow,
     revision: &Revision,
@@ -107,7 +106,7 @@ fn accept_of(
     })
 }
 
-/// 비활성 프로필의 Close만 판본 없이 받는다: 정말 비활성인지 보호 잠금 안에서 확인한다.
+/// Verifies the active profile revision, or confirms profile inactivity for `Close(ProfileInactive)` under `FOR SHARE`.
 async fn guard(tx: &mut Tx<'_>, cmd: &AdvanceSchedule) -> R<()> {
     match &cmd.checked_revision {
         Some(_)
@@ -142,15 +141,8 @@ async fn guard(tx: &mut Tx<'_>, cmd: &AdvanceSchedule) -> R<()> {
 }
 
 impl Store {
-    /// 옛 집합에 묶인 핸들은 읽지 못한다(`Stale`): 판본 교체 뒤 구판 스케줄러가 같은 쪽을 계속 읽으며 도는 일을 막는다.
-    /// `after`가 있으면 `(next_ms, profile, id)`가 그 자리 **뒤**인 행부터 읽는다(keyset): 스케줄러가 처리하지 못해 남겨 둔 예약(등록부 장애로 보류된 것 등)이
-    /// 첫 쪽을 계속 채워 뒤의 다른 예약을 막지 않게 한다. 이 읽기는 행을 건드리지 않는다(발생 시각 · 커서 · 다음 확인 시각 그대로).
-    /// 바퀴의 끝은 바퀴를 시작할 때(`after`가 없을 때) 지금 확인할 예약의 마지막 행으로 **고정**한다. 이 끝은 키(자리) 상한일 뿐 전체 행의 스냅숏이 아니다:
-    /// 읽는 동안 새로 확인 대상이 된 예약은 자리가 끝 뒤에 놓이면 다음 바퀴에 보고, 이어 읽을 자리와 끝 사이에 놓이면 이번 바퀴에도 보일 수 있다.
-    /// 발화로 다음 확인 시각이 앞으로 간 예약도 그 사이에 놓이면 같은 바퀴의 뒤쪽 쪽에 다시 나타난다 — 바퀴 하나에서 예약마다 한 번씩만 차례를 주는 것은 부르는 쪽 몫이다.
-    /// 계속 새 예약이 들어와도 바퀴는 끝나고(끝 뒤의 행은 이번 바퀴가 읽지 않는다), 앞쪽에 남겨 둔 예약이 다시 보인다. 끝 행까지 읽었으면 `next`는 None이다.
-    /// 저장된 시각 정의(cron)를 읽을 수 없는 행은 `unreadable`로 따로 돌려준다(저장소 장애가 아니라 저장된 값이 읽히지 않는 경우만): 한 행의 손상이 쪽 전체를 막지 않는다.
-    /// `limit`과 `next`는 정상 + 손상 행을 합친 쪽을 기준으로 하므로 손상 행만 있는 쪽도 앞으로 간다. 이 읽기는 닫지 않는다 — 닫는 것은 스케줄러의 `advance(Close)`다.
+    /// Keyset-scans due active schedules in `(next_ms, profile, id)` order within a frozen sweep upper bound `end`.
+    /// Unreadable rows are returned separately in `unreadable` without blocking the page or mutating state.
     pub(crate) async fn schedule_due(&self, after: Option<DueKey>, limit: u32) -> R<DuePage> {
         let limit = limit.clamp(1, 500);
         let mut tx = self.begin_authorized().await?;
@@ -188,7 +180,7 @@ impl Store {
             "select {} from bot_user_schedules where state = 'active' and next_ms <= $1
                and (next_ms, profile, id) <= ($3, $4, $5) {from} order by next_ms, profile, id limit $2", crate::cols::USER_SCHEDULES
         );
-        // 한 행을 더 읽어 «이 바퀴에 읽을 것이 더 남았는지» 본다(끝 행이 쪽의 마지막이면 빈 쪽을 따로 읽지 않는다)
+        // Fetch limit + 1 to detect whether more rows remain within this sweep bound.
         let mut query = sqlx::query(&sql)
             .bind(now)
             .bind(i64::from(limit) + 1)
@@ -209,7 +201,6 @@ impl Store {
             after: pos_of(last),
             end,
         });
-        // 행마다 해석한다: 값을 읽지 못한 행은 따로 돌려주고(읽기 전용 — 닫는 것은 스케줄러의 advance), 나머지는 그대로 한 쪽에 담는다
         let (mut schedules, mut unreadable) = (Vec::new(), Vec::new());
         for row in &rows {
             match due_of(row)? {
@@ -237,7 +228,7 @@ impl Store {
         let expected = time_to_ms(cmd.expected_cursor);
         let mut tx = self.begin_authorized().await?;
         guard(&mut tx, &cmd).await?;
-        // 안내를 남길 종료는 안내가 들어갈 run의 잠금을 예약 행보다 먼저 잡는다(run → 예약 순서, 일반 회신과 같은 run 잠금 아래에서 순번을 정한다)
+        // Lock the origin run before the schedule row when a close notice will be enqueued (preserves run -> schedule order).
         if let NextOccurrence::Close(closing) = &cmd.next
             && closing.notice().is_some()
         {
@@ -254,31 +245,28 @@ impl Store {
         .ok_or(Error::Missing)?;
         let state: String = row.get("state");
         let cursor: i64 = row.get("cursor_ms");
-        // 닫힌 예약: 닫는 요청은 이미 이뤄진 것이고, 발화·대기는 더는 할 수 없다(취소와 접수는 이 잠금으로 직렬화된다)
+        // Closed schedules ignore further closes and converge matching `Fire` retries onto the already-accepted run.
         if state != "active" {
             tx.rollback().await?;
             return match cmd.next {
                 NextOccurrence::Close(_) => Ok(None),
-                NextOccurrence::Fire { at, .. } => {
-                    // 취소 전에 이미 접수한 같은 발생이면 그 run으로 수렴한다
-                    self.occurrence_run(profile, id, time_to_ms(at))
-                        .await?
-                        .map(Some)
-                        .ok_or(Error::Stale.into())
-                }
+                NextOccurrence::Fire { at, .. } => self
+                    .occurrence_run(profile, id, time_to_ms(at))
+                    .await?
+                    .map(Some)
+                    .ok_or(Error::Stale.into()),
                 NextOccurrence::WaitUntil(_) => Err(Error::Stale.into()),
             };
         }
         match cmd.next {
             NextOccurrence::Close(closing) => {
-                // 닫는 결정도 읽은 커서를 기준으로 한다: 그 사이 다른 스케줄러가 움직였다면 낡은 결정이니 감사·안내 없이 거절한다(다시 읽고 다시 정한다)
+                // Reject stale close decisions if another scheduler already moved the cursor.
                 if cursor != expected {
                     return Err(Error::Stale.into());
                 }
                 let reason = closing.code();
                 close(&mut tx, profile, id, reason).await?;
                 let mut audits = Vec::new();
-                // 수신 경로가 없어진 예약은 원래 대화에 고정 안내 한 건을 같은 커밋으로 남긴다
                 if let Some(text) = closing.notice() {
                     crate::user_notice::push_into(&mut tx, &row, text, &mut audits).await?;
                 }
@@ -315,7 +303,7 @@ impl Store {
             NextOccurrence::Fire { at, next, scopes } => {
                 let (at_ms, next_ms) = (time_to_ms(at), next.map(time_to_ms));
                 if cursor != expected {
-                    // 다른 스케줄러가 먼저 움직였다: 같은 발생이면 그 run으로 수렴하고, 아니면 이 입력은 낡았다
+                    // Another scheduler moved the cursor: converge if the same occurrence was accepted, otherwise reject as stale.
                     tx.rollback().await?;
                     return self
                         .occurrence_run(profile, id, at_ms)
@@ -328,7 +316,7 @@ impl Store {
                     .await?;
                 let ceiling: Vec<String> = row.get("ceiling");
                 let timed_at: Option<i64> = row.get("at_ms");
-                // 시각 규칙: 아직 오지 않았거나(스케줄러 호스트 시계가 빠르다) 커서 뒤로 가는 발생, 한 번짜리의 다른 시각·다음 발생은 받지 않는다
+                // Reject future times (host clock ahead), backward cursors, mismatched one-shot times, or scopes exceeding the ceiling.
                 if at_ms > now
                     || at_ms <= cursor
                     || next_ms.is_some_and(|n| n <= at_ms)
@@ -338,9 +326,8 @@ impl Store {
                     return invalid();
                 }
                 let revision = cmd.checked_revision.clone().ok_or(Error::Invalid)?;
-                // 원래 대화의 발송 책임은 예약을 만든 실행에 고정돼 있다.
-                // 푸시 대화인데 발송 키가 비어 있는 구판 실행은 업그레이드 때 매핑을 빠뜨린 경우에만 생긴다.
-                // 자동으로 닫으면 운영자 누락으로 사용자 예약이 되돌릴 수 없이 사라지므로, 발화만 거절해 두고 키를 채우면 다음 점검에 다시 발화하게 둔다.
+                // Reject firing without closing if a legacy push origin is missing `reply_transport`,
+                // so operators can backfill the mapping without losing the user's schedule.
                 let origin_transport: Option<String> = sqlx::query_scalar(
                     "select reply_transport from bot_runs where profile = $1 and id = $2",
                 )
@@ -380,7 +367,7 @@ impl Store {
                 .bind(row.get::<bool, _>("origin_private_read"))
                 .execute(&mut *tx)
                 .await?;
-                // 명시 목적지가 있으면 발화를 접수한 같은 커밋에서 목적지를 이 run에 고정한다(예약을 나중에 취소해도 바뀌지 않는다)
+                // Pin explicit destination to this run at fire time so later schedule cancellation does not alter it.
                 if row.get::<Option<String>, _>("dest_binding").is_some() {
                     sqlx::query(
                         "insert into bot_deliveries (profile, run, dest_binding, dest_kind, dest_id, dest_thread)
@@ -422,7 +409,7 @@ impl Store {
                     &run,
                     "accepted",
                 )];
-                // 마지막 발생을 접수하면 같은 커밋에서 정상 종료로 닫힌다(감사 한 줄, 안내 없음)
+                // Final occurrence closes the schedule as `Finished` in the same commit.
                 if next_ms.is_none() {
                     audits.push(OwnedEntry::new(
                         profile,
@@ -439,7 +426,6 @@ impl Store {
         }
     }
 
-    /// 이미 접수한 발생의 run.
     async fn occurrence_run(&self, profile: &str, schedule: &str, at_ms: i64) -> R<Option<RunId>> {
         let run: Option<String> = sqlx::query_scalar(
             "select run from bot_user_occurrences where profile = $1 and schedule = $2 and at_ms = $3",

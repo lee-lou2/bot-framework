@@ -1,4 +1,4 @@
-//! 이벤트 시험(`slack_events`·`slack_reactions`)이 함께 쓰는 도우미: 채널 바인딩 프로필·스레드 증거 키·프레임·반응 트리거.
+//! Shared helpers for Slack event and reaction integration tests.
 #![allow(dead_code)]
 use super::*;
 use bot_core::{
@@ -28,9 +28,9 @@ pub fn channel_profile(events: &[SlackEvent]) -> Fixture {
         )
         .member("slack:home/U1", &["owner"])
         .member("slack:home/U3", &["owner"])
-        // 도구만 쓸 수 있고 에이전트는 실행하지 못하는 멤버(`run` 없음)
+        // Tool-only member without `run` scope.
         .member("slack:home/U5", &["reader"])
-        // 멤버로 (잘못) 올라 있는 Slackbot: 사람 판정이 멤버 확인과 별개로 거른다
+        // Slackbot registered as a member to verify human check runs independently.
         .member("slack:home/USLACKBOT", &["owner"])
         .role("owner", &["run"])
         .role("reader", &["agenda.read"])
@@ -48,7 +48,6 @@ pub fn thread(root: &str) -> BotThread {
     }
 }
 
-/// 스레드 안의 `app_mention` 프레임
 pub fn mention_in_thread(envelope: &str, user: &str, ts: &str, root: &str, text: &str) -> Value {
     json!({"type": "events_api", "envelope_id": envelope, "payload": {
         "team_id": "T1", "event_id": format!("Ev-{envelope}"),
@@ -60,7 +59,7 @@ pub fn event(envelope: &str, event: Value) -> Value {
         "team_id": "T1", "event_id": format!("Ev-{envelope}"), "event": event}})
 }
 
-/// 프레임을 보내고 **이번에 보낸 만큼** 더 ack될 때까지 기다린다(앞서 받은 ack는 세지 않는다).
+/// Pushes frames and waits for that many additional acks beyond prior ones.
 pub async fn push_all(rig: &Rig, frames: Vec<Value>) {
     let want = rig.slack.acks().len() + frames.len();
     for frame in frames {

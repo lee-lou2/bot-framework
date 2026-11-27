@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 716" width="1120" height="716" role="img" aria-labelledby="t-rt-d d-rt-d">
-  <title id="t-rt-d">Bot Framework 런타임 아키텍처 및 신뢰 경계</title>
-  <desc id="d-rt-d">Gateway, Scheduler, Admin이 PostgreSQL(bot-store)에 요청과 승인을 기록하고, 신뢰 호스트의 Worker와 Broker(단일 인가 관문)가 모델 VM, 상류 모델 API, MCP 도구 샌드박스(srt), 원격 MCP 서버를 격리 실행하는 구조.</desc>
+  <title id="t-rt-d">Bot Framework Runtime Architecture &amp; Trust Boundaries</title>
+  <desc id="d-rt-d">Gateway, Scheduler, and Admin commit requests and approvals to PostgreSQL (bot-store), while the trusted host Worker and Broker (single authorization gate) run isolated Model VMs, upstream Model APIs, MCP tool sandboxes (srt), and remote MCP servers.</desc>
   <style>
     .bg { fill: #1c212c; }
     .frame { fill: #1c212c; stroke: #343d50; stroke-width: 1; }
@@ -78,8 +78,8 @@
     <rect x="0" y="76" width="1120" height="560" fill="url(#dots-rt-d)" opacity="0.6"/>
     <!-- Header -->
     <text x="24" y="28" class="h-eye">ARCHITECTURE · BOT FRAMEWORK · RUNTIME &amp; TRUST BOUNDARIES</text>
-    <text x="24" y="51" class="h-title">Bot Framework 전체 런타임 아키텍처</text>
-    <text x="24" y="67" class="h-sub">단일 바이너리(bot serve --role all)가 프로필을 읽어 DB에 먼저 커밋하고, 브로커 관문과 샌드박스 격리 아래 실행·회신하는 구조</text>
+    <text x="24" y="51" class="h-title">Bot Framework Runtime Architecture</text>
+    <text x="24" y="67" class="h-sub">Single binary (bot serve --role all) loads profiles, commits to PostgreSQL first, and executes via the broker gate &amp; sandboxes</text>
     <line x1="0" y1="76" x2="1120" y2="76" class="hdr-rule"/>
 
     <!-- Diagram canvas translated down by 68 -->
@@ -116,31 +116,31 @@
 
       <!-- EDGE LABELS -->
       <rect x="220" y="76" width="56" height="13" rx="2" class="lbl-bg"/>
-      <text x="248" y="86" text-anchor="middle" class="elbl-acc">접수 커밋</text>
+      <text x="248" y="86" text-anchor="middle" class="elbl-acc">Accept TX</text>
       <rect x="224" y="140" width="44" height="13" rx="2" class="lbl-bg"/>
-      <text x="246" y="150" text-anchor="middle" class="elbl">회신</text>
+      <text x="246" y="150" text-anchor="middle" class="elbl">Reply</text>
       <rect x="222" y="268" width="52" height="13" rx="2" class="lbl-bg"/>
-      <text x="248" y="278" text-anchor="middle" class="elbl">예약 접수</text>
+      <text x="248" y="278" text-anchor="middle" class="elbl">Schedule</text>
       <rect x="220" y="444" width="56" height="13" rx="2" class="lbl-bg"/>
-      <text x="248" y="454" text-anchor="middle" class="elbl">승인 · 제어</text>
+      <text x="248" y="454" text-anchor="middle" class="elbl">Decide/Ops</text>
       <rect x="454" y="100" width="56" height="13" rx="2" class="lbl-bg"/>
-      <text x="482" y="110" text-anchor="middle" class="elbl">리스 점유</text>
+      <text x="482" y="110" text-anchor="middle" class="elbl">Claim run</text>
       <rect x="454" y="248" width="56" height="13" rx="2" class="lbl-bg"/>
-      <text x="482" y="258" text-anchor="middle" class="elbl">결과 · 회신</text>
+      <text x="482" y="258" text-anchor="middle" class="elbl">Done/Reply</text>
       <rect x="454" y="324" width="60" height="13" rx="2" class="lbl-bg"/>
-      <text x="484" y="334" text-anchor="middle" class="elbl-acc">원장 · 감사</text>
+      <text x="484" y="334" text-anchor="middle" class="elbl-acc">Call/Audit</text>
       <rect x="454" y="496" width="56" height="13" rx="2" class="lbl-bg"/>
-      <text x="482" y="506" text-anchor="middle" class="elbl">키 · 판본</text>
+      <text x="482" y="506" text-anchor="middle" class="elbl">Keys/Rev</text>
       <rect x="572" y="244" width="96" height="14" rx="2" class="lbl-bg"/>
       <text x="620" y="254" text-anchor="middle" class="elbl-acc">Broker::call</text>
       <rect x="742" y="92" width="70" height="13" rx="2" class="lbl-bg"/>
-      <text x="777" y="102" text-anchor="middle" class="elbl">VM 기동</text>
+      <text x="777" y="102" text-anchor="middle" class="elbl">Spawn VM</text>
       <rect x="728" y="246" width="64" height="14" rx="2" class="lbl-bg"/>
-      <text x="760" y="256" text-anchor="middle" class="elbl-acc">릴레이 HTTP</text>
+      <text x="760" y="256" text-anchor="middle" class="elbl-acc">Relay HTTP</text>
       <rect x="766" y="168" width="48" height="14" rx="2" class="lbl-bg"/>
-      <text x="790" y="178" text-anchor="middle" class="elbl-lnk">직접 API</text>
+      <text x="790" y="178" text-anchor="middle" class="elbl-lnk">API call</text>
       <rect x="760" y="294" width="56" height="14" rx="2" class="lbl-bg"/>
-      <text x="788" y="304" text-anchor="middle" class="elbl-lnk">모델 프록시</text>
+      <text x="788" y="304" text-anchor="middle" class="elbl-lnk">API proxy</text>
       <rect x="748" y="368" width="56" height="13" rx="2" class="lbl-bg"/>
       <text x="776" y="378" text-anchor="middle" class="elbl">stdio</text>
       <rect x="738" y="494" width="76" height="13" rx="2" class="lbl-bg"/>
@@ -154,121 +154,121 @@
         <line x1="48" y1="116" x2="200" y2="116" class="div"/>
         <text x="48" y="134" class="sub">CLI · Slack · OpenAI HTTP</text>
         <text x="48" y="152" class="mono">verify → normalize</text>
-        <text x="48" y="168" class="mono">→ accept → outbox 회신</text>
+        <text x="48" y="168" class="mono">→ accept → outbox reply</text>
       </g>
       <g id="node-scheduler">
         <rect x="36" y="232" width="176" height="104" rx="6" class="node"/>
         <text x="48" y="252" class="eye">ROLE · bot-runtime</text>
         <text x="48" y="274" class="ttl">Scheduler</text>
         <line x1="48" y1="284" x2="200" y2="284" class="div"/>
-        <text x="48" y="302" class="sub">정적 Cron · 대화 예약</text>
-        <text x="48" y="318" class="mono">직접 도구 / 에이전트 트리거</text>
+        <text x="48" y="302" class="sub">Static Cron · Chat Schedules</text>
+        <text x="48" y="318" class="mono">Direct tool / agent runs</text>
       </g>
       <g id="node-admin">
         <rect x="36" y="384" width="176" height="140" rx="6" class="node"/>
         <text x="48" y="404" class="eye">ROLE · bot-admin</text>
-        <text x="48" y="426" class="ttl">Admin · 사람 승인</text>
+        <text x="48" y="426" class="ttl">Admin · Approvals</text>
         <line x1="48" y1="436" x2="200" y2="436" class="div"/>
-        <text x="48" y="454" class="sub">axum 관리 UI / API</text>
-        <text x="48" y="472" class="sub">승인 카드 · 실행 재개/취소</text>
-        <text x="48" y="492" class="mono">OTLP 추적 · 로그</text>
-        <text x="48" y="508" class="mono">Sentry 호환 이슈 트래커</text>
+        <text x="48" y="454" class="sub">axum Admin UI / API</text>
+        <text x="48" y="472" class="sub">Approvals · Resume / Cancel</text>
+        <text x="48" y="492" class="mono">OTLP traces · logs</text>
+        <text x="48" y="508" class="mono">Sentry-compatible issues</text>
       </g>
       <g id="node-pg">
         <rect x="284" y="148" width="164" height="248" rx="6" class="node-focal"/>
         <text x="296" y="168" class="eye-acc">FOCAL · bot-store</text>
         <text x="296" y="192" class="ttl-acc">PostgreSQL</text>
-        <text x="296" y="208" class="sub">단일 영속 원장 (접수 = 커밋)</text>
+        <text x="296" y="208" class="sub">Durable store (accept=TX)</text>
         <line x1="296" y1="220" x2="436" y2="220" class="div-acc"/>
-        <text x="296" y="240" class="mono-ink">· 멱등 접수 (RequestKey)</text>
-        <text x="296" y="260" class="mono-ink">· 큐 · 리스 · 세대 펜싱</text>
-        <text x="296" y="280" class="mono-ink">· 사람 승인 · 사전 승인</text>
-        <text x="296" y="300" class="mono-ink">· 효과 원장 · 보류(Held)</text>
-        <text x="296" y="320" class="mono-ink">· 기억 · 위임 · 넘김 사슬</text>
-        <text x="296" y="340" class="mono-ink">· Outbox 회신 원장</text>
-        <text x="296" y="360" class="mono-ink">· 감사 체인 · 활성 판본</text>
-        <text x="296" y="380" class="mono">TX 일괄 반영 (유실 방지)</text>
+        <text x="296" y="240" class="mono-ink">· Idempotent RequestKey</text>
+        <text x="296" y="260" class="mono-ink">· Queue · Lease · Gen</text>
+        <text x="296" y="280" class="mono-ink">· Approvals · Grants</text>
+        <text x="296" y="300" class="mono-ink">· Effects · Holds (Held)</text>
+        <text x="296" y="320" class="mono-ink">· Memory · Child · Pass</text>
+        <text x="296" y="340" class="mono-ink">· Outbox reply ledger</text>
+        <text x="296" y="360" class="mono-ink">· Audit chain · Revision</text>
+        <text x="296" y="380" class="mono">Atomic TX (zero loss)</text>
       </g>
       <g id="node-secrets">
         <rect x="284" y="440" width="164" height="88" rx="6" class="node-soft"/>
         <text x="296" y="460" class="eye">HOST ONLY · SECRETS</text>
         <text x="296" y="480" class="ttl-sm">SecretStore · Profile</text>
-        <text x="296" y="498" class="sub">서비스 키 · 활성화 지문</text>
-        <text x="296" y="514" class="mono">모델에 절대 비노출</text>
+        <text x="296" y="498" class="sub">Service keys · Fingerprint</text>
+        <text x="296" y="514" class="mono">Never exposed to models</text>
       </g>
       <g id="node-worker">
         <rect x="520" y="64" width="200" height="148" rx="6" class="node"/>
         <text x="532" y="84" class="eye">EXECUTION · bot-runtime</text>
         <text x="532" y="106" class="ttl">Worker</text>
         <line x1="532" y1="116" x2="708" y2="116" class="div"/>
-        <text x="532" y="134" class="sub">리스 점유 · 맥락/기억 조립</text>
-        <text x="532" y="152" class="sub">직계 자식 위임 · 체크포인트</text>
-        <text x="532" y="174" class="mono">API 경로: 전송 직전 키 주입</text>
-        <text x="532" y="190" class="mono">CLI 경로: 일회용 VM 기동</text>
+        <text x="532" y="134" class="sub">Claim lease · Assemble context</text>
+        <text x="532" y="152" class="sub">Child delegation · Checkpoints</text>
+        <text x="532" y="174" class="mono">API: inject key on send</text>
+        <text x="532" y="190" class="mono">CLI: spawn disposable VM</text>
       </g>
       <g id="node-broker">
         <rect x="520" y="292" width="200" height="188" rx="6" class="node-focal"/>
         <text x="532" y="312" class="eye-acc">FOCAL · bot-broker</text>
         <text x="532" y="336" class="ttl-acc">Broker</text>
-        <text x="532" y="352" class="sub">단일 도구·모델 관문</text>
+        <text x="532" y="352" class="sub">Single tool &amp; model gate</text>
         <line x1="532" y1="364" x2="708" y2="364" class="div-acc"/>
-        <text x="532" y="384" class="mono-ink">· 권한 ∩ 에이전트 ∩ 도구</text>
-        <text x="532" y="404" class="mono-ink">· 승인 게이트 · 효과 원장</text>
-        <text x="532" y="424" class="mono-ink">· VM 릴레이 (/mcp)</text>
-        <text x="532" y="444" class="mono-ink">· 모델 프록시 (/v1/messages)</text>
-        <text x="532" y="464" class="mono">호출 순서·속도 제한·감사 기록</text>
+        <text x="532" y="384" class="mono-ink">· Caller ∩ Agent ∩ Tool</text>
+        <text x="532" y="404" class="mono-ink">· Approvals · Effect ledger</text>
+        <text x="532" y="424" class="mono-ink">· VM relay (/mcp)</text>
+        <text x="532" y="444" class="mono-ink">· Model proxy (/v1/messages)</text>
+        <text x="532" y="464" class="mono">Ordering · Rate limits · Audit</text>
       </g>
       <g id="node-vm">
         <rect x="836" y="64" width="248" height="112" rx="6" class="node-dash"/>
         <text x="848" y="84" class="eye-acc">UNTRUSTED · APPLE CONTAINER</text>
         <text x="848" y="106" class="ttl-sm">Model Sandbox VM</text>
         <line x1="848" y1="116" x2="1072" y2="116" class="div"/>
-        <text x="848" y="134" class="sub">claude-cli 일회용 VM · 비밀 없음</text>
-        <text x="848" y="150" class="mono">세션 토큰만 보유 · bot-init 방화벽</text>
-        <text x="848" y="166" class="mono">격리된 파일 read · 출구 = 릴레이 1곳</text>
+        <text x="848" y="134" class="sub">Disposable claude-cli VM · No secrets</text>
+        <text x="848" y="150" class="mono">Session token only · bot-init firewall</text>
+        <text x="848" y="166" class="mono">Isolated read · Egress = relay only</text>
       </g>
       <g id="node-providers">
         <rect x="836" y="204" width="248" height="92" rx="6" class="node-link"/>
         <text x="848" y="224" class="eye-lnk">UPSTREAM · HTTPS</text>
         <text x="848" y="246" class="ttl-sm">Model Providers</text>
         <line x1="848" y1="256" x2="1072" y2="256" class="div"/>
-        <text x="848" y="274" class="sub">Anthropic · OpenAI · Gemini/Ollama</text>
-        <text x="848" y="288" class="mono">호스트만 키 보유 · 응답 내 키 누출 차단</text>
+        <text x="848" y="274" class="sub">Anthropic · OpenAI · Gemini / Ollama</text>
+        <text x="848" y="288" class="mono">Host-only keys · Leak guard on reply</text>
       </g>
       <g id="node-mcp-srt">
         <rect x="836" y="328" width="248" height="104" rx="6" class="node"/>
         <text x="848" y="348" class="eye">SANDBOX · srt (stdio)</text>
         <text x="848" y="370" class="ttl-sm">MCP Tool Sandbox</text>
         <line x1="848" y1="380" x2="1072" y2="380" class="div"/>
-        <text x="848" y="398" class="sub">허가된 호출만 실행 · 선언 비밀만 주입</text>
-        <text x="848" y="416" class="mono">허용 호스트 egress → 외부 API 호출</text>
+        <text x="848" y="398" class="sub">Authorized calls · Declared keys only</text>
+        <text x="848" y="416" class="mono">Allowed host egress → external APIs</text>
       </g>
       <g id="node-remote-mcp">
         <rect x="836" y="452" width="248" height="76" rx="6" class="node-link"/>
         <text x="848" y="472" class="eye-lnk">REMOTE · STREAMABLE HTTP</text>
         <text x="848" y="494" class="ttl-sm">Remote MCP Server</text>
-        <text x="848" y="514" class="sub">호스트에 등록된 정확한 host:port만 접속</text>
+        <text x="848" y="514" class="sub">Registered exact host:port only</text>
       </g>
     </g>
 
     <!-- Footer Invariants Ledger -->
   <line x1="1" y1="636" x2="1119" y2="636" class="hdr-rule"/>
   <line x1="24" y1="652" x2="24" y2="700" class="bar"/>
-  <text x="34" y="662" class="fk">불변식 01 · 모델 격리</text>
-  <text x="34" y="681" class="fv">모델은 호스트와 서비스 키에 닿지 못함</text>
-  <text x="34" y="697" class="fv">(VM 세션 토큰 / API 호스트 헤더 주입)</text>
+  <text x="34" y="662" class="fk">INVARIANT 01 · MODEL ISOLATION</text>
+  <text x="34" y="681" class="fv">Models never touch the host or service keys</text>
+  <text x="34" y="697" class="fv">(VM session token / API host header inject)</text>
   <line x1="296" y1="652" x2="296" y2="700" class="bar-acc"/>
-  <text x="306" y="662" class="fk-acc">불변식 02 · 단일 브로커 관문</text>
-  <text x="306" y="681" class="fv">모든 도구 인가·승인·감사는 반드시</text>
-  <text x="306" y="697" class="fv">Broker::call 한 곳을 경유</text>
+  <text x="306" y="662" class="fk-acc">INVARIANT 02 · SINGLE BROKER GATE</text>
+  <text x="306" y="681" class="fv">All tool auth, approvals, and auditing pass</text>
+  <text x="306" y="697" class="fv">exclusively through Broker::call</text>
   <line x1="568" y1="652" x2="568" y2="700" class="bar-acc"/>
-  <text x="578" y="662" class="fk-acc">불변식 03 · DB 우선 접수</text>
-  <text x="578" y="681" class="fv">접수 성공 = PostgreSQL 커밋 성공</text>
-  <text x="578" y="697" class="fv">장애·재시작에도 요청·원장 보존</text>
+  <text x="578" y="662" class="fk-acc">INVARIANT 03 · DB-FIRST DURABILITY</text>
+  <text x="578" y="681" class="fv">Request accepted only on PostgreSQL commit</text>
+  <text x="578" y="697" class="fv">Survives crashes, restarts, and waits</text>
   <line x1="840" y1="652" x2="840" y2="700" class="bar"/>
-  <text x="850" y="662" class="fk">불변식 04 · 사람 승인</text>
-  <text x="850" y="681" class="fv">되돌릴 수 없는 외부 쓰기(효과)는</text>
-  <text x="850" y="697" class="fv">정확한 인자에 묶여 사람만 승인</text>
+  <text x="850" y="662" class="fk">INVARIANT 04 · HUMAN APPROVAL</text>
+  <text x="850" y="681" class="fv">Irreversible writes (effects) bind to exact</text>
+  <text x="850" y="697" class="fv">arguments and require human confirmation</text>
   </g>
   <rect x="0.5" y="0.5" width="1119" height="715" rx="10" fill="none" stroke="#343d50" stroke-width="1"/>
 </svg>

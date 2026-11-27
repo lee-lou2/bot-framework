@@ -4,8 +4,8 @@ fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
     let mut m = HeaderMap::new();
     for (k, v) in pairs {
         m.insert(
-            header::HeaderName::from_bytes(k.as_bytes()).expect("이름"),
-            HeaderValue::from_str(v).expect("값"),
+            header::HeaderName::from_bytes(k.as_bytes()).expect("header name"),
+            HeaderValue::from_str(v).expect("header value"),
         );
     }
     m
@@ -96,13 +96,12 @@ fn limiter_blocks_after_the_failure_budget_and_recovers() {
     l.fail(t + Duration::from_secs(2));
     assert!(
         l.check(t + Duration::from_secs(3)).is_err(),
-        "세 번째 실패에서 막힌다"
+        "blocked on third failure"
     );
     assert!(
         l.check(t + Duration::from_secs(33)).is_ok(),
-        "차단 시간이 지나면 풀린다"
+        "recovers after block duration"
     );
-    // 집계 창 밖의 실패는 세지 않는다
     let mut l = Limiter::new(2, Duration::from_secs(10), Duration::from_secs(30));
     l.fail(t);
     l.fail(t + Duration::from_secs(20));
@@ -114,17 +113,16 @@ fn each_source_has_its_own_failure_budget_and_memory_is_bounded() {
     let t = Instant::now();
     let mut l = Limiters::new(2, Duration::from_secs(60), Duration::from_secs(30));
     let (a, b) = (
-        Some("203.0.113.7".parse().expect("주소")),
-        Some("198.51.100.9".parse().expect("주소")),
+        Some("203.0.113.7".parse().expect("addr")),
+        Some("198.51.100.9".parse().expect("addr")),
     );
     l.fail(a, t);
     l.fail(a, t);
-    assert!(l.check(a, t).is_err(), "실패한 출처는 막힌다");
-    assert!(l.check(b, t).is_ok(), "다른 출처는 영향이 없다");
+    assert!(l.check(a, t).is_err(), "failed source is blocked");
+    assert!(l.check(b, t).is_ok(), "other source is unaffected");
     assert!(l.check(None, t).is_ok());
     l.fail(b, t);
-    assert!(l.check(b, t).is_ok(), "예산은 출처마다 센다");
-    // 기억하는 출처 수는 한정된다.
+    assert!(l.check(b, t).is_ok(), "budget is tracked per source");
     for i in 0..(MAX_SOURCES as u32 + 50) {
         l.fail(
             Some(IpAddr::from(i.to_be_bytes())),
@@ -136,7 +134,7 @@ fn each_source_has_its_own_failure_budget_and_memory_is_bounded() {
 
 fn guard_for_tests() -> Arc<Guard> {
     let hosts = hosts_for(
-        "127.0.0.1:8080".parse().expect("주소"),
+        "127.0.0.1:8080".parse().expect("addr"),
         &["Admin.Example:8443".into()],
     );
     Guard::new(
@@ -184,10 +182,13 @@ fn csrf_token_binds_the_identity_and_post_needs_every_guard() {
         ("x-bot-csrf", tok.as_str()),
     ];
     assert!(g.csrf_ok(&headers(&base), &me));
-    assert!(!g.csrf_ok(&headers(&base), &other), "다른 신원의 토큰");
+    assert!(
+        !g.csrf_ok(&headers(&base), &other),
+        "token bound to another principal"
+    );
     assert!(
         !g.csrf_ok(&headers(&[("content-type", "application/json")]), &me),
-        "토큰 없음"
+        "missing csrf token"
     );
     assert!(!g.csrf_ok(
         &headers(&[("content-type", "text/plain"), ("x-bot-csrf", tok.as_str())]),
@@ -202,11 +203,11 @@ fn csrf_token_binds_the_identity_and_post_needs_every_guard() {
     assert!(g.csrf_ok(&with(("sec-fetch-site", "same-origin")), &me));
     assert!(
         !g.csrf_ok(&with(("origin", "http://evil.example")), &me),
-        "교차 출처"
+        "cross-origin"
     );
     assert!(
         !g.csrf_ok(&with(("origin", "http://localhost:9999")), &me),
-        "다른 포트"
+        "different port"
     );
     assert!(!g.csrf_ok(&with(("sec-fetch-site", "cross-site")), &me));
     assert!(!g.csrf_ok(&with(("sec-fetch-site", "same-site")), &me));
@@ -217,5 +218,5 @@ fn new_tokens_are_long_random_hex_and_never_repeat() {
     let (a, b) = (new_token(), new_token());
     assert_eq!((a.len(), b.len()), (64, 64));
     assert!(a.bytes().all(|c| c.is_ascii_hexdigit()) && a != b);
-    assert!(a.bytes().any(|c| c != b'0'), "영이 아닌 값");
+    assert!(a.bytes().any(|c| c != b'0'), "non-zero token");
 }

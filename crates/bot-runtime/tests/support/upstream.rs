@@ -1,5 +1,4 @@
-//! 실제 HTTP 가짜 상류(loopback의 TCP 서버): 받은 요청(경로·머리·본문)을 기록하고 대본대로 답한다. API 직접 호출 실행기의 실제 전송(리다이렉트·시간 한도·취소·연결 끊김)을
-//! 시험하려고 진짜 소켓을 쓴다. 요청 하나에 연결 하나(`connection: close`)다.
+//! Real loopback HTTP fake upstream for testing direct API transport behavior (redirects, timeouts, cancellation, disconnects).
 #![allow(dead_code)]
 
 use serde_json::Value;
@@ -15,7 +14,6 @@ use tokio::{
     task::JoinHandle,
 };
 
-/// 서버가 받은 요청 하나(머리 이름은 소문자)
 #[derive(Clone, Debug)]
 pub struct Seen {
     pub path: String,
@@ -32,10 +30,9 @@ impl Seen {
     }
 
     pub fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).expect("요청 본문은 JSON")
+        serde_json::from_slice(&self.body).expect("request body must be JSON")
     }
 
-    /// 요청에 실린 도구 이름들(Anthropic `tools[].name` · OpenAI `tools[].function.name`)
     pub fn tool_names(&self) -> Vec<String> {
         let body = self.json();
         body["tools"]
@@ -51,36 +48,33 @@ impl Seen {
             .collect()
     }
 
-    /// 도구 ID(`agenda.list`)가 이 요청에서 모델에게 보인 이름(별칭)
+    /// Resolves the wire alias presented to the model for `tool_id`.
     pub fn alias(&self, tool_id: &str) -> String {
         let stem = tool_id.replace('.', "_");
         self.tool_names()
             .into_iter()
             .find(|name| name == tool_id || name.starts_with(&format!("{stem}_")))
-            .unwrap_or_else(|| panic!("요청에 {tool_id} 도구가 없다: {:?}", self.tool_names()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "tool {tool_id} missing from request: {:?}",
+                    self.tool_names()
+                )
+            })
     }
 }
 
-/// 서버의 응답 대본 한 줄
 #[derive(Clone)]
 pub enum Reply {
-    /// 상태와 JSON 본문
     Json(u16, String),
-    /// 머리·본문을 직접 정한다
     Raw {
         status: u16,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     },
-    /// 302와 `location`
     Redirect(String),
-    /// 지연 뒤에 다른 응답
     Delayed(Duration, Box<Reply>),
-    /// 받은 요청에 따라 정한다(도구 별칭처럼 요청에서 알 수 있는 값을 응답에 쓸 때)
     With(Arc<dyn Fn(&Seen) -> Reply + Send + Sync>),
-    /// 요청을 받고 끝내 답하지 않는다
     Hang,
-    /// 요청을 받고 응답 없이 연결을 닫는다
     Close,
 }
 
@@ -103,7 +97,7 @@ impl FakeApi {
     pub async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("loopback 바인드");
+            .expect("loopback bind");
         let addr = listener.local_addr().unwrap();
         let state = Arc::new(Mutex::new(State {
             script: VecDeque::new(),
@@ -121,12 +115,10 @@ impl FakeApi {
         Self { addr, state, task }
     }
 
-    /// 기준 주소(경로 없음): Anthropic 형식의 `endpoint`
     pub fn url(&self) -> String {
         format!("http://{}", self.addr)
     }
 
-    /// 다음 요청에 줄 응답을 대본 끝에 더한다.
     pub fn script(&self, reply: Reply) -> &Self {
         lock(&self.state).script.push_back(reply);
         self
@@ -136,7 +128,6 @@ impl FakeApi {
         lock(&self.state).seen.clone()
     }
 
-    /// 요청이 `count`건이 될 때까지 기다린다(최대 10초).
     pub async fn wait_for(&self, count: usize) {
         for _ in 0..1000 {
             if self.seen().len() >= count {
@@ -144,7 +135,10 @@ impl FakeApi {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("상류가 요청 {count}건을 받지 못했다: {}", self.seen().len());
+        panic!(
+            "upstream did not receive {count} request(s): got {}",
+            self.seen().len()
+        );
     }
 }
 

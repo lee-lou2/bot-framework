@@ -1,10 +1,12 @@
-# 스킬의 실행 코드는 독립 MCP 서버로 설치하고 tools.yaml로 연결한다.
+# MCP Tool Plugins and Built-In Tools
 
-운영자는 도구 서버를 호스트에 설치하고 프로필에는 서버 별칭만 적는다. 서버는 언어와 무관하게 MCP stdio 초기화와 tools/list, tools/call을 구현한다. 공개 프레임워크 라이브러리는 필요하지 않다. 처음 도구를 붙이는 순서와 최소 서버 예시는 [첫 도구 만들기](first-tool.md)에, 일정 도구 예시는 [일정 스킬 선언](profile-spec.md)에 있다.
+English | [한국어](ko/plugins.md)
 
-## 도구 서버 설치
+Operators register tool servers in `host.json` (`BOT_HOST_CONFIG`) and profiles reference them only by server alias in `tools.yaml`. Servers are language-agnostic MCP implementations (`initialize`, `tools/list`, `tools/call`) requiring no framework library. See [first-tool.md](first-tool.md) for a minimal walkthrough and [profile-spec.md](profile-spec.md) for profile schema rules.
 
-`BOT_HOST_CONFIG`의 `servers`에는 별칭별로 코드 전용 설치 폴더와 실행 명령을 적는다. 다음은 호스트 파일의 해당 절이다.
+## Local Tool Servers (MCP stdio)
+
+Declare local servers under `servers` in `host.json`:
 
 ```json
 {
@@ -17,19 +19,14 @@
 }
 ```
 
-`root`는 절대 경로다. `command[0]`은 그 폴더 안의 실행 가능한 일반 파일이며, 뒤의 값은 셸 해석 없이 전달할 인자다. 로컬 모듈과 정적 자원은 같은 폴더에 둔다. 스크립트도 사용할 수 있으며 운영체제와 시스템 인터프리터는 신뢰 호스트가 관리한다. 링크·특수 파일은 거절하고 비밀 값과 실행 데이터는 설치 폴더 밖에 둔다. 이전 별칭 배열은 위 객체 형식으로 바꾼다.
+- `root` is an absolute code-only directory; `command[0]` is a relative executable regular file inside `root`; remaining entries are passed without shell expansion. Symlinks and special files are rejected. Keep secrets and runtime data outside `root`.
+- **Content-addressed installs:** At startup, the host copies `root` into a read-only installation and computes a deterministic SHA-256 revision from file contents, relative paths, executable bits, directories, `command`, and `state` ([`crates/bot-core/src/install.rs`](../crates/bot-core/src/install.rs)). Approval cards and broker execution pin this revision—changing code invalidates prior cards. Split deployments must deploy identical packages to decision and execution hosts.
+- **Server state (`state`):** Defaults to `"ephemeral"` (fresh scratch directory per call). Set `"required"` for servers needing persisted files across calls (folds into the install revision). Current `srt` has no persistent-volume adapter and refuses `state: "required"` at startup. Future adapters must expose a dedicated `0700` `(profile, server)` volume via `BOT_STATE_DIR` (unoverridable by tool `env`), block cross-profile/model access and symlink escape, enforce disk quotas, and use inter-process write locks across hosts.
+- **Private egress (`private_egress`):** For local tools calling private-network services, operators pin per-profile destinations in `host.json`, e.g. `{"private_egress":{"personal":{"calendar.internal:443":"10.0.0.8:443"}}}`. After verifying tool `egress` ∩ profile cap, the sandbox proxy connects only to the pinned IP and port.
 
-호스트는 기동 시 패키지를 읽기 전용 설치본으로 복사한다. 복사된 파일의 내용·상대 경로·실행 비트·디렉터리와 명령 인자를 바탕으로 SHA-256 판본을 계산한다. 설치 위치나 수정 시각이 달라도 내용이 같으면 같은 판본이다. 운영자가 판본을 입력할 필드는 없다. [설치 판본 계산](../crates/bot-core/src/install.rs)
+## Remote Tool Servers (Streamable HTTP)
 
-승인 카드와 실제 실행은 같은 설치 판본에 묶인다. 게이트웨이·관리 역할은 판본만 조회하고, 브로커는 확인한 설치본에서 실행한다. 분리 배치에서는 승인과 실행을 맡은 호스트에 같은 패키지를 배포한다. 새 판본으로 바뀌면 이전 카드로 새 코드를 실행할 수 없다. 설치본을 확인할 수 없으면 승인을 보류하고 도구를 실행하지 않는다.
-
-설정 `servers.<별칭>.state`의 기본값은 `"ephemeral"`이다. 호출 사이에 파일을 보존해야 하는 서버에는 `"required"`를 지정한다. 상태 요구를 바꾸면 설치 판본도 바뀐다. 전용 상태 볼륨을 제공할 수 없는 어댑터는 해당 서버를 실행하기 전에 거절한다.
-
-로컬 도구가 사설망 서비스를 써야 하면 운영자가 호스트 설정의 `private_egress`에 프로필별 고정 목적지를 등록한다. 예를 들어 `{"private_egress":{"personal":{"calendar.internal:443":"10.0.0.8:443"}}}`이면 샌드박스 프록시는 도구의 egress와 프로필 상한을 확인한 뒤 해당 호스트·포트의 연결을 지정한 IP·포트로 보낸다.
-
-## 원격 도구 서버(Streamable HTTP)
-
-이미 운영 중인 MCP 서버는 설치하지 않고 주소로 연결한다. 호스트 파일의 해당 절이다.
+Connect already-running MCP servers over Streamable HTTP without installing local files:
 
 ```json
 {
@@ -43,48 +40,44 @@
 }
 ```
 
-- `url`은 `https`다. `http`는 루프백 IPv4 리터럴(`127.0.0.0/8`)만 받는다. IPv6 리터럴(`[::1]` 포함)은 허용 목록의 `호스트:포트`에 적을 수 없어 거절한다. `user:pass@`·`#` 조각·1–65535 밖의 포트는 거절한다. 숫자로 끝나는 호스트(마지막 라벨이 십진수나 `0x` 16진수)는 URL 파서가 IPv4로 읽으므로 점으로 나눈 십진수 네 마디의 정규 표기(`93.184.216.34`)만 받고 `0x7f000001`·`2130706433`·`0177.0.0.1`·`127.1`·끝에 점이 붙은 표기는 거절한다. 리다이렉트를 따라가지 않고 숨은 재시도도 없으며 응답 크기·시간에 한도가 있다.
-- `auth`는 생략할 수 있다. bearer는 비밀 **이름**만 적고 값은 대상 프로필의 비밀 보관소에서 읽는다. 값은 `Authorization` 머리에만 실리고 결과·로그·감사에 남기지 않는다. 서버 응답 어디에든(원문·해석한 글·키·숫자 표기·`nextCursor`·세션 ID) 이 값이 들어 있으면 그 응답을 쓰지 않는다: 도구 목록이면 호출하지 않고(`response_credential`), 호출 결과면 결과를 막는다(`result_credential`). 이 비밀이 없으면 호출을 보내지 않는다.
-- 접속 대상은 `url`의 `호스트:포트` 하나다. 이 서버를 쓰는 도구의 `egress` ∩ 프로필 상한에 정확히 있어야 한다(없으면 활성화를 거절하고 호출도 보내지 않는다). 연결마다 이름 풀이 결과 전체를 검사해 사설·루프백·링크로컬 주소가 하나라도 있으면 거절하고, 검사한 주소로만 접속한다. 전역 사설망 허용으로 루프백 예외를 넓히지 않는다. 판정한 호스트·포트·방식이 연결에 쓰는 URL 파서가 읽은 값과 글자 그대로 같을 때만 보낸다. 요청을 보내기 직전마다(판본 확인·도구 목록·구판의 초기화·`tools/call`·세션 정리) 이 프로세스의 활성 판본을 다시 확인하고, 다르거나 확인하지 못하면 아무것도 보내지 않는다(그 호출은 미실행으로 풀려난다). 승인 뒤 목록을 기다리는 사이 목적지를 철회한 새 집합이 게시돼도 구판 프로세스는 옛 주소로 bearer와 쓰기 호출을 보내지 않는다.
-- 판본은 공식 규격의 현행(2026-07-28)과 구판 2025-11-25·2025-06-18·2025-03-26이다(구판은 도구 부분이 같다). 읽기 전용 `server/discover`로 먼저 판별하고, 공식 HTTP 호환 절차에서 구판으로 확인될 때만 `initialize`→`initialized`와 세션 ID를 쓴다(`initialize`에는 구판 중 최신을 내세우고 서버가 답한 구판을 쓴다. `MCP-Protocol-Version` 머리는 이 머리가 생긴 2025-06-18부터 싣고 2025-03-26에는 싣지 않는다). 쓰기 `tools/call`을 판본 탐지나 재전송에 쓰지 않는다. 현행 판본에서는 스키마의 `x-mcp-header`가 가리키는 인자를 `Mcp-Param-*` 머리로 되풀이한다.
-- 원격 서버의 도구는 `effects: true`·`secrets`·`env`를 선언할 수 없다(활성화 때 거절). 로컬 FD·프록시 콜백과 원장 증거를 원격에 이어 줄 길이 없기 때문이다. 서버로 가는 `_meta`는 `bot/call-id`·`bot/profile-id`·`bot/run-id`뿐이다.
-- HTTP 연결이 끝난 것은 원격 실행 종료의 증거가 아니다. 보낸 뒤 응답을 못 받으면(시간 초과·끊김) 같은 호출을 다시 보내지 않고 기존 복구 규약대로 보류한다. **2xx이고 같은 요청 번호의 응답만** 결과로 인정한다: 연결 전 실패와 요청 직전 판본 확인의 거절은 실행되지 않은 것이고, 2xx 안의 같은 번호의 확정적 JSON-RPC 거절(잘못된 요청·없는 메서드·잘못된 인자)만 서버의 거절이다. 인증·권한 거절(401·403)과 5xx를 포함해 2xx가 아닌 응답은 본문이 무엇이든 실행 여부를 알려 주지 않으므로 결과 불명이다(쓰기는 보류, 읽기는 일시 실패).
-- 설치 판본에는 `url`·transport·bearer 이름이 묶인다. 바꾸면 이전 승인 카드로 실행할 수 없다.
+- **URL & HTTP rules:** `https` required; `http` is allowed only for canonical IPv4 loopback literals (`127.0.0.0/8`). Rejects IPv6 literals (including `[::1]`), `user:pass@`, `#` fragments, invalid ports, and non-canonical numeric IPv4 forms (`0x7f000001`, `2130706433`, `0177.0.0.1`, `127.1`, trailing dots). No redirects, no hidden retries, bounded response size and timeout.
+- **Bearer auth (`auth`):** Optional. Names a secret in the calling profile's secret store (`Authorization` header only; never logged or audited). Any server response containing the secret value anywhere (raw body, decoded text, keys, numeric encoding, `nextCursor`, session ID) is rejected (`response_credential` on discovery/list, `result_credential` on tool call). Missing secret blocks the call.
+- **Egress & DNS pinning:** Exact `url` `host:port` must appear in tool `egress` ∩ profile cap. Every connection validates all DNS answers (rejecting private, loopback, or link-local IPs without loosening via global private-network settings) and dials the vetted IP directly. Before every outbound step (`server/discover`, `tools/list`, legacy `initialize`, `tools/call`, session teardown), the broker re-verifies the process's active revision and aborts unsent if stale or unreadable.
+- **Protocol negotiation:** Supports MCP `2026-07-28` (probed via read-only `server/discover`; repeats `x-mcp-header` arguments as `Mcp-Param-*` headers) and legacy `2025-11-25`, `2025-06-18`, `2025-03-26` (uses `initialize` -> `initialized` and session ID; sends `MCP-Protocol-Version` from `2025-06-18` onward). Never uses write `tools/call` for version probing or retries.
+- **Constraints & failure semantics:** Remote tools cannot declare `effects: true`, `secrets`, or `env` (rejected at activation); outbound `_meta` carries only `bot/call-id`, `bot/profile-id`, and `bot/run-id`. Only `2xx` responses with matching JSON-RPC request IDs are authoritative; disconnects, timeouts, and non-`2xx` responses (including `401`/`403`/`5xx`) leave execution unknown (writes hold, reads retry transiently). Install revision binds `url`, `transport`, and bearer secret name.
 
-### 도구 정의 잠금: tools.lock.yaml
+### Tool Definition Locking (`tools.lock.yaml`)
 
-서버가 내세우는 도구 이름이 tools.yaml `id`(소문자·숫자·`-`)와 다르면(실제 서버는 대개 `get_forecast`처럼 snake_case다) 도구에 선택 필드 `name`을 적는다(영문·숫자·`_`·`-`·`.` 128자 이하, 생략하면 `id`). 모델이 보는 도구 ID(`skill.id`)·승인·권한은 `id`를 따르고, 서버로 가는 `tools/list` 조회·`tools/call`·`Mcp-Name`은 `name`을 쓴다. `name`은 도구 판본에 들어가고, 잠금은 `id`로 묶어 서버 이름을 기록한다(둘이 다르면 `lock-name-mismatch`로 거절하니 `bot mcp sync`를 다시 실행한다).
+When a server exposes a non-kebab tool name (e.g. `get_forecast`), set `name` on the `tools.yaml` entry (`[A-Za-z0-9_.-]+`, <= 128 chars; defaults to `id`). Models, scopes, and approvals use `skill.id`; MCP `tools/list`, `tools/call`, and `Mcp-Name` use `name`. Lock mismatches fail with `lock-name-mismatch`.
 
-`tools.yaml` 도구의 `input`을 생략하면 같은 스킬 폴더의 `tools.lock.yaml`에서 입력 스키마와 설명을 함께 가져온다. 정의 해시로 검증한 설명은 Claude CLI의 MCP 목록과 두 API 실행기의 도구 설명 필드에 실린다. 잠금 설명이 비어 있으면 입력 스키마의 최상위 `description`을 쓰고, 그것도 비어 있으면 도구 ID를 쓴다. 모델에 보내는 도구 설명은 UTF-8 4 KiB까지다. 인라인 `input`을 선언한 도구는 그 스키마의 설명을 쓰며 잠금 항목을 사용하지 않는다. `input`도 잠금 항목도 없으면 활성화를 거절한다(`missing-input`).
+When `input` is omitted in `tools.yaml`, the loader reads the input schema and description from sibling `tools.lock.yaml` (fallback order for model-visible description: lock description -> schema `description` -> tool ID, max 4 KiB UTF-8; inline `input` ignores the lock; omitting both fails with `missing-input`). Review synced `description` text for prompt-injection instructions before deploying.
 
-프로필 판본에는 번들에 담긴 잠금 파일이 포함된다. 잠금에서 입력을 가져온 도구의 판본에는 설명 원문을 포함한 정의 해시가 들어 있다. 배포하기 전에 `bot mcp sync`가 받은 `description`에 도구 사용과 무관한 지시가 섞였는지 검토한다.
-
-```bash
-bot mcp sync <BOT_PROFILES 아래 스킬 폴더>
+```sh
+bot mcp sync <skill-dir-under-BOT_PROFILES>
 ```
 
-폴더로 대상 프로필과 스킬을 정한다: `validate`와 같은 로더로 루트 목록·링크 금지·폴더 구조·`profile.yaml`의 스키마와 `id`(폴더 이름과 같아야 한다)·대상 `SKILL.md`(front matter·폴더명·단일 64 KiB 상한)를 확인하고, 자격은 그 프로필의 보관소에서만 읽는다(정하지 못하면 접속하지 않고 자격도 읽지 않는다). tools.yaml의 서버에 연결해 `tools/list`를 **모든 쪽** 읽고 **선언한 도구만** `{id, name, description, input_schema, sha256}`로 적는다(서버에서는 `name`으로 찾는다). 선언한 도구가 서버에 없거나 이름이 겹치면 실패한다. 목록은 상한(16쪽·4096개)까지 모두 받아야 하고, `nextCursor`는 없거나 비어 있지 않은 글이어야 한다(다른 형식·반복되는 커서·모으는 동안의 `list_changed` 알림은 오류다). `sha256`은 `{"name","description","inputSchema"}`의 RFC 8785 정규 JSON의 SHA-256이라 설명만 바뀌어도 달라진다. 출력은 결정적이라 바뀐 게 없으면 파일을 다시 쓰지 않는다. 서버가 돌려준 정의는 믿지 않는다: 자격이 응답 어디에도(선언하지 않은 도구·키·숫자 표기·커서까지) 섞이지 않았는지를 **먼저** 보고, 입력 스키마가 프로필 어휘로 읽히는지 본다. 진단은 고정 코드와 JSON 포인터만 싣고 서버가 고른 글은 되풀이하지 않는다. 만든 잠금은 `validate`와 같은 검사(파일 크기·YAML 한도·잠금의 모양과 해시·`tools.yaml`과의 짝)를 통과해야 쓰며, 하나라도 어긋나면 아무것도 쓰지 않고 0이 아닌 코드로 끝난다. `bot mcp sync` 성공은 대상 스킬의 `SKILL.md`·`tools.yaml`·`tools.lock.yaml` 단독 유효성을 보증하며, 에이전트별 상속 스킬 본문 합계(64 KiB)와 프로필 전체 참조·권한은 `bot validate`가 검증한다. 현재는 원격(`transport: "http"`) 서버만 지원한다.
+- Validates directory structure, symlink absence, `profile.yaml` (`id == folder`), and target `SKILL.md` (front matter, name match, single-file 64 KiB cap) using the same loader as `bot validate`, reading credentials only from that profile's secret store.
+- Fetches all `tools/list` pages (up to 16 pages / 4,096 tools; rejects invalid/repeating `nextCursor` or mid-fetch `list_changed`), filters to tools declared in `tools.yaml` (failing on missing or duplicate server names), scans the entire response for leaked credentials before accepting, validates input schemas against the profile vocabulary, and writes deterministic `{id, name, description, input_schema, sha256}` entries where `sha256` is the RFC 8785 canonical JSON digest of `{"name","description","inputSchema"}`.
+- Currently supports remote (`transport: "http"`) servers. Run `bot validate` afterward to verify full profile references and per-agent 64 KiB skill sums.
+- At execution time, the broker compares the server's live tool definition digest against the lock before calling (`tool_definition_changed`, `tool_missing`) for both HTTP and stdio servers.
 
-실행할 때 브로커는 서버가 내세우는 도구 정의의 해시를 잠금과 비교한다. 달라졌거나 도구가 사라졌으면 **호출하기 전에** 막고 고정 코드(`tool_definition_changed`·`tool_missing`)를 감사에 남긴다. 새 정의를 받아들이려면 `bot mcp sync`를 다시 실행하고 프로필을 다시 배포한다. 로컬(stdio) 서버의 잠금도 같은 방식으로 비교한다.
+## Tool Declarations and Standard Call Flow
 
-## 일반 호출
+Each tool in `tools.yaml` requires `id`, `class` (`read`, `write`, `irreversible`), and `scopes` (>= 1), plus optional `name`, `external`, `effects`, `env`, `secrets`, `egress`, `timeout_secs`, `destination`, and `input`.
 
-1. 브로커는 실행할 도구 이름·판본·인자를 고정하고 권한·위험도·속도 제한을 확인한다. 필요한 승인을 얻기 전에는 도구를 실행하지 않는다.
-2. 승인된 호출마다 별도 샌드박스를 시작한다. 빈 환경에서 시작해 도구가 선언한 비밀과 일반 설정만 전달한다. 일반 설정은 에이전트의 고정 판본과 현재 판본에서 값이 일치해야 한다. 호스트가 별도로 네트워크 프록시와 효과 콜백 주소를 설정한다. 같은 서버에 있는 다른 도구의 환경은 상속하지 않는다.
-3. MCP에서 협상한 버전과 도구 입력 스키마를 선언과 비교한다. 일치하는 도구 하나만 호출한다. 호스트가 MCP `tools/call`의 `params._meta`를 채운다. 예를 들어 `{"bot/profile-id":"personal","bot/run-id":"r-3","bot/call-id":"c-17","bot/generation":4,"bot/principal":"local:owner","bot/trigger":"message"}`이다. 재시도에도 call ID는 같고 세대는 현재 값이다. stdout은 MCP, stderr는 제한·가림 처리한 진단용이다. 부모 프로세스의 파일·소켓을 전달하지 않는다.
-4. 서버는 허용된 외부 API를 직접 호출하고 정해진 결과 또는 오류를 반환한다. 브로커는 호출 ID로 결과를 저장한 뒤 프로세스를 종료한다. 수신처 멱등 키는 프로필·run·호출 ID를 순서 있는 배열로 인코딩해 만든다. 다단계 쓰기는 단계 키도 포함한다. 세대와 claim은 제외하므로 인계 뒤에도 같은 키가 되고, 두 run의 첫 호출은 구별된다. 결과가 불명이고 안전한 조회·재시도 수단이 없으면 호출 자체를 보류한다.
+1. **Authorize & approve:** Broker pins tool name, revision, and arguments; checks scopes, risk class, and rate limits; blocks until any required human approval completes.
+2. **Isolate:** Starts a fresh sandbox per call from an empty environment containing only declared `secrets` and `env` keys (verifying `env` names and values match both pinned and current revisions), plus host-injected proxy and callback URLs.
+3. **Invoke:** Verifies negotiated MCP version and tool schema, then sends `tools/call` with host-owned `params._meta`, e.g. `{"bot/profile-id":"personal","bot/run-id":"r-3","bot/call-id":"c-17","bot/generation":4,"bot/principal":"local:owner","bot/trigger":"message"}` (and `bot/destination` for `destination: "reply"` tools). `stdout` is MCP; `stderr` is bounded and redacted; no parent FDs are inherited.
+4. **Record & terminate:** Persists the result by logical call ID and terminates the process. Downstream idempotency keys hash `[profile, run, call(, step)]` (excluding `generation` and claim). Unknown outcomes without safe read verification hold the call.
 
-**요청자 신원.** 브로커는 모든 도구 호출의 `bot/principal`에 인증된 요청자 신원을 넣는다. 위임·승인·재개 뒤에도 원래 주체를 유지한다. 정적 예약은 트리거의 서비스 주체(`service:morning`), 대화에서 만든 예약과 후속 확인은 만든 사람의 신원이다. Slack은 `slack:<워크스페이스 별칭>/<사용자 ID>`(U 또는 W로 시작), CLI는 `local:<계정>`, HTTP는 인증한 `http:<입구>/<sub>`다. 민감 DM은 게이트웨이가 인증한 발신자를 지정 도구 하나에만 건넨다. 도구는 “내 리포트”를 조회할 때 `bot/profile-id`와 `bot/principal`로 범위를 좁힐 수 있다. 인가는 브로커가 수행한다. 업무 인자 속 `_meta`나 모델이 지정한 신원으로 이 값을 덮어쓸 수 없다.
+- **Identity & origin:** `bot/principal` preserves the authenticated requester (`local:<account>`, `slack:<ws>/<user>`, `http:<endpoint>/<sub>`, `service:<name>`) across delegation, approvals, and resumes; models cannot spoof `_meta`. `bot/trigger` records root origin: `message` (CLI/Slack human input including private DM), `http`, `schedule` (static cron or user schedule), `wake`, or `unknown`. Interactive tools waiting for user replies should accept only `message`.
+- **Timeouts & limits:** Default timeout is `60s`; `timeout_secs` allows `1..=900` up to host `limits.tool_call_max_secs` (default `60`, max `900`; exceeding fails activation with `tool-timeout-over-cap` or blocks pre-call with `tool_timeout_over_cap`). Sandbox deadline is `max(300s, timeout + 240s)`; proxy tunnel deadline is `600s` (raised to match when `timeout_secs > 600`). Callback frames are capped at 64 KiB. Post-send `timeout` is unknown (writes hold without auto-retry; see [reliability.md](reliability.md)).
+- **Input schema vocabulary:** Supported keywords: `type`, `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`, `minItems`, `maxItems`, `minLength`, `maxLength`, `minimum`, `maximum`, `pattern`, `anyOf`, `oneOf`, `allOf`, `title`, `description`, `default`, plus non-validating annotations (`$schema`, `$comment`, `examples`, `format`, `deprecated`, `readOnly`, `writeOnly`). Local `$defs`/`definitions` and `#/$defs/<name>`/`#/definitions/<name>` `$ref`s are expanded at compile time (percent-decoded, then JSON Pointer `~1`/`~0`); `$ref` siblings may be annotation keywords only; recursive/external/missing refs or > 20,000 expanded nodes are rejected. `pattern` uses portable Rust regex syntax without `\d`/`\w`/`\s`/`\b`, inline flags, or lookaround.
+- **External & destination declarations:** Set `external: true` (default `false`) on any tool that sends input to third parties (including search); calling an `external` tool after recalling private memory escalates approval. `destination: "reply"` injects the original conversation into `_meta["bot/destination"]`. `destination: {recipient: "args.<path>", content: "args.<path>"}` targets an argument-specified recipient and automatically elevates the tool's effective class to `irreversible`.
 
-**실행 출처.** 호스트가 `params._meta["bot/trigger"]`에 루트 요청의 출처를 넣는다. `message`는 인증된 CLI 사용자 입력 또는 Slack 사람의 글(민감 DM 포함), `http`는 인증된 HTTP 요청, `schedule`은 정적 cron이나 사용자가 만든 예약의 발화, `wake`는 도구가 요청한 후속 확인이다. 이전 기록 등 출처를 확인할 수 없으면 `unknown`이다. 위임·재시도·승인 후 재개에서도 값을 유지한다.
+## Optional Callbacks for Multi-Step Writes
 
-사용자의 답을 기다리는 도구는 `message`에서만 답을 받아들인다. 답의 내용까지 확인해야 하면 인증된 메시지의 봉투 필드를 전용 도구에 직접 매핑한다. 중요한 쓰기에는 수신자와 인자에 묶인 사람 승인을 사용한다.
-
-## 여러 번 쓰는 작업의 선택적 콜백
-
-예를 들어 예약 작업이 파일을 올리고 알림을 보낸다면, 업로드 뒤 중단됐을 때 어느 단계까지 끝났는지 알아야 한다. 이런 도구만 tools.yaml에 `effects: true`를 선언한다. srt에서 실행되는 도구는 브로커가 환경으로 준 `BOT_EFFECT_URL`에 JSON 요청 하나를 HTTP POST로 보내고 응답 본문으로 결과를 받는다. 호출 전용 프록시가 전용 주소 `http://bot-effects.invalid/effect`를 내부에서 처리한다. 외부 DNS·서비스 접속이나 별도 egress 선언은 필요 없다. 콜백은 단계 기록용이며 도구 실행 승인은 앞의 일반 호출 경계 한 곳에서 끝난다. 승인 대상·개수가 실행 중에 정해지는 작업은 먼저 계획을 만들고, 구체적 인자를 담은 별도 호출로 승인받는다.
-
-요청과 응답은 각각 UTF-8 JSON 객체 하나다. 양방향 FD를 제공하는 어댑터에서는 같은 객체를 NDJSON 한 줄로 교환한다. v는 프로토콜 버전, id는 메시지 번호다. 채널이 원래 호출과 시도 세대를 식별하므로 도구가 주체나 권한을 지정할 필요가 없다.
+Tools performing multiple external writes declare `effects: true` to record step progress against `BOT_EFFECT_URL` (`http://bot-effects.invalid/effect`, handled locally by the per-call proxy with no extra `egress` entry; NDJSON over bidirectional FD where supported). Approval still happens once at the call boundary.
 
 ```jsonl
 {"v":1,"id":"0","method":"effect.status","step":"upload","args":{"file":"summary","target":"inbox"}}
@@ -95,74 +88,54 @@ bot mcp sync <BOT_PROFILES 아래 스킬 폴더>
 {"v":1,"id":"2","state":"confirmed","receipt":"file-17","send":false}
 ```
 
-- **effect.request**는 논리 호출 ID와 단계 키에 인자 지문을 묶는다. 새 단계를 점유하거나 운영자의 미실행 판정 뒤 같은 단계를 처음 다시 점유한 요청만 `send:true`를 받는다. 재점유와 판정 소비는 한 커밋이다. 같은 키에 다른 인자를 보내면 `conflict`다.
-- 운영자가 사전 승인한 정적 호출([프로필 명세](profile-spec.md#사전-승인한-정적-호출과-지정한-사람의-승인))은 **모든 쓰기**에서 `args`를 `{"operation":"post","target":"channel:reports","params":{"item":"42"}}` 형태로 보낸다. `(operation, target)`이 허용 쌍과 정확히 같을 때만 새 `send:true`를 허가하고 그날 한도를 한 번 쓴다. 쌍 밖·한도·현재 정지는 `denied`, 옛 승인·옛 claim·옛 정지 세대는 `stale`, 봉투 모양이 다르면 `invalid`다. 이미 기록된 단계의 인자만 바꾼 요청은 승인이 유효할 때만 `conflict`이고, 승인이 철회·교체됐거나 옛 정지 세대면 먼저 `stale`이다. 도구는 실제 수신자와 본문을 확정한 같은 계획으로 허가를 얻고 `send:true`일 때만 그 계획을 한 번 실행한다.
-- **effect.status**에 `step`과 `args`를 주면 점유 없이 조회한다. 유효한 호출에 해당 단계가 없을 때만 `none`이다. 단계가 있으면 `started`·`held`·`rejected`·`confirmed` 중 하나를 반환하고, `confirmed`에만 수신처 영수증(`receipt`)을 싣는다. 모든 조회 응답은 `send:false`이며, 반복 조회해도 `started`는 그대로다.
-- 채널이 프로필·run·세대·claim·호출 ID·도구를 결정한다. 조회 시 호출 또는 도구가 일치하지 않으면 `denied`, 옛 claim이면 `stale`, 같은 단계의 인자 지문이 다르면 `conflict`다. 원장을 읽지 못한 `unavailable`에서는 쓰기를 시작하지 않고 조회를 재시도한다.
-- 도구가 보고하는 글(영수증·보류 사유)과 단계 이름에는 최종 결과와 같은 자격 검사를 **저장하기 전에** 한다. 이 호출이 쓰는 선언 자격의 값·프록시 암호나 토큰 모양이 섞이면 원문을 원장·감사·응답 어디에도 남기지 않고, 단계를 고정 사유로 보류한다: 확정 보고의 영수증이면 `receipt_credential`, 보류 보고의 사유면 `reason_credential`이고 도구에는 `held`와 그 고정 사유만 돌려준다. 단계 이름이 자격이면 기록하기 전에 `invalid`다. 보류된 단계는 도구의 다음 깨끗한 보고나 운영자 판정으로 푼다.
-- 기존처럼 `effect` ID로 상태를 읽거나 `effect`와 `outcome`으로 결과를 기록할 수 있다. confirmed에는 수신처 영수증, rejected에는 확정 거절, held에는 불명 사유 코드를 기록한다. 같은 영수증을 다시 보고하면 결과가 같다. 단계 키 조회에 `effect`·`outcome`·판정 필드를 섞으면 `invalid`다.
-- 중단 후 같은 call과 step을 재사용한다. 원래 키로 확인 가능한 수신처 영수증이 있으면 복구 절차에서 대조한다. 근거가 없으면 보류한다. 하나라도 미결이면 도구의 성공 응답만으로 전체 호출을 완료하지 않는다.
-
-운영자가 보류된 단계를 미실행으로 판정하면 조회 응답은 다음과 같다. `resolution`은 호스트가 기록한 미소비 판정이 있을 때만 싣는다. 반복 조회해도 판정은 남는다. 도구가 보낸 요청에 `resolution` 필드가 있으면 `invalid`로 거절한다.
+- **`effect.request`:** Binds the argument digest to `(call_id, step)`. Returns `send:true` only when claiming a new step or consuming an operator `not_executed` verdict atomically. Mismatched args for an existing step return `conflict`.
+- **Pre-approved calls:** Static cron tools with `preapproved` ([profile-spec.md](profile-spec.md#pre-approved-static-calls-and-designated-human-approval)) must send `args: {"operation":"...","target":"...","params":{...}}` for every write. New `send:true` grants require an exact allowed `(operation, target)` match and consume 1 UTC daily quota (`denied` for out-of-scope/quota/paused; `stale` for revoked/replaced/old-pause-generation; `invalid` for bad shape; `conflict` on valid-grant args mismatch).
+- **`effect.status`:** Querying with `{step, args}` never claims a step (`none`, `started`, `held`, `rejected`, or `confirmed` with `receipt`; always `send:false`). Querying/reporting by `effect` + `outcome` (`confirmed`/`rejected`/`held`) records final step status; mixing step lookup with `effect`/`outcome` returns `invalid`. On `unavailable`, retry status lookup without writing.
+- **Credential scrubbing:** Receipts, hold reasons, and step names are scanned before persistence. Credential leaks in a step name return `invalid`; leaks in receipts or hold reasons hold the step with `receipt_credential` or `reason_credential` without persisting the raw text.
+- **Recovery after operator `not_executed` verdict:** Status returns `resolution: "not_executed"` (tools cannot send `resolution`):
 
 ```json
 {"v":1,"id":"7","state":"held","effect":"e-17","resolution":"not_executed","send":false}
 ```
 
-1. `effect.status{step,args}`로 조회한다. `confirmed`면 영수증을 재사용하고, `rejected`면 종료한다. `started` 또는 판정 없는 `held`는 쓰기를 멈추고 기존 시도의 결과를 확인한다.
-2. `state:"none"` 또는 `resolution:"not_executed"`이면 수신처를 읽기 전용으로 사전 조회한다. 이때 중단돼도 새 단계가 생기거나 판정이 소비되지 않는다.
-3. 쓰기가 여전히 필요하면 같은 `step`과 `args`로 `effect.request`를 호출한다. **그 응답이 `send:true`일 때만** 한 번 쓰고 결과를 기록한다. 재개한 두 실행이 같은 판정을 읽어도 하나만 다시 쓸 수 있다.
+1. Call `effect.status{step, args}`. Reuse `receipt` on `confirmed`, exit on `rejected`, and verify externally without writing on `started` or unresolved `held`.
+2. On `none` or `resolution: "not_executed"`, perform a read-only check at the downstream system (crashing here does not consume the verdict).
+3. If the write is still needed, call `effect.request{step, args}` and write **only if `send:true`**, then report the outcome.
 
-호출별 시간·출력 한도와 콜백 프레임 한도(64 KiB)를 적용한다. 호출 시간 한도는 기본 60초이고, 도구는 `tools.yaml`의 `timeout_secs`(1~900초)로 자기 한도를 선언할 수 있다. 호스트 설정 `limits.tool_call_max_secs`(기본 60, 최대 900)가 천장이다. 도구의 실효 한도(선언하지 않으면 60초)가 천장을 넘으면 활성화를 거절하고(`tool-timeout-over-cap`), 활성화 뒤에 천장을 내렸거나 복원한 옛 선언이면 보내기 전에 거절한다(`tool_timeout_over_cap`, 송신 0). 천장만 올려도 선언하지 않은 도구는 60초 그대로다. 선언은 도구 판본에, 천장은 활성화 지문에 들어간다. 로컬·원격 서버에 같은 값이 쓰이고, 샌드박스 전체 기한은 `max(300초, 한도 + 240초)`이며 프록시의 터널 기한(600초)은 600초를 넘는 한도를 선언한 도구만 그에 맞춘다. 보낸 뒤 한도를 넘기면 결과 불명(`timeout`)이라 쓰기는 보류하고 자동으로 다시 보내지 않는다. 긴 선언은 직접 트리거의 도구 시간 예산을 늘린다. 모델 세션 전체와 호출하는 클라이언트·서버 자체의 기한은 늘어나지 않는다(모델이 부르는 호출에는 모델 차례 한도가 따로 적용된다). 런타임 오류에는 invalid, denied, conflict, stale, unavailable 같은 분류만 싣는다. 재시도·보류 판정은 [복구 규약](reliability.md)을 따른다.
+## Built-In Tools Exposed to Models
 
-도구의 scopes는 하나 이상이다. 입력 스키마의 지원 어휘는 type·enum·const·properties·required·additionalProperties·items·min/maxItems·min/maxLength·minimum/maximum·pattern·anyOf/oneOf/allOf 및 title·description·default다. 실제 서버의 스키마가 흔히 싣는 주석 키워드(`$schema`·`$comment`·`examples`·`format`·`deprecated`·`readOnly`·`writeOnly`)도 받되 검증에는 쓰지 않는다(`format`을 검사하지 않는다). 같은 문서 안의 `$defs`·`definitions`와 `#/$defs/<이름>`·`#/definitions/<이름>` 참조는 컴파일할 때 그 자리에 펼친다(고정한 입력과 해시는 받은 그대로이고 검증만 펼친 스키마로 한다). 참조의 조각은 퍼센트 부호를 먼저 풀고(`%20`은 공백) 그다음 JSON 포인터 이스케이프(`~1`→`/`, `~0`→`~`)를 푼다(잘못된 퍼센트 표기는 거절). `$ref` 옆에는 주석 키워드(`title`·`description`·`default`·`examples`·`$comment`·`deprecated`·`readOnly`·`writeOnly`·`$schema`·`format`)만 둘 수 있고, `allOf`·`type`·`minLength` 같은 조건 키워드가 함께 있으면 조건을 바꾸거나 버릴 수 있어 거절한다(정의 안으로 옮긴다). 재귀 참조(자기 자신·서로를 부름·`#`)·외부 참조·없는 정의·펼친 결과가 크기 한도(노드 2만 개)를 넘는 경우는 이유를 밝혀 거절한다. pattern은 길이가 제한된 Rust regex 공통 문법만 허용한다. 지원하지 않는 키워드는 활성화 때 거절한다. 호출 시에도 같은 InputValidator로 검증한다. reply 도구에는 호스트가 _meta의 bot/destination에 원래 대화 종류·ID·스레드를 넣는다.
+All 12 framework-reserved tool IDs (`delegate`, `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`, `schedule.deliver`, `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`) cannot be declared in `tools.yaml`.
 
-## 모델 실행기가 받는 내장 도구
+- `anthropic-api`, `openai-api`, and `claude-cli` expose `memory.share`, `schedule.create`, `schedule.list`, and `schedule.cancel` when within the agent's scope cap, plus `delegate` (`{"agent":"main/research","instruction":"Summarize today's agenda"}`) for agents with direct children. The host uses `schedule.deliver` internally for delivery-draft approval.
+- For profile `super_admins` holding the matching scopes, the 6 live-management tools below are also exposed (hidden from non-super-admins; direct calls fail with `not_super_admin`). Claude CLI exposes dot names as underscores (`memory_share`, `skill_create`); API runners map aliases per request.
 
-`anthropic-api`, `openai-api`, `claude-cli`는 에이전트의 스코프 상한에 든 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`을 모델에 제공한다. 호스트는 발화별 전송 승인에 `schedule.deliver`를 쓴다. 또한 프로필의 `super_admins`에 등록된 슈퍼 관리자가 해당 스코프를 가질 때는 런타임 스킬·MCP 관리 도구 `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`도 모델에 노출된다(비-슈퍼 관리자에게는 목록에도 나오지 않고 호출 시 브로커가 `not_super_admin`으로 거절한다). 이 열한 이름과 `delegate`는 프레임워크에 예약돼 있다. 프로필 도구의 전체 ID가 예약 이름과 겹치면 검증이 실패한다. Claude CLI의 MCP 목록에는 `memory_share`·`skill_create`처럼 점을 밑줄로 바꾼 이름이 나온다. API 실행기는 요청마다 별칭표를 만들어 응답의 도구 이름을 전체 ID로 되돌린다.
-
-| 슈퍼 관리자 관리 도구 | 등급 | 역할 |
+| Super-admin tool | Class | Behavior |
 |---|---|---|
-| `skill.inspect` | `read` | 에이전트 구조·설명·스킬 용량(64 KiB 한도), 스킬 목록(또는 지정 스킬 본문), MCP 서버 목록, 비밀 보관소 종류와 비밀 **이름**(값 제외) 조회 |
-| `skill.create` | `write` | 프로필 공용 또는 지정 에이전트에 `SKILL.md` 생성, 검증 및 즉시 활성화 |
-| `skill.update` | `write` | 기존 스킬의 `description`·본문 수정(기존 `tools.yaml`·`tools.lock.yaml` 보존), 검증 및 즉시 활성화 |
-| `skill.delete` | `write` | 스킬 폴더 삭제·미사용 도구 스코프 정리, 검증 및 즉시 활성화 |
-| `mcp.add` | `write` (`external`) | 원격 Streamable HTTP(`tools/list` 자동 잠금) 또는 로컬 stdio MCP 서버 추가, SOPS/키체인 비밀 암호화 저장·캐시 무효화, 검증 및 즉시 활성화 |
-| `mcp.remove` | `write` | MCP 서버·스킬 도구 바인딩·미사용 스코프 제거(`remove_secrets: true` 시 미사용 비밀도 암호화 보관소에서 제거), 검증 및 즉시 활성화 |
+| `skill.inspect` | `read` | Inspect agent tree, descriptions, skill byte budget (64 KiB cap), skills (or one skill body), MCP servers, secret backend, and secret **names** (never values). |
+| `skill.create` | `write` | Create a profile-wide or agent-scoped `SKILL.md`, validate, and activate live. |
+| `skill.update` | `write` | Update an existing skill's `description` or body (preserving `tools.yaml`/`tools.lock.yaml`), validate, and activate live. |
+| `skill.delete` | `write` | Remove a skill folder and prune unused tool scopes, validate, and activate live. |
+| `mcp.add` | `write` (`external`) | Register a remote Streamable HTTP (`tools/list` auto-locked) or local stdio MCP server, store secrets encrypted, validate, and activate live. |
+| `mcp.remove` | `write` | Remove an MCP server, its skill tool bindings, and unused scopes (`remove_secrets: true` also deletes unused encrypted secrets), validate, and activate live. |
 
-- 모든 관리 변경은 트랜잭션으로 묶여 검증·설치·DB 커밋 중 하나라도 실패하면 디스크 변경을 원래대로 되돌린다.
-- 성공하면 기존 사전 승인(`bot_grants`)은 유지한 채 새 프로필 번들과 활성 판본을 PostgreSQL에 커밋하고, 같은 프로세스의 레지스트리·도구 실행기·샌드박스·승인 결정기를 즉시 갱신해 재기동 없이 다음 요청부터 바로 동작한다.
-- 비밀 **값**은 평문 파일(`SKILL.md`·`tools.yaml`·`tools.lock.yaml`·`profile.yaml`·`host.json`)이나 승인 카드에 기록하지 않는다. `mcp.add`에 `secret_value`·`secret_values`가 주어지면 먼저 가림 장치(`Redactor`)에 등록한 뒤 SOPS(`sops set`) 또는 키체인(`bot/<profile>/<name>`)에 암호화 저장하고 SOPS 캐시를 즉시 비운다.
+- Management mutations are atomic: any validation, install, or DB failure rolls back disk edits. Success commits the new bundle and active revision while preserving existing `bot_grants`, then hot-reloads the in-process registry, runners, sandboxes, and decision gate with no restart.
+- Secret values (`secret_value`, `secret_values`) are registered with `Redactor`, stored encrypted in SOPS (`sops set`) or keychain (`bot/<profile>/<name>`) with immediate cache flush, and never written to plaintext files or approval cards.
+- The broker checks pinned and current permissions on every built-in call. `memory.share` requires the owner to approve the exact body from their DM or `bot chat`. Confirmed rejections replay deterministically by call ID ([reliability.md](reliability.md)).
 
-브로커는 각 호출에서 요청자와 에이전트의 권한을 고정 판본과 현재 판본에 대조한다. 기억을 공유하려면 소유자가 자신의 DM 또는 `bot chat`으로 시작한 CLI 대화에서 기억 한 건의 본문을 확인하고 승인해야 한다. 승인 대기 뒤에도 앞에서 확정한 거절은 같은 호출 ID로 재생한다. [거절 기록 계약](reliability.md#거절-기록-계약)
+### Schedules and Follow-Up Wakes
 
-직계 자식이 있는 에이전트는 세 실행기에서 모두 `delegate`를 쓸 수 있다. `{"agent":"main/research","instruction":"일정 요약"}`처럼 자식과 지시를 지정하면 호스트가 부모의 신원·대화·권한을 이어받아 자식을 시작하고 같은 도구 호출에 결과를 돌려준다.
+- **Chat schedules:** `schedule.create` takes `instruction`, either `at` (UTC RFC 3339, up to 1,830 days ahead) or `cron` (5-field + optional IANA `timezone`), optional `quiet` (default `false`; quiet runs returning `<quiet>` suppress replies), and optional `destination: {binding, conversation: {kind, id, thread?}}`. `schedule.list` lists the caller's active schedules; `schedule.cancel` cancels by `{"id":"<schedule-id>"}`.
+- **Recipient rules:** Defaults to the originating conversation. Profile members with `schedule.create` may target other registered Slack channels on the same profile; the owner approves the recipient and instruction at creation and approves each `Delivery draft` card (`schedule.deliver`) when the schedule fires. CLI users may schedule only to the current conversation; DM bindings cannot target arbitrary DMs; HTTP and service principals cannot manage user schedules.
+- **Tool-initiated wakes (`_meta["bot/wake"]`):** A successful non-private MCP tool result may include `"_meta":{"bot/wake":{"at":"2030-01-01T12:00:00Z","instruction":"Check if files arrived","quiet":true}}`. Requires `effects: true`, `schedule.create` scope on the tool and current requester/agent, and verified prior step receipts. Schedules one wake to the originating conversation and strips `_meta["bot/wake"]` from model output. Holds the call if wake creation fails after an external effect.
 
-### 예약과 후속 확인
+### Passing Unhandled Events (`bot/pass`)
 
-대화에서 `schedule.create`로 “내일 한 번 자료가 도착했는지 확인해 줘”를 등록할 수 있다. 지시문과 `at`(UTC RFC 3339) 또는 `cron`(프로필 시간대, IANA 이름으로 재지정 가능) 중 하나를 보낸다. `at`에는 지금보다 뒤인 시각을 최대 1,830일 뒤까지 지정할 수 있다. `quiet`의 기본값은 false다. `schedule.list`는 본인의 활성 예약 ID·시각·quiet를, `schedule.cancel`은 취소 결과를 돌려준다. 각 예약 도구는 같은 이름의 스코프가 필요하다.
-
-예를 들어 `schedule.create` 인자는 `{"at":"2030-01-01T12:00:00Z","instruction":"자료 도착 여부 확인","quiet":true}`이고, 반복은 `at` 대신 `"cron":"0 9 * * 1-5","timezone":"Asia/Seoul"`을 쓴다. 취소 인자는 `{"id":"<예약 ID>"}`다. 기본 목적지는 원래 대화다. 다른 수신자는 `destination: {binding, conversation: {kind, id, thread?}}`로 명시하며 호스트가 현재 바인딩으로 정확한 수신자에게 보낼 수 있을 때만 등록할 수 있다.
-
-`schedule.create` 권한을 가진 프로필 멤버는 등록부에 올라 있는 수신자를 예약 목적지로 쓸 수 있다. 제한하려면 등록부에서 뺀다. CLI 사용자는 원래 대화에만 예약할 수 있다. HTTP 주체와 서비스 계정은 사용자 예약을 생성·조회·취소할 수 없다.
-
-Slack에서 다른 채널을 지정하면 호스트는 같은 프로필의 등록부에서 실제 팀과 채널을 확인한다. 소유자는 생성 때 바인딩·대화 종류·`팀ID/채널ID`·스레드·지시문을 승인하고, 발송할 때마다 완성된 전송 초안을 승인한다. DM 전체를 받는 바인딩에는 개별 수신자가 등록돼 있지 않으므로 다른 DM을 지정할 수 없다.
-
-일반 MCP 도구는 성공 응답의 최상위 메타데이터에 후속 확인 하나를 요청할 수 있다. 예시는 `"_meta":{"bot/wake":{"at":"2030-01-01T12:00:00Z","instruction":"자료 도착 여부 확인","quiet":true}}`이다. 브로커는 `effects: true`와 `schedule.create` 선언, 인증된 요청자·에이전트의 현재 권한, 이전 단계 영수증을 확인한다. 원래 대화에 한 번만 예약하며 이 메타데이터는 모델 결과에서 제거한다. 이미 외부 효과를 낸 뒤 예약을 확정할 수 없으면 호출을 보류한다. 민감 DM 전용 도구에는 이 기능이 없다.
-
-현재 srt에서는 호출마다 새 작업 폴더를 사용한다. `state: required` 서버를 운영할 영속 볼륨 어댑터는 아직 없다. 향후 어댑터의 계약에서 `BOT_STATE_DIR`은 운영자가 허용한 (프로필, 설치 서버) 전용 0700 볼륨 하나를 가리킨다. 도구의 env 선언으로 이 변수를 바꿀 수 없다. 다른 프로필·서버·모델의 접근과 링크 탈출을 차단하고 쓰는 동안의 파일시스템 용량 상한을 집행해야 한다. 여러 호스트에서 쓸 때는 같은 볼륨과 프로세스 간 쓰기 잠금을 사용한다. 어댑터가 이 조건을 확인할 수 없으면 상태를 요구하는 서버의 기동을 거절한다. 같은 설치 서버의 도구는 이 내용을 공유하므로 서로 다른 자격 경계에는 별도 서버를 사용한다. 일반 작업 폴더는 호출마다 새로 만든다. 회전 자격은 해당 서버의 전용 보관소 권한으로 관리한다.
-
-### 처리하지 않은 이벤트 넘기기 (`bot/pass`)
-
-인증된 Slack 이벤트의 **일반 직접 도구 트리거**에서 도구는 «이 이벤트는 내 일이 아니다»를 이렇게 알릴 수 있다. 성공한 MCP 결과 그대로이며, 다른 호출(모델·위임·HTTP·cron·wake)에서는 해석하지 않고 떼어 낸다.
+On authenticated Slack **direct-tool triggers**, a tool may decline an event so the broker advances to the next candidate trigger or fallback chat (ignored and stripped on model, delegation, HTTP, cron, and wake calls):
 
 ```json
 {"content":[],"isError":false,"_meta":{"bot/pass":true}}
 ```
 
-- 유효한 표식은 최상위 `_meta["bot/pass"]`의 불리언 `true`와 빈 `content`, 오류가 아닌 성공 결과뿐이다. text 안의 JSON·문자열 `"true"`·본문·`structuredContent`·오류·`bot/wake`를 비롯한 `_meta`의 다른 항목이 함께 오면(내용은 버리고 «다른 항목이 있다»는 사실만 남긴다) `invalid_pass`로 그 후보에서 닫고 다음 후보·기본 대화를 부르지 않는다.
-- 판별용 읽기만 한 호출만 넘길 수 있다. 효과 단계 시작·보류·결과 불명·회신(outbox) 생성·승인 대기가 하나라도 있으면 `pass_after_effect`로 닫는다. 쓰기 등급인데 단계 원장(`effects: true`)이 없는 도구는 부작용을 가릴 수 없어 넘길 수 없다. 실제로 아무것도 쓰지 않은 `effects` 도구는 넘길 수 있다.
-- **쓰기는 반드시 단계로 남기고, 쓰기 뒤에 넘기지 않는 것은 도구의 책임이다.** 호스트는 단계 원장·회신·승인에 남은 흔적으로만 «쓰기를 했는가»를 안다. `effects: true`인 도구가 단계 원장에 기록하지 않고 외부에 쓴 뒤 `bot/pass`를 돌려주면 호스트는 그 쓰기를 볼 수 없어 넘김을 막지 못한다 — 외부에 쓸 때는 항상 `effect.request` 단계를 거치고, 무언가 썼다면 `bot/pass`를 돌려주지 않는다.
-- 호스트는 PASS 확정·호출 결론·커서 전진·감사를 한 PG 커밋으로 기록한다. 후보마다 호출 ID가 달라(`<run>:tool`, `<run>:tool:1`, …) 후보를 한 번씩만 방문하고, 재시작·동시 전달에도 호출과 답은 한 번이다. 표식은 호스트가 결과에서 떼어 내 모델·감사·회신 어디에도 남지 않는다.
-- 민감 DM은 기본적으로 지정 도구가 비공개로 처리한다. 선택된 트리거에 `private_pass: true`를 명시하고 그 도구가 유효한 빈 PASS를 반환하면 원래 질문과 첨부 참조가 일반 대화 run에 저장되고 모델 입력이 될 수 있다. 도구가 받는 매핑 인자는 이 봉투의 일부일 수 있다. 전체 봉투를 일반 대화에 공개해도 될 때만 넘긴다. 다른 선언의 허용 설정은 적용되지 않으며, 허용되지 않은 표식은 전용 원장에 보류로 남는다.
-- 도구 실패·카드 거절·일시 장애는 넘김이 아니다. 기존 종결·재시도 규칙을 따른다.
+- **Strict shape:** Requires top-level `_meta["bot/pass"]: true`, empty `content`, `isError: false`, and no `structuredContent` or extra `_meta` keys (`bot/wake`, etc.). Any extra field closes the candidate as `invalid_pass` without advancing.
+- **No prior side effects:** Allowed only after pure reads. Any started/held/unknown effect step, outbox reply, or pending approval closes as `pass_after_effect`. Write-class tools without `effects: true` cannot pass; `effects: true` tools that recorded zero writes can pass. **Tools must log every external write via `effect.request` and never return `bot/pass` after writing**, because the host detects writes only through the effect ledger, outbox, and approvals.
+- **Commit & privacy:** PASS confirmation, call conclusion, cursor advance, and audit commit atomically with distinct candidate call IDs (`<run>:tool`, `<run>:tool:1`, ...), and the marker is stripped from all outputs. On a `private: true` DM trigger, returning a valid empty PASS promotes the raw body and attachments to normal DM chat only when `private_pass: true` is declared; otherwise unpermitted passes hold in the private ledger. Tool errors, rejected approvals, and transient failures are not PASS.

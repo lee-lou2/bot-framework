@@ -79,7 +79,7 @@ def check_files():
 def check_examples():
     """Validate example YAML manifests and AGENT.md/SKILL.md front matter against schemas/v1/*.schema.json
     (plus SKILL.md folder-name match and unclosed `---` fence). Full YAML 1.2 strict parsing, BOM/control-char
-    checks, duplicate-key/anchor bans, 32 KiB skill limits, and cross-file references are enforced by the Rust
+    checks, duplicate-key/anchor bans, 64 KiB skill limits, and cross-file references are enforced by the Rust
     `bot-profile` tests (`acceptance`, `team_example`, `front_matter`, `triggers_schema`) during `cargo test`."""
     validators = {}
     for path in Path("schemas/v1").glob("*.schema.json"):

@@ -1,4 +1,4 @@
-// 실행 상세의 명령 가시성과 확인·재전송에 쓰는 요청을 확인한다.
+// Unit tests for operator run-control visibility, confirmation timing, and command pinning (ui/runctl.js).
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
@@ -91,7 +91,7 @@ test("an operator can release a pending resend and read the latest state", async
 });
 
 test("a blocked run opens the hold view without sending a command", () => {
-  const { controller, nav } = surface(() => assert.fail("보류에는 명령을 보내지 않는다"));
+  const { controller, nav } = surface(() => assert.fail("must not send a command for a held run"));
   const d = detail("waiting");
   d.control.held = true;
   const button = controller.mount(d, offered(d, true)).children[0];
@@ -106,6 +106,6 @@ test("a rejected run command reports an error toast with bad tone", async (t) =>
   button.onclick();
   now.mock.mockImplementation(() => 1700);
   await button.onclick();
-  assert.deepEqual(toasts, [["실행 상태가 바뀌었습니다. 새 상태를 확인하세요.", "bad"]]);
+  assert.deepEqual(toasts, [["Run state changed. Refresh to see the latest state.", "bad"]]);
   assert.deepEqual(refreshes, [true]);
 });

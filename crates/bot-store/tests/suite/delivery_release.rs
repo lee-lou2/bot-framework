@@ -1,4 +1,4 @@
-//! 다른 수신자에게 보낼 예약 회신을 실제 브로커로 승인하고 PG에 등록한다.
+//! End-to-end scheduled delivery approval and outbox enqueue via the real broker and PG store.
 
 use crate::support::{delivery::outbox_rows, *};
 use bot_broker::{
@@ -32,7 +32,6 @@ fn broker(db: &TestDb, activation: &str) -> BrokerService {
             .build(),
     );
     let pg = Arc::new(db.store.for_activation(Revision(activation.into())));
-    // 같은 프로필의 호스트 등록부: 발화가 고정한 목적지(Slack 채널의 정규 경로 `팀ID/채널ID`)가 등록돼 있다. 등록부가 없으면 브로커는 전송 카드를 열지 않는다.
     let routes = Arc::new(MemRoutes::new());
     routes.register(
         "personal",
@@ -63,30 +62,29 @@ fn broker(db: &TestDb, activation: &str) -> BrokerService {
 fn receipt(result: Result<CallResult, Error>) -> String {
     match result {
         Ok(CallResult::Done(payload)) => payload.0,
-        Ok(_) => panic!("승인된 초안의 등록 영수증이 필요하다"),
-        Err(error) => panic!("승인된 초안의 등록 영수증 조회 실패: {error:?}"),
+        Ok(_) => panic!("expected enqueue receipt for approved draft"),
+        Err(error) => panic!("failed to fetch enqueue receipt for approved draft: {error:?}"),
     }
 }
 
 async fn approve(db: &TestDb, service: &BrokerService) -> (Attempt, Attempt) {
-    let mut request = accept("personal", "delivery", "예약 회신");
+    let mut request = accept("personal", "delivery", "scheduled reply");
     request.scopes = scopes(&["run", "schedule.create"]);
     request.approver = Some(PrincipalId(OWNER.into()));
     let id = runs(db).accept(request).await.unwrap();
     let first = runs(db).claim().await.unwrap().unwrap().attempt;
-    // 발화 시 저장하는 목적지만 준비한다. 초안·승인·발송 등록은 모두 실제 포트를 거친다.
     query("insert into bot_deliveries (profile, run, dest_binding, dest_kind, dest_id) values ('personal', $1, 'slack', 'channel', 'T1/C9')")
         .bind(&id.0)
         .execute(db.store.pool())
         .await
         .unwrap();
     delivery::replies(db)
-        .draft(first.clone(), Some(done("승인한 답")))
+        .draft(first.clone(), Some(done("approved reply")))
         .await
         .unwrap()
         .unwrap();
     let Ok(CallResult::Awaiting(nonce)) = service.release(first.clone()).await else {
-        panic!("소유자의 승인이 필요하다")
+        panic!("owner approval required")
     };
     assert_eq!(outbox_rows(db, "T1/C9").await, 0);
     service
@@ -117,7 +115,7 @@ async fn the_final_claim_can_recover_the_committed_receipt_after_the_run_ends() 
         .await;
     assert_eq!(issued, recorded);
 
-    // 응답을 잃은 호스트는 새 브로커로 같은 영수증만 얻는다.
+    // A restarted host recovers the same receipt without re-enqueuing.
     let restarted = broker(&db, "set-1");
     assert_eq!(receipt(restarted.release(last.clone()).await), recorded);
     for other in [
@@ -142,7 +140,7 @@ async fn the_final_claim_can_recover_the_committed_receipt_after_the_run_ends() 
     assert_eq!(outbox_rows(&db, "T1/C9").await, 1);
 }
 
-/// PG 커밋까지 실행한 뒤 호출자가 응답을 받지 못하게 한다.
+/// Simulates a lost reply after PG commits `enqueue`.
 struct LostEnqueueReply(bot_store::Store);
 
 impl ScheduledReplies for LostEnqueueReply {

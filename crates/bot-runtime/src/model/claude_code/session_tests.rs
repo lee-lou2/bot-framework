@@ -1,4 +1,4 @@
-//! Claude Code 세션: 새로 시작·확인된 응답마다 묶음 쓰기·승인/위임 뒤 이어 받기. 가짜 샌드박스가 세션 파일에 줄을 써 CLI를 흉내 낸다.
+//! Claude Code session tests: fresh sessions, front-confirmed batch commits, resume, and symlink safety.
 
 use super::*;
 use crate::model::{
@@ -19,15 +19,14 @@ use std::{
 };
 
 const CHAIN: &str = include_str!("../session/fixture.jsonl");
-/// 원장의 실제 결과(세션 파일에 적힌 본문이 아니라 이 값이 이어 받는 세션에 들어간다)
-const TRUSTED: &str = r#"{"content":[{"type":"text","text":"원장 결과"}],"isError":false}"#;
+const TRUSTED: &str = r#"{"content":[{"type":"text","text":"ledger result"}],"isError":false}"#;
 const OK: &str = r#"{"type":"stream_event","event":{"type":"message_start","message":{"role":"assistant"}}}
-{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"끝"}}}
-{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"났"}}}
-{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"어"}}}
-{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"요"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"D"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"o"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"n"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"e"}}}
 {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}}
-{"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"끝났어요.","usage":{"input_tokens":1,"output_tokens":1}}"#;
+{"type":"result","subtype":"success","is_error":false,"api_error_status":null,"result":"Done.","usage":{"input_tokens":1,"output_tokens":1}}"#;
 
 fn lines() -> Vec<&'static str> {
     CHAIN.lines().collect()
@@ -68,11 +67,11 @@ fn request(port: Arc<FakePort>) -> ModelRequest {
     ModelRequest {
         attempt: attempt(),
         model: "assistant".into(),
-        system: "너는 비서다.".into(),
+        system: "You are an assistant.".into(),
         conversation: vec![Message {
             role: Role::User,
             speaker: Some(PrincipalId("local:owner".into())),
-            text: "삭제해줘".into(),
+            text: "Delete it".into(),
         }],
         tools: vec![],
         exchanges: vec![],
@@ -95,7 +94,6 @@ fn runner(sandbox: &FakeSandbox, tag: &str) -> ClaudeCodeRunner {
     ClaudeCodeRunner::new(Arc::new(sandbox.clone()), config)
 }
 
-/// 세션 파일(호출 폴더 안, CLI가 쓰는 자리)
 fn session_file(spec: &ModelSpec) -> PathBuf {
     spec.scratch
         .as_ref()
@@ -127,7 +125,6 @@ fn probe_response() -> CliResponse {
     }
 }
 
-/// 표본 앞쪽 `n`줄을 쓰고 프런트가 확인한 묶음의 체크포인트 목록.
 fn saved_steps(n: usize) -> Vec<Step> {
     let mut journal = Journal::new(0, Default::default(), "mcp__relay__".into());
     for line in &lines()[..n] {
@@ -141,15 +138,13 @@ struct FakePort {
     steps: Vec<Step>,
     commits: Mutex<Vec<Vec<Step>>>,
     responses: Mutex<BTreeMap<String, CliResponse>>,
-    /// 원장에서 끝나지 않은 자리(turn, pos). 나머지는 끝났고 결과는 `TRUSTED`다.
+    /// Slots `(turn, pos)` still unfinished in the ledger; others resolve to `TRUSTED`.
     unfinished: Mutex<BTreeSet<(u64, u32)>>,
-    /// 계획은 저장됐지만 끝내 실행되지 못한 자리: 쓸 때의 확인(`recall`)은 통과하고 끝난 뒤의 확인(`ended`)만 실패한다.
+    /// Slots whose plan was saved (`recall` passes) but that never ran (`ended` returns false).
     never_ran: Mutex<BTreeSet<(u64, u32)>>,
-    /// 끝난 뒤의 확인이 응답하지 않는다
     ended_hangs: std::sync::atomic::AtomicBool,
     settle: Mutex<VecDeque<Result<Slot, SessionError>>>,
     settled: Mutex<Vec<(u64, u32, String)>>,
-    /// 이미 기록된 자리를 다시 읽을 때 줄 값(없으면 끝난 자리는 `TRUSTED`)과 읽은 자리
     recall: Mutex<VecDeque<Option<ToolOutput>>>,
     recalled: Mutex<Vec<(u64, u32, String)>>,
     commit_error: Mutex<Option<SessionError>>,
@@ -260,7 +255,7 @@ async fn a_fresh_session_is_named_and_one_batch_is_written_once_the_front_confir
         .step(request(port.clone()))
         .await
         .unwrap();
-    assert!(matches!(out, ModelStep::Final { ref text, .. } if text == "끝났어요."));
+    assert!(matches!(out, ModelStep::Final { ref text, .. } if text == "Done."));
     let spec = &sandbox.specs()[0];
     let at = spec.args.iter().position(|a| a == "--session-id").unwrap();
     assert_eq!(spec.args[at + 1], sid());
@@ -272,10 +267,10 @@ async fn a_fresh_session_is_named_and_one_batch_is_written_once_the_front_confir
     );
     assert!(
         spec.stdin.is_some(),
-        "처음에는 대화 본문을 표준입력으로 준다"
+        "initial session sends conversation on stdin"
     );
     let commits = port.commits();
-    assert_eq!(commits.len(), 1, "응답 하나는 한 묶음");
+    assert_eq!(commits.len(), 1, "one response commits as one batch");
     assert_eq!(
         keys(&commits[0]),
         [
@@ -298,7 +293,7 @@ async fn nothing_is_written_until_the_front_confirms_and_a_late_confirmation_sti
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert!(
             late.commits().is_empty(),
-            "확인 전에는 아무것도 쓰지 않는다"
+            "nothing may commit before front confirmation"
         );
         late.confirm(probe_response());
     });
@@ -332,7 +327,7 @@ async fn a_response_that_differs_from_the_front_confirmation_stops_the_cli_and_w
         }
     );
     assert!(port.commits().is_empty());
-    assert_eq!(sandbox.killed(), 1, "믿을 수 없는 세션의 CLI는 끝낸다");
+    assert_eq!(sandbox.killed(), 1, "untrusted session CLI must be killed");
 }
 
 #[tokio::test]
@@ -359,7 +354,6 @@ mod restore;
 #[tokio::test]
 async fn a_line_that_never_ends_or_too_many_unconfirmed_lines_stop_the_journal_without_growing_memory()
  {
-    // 개행 없이 상한을 넘는 줄 하나: 쌓아 두지 않고 더는 쓰지 않는다. CLI 실행은 계속된다
     let port = FakePort::new(vec![]);
     port.confirm(probe_response());
     let sandbox = FakeSandbox::new([slow()]).inspect(|spec| {
@@ -391,8 +385,8 @@ async fn resuming_parks_again_without_starting_a_cli_when_a_slot_must_wait() {
         .await
         .unwrap_err();
     assert_eq!(error, ModelError::Parked);
-    assert!(sandbox.specs().is_empty(), "CLI를 띄우지 않는다");
-    assert!(port.commits().is_empty(), "일부 결과만 적지 않는다");
+    assert!(sandbox.specs().is_empty(), "CLI must not start");
+    assert!(port.commits().is_empty(), "partial results must not commit");
 }
 
 #[tokio::test]
@@ -424,7 +418,6 @@ async fn slot_failures_map_to_model_errors_and_corrupt_records_never_start_a_cli
         assert_eq!(error, want);
         assert!(sandbox.specs().is_empty());
     }
-    // 줄 없이 그룹만 있는 기록
     let broken: Vec<Step> = saved_steps(4)
         .into_iter()
         .filter(|s| !s.key.starts_with("cli-rec-"))
@@ -455,7 +448,6 @@ async fn a_session_path_the_vm_swapped_for_a_link_is_never_followed_and_ends_the
     use std::os::unix::fs::symlink;
     let port = FakePort::new(vec![]);
     port.confirm(probe_response());
-    // 작업 폴더 밖의 파일에 유효한 세션 줄이 들어 있어도 읽지 않는다
     let outside = std::env::temp_dir().join(format!("bot-outside-session-{}", std::process::id()));
     std::fs::write(&outside, lines()[..4].join("\n") + "\n").unwrap();
     let target = outside.clone();
@@ -477,8 +469,8 @@ async fn a_session_path_the_vm_swapped_for_a_link_is_never_followed_and_ends_the
     );
     assert!(
         port.commits().is_empty(),
-        "밖의 파일 내용은 저장하지 않는다"
+        "external file contents must not be committed"
     );
-    assert_eq!(sandbox.killed(), 1, "믿을 수 없는 세션의 CLI는 끝낸다");
+    assert_eq!(sandbox.killed(), 1, "untrusted session CLI must be killed");
     let _ = std::fs::remove_file(outside);
 }

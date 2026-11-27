@@ -1,8 +1,8 @@
-//! 도구 서버의 외부 접속(egress 프록시)과 단계 원장 콜백 채널 시험.
+//! Tests for egress proxy enforcement and effect-journal callback channels.
 
 use super::*;
 
-/// 도구가 프록시에 `CONNECT`를 요청하고 상태 줄을 돌려주는 가짜 서버.
+/// Fake server probing `CONNECT` targets through `HTTPS_PROXY` and returning status lines.
 fn probing(targets: &'static [&'static str], with_credentials: bool) -> Server {
     Server::new(&[("delete", schema())]).answering(move |ctx| {
         let url = ctx
@@ -86,22 +86,22 @@ async fn the_tool_can_only_leave_through_declared_hosts_within_the_operator_cap(
     );
     let ran = run(&r, job(tool, r#"{"event":"a"}"#)).await;
     let got = statuses(&ran);
-    assert!(got[0].contains("200"), "선언 ∩ 상한: {got:?}");
-    assert!(got[1].contains("403"), "선언했지만 운영자 상한 밖: {got:?}");
-    assert!(got[2].contains("403"), "선언하지 않은 호스트: {got:?}");
-    assert!(got[3].contains("403"), "선언하지 않은 포트: {got:?}");
+    assert!(got[0].contains("200"), "declared & capped: {got:?}");
+    assert!(got[1].contains("403"), "declared but outside cap: {got:?}");
+    assert!(got[2].contains("403"), "undeclared host: {got:?}");
+    assert!(got[3].contains("403"), "undeclared port: {got:?}");
     assert!(
         got[4].contains("403"),
-        "이름이 사설 주소로 풀리면 거절: {got:?}"
+        "private DNS resolution rejected: {got:?}"
     );
     assert_eq!(
         r.connector.addrs(),
         vec!["93.184.216.34:443".parse().unwrap()],
-        "접속은 허용한 한 곳뿐"
+        "only the single allowed host should connect"
     );
-    // 샌드박스에는 프록시 하나뿐이고, 호출이 끝나면 닫힌다
+    // Sandbox receives one proxy endpoint that closes when the call ends.
     let spec = &r.sandbox.specs()[0];
-    let addr = spec.egress.as_ref().expect("프록시").addr;
+    let addr = spec.egress.as_ref().expect("proxy").addr;
     for name in [
         "HTTPS_PROXY",
         "https_proxy",
@@ -138,7 +138,7 @@ async fn no_declared_host_means_no_network_at_all() {
     run(&r, job(decl(&[], &[], false), r#"{"event":"a"}"#)).await;
     let spec = &r.sandbox.specs()[0];
     assert!(spec.egress.is_none() && spec.env.is_empty());
-    // 운영자 상한과 겹치는 곳이 없어도 마찬가지다
+    // Disjoint intersection with operator cap also disables networking.
     let capped = rig(
         plain_server(),
         |_| {},
@@ -168,7 +168,7 @@ fn plain_server() -> Server {
 async fn multi_step_tools_get_a_callback_channel_that_closes_with_the_call() {
     let server = plain_server().answering(|ctx| {
         Box::pin(async move {
-            let mut pipe = ctx.effects.expect("콜백 채널");
+            let mut pipe = ctx.effects.expect("effects channel");
             let frame = r#"{"v":1,"id":"1","method":"effect.request","step":"upload","args":{"file":"summary"}}"#;
             pipe.write.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
             let mut reader = BufReader::new(pipe.read);
@@ -186,7 +186,7 @@ async fn multi_step_tools_get_a_callback_channel_that_closes_with_the_call() {
     );
     assert_eq!(r.journal.states().len(), 1);
     assert!(r.sandbox.specs()[0].effects);
-    // 채널을 주지 않는 어댑터면 실행하지 않는다
+    // Refuse to execute when the adapter withholds the effects pipe.
     let r = rig(plain_server(), |_| {}, |_| {});
     r.sandbox.withhold_effects_pipe(true);
     assert!(matches!(
@@ -203,14 +203,14 @@ const LOOKUP_FRAME: &str =
 
 #[tokio::test]
 async fn a_step_lookup_through_the_pipe_channel_is_checked_against_the_calls_own_tool() {
-    // 호출을 연 도구(`agenda.delete`)로 묶인 원장이면 조회가 읽고, 다른 도구로 묶였으면 원장이 거절한다(채널이 도구를 정한다)
+    // Pipe lookup validates against the call's bound tool.
     for (bound, expected) in [
         ("agenda.delete", r#""state":"started""#),
         ("agenda.other", r#""error":"denied""#),
     ] {
         let server = plain_server().answering(|ctx| {
             Box::pin(async move {
-                let mut pipe = ctx.effects.expect("콜백 채널");
+                let mut pipe = ctx.effects.expect("effects channel");
                 let mut reader = BufReader::new(pipe.read);
                 let mut seen = Vec::new();
                 for frame in [UPLOAD_FRAME, LOOKUP_FRAME] {
@@ -233,7 +233,7 @@ async fn a_step_lookup_through_the_pipe_channel_is_checked_against_the_calls_own
         assert!(parts[0].contains(r#""send":true"#), "{seen}");
         assert!(parts[1].contains(expected), "{bound}: {seen}");
         assert!(parts[1].contains(r#""id":"2""#), "{seen}");
-        // 조회는 아무것도 바꾸지 않았다: 단계 하나가 시작 상태 그대로다
+        // Lookup is read-only and leaves the single started step unchanged.
         assert_eq!(
             r.journal.states(),
             vec![(
@@ -265,7 +265,7 @@ async fn a_step_lookup_through_the_proxys_local_address_is_checked_against_the_c
     }
 }
 
-/// 도구가 프록시의 전용 주소로 단계 원장 프레임을 보내고 응답 한 줄을 돌려받는 가짜 서버.
+/// Fake server posting effect frames via the proxy's local effect endpoint.
 fn effect_client(frames: &'static [&'static str], auth_ok: bool, path: &'static str) -> Server {
     Server::new(&[("delete", schema())]).answering(move |ctx| {
         Box::pin(async move {
@@ -323,7 +323,7 @@ async fn a_sandbox_without_fd_passing_reports_steps_through_the_proxys_local_add
         "{seen}"
     );
     let spec = &r.sandbox.specs()[0];
-    assert!(!spec.effects, "파이프 채널은 주지 않는다");
+    assert!(!spec.effects, "must not attach pipe channel");
     assert!(spec.host_env.contains(&(
         "BOT_EFFECT_URL".into(),
         "http://bot-effects.invalid/effect".into()
@@ -344,7 +344,7 @@ async fn a_sandbox_without_fd_passing_reports_steps_through_the_proxys_local_add
     );
     assert!(
         r.connector.addrs().is_empty(),
-        "전용 주소는 바깥으로 나가지 않는다"
+        "local effect endpoint must not dial out"
     );
 }
 
@@ -367,10 +367,10 @@ async fn the_local_address_needs_the_per_call_credentials_and_only_serves_the_ef
         );
         assert!(
             r.journal.states().is_empty(),
-            "거절된 요청은 원장에 닿지 않는다"
+            "rejected requests must not mutate the journal"
         );
     }
-    // 단계 원장을 쓰지 않는 도구에는 전용 주소도 환경 변수도 없다
+    // Tools without `effects: true` get neither the local URL nor proxy config.
     let r = rig(effect_client(frame, true, "/effect"), |_| {}, |_| {});
     r.sandbox.set_effects_via_proxy(true);
     run(&r, job(decl(&[], &[], false), r#"{"event":"a"}"#)).await;
@@ -383,7 +383,7 @@ async fn a_stale_generation_cannot_report_through_the_local_address() {
         &[r#"{"v":1,"id":"1","method":"effect.request","step":"upload","args":{"file":"x"}}"#];
     let r = rig(effect_client(frames, true, "/effect"), |_| {}, |_| {});
     r.sandbox.set_effects_via_proxy(true);
-    r.journal.set_generation("r1", 2); // 워커가 이미 인계됐다
+    r.journal.set_generation("r1", 2); // Worker generation already advanced.
     let ran = run(&r, job(decl(&[], &[], true), r#"{"event":"a"}"#)).await;
     assert!(
         reply_text(&ran).contains(r#""error":"stale""#),

@@ -1,4 +1,4 @@
-//! 운영자 API, 조건부 전이, 감사 재전송을 실제 PostgreSQL에서 확인한다.
+//! Operator run control HTTP API, conditional transitions, and audit replay against PostgreSQL.
 
 use crate::support::{admin::*, *};
 use bot_admin::{AdminConfig, AdminDeps, StaticTokens, fake, router};
@@ -180,7 +180,7 @@ async fn fork(db: &TestDb, parent: &Attempt) -> RunId {
             checked_revision: Revision("r1".into()),
             step: "d1".into(),
             child: AgentId("main/research".into()),
-            instruction: "조사해 주세요".into(),
+            instruction: "investigate".into(),
             scopes: scopes(&["run"]),
         })
         .await
@@ -323,7 +323,7 @@ async fn cancellation_checks_the_claim_epoch_even_when_the_generation_is_unchang
     let picked = runs(&db).claim().await.unwrap().unwrap();
     assert_eq!(picked.attempt.run, child);
     runs(&db)
-        .finish(picked.attempt, done("조사 결과"))
+        .finish(picked.attempt, done("research result"))
         .await
         .unwrap();
     let next = runs(&db).claim().await.unwrap().unwrap();
@@ -505,7 +505,7 @@ async fn dead_cancel_requested_resumes_without_audit_update_and_boundaries_hold(
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 감사 테이블은 INSERT 전용이다: run_command_id 기록에 UPDATE를 쓰면 즉시 실패한다.
+    // bot_audit is append-only; recording run_command_id via UPDATE must fail.
     db.sql(
         "create function bot_forbid_audit_update() returns trigger language plpgsql as $$
          begin raise exception 'bot_audit must be append-only'; end $$",
@@ -554,7 +554,7 @@ async fn dead_cancel_requested_resumes_without_audit_update_and_boundaries_hold(
     assert_eq!(cmd_rows, 1);
     assert_eq!(http.verify_audit().await["ok"], true);
 
-    // 다른 운영자가 같은 command_id를 다시 보내면 충돌(409)이다.
+    // Reusing command_id under another operator returns 409 Conflict.
     status(
         http.post(&run, "resume", OPERATOR2, Some(&http.operator2_csrf), &cmd)
             .await,
@@ -563,7 +563,7 @@ async fn dead_cancel_requested_resumes_without_audit_update_and_boundaries_hold(
     )
     .await;
 
-    // 다른 프로필 경로와 private 실행은 존재를 드러내지 않고 404다.
+    // Foreign profile routes and private runs return 404 without revealing existence.
     let other_profile = http
         .client
         .post(format!("{}/runs/other/{}/resume", http.root, run.0))

@@ -1,5 +1,4 @@
-//! 실제 BrokerService를 PG 원장 위에서 돌려 승인 흐름의 계약 수락을 확인한다:
-//! 승인 요청(run 대기·리스 해제) → 대기 중 승인 클릭(approval_context) → 같은 세대 재개(새 claim 토큰) → 승인 소비·한 번 실행.
+//! End-to-end BrokerService approval flow on PostgreSQL: park, decide while parked, resume on same generation, consume once.
 
 use crate::support::*;
 use bot_broker::{
@@ -167,25 +166,27 @@ async fn an_approved_irreversible_call_runs_exactly_once_after_the_parked_run_re
     };
     db.publish().await;
     let rig = rig(&db);
-    let mut accept = accept("personal", "req", "산책 일정을 삭제해줘");
+    let mut accept = accept("personal", "req", "Delete the walk event");
     accept.scopes = scopes(&["run", "calendar.delete"]);
     accept.approver = Some(PrincipalId(OWNER.into()));
     runs(&db).accept(accept).await.unwrap();
     let first = runs(&db).claim().await.unwrap().unwrap();
 
-    // 승인이 필요한 호출은 실행하지 않고 대기한다: run은 대기로 넘어가 워커 리스를 놓는다
     let CallResult::Awaiting(nonce) = rig.broker.call(delete_call(&first.attempt)).await.unwrap()
     else {
-        panic!("승인 대기여야 한다")
+        panic!("expected awaiting approval")
     };
-    assert!(rig.runner.jobs().is_empty(), "승인 전 실행 0건");
+    assert!(
+        rig.runner.jobs().is_empty(),
+        "must not execute before approval"
+    );
     assert_eq!(state_of_run(&db, &first.attempt.run).await, "waiting");
     assert!(matches!(
         runs(&db).renew(first.attempt.clone()).await,
         Err(Error::Stale)
     ));
 
-    // 대기 중에도 승인 클릭이 통한다(승인 버튼은 approval_context로 읽는다). 낯선 사람의 클릭은 거절된다
+    // Decisions succeed while parked via approval_context; non-approvers are denied.
     let stranger = rig
         .broker
         .decide(nonce.clone(), PrincipalId("local:guest".into()), true)
@@ -198,15 +199,17 @@ async fn an_approved_irreversible_call_runs_exactly_once_after_the_parked_run_re
     rig.broker
         .decide(nonce.clone(), PrincipalId(OWNER.into()), true)
         .await
-        .unwrap(); // 같은 클릭의 반복은 같은 결과
+        .unwrap();
     assert_eq!(
         calls(&db).approval(nonce.clone()).await.unwrap().state,
         ApprovalState::Approved
     );
     assert_eq!(state_of_run(&db, &first.attempt.run).await, "ready");
-    assert!(rig.runner.jobs().is_empty(), "결정만으로는 실행하지 않는다");
+    assert!(
+        rig.runner.jobs().is_empty(),
+        "decision alone must not execute"
+    );
 
-    // 같은 세대로 재개하고(claim 토큰만 오른다), 같은 호출 ID로 다시 들어오면 승인을 소비하고 한 번 실행한다
     let resumed = runs(&db).claim().await.unwrap().unwrap();
     assert_resumed(&first.attempt, &resumed.attempt);
     assert!(
@@ -214,7 +217,7 @@ async fn an_approved_irreversible_call_runs_exactly_once_after_the_parked_run_re
             rig.broker.call(delete_call(&first.attempt)).await,
             Err(Error::Stale)
         ),
-        "옛 attempt의 호출은 거절"
+        "stale attempt must be rejected"
     );
     assert!(matches!(
         runs(&db).renew(first.attempt.clone()).await,
@@ -226,7 +229,7 @@ async fn an_approved_irreversible_call_runs_exactly_once_after_the_parked_run_re
         .await
         .unwrap()
     else {
-        panic!("실행되어야 한다")
+        panic!("expected call to run")
     };
     assert_eq!(rig.runner.jobs().len(), 1);
     assert_eq!(rig.runner.jobs()[0].principal.0, OWNER);
@@ -235,14 +238,13 @@ async fn an_approved_irreversible_call_runs_exactly_once_after_the_parked_run_re
         ApprovalState::Consumed
     );
 
-    // 재시도(같은 호출 ID)는 저장된 결과를 돌려주고 다시 실행하지 않는다
     let CallResult::Done(again) = rig
         .broker
         .call(delete_call(&resumed.attempt))
         .await
         .unwrap()
     else {
-        panic!("저장된 결과여야 한다")
+        panic!("expected cached result")
     };
     assert_eq!((again, rig.runner.jobs().len()), (result, 1));
     assert_eq!(db.store.verify().await.unwrap().first_bad, None);

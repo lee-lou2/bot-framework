@@ -1,4 +1,4 @@
-//! OpenAI 모델 바인딩의 인간 승인 경로(`Snapshot::approval_route`): 바인딩·요청자별 조회, 스냅숏이 바뀌었을 때의 닫힘, 보관한 묶음에서의 복원.
+//! Tests for OpenAI model binding approval routes (`Snapshot::approval_route`): lookup, fail-closed mutations, and bundle restore.
 
 use crate::support::openai::{LOCAL, SLACK, models, ok, route, with_people};
 use crate::support::raw_bundle;
@@ -17,14 +17,12 @@ fn approval_routes_resolve_per_binding_and_requester() {
         binding: BindingId("team".into()),
     };
     assert_eq!(route(&snap, "assistant", "http:openai/build"), Some(slack));
-    // 매핑은 바인딩마다 독립이다: 같은 요청자도 매핑이 없는 모델에서는 승인자가 없다
     assert_eq!(route(&snap, "research", "http:openai/build"), None);
-    // 멤버가 아니거나 매핑이 없는 주체, 웹훅·CLI 바인딩, 없는 바인딩
     assert_eq!(route(&snap, "assistant", "http:openai/ops"), None);
     assert_eq!(route(&snap, "inbox", "http:openai/build"), None);
     assert_eq!(route(&snap, "desk", "local:owner"), None);
     assert_eq!(route(&snap, "nowhere", "http:openai/build"), None);
-    // 사람이 요청자인 척해도 HTTP 주체가 아니면 열리지 않는다
+    // Non-HTTP requesters cannot resolve OpenAI approval routes.
     assert_eq!(route(&snap, "assistant", "local:owner"), None);
     let local = ok(&models(LOCAL));
     assert_eq!(
@@ -46,10 +44,10 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
     assert!(asks(&snap).is_some());
     let mut gone = snap.clone();
     gone.members.remove(&person);
-    assert_eq!(asks(&gone), None, "승인자가 멤버에서 빠짐");
+    assert_eq!(asks(&gone), None, "approver removed from members");
     let mut left = snap.clone();
     left.members.remove(&build);
-    assert_eq!(asks(&left), None, "요청자가 멤버에서 빠짐");
+    assert_eq!(asks(&left), None, "requester removed from members");
     let mut moved = snap.clone();
     moved
         .bindings
@@ -63,7 +61,7 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
     assert_eq!(
         asks(&moved),
         None,
-        "전달 바인딩이 다른 워크스페이스로 옮겨 감"
+        "delivery binding moved to another workspace"
     );
     let mut dm = snap.clone();
     dm.bindings
@@ -72,10 +70,10 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
         .source = Adapter::SlackDm {
         workspace: "home".into(),
     };
-    assert_eq!(asks(&dm), None, "전달 바인딩이 DM");
+    assert_eq!(asks(&dm), None, "delivery binding changed to DM");
     let mut removed = snap.clone();
     removed.bindings.remove(&BindingId("team".into()));
-    assert_eq!(asks(&removed), None, "전달 바인딩 삭제");
+    assert_eq!(asks(&removed), None, "delivery binding removed");
     let mut rebased = snap.clone();
     rebased
         .bindings
@@ -84,8 +82,7 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
         .source = Adapter::Http {
         endpoint: "reminders".into(),
     };
-    assert_eq!(asks(&rebased), None, "모델 바인딩이 웹훅으로 바뀜");
-    // 승인자가 사람이 아니거나, 경로 종류와 신원 종류가 맞지 않으면 열리지 않는다
+    assert_eq!(asks(&rebased), None, "model binding changed to webhook");
     let rerouted = |route: ApprovalRoute| {
         let mut changed = snap.clone();
         let Adapter::OpenAi { approvers, .. } = &mut changed
@@ -106,7 +103,7 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
     assert_eq!(
         asks(&rerouted(service)),
         None,
-        "서비스 주체는 승인할 수 없다"
+        "service principal cannot approve"
     );
     let local_with_slack_person = ApprovalRoute::Local {
         person: people("slack:home/U1"),
@@ -114,7 +111,7 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
     assert_eq!(
         asks(&rerouted(local_with_slack_person)),
         None,
-        "로컬 경로에 Slack 신원"
+        "Slack identity on local route"
     );
     let slack_with_local_person = ApprovalRoute::Slack {
         person: people("local:owner"),
@@ -123,7 +120,7 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
     assert_eq!(
         asks(&rerouted(slack_with_local_person)),
         None,
-        "Slack 경로에 로컬 신원"
+        "local identity on Slack route"
     );
     let mut odd = rerouted(ApprovalRoute::Slack {
         person: people("slack:home/u1"),
@@ -131,8 +128,7 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
     });
     odd.members
         .insert(people("slack:home/u1"), Default::default());
-    assert_eq!(asks(&odd), None, "신원 문법이 맞지 않는 승인자");
-    // 매핑 키가 다른 별칭의 주체이면 그 입구에서는 열리지 않는다
+    assert_eq!(asks(&odd), None, "malformed approver identity");
     let mut other = snap.clone();
     other
         .bindings
@@ -149,7 +145,7 @@ fn approval_routes_fail_closed_when_a_snapshot_is_altered() {
         )]
         .into(),
     };
-    assert_eq!(asks(&other), None, "요청자 별칭과 바인딩 별칭이 다름");
+    assert_eq!(asks(&other), None, "requester endpoint mismatch");
 }
 
 #[test]

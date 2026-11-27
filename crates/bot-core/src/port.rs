@@ -1,5 +1,6 @@
-//! 크레이트 사이를 잇는 핵심 포트(트레이트): 프로필 원천(`ProfileSource`)·실행 저장소(`RunStore`)·기억·비밀(`SecretStore`)·브로커(`Broker`)·게이트웨이 신호(`Gateway`)·예약·위임·효과 원장·감사.
-//! 구현자는 각 경계에서 인증된 상태를 다시 읽고 판정한다. 모든 메서드는 `Reply<'a, T>`를 돌려준다: 이것은 회신이 아니라 `Result<T, Error>`를 내는 비동기 반환형 별칭이다.
+//! Core cross-crate port traits for storage, secrets, broker, gateway, scheduling, delegation, effects, and audit.
+//!
+//! Implementers re-read and authorize state at each boundary. `Reply<'a, T>` is an async return alias, not a chat reply.
 use crate::{
     command::*,
     id::*,
@@ -26,14 +27,13 @@ pub trait ProfileSource: Send + Sync {
 }
 
 pub trait RunStore: Send + Sync {
-    /// 원천·넘김 사슬이 없는 일반 접수도 같은 구현을 사용한다.
     fn accept(&self, command: Accept) -> Reply<'_, RunId> {
         self.accept_with(command, AcceptExtras::default())
     }
 
-    /// 어댑터가 인증한 원천·넘김 사슬(`AcceptExtras`)을 접수와 한 커밋에 남긴다. 저장할 수 없는 접수는 오류로 반환한다.
+    /// Persists adapter-verified extras (`AcceptExtras`) in the same commit as intake.
     ///
-    /// 접수 저장소는 `accept_with`를 구현해야 한다.
+    /// Implementers must override `accept_with`.
     ///
     /// ```compile_fail,E0046
     /// # use bot_core::{command::*, id::*, intake::{RequestKey, RequestState, RunProgress}, port::{Reply, RunStore}, state::RunContext};
@@ -54,45 +54,40 @@ pub trait RunStore: Send + Sync {
     /// ```
     fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId>;
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>>;
-    /// run 트리의 현재 진행 요약(하위 에이전트·실행 중인 도구·승인 대기 여부).
     fn progress(&self, profile: ProfileId, run: RunId) -> Reply<'_, Option<RunProgress>>;
-    /// 준비된 작업을 점유할 때 같은 트랜잭션에 현재 호스트 활성 집합을 기록한다.
-    /// 리스 만료 인계 시 이전·현재 집합이 모두 있고 다를 때만 시도 횟수를 유지한다.
-    /// 같은 집합 또는 이전 기록 부재는 한 번 차감한다. 집합 조회 오류는 쓰기 없이 실패한다.
-    /// 인계는 세대를 올리고 이전 승인을 무효화한다. 자발적 승인 대기에서 재개하면 세대를 유지한다.
+    /// Claims a ready run and records the host active set in the same transaction.
+    /// On lease-expiry handover, preserves attempt count only when previous and current active sets both exist and differ.
+    /// Handover bumps generation and invalidates prior approvals; resuming from voluntary approval wait preserves generation.
     fn claim(&self) -> Reply<'_, Option<RunContext>>;
-    /// 정상 종료 유예가 지난 뒤 호스트가 이 claim의 자식 프로세스 종료와 세션 회수를 확인하고 호출한다.
-    /// 미취소 run의 유효한 리스·세대·claim_epoch 소유자만 ready로 돌린다. 시도 횟수는 유지한다.
-    /// 세대 증가와 옛 승인 무효화는 한 커밋이며 바로 다음 점유는 세대를 보존한다.
-    /// 이미 반납했거나 소유권을 잃은 시도는 Stale이며 이후 소유자에게 영향을 주지 않는다.
+    /// Called after shutdown grace once child processes and sessions for this claim are reaped.
+    /// Returns a non-cancelled run to ready without spending an attempt if lease, generation, and `claim_epoch` still match;
+    /// bumps generation and invalidates old approvals in one commit (next claim preserves generation), or returns `Stale`.
     fn release_for_shutdown(&self, attempt: Attempt) -> Reply<'_, ()>;
-    /// 현재 소유자·세대·만료를 대조하고 리스를 늘린다. 옛 세대·만료 뒤는 Stale.
+    /// Extends lease if owner, generation, and expiry still match; otherwise `Stale`.
     fn renew(&self, attempt: Attempt) -> Reply<'_, Beat>;
-    /// 모델 step·도구 결과 체크포인트. 같은 key는 멱등.
     fn checkpoint(&self, attempt: Attempt, step: Step) -> Reply<'_, ()> {
         self.checkpoint_batch(attempt, vec![step])
     }
-    /// 현재 claim으로 차례의 레코드·도구·그룹을 한 커밋에 저장한다.
-    /// 기존 key의 내용이 하나라도 다르면 전체를 롤백한다. 같은 내용의 재전송은 멱등이다.
+    /// Atomically checkpoints steps for the current claim; idempotent on identical keys, rolls back all on content mismatch.
     fn checkpoint_batch(&self, attempt: Attempt, steps: Vec<Step>) -> Reply<'_, ()>;
-    /// 결과·답(outbox)·부모 깨우기를 한 커밋으로 기록한다. 취소가 먼저면 답을 버리고 취소로 종결해 실제 상태를 돌려준다.
+    /// Atomically records result, reply outbox, and parent wake; if already cancelled, drops replies and returns cancelled status.
     fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, Completion>;
-    /// `finish`와 같되 실행 계량(잘림·사용량)도 같은 커밋에 기록한다.
+    /// Same as `finish`, recording execution metrics (`RunOutcome`) in the same commit.
     fn finish_with(
         &self,
         attempt: Attempt,
         done: Finish,
         outcome: RunOutcome,
     ) -> Reply<'_, Completion>;
-    /// 일시 오류는 백오프 재시도, 영구 오류·시도 한도 초과는 dead letter.
+    /// Retries transient failures with backoff; dead-letters permanent failures or exhausted attempts.
     fn fail(&self, attempt: Attempt, failure: Failure) -> Reply<'_, Retry>;
-    /// 같은 대화의 최근 차례(오래된 순). 요청자에게 보이는 것만.
+    /// Recent turns in the same conversation (oldest first), filtered to requester visibility.
     fn history(&self, attempt: Attempt, limit: u32) -> Reply<'_, Vec<Turn>>;
 }
 
-/// 운영자 조치. 모두 감사에 남는다.
+/// Operator controls; all actions are audited.
 pub trait RunAdmin: Send + Sync {
-    /// dead letter 재개. 같은 논리 run·효과 키를 유지하고 시도 횟수만 비운다.
+    /// Resumes a dead-letter run while keeping its logical run and effect keys, resetting attempts only.
     fn resume(
         &self,
         profile: ProfileId,
@@ -100,7 +95,7 @@ pub trait RunAdmin: Send + Sync {
         actor: PrincipalId,
         reason: String,
     ) -> Reply<'_, ()>;
-    /// 취소 요청. 자식도 함께 요청하고, 실행 중이면 다음 외부 효과 전에 멈춘다.
+    /// Requests cancellation for the run and its children; stops active runs before the next external effect.
     fn cancel(
         &self,
         profile: ProfileId,
@@ -110,31 +105,31 @@ pub trait RunAdmin: Send + Sync {
     ) -> Reply<'_, ()>;
 }
 
-/// 조회는 모델 전달 전 private_memory_read를 요청 트리에 원자적으로 기록한다.
+/// Reads atomically record `private_memory_read` on the request tree before returning data to the model.
 pub trait MemoryStore: Send + Sync {
     fn search(&self, attempt: Attempt, query: String) -> Reply<'_, Vec<MemoryHit>>;
-    /// 현재 claim과 search의 가시성 규칙으로 ID 한 건만 조회한다. private 반환 전 요청 트리 플래그를 기록한다.
+    /// Fetches one entry under `search` visibility rules, recording `private_memory_read` before returning private content.
     fn preview(&self, attempt: Attempt, id: MemoryId) -> Reply<'_, MemoryPreview>;
     fn change(&self, attempt: Attempt, change: MemoryChange) -> Reply<'_, MemoryId>;
-    /// 승인과 현재 소유자·본문 지문을 대조하고 승인 소비·공유·호출 완료·감사를 한 번에 커밋한다.
-    /// 지문 불일치는 Conflict다. 완료한 호출의 재시도는 기억의 가시성을 다시 바꾸지 않는다.
+    /// Atomically verifies approval, owner, and content digest, then consumes approval, shares, completes the call, and audits;
+    /// digest mismatch returns `Conflict` and retries of completed calls do not alter visibility.
     fn share(&self, start: crate::ledger::StartCall, id: MemoryId) -> Reply<'_, MemoryId>;
     fn seed(&self, seed: MemorySeed) -> Reply<'_, ()>;
 }
 
-/// 호스트가 바인딩된 profile로 얻은 핸들. 호출에 전체 경로나 프로필을 받지 않는다.
+/// Profile-scoped secret handle; callers never pass paths or profile IDs.
 pub trait ProfileSecrets: Send + Sync {
     fn resolve(&self, name: SecretName) -> Reply<'_, SecretValue>;
 }
 
-/// 진단 출력을 위한 Debug/Display 미제공.
+/// Deliberately omits `Debug` and `Display` to prevent secret leakage in diagnostics.
 pub struct SecretValue(pub Vec<u8>);
 
 pub trait SecretStore: Send + Sync {
     fn for_profile(&self, profile: ProfileId) -> Reply<'_, Box<dyn ProfileSecrets>>;
 }
 
-/// 모델이 계획한 호출의 정상 결론 또는 원장·입력·한도를 대조해 확인한 실행 전 거절.
+/// Result of a model-planned call, or a pre-execution refusal verified against ledger, inputs, and limits.
 pub enum ModelCall {
     Returned(CallResult),
     Refused(crate::cli::CliRefusal),
@@ -142,8 +137,8 @@ pub enum ModelCall {
 
 pub trait Broker: Send + Sync {
     fn call(&self, call: ToolCall) -> Reply<'_, CallResult>;
-    /// 검증된 모델 계획의 호출. 표식으로 남길 근거가 없는 오류는 바깥 `Err`로 돌려준다.
-    /// 결정 전용 포트 등 호출 원인을 확인할 수 없는 구현은 실행을 시작하지 않는다.
+    /// Executes a validated model-planned call; non-refusal failures return outer `Err`.
+    /// Decide-only implementations must not start execution.
     fn call_for_model(&self, _: ToolCall) -> Reply<'_, ModelCall> {
         Box::pin(async { Err(Error::Unavailable) })
     }
@@ -155,26 +150,23 @@ pub trait Gateway: Send + Sync {
 }
 
 pub trait ScheduleStore: Send + Sync {
-    /// 원래 예정 시각과 발생 접수·커서 이동을 함께 커밋한다. 같은 (profile, agent, trigger, 시각)은 기존 run.
+    /// Atomically commits occurrence intake and cursor advance; duplicate `(profile, agent, trigger, scheduled_at)` returns the existing run.
     fn accept_occurrence(&self, occurrence: Occurrence, command: Accept) -> Reply<'_, RunId>;
     fn snapshot(&self) -> Reply<'_, ScheduleSnapshot>;
 }
 
 pub trait DelegationStore: Send + Sync {
-    /// 현 claim·판본과 자식의 실제 대상·지시·부여 범위를 대조해 완료 결과만 읽는다.
-    /// 아직 완료하지 않았거나 자식이 없으면 None이다. 새 위임이나 부모 대기를 만들지 않는다.
+    /// Reads a completed child result matching current claim, revision, target, instruction, and scopes;
+    /// returns `None` without creating a delegation or waiting.
     fn result(&self, command: Delegate) -> Reply<'_, Option<JsonPayload>>;
     fn delegate(&self, command: Delegate) -> Reply<'_, RunId>;
 }
 
 pub trait EffectJournal: Send + Sync {
-    /// 새 단계 또는 운영자의 NotExecuted 판정 뒤 첫 점유에서만 send=true를 반환한다.
-    /// 판정 소비와 새 점유는 한 커밋이다. 이후 조회는 소비된 판정을 반환하지 않는다.
+    /// Returns `send=true` only for a new step or the first claim after an operator `NotExecuted` resolution (consumed in the same commit).
     fn request(&self, request: EffectRequest) -> Reply<'_, EffectPermit>;
-    /// 호출 채널에 묶인 도구와 현재 attempt·call을 검증한 뒤 step과 request와 같은 인자 지문으로 조회한다.
-    /// 유효한 호출에 단계가 없으면 None, 같은 단계의 지문이 다르면 Conflict다.
-    /// 조회는 단계·영수증·감사를 쓰거나 전송을 허가하지 않는다.
-    /// 보류 단계의 미소비 운영자 판정은 resolution에 담는다. 반복 조회해도 소비되지 않는다.
+    /// Validates tool binding, attempt, call, and args digest without writing state or granting send;
+    /// returns `Conflict` on digest mismatch and leaves unconsumed operator resolutions intact.
     fn lookup(&self, request: EffectRequest, tool: ToolId) -> Reply<'_, Option<EffectStatus>>;
     fn status(&self, attempt: Attempt, call: CallId, effect: EffectId) -> Reply<'_, EffectStatus>;
     fn unresolved(&self, attempt: Attempt, call: CallId) -> Reply<'_, Vec<EffectStatus>>;
@@ -187,8 +179,8 @@ pub struct EffectPermit {
 }
 
 pub trait AuditLog: Send + Sync {
-    /// 상태 변경과 함께 쓰는 감사는 저장소가 같은 트랜잭션에서 직접 기록한다. 이것은 거부 판정 같은 단독 기록용이다.
+    /// Appends standalone audit rows (such as denials); state transitions write their own audit entries in-transaction.
     fn append(&self, entry: AuditEntry) -> Reply<'_, u64>;
-    /// 신뢰 호스트의 체인 전체를 검증한다. 사용자용 진입점은 운영자 권한을 확인한다.
+    /// Verifies the full audit chain on the trusted host; user-facing entrypoints must enforce operator authorization.
     fn verify(&self) -> Reply<'_, ChainReport>;
 }

@@ -1,5 +1,4 @@
-//! 인자 봉인: 엄격한 읽기 → 정규화 → 스키마 검증 → 목적지 확정 → SHA-256.
-//! 해시한 바이트가 곧 도구가 받는 바이트다. 승인한 것과 실행하는 것이 달라질 틈이 없다.
+//! Argument sealing: strict JSON parse, JCS canonicalization, schema check, destination extraction, and SHA-256.
 
 use crate::{
     canon::{canonicalize, sha256},
@@ -14,7 +13,6 @@ use bot_core::{
 use serde_json::Value;
 use std::sync::Arc;
 
-/// 인자 문서의 상한.
 pub const MAX_ARGS_BYTES: usize = 256 * 1024;
 
 pub struct JcsSealer {
@@ -22,7 +20,7 @@ pub struct JcsSealer {
 }
 
 impl JcsSealer {
-    /// `validator`는 프로필 활성화 때 쓴 것과 같은 스키마 구현이어야 한다.
+    /// `validator` must match the schema validator used during profile activation.
     pub fn new(validator: Arc<dyn InputValidator>) -> Self {
         Self { validator }
     }
@@ -38,7 +36,7 @@ impl Sealer for JcsSealer {
             return Err(Error::Invalid);
         }
         let canonical = canonicalize(&value).ok_or(Error::Invalid)?;
-        // 검증기는 실행할 바로 그 바이트를 본다.
+        // Validate the exact canonical bytes that will be passed to the tool.
         self.validator
             .validate(&tool.input, &JsonPayload(canonical.clone()))?;
         let destination = match &tool.destination {
@@ -59,7 +57,7 @@ impl Sealer for JcsSealer {
     }
 }
 
-/// `args.a.b` 경로가 가리키는 문자열. 경로가 없거나 문자열이 아니면 `None`이다.
+/// Resolves a dotted `args.a.b` string path, returning `None` if missing or non-string.
 fn text_at(value: &Value, path: &str) -> Option<String> {
     let mut current = value;
     for key in path.strip_prefix("args.")?.split('.') {
@@ -75,7 +73,7 @@ mod tests {
     use bot_core::state::Risk;
     use std::sync::Mutex;
 
-    /// 받은 (스키마, 인자)를 기록하고 `reject`가 인자에 들어 있으면 거절한다.
+    /// Records `(schema, args)` pairs and rejects arguments containing `reject`.
     #[derive(Default)]
     struct Probe {
         seen: Mutex<Vec<(String, String)>>,
@@ -176,7 +174,7 @@ mod tests {
         assert!(matches!(seal(&s, &t, &big), Err(Error::Invalid)));
         assert!(
             probe.seen.lock().unwrap().is_empty(),
-            "검증기는 읽기·정규화를 통과한 문서만 본다"
+            "validator only sees parsed, canonicalized documents"
         );
     }
 
@@ -195,7 +193,7 @@ mod tests {
             sealed.destination,
             Some(("bob@example.test".to_string(), "hi\nthere".to_string()))
         );
-        // 내용은 빈 문자열이어도 결정된 것이다
+        // Empty content string still counts as an explicit destination.
         assert!(seal(&s, &t, r#"{"to":"bob","message":{"body":""}}"#).is_ok());
     }
 

@@ -24,20 +24,17 @@ fn attachments_carried_in_the_request_pass_at_any_depth() {
         ))
         .is_ok()
     );
-    // 문서: base64·본문 글·안에 블록을 담는 `content` 종류
     let docs = json!([
         {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": B64}},
         {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "notes"}},
         {"type": "document", "source": {"type": "content", "content": [{"type": "text", "text": "a"}, inline_image()]}},
     ]);
     assert!(check(user(docs)).is_ok());
-    // 도구 결과는 글이거나 블록 목록이고, 그 안의 첨부도 같은 규칙을 받는다
     let result = json!([
         {"type": "tool_result", "tool_use_id": "t1", "content": "done"},
         {"type": "tool_result", "tool_use_id": "t2", "content": [{"type": "text", "text": "x"}, inline_image()]},
     ]);
     assert!(check(user(result)).is_ok());
-    // 시스템 블록
     let body = json!({"system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}], "messages": []});
     assert!(check(body).is_ok());
 }
@@ -45,7 +42,7 @@ fn attachments_carried_in_the_request_pass_at_any_depth() {
 #[test]
 fn a_tool_use_input_is_data_and_a_search_result_source_is_only_a_label() {
     let blocks = json!([
-        // 모델이 만든 도구 입력에 `source` 같은 이름이 있어도 첨부가 아니다
+        // A `source` key inside model-authored tool_use input is plain data, not an attachment.
         {"type": "tool_use", "id": "t1", "name": "x", "input": {"source": {"type": "url", "url": "http://a.example/x"}}},
         {"type": "tool_result", "tool_use_id": "t1", "content": [
             {"type": "search_result", "source": "https://example.test/page", "title": "t",
@@ -69,23 +66,17 @@ fn remote_references_are_refused_wherever_they_hide() {
         user(json!([doc_url])),
         user(json!([doc_file])),
         user(json!([nested_doc])),
-        // 도구 결과 안
         user(json!([{"type": "tool_result", "tool_use_id": "t", "content": [url.clone()]}])),
-        // 도구 결과 안의 문서 안의 도구 결과 …
         user(
             json!([{"type": "tool_result", "tool_use_id": "t", "content": [
                 {"type": "document", "source": {"type": "content", "content": [url.clone()]}}
             ]}]),
         ),
-        // 객체 하나인 content(서버 도구 결과 모양)
         user(
             json!([{"type": "web_fetch_tool_result", "tool_use_id": "t", "content": url.clone()}]),
         ),
-        // 메시지 content가 객체 하나
         user(url.clone()),
-        // 시스템
         json!({"system": [url.clone()], "messages": []}),
-        // 컨테이너 파일, 모양이 틀린 첨부, 모르는 종류, 깨진 content
         user(json!([{"type": "container_upload", "file_id": "file_abc"}])),
         user(json!([{"type": "image"}])),
         user(json!([{"type": "image", "source": "https://attacker.example/p.png"}])),
@@ -113,7 +104,6 @@ fn nesting_deeper_than_the_limit_is_refused() {
         inner = json!({"type": "document", "source": {"type": "content", "content": [inner]}});
     }
     assert!(matches!(check(user(json!([inner]))), Err(Error::Invalid)));
-    // 한도 안의 중첩은 받는다
     let mut ok = inline_image();
     for _ in 0..3 {
         ok = json!({"type": "document", "source": {"type": "content", "content": [ok]}});
@@ -138,7 +128,6 @@ fn fields_that_open_execution_outside_the_boundary_stay_closed_even_if_the_opera
             "{body}"
         );
     }
-    // 운영자가 연 다른 필드는 그대로 열린다
     let ok = json!({"messages": [], "x_extra": 1});
     assert!(vet_request(ok.as_object().unwrap(), &extra).is_ok());
 }
@@ -146,33 +135,33 @@ fn fields_that_open_execution_outside_the_boundary_stay_closed_even_if_the_opera
 #[test]
 fn an_inline_attachment_needs_its_real_fields_and_types() {
     let bad = [
-        // 종류 이름만 맞는 빈 껍데기
+        // Missing required fields
         json!({"type": "image", "source": {"type": "base64"}}),
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png"}}),
         json!({"type": "image", "source": {"type": "base64", "data": B64}}),
         json!({"type": "document", "source": {"type": "text"}}),
         json!({"type": "document", "source": {"type": "content"}}),
-        // 자료형이 틀리다
+        // Wrong field types
         json!({"type": "image", "source": {"type": "base64", "media_type": 5, "data": B64}}),
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": 5}}),
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ["a"]}}),
         json!({"type": "document", "source": {"type": "content", "content": 5}}),
-        // base64가 아닌 글(URL·공백·빈 값)
+        // Non-base64 data (URL, spaces, empty, padding only)
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "https://attacker.example/p.png"}}),
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc def"}}),
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ""}}),
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "===="}}),
-        // 종류에 없는 필드를 끼웠다
+        // Unexpected source fields
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": B64, "url": "http://a.example/x"}}),
         json!({"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "t", "file_id": "file_1"}}),
         json!({"type": "document", "source": {"type": "content", "content": [], "url": "http://a.example/x"}}),
-        // 미디어 이름 모양이 아니다
+        // Malformed media type
         json!({"type": "image", "source": {"type": "base64", "media_type": "IMAGE/PNG", "data": B64}}),
         json!({"type": "image", "source": {"type": "base64", "media_type": "image", "data": B64}}),
-        // 이미지는 base64만 받는다
+        // Images allow base64 only
         json!({"type": "image", "source": {"type": "text", "media_type": "text/plain", "data": "t"}}),
         json!({"type": "image", "source": {"type": "content", "content": []}}),
-        // 블록에 모르는 필드가 있다
+        // Unexpected block fields
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": B64}, "url": "http://a.example/x"}),
         json!({"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "t"}, "file_id": "file_1"}),
     ];
@@ -182,7 +171,6 @@ fn an_inline_attachment_needs_its_real_fields_and_types() {
             "case {i}: {block}"
         );
     }
-    // 갖춘 것은 통한다(문서 글 본문은 base64가 아니어도 된다)
     let good = [
         inline_image(),
         json!({"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": "AAAA"}, "cache_control": {"type": "ephemeral"}}),

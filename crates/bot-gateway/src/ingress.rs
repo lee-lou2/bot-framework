@@ -1,6 +1,6 @@
-//! 접수 순서: 어댑터가 인증·정규화한 입력 → 입구 확인 → 한도 → 멤버 확인 → 트리거 선택 → 내구 접수.
-//! 어댑터는 `Admission`을 받은 뒤에만 ack한다. 접수 성공은 저장소 커밋 성공을 뜻한다.
-//! 민감(private) 트리거는 일반 접수·큐에 쓰기 전에 분기하고, 전용 입구가 실패해도 일반 대화로 넘기지 않는다.
+//! Central request admission pipeline: entrance lookup, rate limits, membership, trigger selection, and durable intake.
+//!
+//! Private DM triggers branch before the durable queue and never fall through to normal chat on failure.
 use crate::{
     active::{ActiveCheck, Release},
     entrance::{Owner, Real},
@@ -28,43 +28,33 @@ use std::{
     time::Duration,
 };
 
-/// 접수 결과. 어댑터가 ack·응답을 정한다.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Admission {
-    /// 접수·run·큐·감사 커밋이 끝났다(같은 키·같은 내용의 재전달이면 기존 run).
     Accepted {
         run: RunId,
         respond: Respond,
     },
-    /// 민감 입력을 전용 도구 입구가 안전하게 받았다. 큐에는 아무것도 쓰지 않았다.
+    /// Consumed by a private DM trigger without writing to the durable queue.
     Private,
-    /// 등록된 입구가 아니다. 일도 응답도 없이 받았다는 표시만 한다.
+    /// Unregistered entrance; acknowledge without creating work or replying.
     Ignored,
     Rejected(Rejection),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Rejection {
-    /// 인증은 됐지만 이 프로필의 멤버가 아니다.
     Unregistered,
-    /// 멤버지만 이 일을 시작할 권한이 없다.
     Forbidden,
-    /// 일시적이다. 기다리면 같은 입력이 접수될 수 있다(HTTP 429 + Retry-After, Slack은 ack하지 않고 재전달).
     RateLimited(Duration),
     TooLarge,
-    /// HTTP: method·path에 맞는 트리거가 없다.
     NoRoute,
-    /// 본문·입력 매핑이 맞지 않는다.
     Invalid,
-    /// 같은 키에 다른 내용이 왔다.
     Conflict,
-    /// 저장소를 쓸 수 없다. ack하지 않아야 상대가 다시 보낸다.
     Unavailable,
 }
 
 impl Admission {
-    /// 재전달을 기다리지 않고 «받았다»고 ack해도 되는가. 다시 보내도 결론이 달라지지 않는 경우만 true.
-    /// 일시적인 거절(저장소 장애·속도 제한)은 false다 — 상대가 나중에 같은 입력을 다시 보내게 둔다.
+    /// Returns true only when redelivery cannot change the outcome; transient rejections stay unacknowledged.
     pub fn settled(&self) -> bool {
         !matches!(
             self,
@@ -92,20 +82,17 @@ pub struct Ingress {
 #[derive(Default)]
 struct Cached {
     current: Option<Arc<Routes>>,
-    /// 마지막으로 만들지 못한 활성 집합과 그 오류. 같은 집합은 요청마다 다시 만들지 않는다.
     failed: Option<(Active, RoutesError)>,
 }
 
-/// 접수 중에 알게 된 비민감 사실(스팬용)
 #[derive(Default)]
 struct Seen {
     trigger: Option<String>,
     private: bool,
-    /// 요청이 맞은 **등록된 트리거 정의**의 (method, path). 요청의 원래 값이 아니다 — 맞지 않으면 없다(스팬에는 고정 값이 나간다).
+    /// Matched trigger definition `(method, path)`, never the raw request path.
     route: Option<(String, String)>,
 }
 
-/// 트리거 또는 기본 대화가 정한 실행 대상과 응답 방식
 struct Plan {
     target: Target,
     respond: Respond,
@@ -134,14 +121,11 @@ impl Ingress {
         }
     }
 
-    /// 이 프로세스의 판본 집합을 저장소의 활성 집합과 견주는 확인을 붙인다. 붙이면 구판 프로세스는 새 접수·결과
-    /// 반환·승인 결정을 일시 실패로 닫는다(생략하면 확인하지 않는다 — 단독 시험용).
     pub fn with_active(mut self, active: Arc<dyn ActiveCheck>) -> Self {
         self.active = Some(active);
         self
     }
 
-    /// 계측 수신처를 정한다(생략하면 아무것도 하지 않는다). 접수·회신·승인 스팬이 여기로 간다.
     pub fn with_tracer(mut self, tracer: Arc<dyn Tracer>) -> Self {
         self.tracer = tracer;
         self
@@ -151,7 +135,6 @@ impl Ingress {
         &self.tracer
     }
 
-    /// 시험용: OS 사용자 해석을 바꾼다.
     pub fn with_uid_resolver(
         mut self,
         resolver: impl Fn(&CliAccount) -> Result<u32, HostError> + Send + Sync + 'static,
@@ -160,7 +143,6 @@ impl Ingress {
         self
     }
 
-    /// 실행·승인이 고정한 판본의 스냅숏(복원하지 못하면 None). 지금의 활성 판본과 견주는 데 쓴다.
     pub fn pinned(&self, profile: &ProfileId, revision: &Revision) -> Option<Arc<Snapshot>> {
         self.catalog.lookup(profile, revision)
     }
@@ -173,9 +155,7 @@ impl Ingress {
         &self.host
     }
 
-    /// 활성 집합이 바뀌었으면 라우팅 표를 다시 만든다. 새 집합이 검사를 통과하지 못하면 이전 표를 계속 쓴다
-    /// (처음부터 만들 수 없으면 Err). 활성 집합은 잠금 안에서 읽어 오래된 집합이 최신 표를 덮지 못하게 하고,
-    /// 이미 실패한 같은 집합은 다시 만들지 않는다.
+    /// Rebuilds the cached route table when the active set changes; keeps the previous valid table on build failure.
     pub fn routes(&self) -> Result<Arc<Routes>, RoutesError> {
         let mut cache = self.routes.lock().unwrap_or_else(|e| e.into_inner());
         let active = self.catalog.active();
@@ -197,7 +177,7 @@ impl Ingress {
                 Ok(built)
             }
             Err(error) => {
-                tracing::error!(%error, "활성 프로필 집합으로 입구 표를 만들지 못했어요 — 이전 표를 계속 써요");
+                tracing::error!(%error, "failed to build route table from active profile set — keeping previous table");
                 cache.failed = Some((active, error.clone()));
                 cache.current.clone().ok_or(error)
             }
@@ -211,7 +191,6 @@ impl Ingress {
         self.admit_with(&routes, inbound).await
     }
 
-    /// 이 프로세스가 쓰는 판본 집합이 저장소의 활성 집합과 같은가. 다르면 `Stale`, 읽지 못하면 `Unavailable`.
     pub async fn verify_active(&self) -> Result<(), Error> {
         match &self.active {
             Some(check) => {
@@ -219,7 +198,7 @@ impl Ingress {
                 if let Err(error) = &verified {
                     tracing::warn!(
                         ?error,
-                        "이 프로세스의 판본이 저장소의 활성 판본과 같은지 확인하지 못해 닫아요 — 새 판본이면 다시 시작하세요"
+                        "active set check failed — closing intake until restarted with the active revision"
                     );
                 }
                 verified
@@ -228,8 +207,7 @@ impl Ingress {
         }
     }
 
-    /// 결과·상태를 돌려주기 직전 확인: 지금의 활성 집합에서도 멤버이고(접수 뒤 멤버 철회·입구 소유자 변경이
-    /// 응답에 새어 나가지 않게) 이 프로세스의 판본이 저장소의 활성 판본인가(구판 프로세스는 로컬 표만 보므로 닫는다).
+    /// Re-verifies current binding membership and active revision immediately before releasing a result or status.
     pub async fn release(&self, real: &Real, owner: &Owner, principal: &PrincipalId) -> Release {
         if !self.still_member(real, owner, principal) {
             return Release::Forbidden;
@@ -240,7 +218,6 @@ impl Ingress {
         }
     }
 
-    /// 지금의 활성 집합에서도 이 주체가 같은 입구·바인딩의 멤버인가(이 프로세스의 로컬 표 기준).
     pub fn still_member(&self, real: &Real, owner: &Owner, principal: &PrincipalId) -> bool {
         let Ok(routes) = self.routes() else {
             return false;
@@ -252,13 +229,12 @@ impl Ingress {
         })
     }
 
-    /// 이미 고른 라우팅 표로 접수한다. 인증과 접수가 같은 표를 쓰게 해, 그 사이에 입구 소유자가 바뀌어도
-    /// 인증한 프로필과 다른 프로필로 접수되지 않는다.
+    /// Admits using the caller's pre-selected route table so auth and intake observe the same profile revision.
     pub async fn admit_with(&self, routes: &Routes, inbound: Inbound) -> Admission {
         self.admit_sourced(routes, inbound, None).await
     }
 
-    /// `admit_with`에 어댑터가 인증한 Slack 이벤트 원천을 덧붙인다(이벤트 중복 제거·지정한 사람의 승인 증거용). 원천이 있는 접수만 넘김 후보 사슬을 만든다.
+    /// Like `admit_with`, attaching authenticated Slack event evidence (also enables `bot/pass` chains).
     pub async fn admit_sourced(
         &self,
         routes: &Routes,
@@ -269,7 +245,6 @@ impl Ingress {
         let Some(route) = routes.find(&inbound.real) else {
             return Admission::Ignored;
         };
-        // 스팬에 쓸 비민감 정보를 inbound가 옮겨 가기 전에 챙긴다(본문·첨부는 싣지 않는다)
         let profile = route.snapshot.id.clone();
         let binding = route.binding_id.0.clone();
         let request = inbound.request.0.clone();
@@ -313,7 +288,7 @@ impl Ingress {
         let Some(route) = routes.find(&inbound.real) else {
             return Admission::Ignored;
         };
-        // 구판 프로세스는 새 접수를 하지 않는다(한도·권한 검사 전에 닫아 상대가 다시 보내게 한다)
+        // Reject stale processes before rate or permission checks so callers retry against the active revision.
         if self.verify_active().await.is_err() {
             return Admission::Rejected(Rejection::Unavailable);
         }
@@ -325,13 +300,13 @@ impl Ingress {
         {
             return Admission::Rejected(Rejection::TooLarge);
         }
-        // 입구 한도는 멤버 확인 전에 센다(미등록 시도도 입구의 부하다). 키는 등록된 바인딩뿐이라 상태가 늘지 않는다.
+        // Charge entrance limit before membership checks using bounded registered binding keys.
         let entrance_key = format!("{}/{}", profile.0, route.binding_id.0);
         if let Err(wait) = self.entrance_limiter.check(&entrance_key) {
             return Admission::Rejected(Rejection::RateLimited(wait));
         }
         let Some(roles) = snapshot.members.get(&inbound.principal) else {
-            tracing::debug!(profile = %profile.0, binding = %route.binding_id.0, "미등록 주체를 거절했어요");
+            tracing::debug!(profile = %profile.0, binding = %route.binding_id.0, "rejected unregistered principal");
             return Admission::Rejected(Rejection::Unregistered);
         };
         let principal_key = format!("{}/{}", profile.0, inbound.principal.0);
@@ -373,8 +348,8 @@ impl Ingress {
                         return Admission::Rejected(Rejection::Forbidden);
                     }
                     Ok(PrivateDecision::Pass) => {
-                        // 민감 DM 입구가 이미 원 요청 ID(`key.request`)로 `bot_requests`에 private 행을 커밋했으므로
-                        // 일반 대화로 넘길 때는 충돌하지 않는 요청 ID를 쓴다(Slack 이벤트 중복 제거는 `slack_key`가 지킨다).
+                        // The private DM intake already committed `key.request` as a private row in `bot_requests`;
+                        // suffix the pass-through request ID while `slack_key` still enforces Slack deduplication.
                         key.request = RequestId(format!("{}:pass", key.request.0));
                         let text = inbound
                             .body
@@ -421,7 +396,6 @@ impl Ingress {
                 }
             },
         };
-        // 인증된 Slack 이벤트의 직접 도구 트리거만 «처리하지 않음»을 넘길 수 있다: 접수가 후보와 기본 대화를 고정한다
         let chain = source
             .as_ref()
             .and_then(|_| chain::pass_chain(&route, &inbound, &envelope, &plan, &scopes));
@@ -441,11 +415,10 @@ impl Ingress {
         scopes: BTreeSet<String>,
         extras: AcceptExtras,
     ) -> Admission {
-        // 에이전트 실행은 `run` 스코프가 있어야 시작한다. 도구 직접 호출의 스코프는 브로커가 도구마다 확인한다.
+        // Agent runs require `run`; direct tool trigger scopes are enforced per tool by the broker.
         if matches!(plan.target, Target::Agent { .. }) && !scopes.contains("run") {
             return Admission::Rejected(Rejection::Forbidden);
         }
-        // HTTP 입구만 Some: 실제 라우팅에서 비교한 대문자 method와 입구 아래 경로(쿼리 제외). 본문에서 뽑지 않는다.
         let http = match &inbound.event {
             Event::Http { method, path } => Some(HttpRoute {
                 method: method.clone(),
@@ -533,7 +506,6 @@ fn plan_of(bound: &BoundTrigger, envelope: &Value) -> Option<Plan> {
     Some(Plan { target, respond })
 }
 
-/// 요청자 권한 스냅샷 = 멤버의 역할이 가진 스코프의 합집합 ∩ 프로필 정책 상한
 fn requester_scopes(snapshot: &Snapshot, roles: &BTreeSet<String>) -> BTreeSet<String> {
     roles
         .iter()
@@ -544,13 +516,12 @@ fn requester_scopes(snapshot: &Snapshot, roles: &BTreeSet<String>) -> BTreeSet<S
         .collect()
 }
 
-/// 기본 승인자는 요청자다. 서비스 주체(HTTP 토큰)는 승인할 수 없으니 지정하지 않는다.
+/// Service principals (HTTP tokens) cannot approve actions.
 fn approver_of(principal: &PrincipalId) -> Option<PrincipalId> {
     principal.is_human().then(|| principal.clone())
 }
 
-/// 민감 입력은 영구 거절(형식·권한)만 확정으로 보고, 나머지(진행 중·시작 전 재시도·충돌·장애)는 모두 재전달 신호다.
-/// 원문을 저장하지 않으므로 ack하지 않고 상대가 다시 보내게 하는 것이 안전한 쪽이다.
+/// Only permanent private-intake failures settle; all others remain unacknowledged because payloads are not stored.
 fn private_rejection(error: Error) -> Rejection {
     match error {
         Error::Invalid => Rejection::Invalid,

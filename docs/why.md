@@ -1,39 +1,49 @@
-# 모델은 가두고, 위험한 일은 브로커 한 곳에서 허가하고, 요청은 DB에 먼저 적는다.
+# Isolate the model, gate risky actions through one broker, and commit requests to PostgreSQL first.
 
-처음 보는 사람이 자주 묻는 "왜"에 짧게 답합니다. 자세한 계약은 각 문서에 있습니다.
+English | [한국어](ko/why.md)
 
-**한 줄 요약.** AI는 속거나 틀릴 수 있다고 보고 키와 실행 권한을 주지 않습니다. 위험한 일은 브로커에서 허가·승인·기록하고, 요청은 먼저 DB에 적어 잃어버리지 않습니다.
+Short answers to the recurring "why" questions behind this design. Exact contracts live in the linked specifications.
 
-## 왜 모델만 VM에 가두나요?
+**In one sentence:** Assume the AI model can be fooled or wrong, so withhold keys and host execution; enforce authorization, human approval, and auditing in one broker; and persist every request to PostgreSQL before acting.
 
-모델은 사용자 글과 외부 내용을 읽다가 속을 수 있는(프롬프트 주입) 가장 믿기 어려운 부분입니다. 그래서 모델이 프로세스로 도는 `claude-cli`는 그 프로세스만 일회용 VM에 넣고, 비밀을 주지 않고(공급자 키는 호스트의 브로커만 읽고 VM 안 모델은 세션 토큰만 갖습니다), 나가는 길을 브로커 릴레이 하나로 좁힙니다. 속아도 훔칠 비밀도 보낼 길도 없게 하려는 것입니다. 파일·셸이 필요 없는 에이전트가 쓰는 API 직접 호출(`anthropic-api`·`openai-api`)은 모델 프로세스가 없어 가둘 것이 없습니다. 워커가 공급자 키를 읽어 상류를 직접 부르지만, 모델에게는 호스트 파일과 셸에 닿는 길이 없고 도구는 이 경로에서도 브로커를 거칩니다. [모델 이미지](model-image.md) · [보안](security.md)
+## Why isolate only the model in a VM?
 
-## 왜 봇 전체를 컨테이너에 넣지 않나요?
+The model is the least trustworthy component because it reads user messages and untrusted external content (prompt injection). When running a local model process (`claude-cli`), only that process runs inside a disposable VM with zero secrets (the host broker holds the provider key; the VM gets only a session token) and a single egress route through the broker relay. Even if tricked, it has no keys to steal and nowhere to exfiltrate data.
 
-게이트웨이·브로커·저장소는 Slack 토큰, DB, 도구 자격을 다룹니다. 모델을 같은 상자에 넣으면 비밀 옆에 놓이게 됩니다. 믿는 호스트와 믿지 않는 모델을 나누는 것이 목적이라, 봇 본체를 어떻게 배포하는지와는 별개입니다.
+Agents that do not need workspace files use direct APIs (`anthropic-api`, `openai-api`): there is no model process to contain, the worker attaches the provider key only when calling upstream, the model has no host filesystem or shell, and every tool call still goes through the broker. ([Model Image](model-image.md) · [Security](security.md))
 
-## 왜 요청마다 새 VM이고, 미리 띄워 두지 않나요?
+## Why not put the entire bot in one container?
 
-입력·작업 폴더·세션 토큰이 실행마다 달라서 VM을 만들 때 정해집니다. VM을 다시 쓰지 않으면 앞 실행의 흔적이 다음 실행(다른 프로필 포함)으로 넘어갈 일이 없습니다. 개발 Mac에서 VM을 띄워 끝내는 시간은 1초 안쪽이었고(마운트·망·방화벽 설정은 뺀 값) 보통 모델 응답 시간보다 작습니다. 시작 지연이 실제로 문제가 되면 한 번 쓰고 버리는 예열 풀을 검토할 수 있습니다(아직 없습니다).
+Gateway, broker, and store handle Slack tokens, database credentials, and tool secrets. Co-locating the model in that container places it next to those secrets. The security boundary separates the trusted host from the untrusted model — independent of how you package or deploy the bot binary itself.
 
-## 왜 요청을 바로 처리하지 않고 DB에 먼저 적나요?
+## Why a fresh VM per request instead of a pre-warmed pool?
 
-접수 성공을 "PostgreSQL 커밋 성공"으로 정의해서, 프로세스가 죽거나 다시 시작해도 요청이 사라지지 않게 합니다. 같은 요청이 다시 와도 새 실행을 만들지 않고 기존 실행으로 돌아갑니다. 승인 대기나 자식 위임 중에는 VM과 리스를 놓고, 결정이 나면 저장된 세션으로 이어 갑니다. 접수·큐·승인·감사 기록은 같은 DB 트랜잭션으로 함께 반영합니다. 대가는 즉시 실행이 아니라 접수 뒤에 실행하는 두 단계가 된다는 점입니다. [장애 복구](reliability.md)
+Inputs, work directory, and session tokens are run-specific and bound at VM creation. Discarding each VM prevents any state from leaking into a subsequent run (including across profiles). On a development Mac, cold VM start-to-exit took under 1 second (excluding mount, network, and firewall setup) — well below typical model latency. If startup overhead ever becomes a bottleneck, a single-use pre-warmed pool can be added later (not yet built).
 
-## 왜 도구는 모델 밖에서, 브로커를 거쳐 실행하나요?
+## Why commit requests to PostgreSQL before executing?
 
-키가 필요한 일은 도구가 하고, 모델은 브로커에 부탁만 합니다. 도구는 선언한 비밀과 선언한 호스트로만 나갈 수 있어서, 모델이 속아도 키를 보지 못하고 도구 권한도 선언 범위를 넘지 못합니다. 브로커는 요청자 권한 ∩ 에이전트 상한 ∩ 도구 범위를 계산하는 허가, 승인, 감사를 한 곳에서 집행합니다. 모델이 도구를 직접 돌릴 수 있으면 이 관문을 우회할 수 있습니다. [MCP 도구](plugins.md)
+Defining acceptance as a PostgreSQL commit guarantees no request is lost across crashes or restarts:
 
-## 왜 사람 승인이 있나요?
+- Duplicate deliveries resolve to the existing run instead of spawning a second one.
+- During human approvals or child delegations, the worker releases its VM and lease and later resumes from the saved session.
+- Intake, queue state, approvals, and audit records commit atomically in the same transaction.
 
-되돌릴 수 없는 일(외부 발송, 삭제 등)은 모델 밖에서 사람이 한 번 확인합니다. 승인은 정확한 인자에 묶여서 내용이 바뀌면 다시 받습니다. 모델은 승인할 수 없습니다.
+The trade-off is a two-step accept-then-execute flow rather than immediate inline execution. ([Reliability](reliability.md))
 
-## 왜 모델에 셸·파일 쓰기·웹 도구가 없나요?
+## Why execute tools outside the model behind a broker?
 
-공격면을 줄이려고 기본으로 끕니다. 모델 VM(`claude-cli`)에서도 읽기 격리가 보증된 `read`만 켤 수 있고(API 직접 호출에는 파일 내장 도구가 없습니다), 필요한 일은 검토한 도구로 만듭니다. [프로필 작성](profile-spec.md)
+Tools perform credentialed work; models only ask the broker to invoke them. Each tool receives only its declared secrets and can reach only its declared egress hosts, so a subverted model never sees keys and cannot exceed tool bounds. The broker computes `caller scope ∩ agent cap ∩ tool scope`, enforces approvals, and records audits in one place. Allowing the model to execute tools directly would bypass that gate. ([MCP Tools](plugins.md))
 
-## 이 구조가 맞지 않는 경우
+## Why require human approval?
 
-- 모델이 직접 코드를 짜서 돌리거나 내 PC의 파일을 만지는 일이 핵심이면 맞지 않습니다. 그런 일은 도구로 만들거나 프레임워크 밖에서 처리하고, 전달과 승인만 이 프레임워크에 맡기세요.
-- 혼자 쓰고 입력을 모두 믿을 수 있다면 OS 샌드박스와 승인만으로 충분할 수 있습니다. 이 프레임워크는 Slack·HTTP로 여러 사용자의 요청을 받고 실제 권한을 쓰는 환경을 기준으로 합니다. [Anthropic 보안 배포 가이드](https://code.claude.com/docs/en/agent-sdk/secure-deployment)도 OS 샌드박스부터 VM까지 위협에 맞게 고르라고 하며, 이 프레임워크는 모델 실행에 그중 강한 쪽을 기본으로 둡니다.
-- 모델 VM의 문서화된 백엔드는 Apple `container`뿐입니다.
+Irreversible side effects (external messages, deletions, writes) require out-of-band human confirmation. Each approval binds cryptographically to exact arguments, so any argument change invalidates it. Models can never approve actions.
+
+## Why disable shell, file-write, and web tools on the model?
+
+They are off by default to minimize attack surface. Even in the `claude-cli` VM, only isolation-backed `read` can be opted into (direct API runners expose no built-in file tools). Wrap any needed capability as an explicitly reviewed tool instead. ([Profile Spec](profile-spec.md))
+
+## When this architecture is not a fit
+
+- **Local coding or PC file editing:** If the model must write/run arbitrary code or modify your local files directly, wrap specific actions as tools or run outside the framework and use this only for delivery and approvals.
+- **Single-user, fully trusted input:** An OS sandbox plus approval prompts may be enough. This framework targets multi-user Slack/HTTP bots operating with real credentials; per the [Anthropic Secure Deployment Guide](https://code.claude.com/docs/en/agent-sdk/secure-deployment), it defaults to strong isolation for model execution.
+- **Non-Apple VM hosts:** The only documented model VM backend is Apple `container`.

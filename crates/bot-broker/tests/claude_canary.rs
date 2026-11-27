@@ -1,10 +1,7 @@
-//! 실제 Claude Code CLI가 브로커 HTTP 프런트로 모델(SSE)과 도구(MCP)를 왕복하는 카나리. 실제 모델 호출은 0이다.
+//! End-to-end canary exercising a real Claude Code CLI against the broker HTTP front (SSE + MCP) with fake upstream and zero egress.
 //!
-//! 상류는 가짜(`FakeUpstream`)이고, CLI는 홈·설정을 격리한 임시 폴더에서 `--bare`로 돌며 `ANTHROPIC_BASE_URL`만 프런트를 가리킨다.
-//! 그 밖의 모든 외부 접속은 거절하며 시도 수를 센다(0이어야 한다).
-//!
-//! 실행: `BOT_CLAUDE_BIN=<claude 경로> BOT_CLAUDE_CANARY=required cargo test -p bot-broker --features testing --test claude_canary`
-//! - `BOT_CLAUDE_CANARY=required`이면 CLI가 없을 때 실패한다. 설정하지 않으면 없을 때 건너뛴다.
+//! Run: `BOT_CLAUDE_BIN=<path> BOT_CLAUDE_CANARY=required cargo test -p bot-broker --features testing --test claude_canary`
+//! Set `BOT_CLAUDE_CANARY=required` to fail when `claude` is absent; otherwise the test skips.
 
 #![cfg(all(unix, feature = "testing"))]
 
@@ -48,7 +45,6 @@ fn event(name: &str, data: &str) -> Vec<u8> {
     format!("event: {name}\ndata: {data}\n\n").into_bytes()
 }
 
-/// 첫 턴: 도구 사용(`mcp__relay__echo_say`)을 입력 JSON 조각 둘로 쪼개 요청한다.
 fn tool_use_turn() -> Vec<Vec<u8>> {
     vec![
         event(
@@ -79,7 +75,6 @@ fn tool_use_turn() -> Vec<Vec<u8>> {
     ]
 }
 
-/// 둘째 턴: 도구 결과를 받은 뒤의 마무리 글.
 fn final_turn(text: &str) -> Vec<Vec<u8>> {
     vec![
         event("message_start", r#"{"type":"message_start","message":{"id":"msg_t2","type":"message","role":"assistant","model":"model-large","content":[],"stop_reason":null,"usage":{"input_tokens":9,"output_tokens":1}}}"#),
@@ -103,7 +98,6 @@ async fn harness() -> Harness {
     harness_with(false).await
 }
 
-/// `planned`이면 호출 ID 원천과 응답 기록을 운영과 같은 `PlannedCalls`·`CheckpointSink`로 둔다(세션 대조는 `PlanningRuns`가 흉내 낸다).
 async fn harness_with(planned: bool) -> Harness {
     let clock = Arc::new(ManualClock::new(1_000));
     let catalog = Arc::new(FakeCatalog::new());
@@ -221,7 +215,6 @@ async fn harness_with(planned: bool) -> Harness {
     }
 }
 
-/// 격리된 CLI 한 턴. (종료 코드, 표준출력, 표준오류)
 async fn run_claude(
     bin: &PathBuf,
     h: &Harness,
@@ -279,7 +272,7 @@ async fn run_claude(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn().expect("claude를 띄우지 못했다");
+    let mut child = command.spawn().expect("failed to spawn claude");
     let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
     let buffers = (
         Arc::new(std::sync::Mutex::new(String::new())),
@@ -310,8 +303,7 @@ async fn run_claude(
                 .push_str(&String::from_utf8_lossy(&chunk[..n]));
         }
     });
-    // 제한 시간 안에 끝나지 않으면 죽이고 그때까지의 출력을 돌려준다. CLI는 스트림 오류 뒤 비스트리밍으로 다시 시도하며
-    // 백오프하므로 오래 걸릴 수 있다.
+    // Kill and return collected output on timeout because the CLI backs off across non-streaming retries.
     let status = match timeout(limit, child.wait()).await {
         Ok(status) => status.ok().and_then(|s| s.code()),
         Err(_) => {
@@ -348,9 +340,9 @@ async fn the_real_cli_makes_a_tool_round_trip_through_the_front_with_zero_outsid
     let Some(bin) = claude_bin() else {
         assert!(
             !required(),
-            "필수 모드: claude CLI가 없다(BOT_CLAUDE_BIN 확인)"
+            "required mode: claude CLI not found (check BOT_CLAUDE_BIN)"
         );
-        eprintln!("claude가 없어 건너뛴다(BOT_CLAUDE_CANARY=required로 실패시킬 수 있다)");
+        eprintln!("skipping: claude CLI not found (set BOT_CLAUDE_CANARY=required to fail)");
         return;
     };
     let h = harness().await;
@@ -370,7 +362,6 @@ async fn the_real_cli_makes_a_tool_round_trip_through_the_front_with_zero_outsid
     let (code, stdout, stderr) = run_claude(&bin, &h, &sink, &[], Duration::from_secs(60)).await;
     assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
     assert!(stdout.contains("TOOL-ROUND-TRIP-OK"), "{stdout}");
-    // 도구는 브로커를 지나 실행기까지 갔다: 호출 ID는 CLI의 toolUseId에서, 인자는 정규화된 JSON으로
     let jobs = h.runner.jobs();
     assert_eq!(jobs.len(), 1, "{stdout}");
     assert_eq!(
@@ -381,7 +372,6 @@ async fn the_real_cli_makes_a_tool_round_trip_through_the_front_with_zero_outsid
         ),
         ("m-toolu_canary1", "echo.say", r#"{"text":"hello"}"#)
     );
-    // 모델 요청 둘: 상류에는 우리 키와 운영자의 모델 이름만, 세션 토큰은 어디에도 없다
     let sent = h.upstream.requests();
     assert_eq!(sent.len(), 2);
     for (endpoint, path, headers, body) in &sent {
@@ -399,13 +389,12 @@ async fn the_real_cli_makes_a_tool_round_trip_through_the_front_with_zero_outsid
     }
     assert!(
         sent[0].3.contains("echo_say"),
-        "모델은 우리가 선언한 도구만 본다"
+        "model must see declared tools"
     );
     assert!(
         sent[1].3.contains("tool_result") && sent[1].3.contains("ECHO:hello"),
-        "도구 결과가 다음 모델 요청으로 돌아갔다"
+        "tool result must return to the next model request"
     );
-    // 외부 접속 시도 0건(프록시를 거치려던 모든 요청이 센다)
     let stats = sink.stats();
     assert_eq!(
         stats.tunnels
@@ -426,7 +415,7 @@ async fn the_real_cli_survives_a_blocked_stream_and_never_sees_the_key() {
     let Some(bin) = claude_bin() else {
         assert!(
             !required(),
-            "필수 모드: claude CLI가 없다(BOT_CLAUDE_BIN 확인)"
+            "required mode: claude CLI not found (check BOT_CLAUDE_BIN)"
         );
         return;
     };
@@ -459,12 +448,11 @@ async fn the_real_cli_survives_a_blocked_stream_and_never_sees_the_key() {
     for _ in 0..40 {
         h.upstream.respond_chunks(200, &chunks, End::Eof);
     }
-    // CLI는 스트림 오류 뒤 비스트리밍으로 다시 시도할 수 있다. 그래도 키는 어느 경로로도 CLI에 닿으면 안 된다.
     let (code, stdout, stderr) = run_claude(&bin, &h, &sink, &[], Duration::from_secs(20)).await;
     assert_ne!(
         code,
         Some(0),
-        "차단된 스트림은 성공으로 끝나면 안 된다: {stdout}"
+        "blocked stream must not exit cleanly: {stdout}"
     );
     assert!(!h.upstream.requests().is_empty());
     assert!(
@@ -472,26 +460,23 @@ async fn the_real_cli_survives_a_blocked_stream_and_never_sees_the_key() {
             && !stderr.contains(tail)
             && !stdout.contains(KEY)
             && !stderr.contains(KEY),
-        "키가 CLI까지 갔다: {stdout}"
+        "provider key reached CLI: {stdout}"
     );
-    // 키를 쪼개 흘려도 앞부분 이벤트까지 쥐었다가 버리므로 앞부분(9바이트)도 CLI에 닿지 않는다.
     assert!(
         !stdout.contains(head) && !stderr.contains(head),
-        "키 앞부분이 CLI까지 갔다: {stdout}{stderr}"
+        "provider key prefix reached CLI: {stdout}{stderr}"
     );
     assert!(h.runner.jobs().is_empty());
     sink.stop().await;
     h.front.stop().await;
 }
 
-/// 운영과 같은 `PlannedCalls`·`CheckpointSink`로 한 도구 왕복: 모델이 끝낸 응답의 도구 목록이 먼저 기록돼야 도구가 실행되고, 호출 ID는
-/// 그 기록의 논리 위치(`cli-<차례>-<위치>`)다. 같은 `toolUseId`를 다시 보내도 같은 호출이다.
 #[tokio::test]
 async fn the_real_cli_runs_a_tool_only_after_its_planned_position_was_recorded() {
     let Some(bin) = claude_bin() else {
         assert!(
             !required(),
-            "필수 모드: claude CLI가 없다(BOT_CLAUDE_BIN 확인)"
+            "required mode: claude CLI not found (check BOT_CLAUDE_BIN)"
         );
         return;
     };
@@ -520,18 +505,15 @@ async fn the_real_cli_runs_a_tool_only_after_its_planned_position_was_recorded()
             jobs[0].args.as_str()
         ),
         ("cli-1-0", "echo.say", r#"{"text":"hello"}"#),
-        "호출 ID는 저장된 차례의 논리 위치다"
+        "call ID must match logical turn position"
     );
-    // 기록: 응답 전체(제공자 메시지 ID), 도구 위치, 그룹
     let recorded = h.ledger.step_keys("r1");
     for key in ["cli-resp-msg_t1", "cli-use-toolu_canary1", "cli-group-1"] {
         assert!(recorded.contains(&key.to_owned()), "{key}: {recorded:?}");
     }
-    // 모델 요청 둘, 도구 결과가 둘째 요청으로 돌아갔다
     let sent = h.upstream.requests();
     assert_eq!(sent.len(), 2);
     assert!(sent[1].3.contains("tool_result") && sent[1].3.contains("ECHO:hello"));
-    // 세션 토큰은 어디에도 없다
     assert!(sent.iter().all(|(_, _, headers, body)| {
         headers.iter().all(|(_, v)| !v.contains(&h.token)) && !body.contains(&h.token)
     }));

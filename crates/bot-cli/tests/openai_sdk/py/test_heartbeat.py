@@ -1,4 +1,4 @@
-"""기다리는 동안 SSE 연결은 살아 있다: 최대 15초마다 `: keep-alive` 주석 줄, 그 사이 첫 청크(역할)는 곧바로 나가고, 끝나면 답과 `[DONE]`. 실제로 17초쯤 걸린다."""
+"""SSE heartbeat test: immediate role chunk, `: keep-alive` comments at most 15s apart while waiting, then content and `[DONE]`."""
 import http.client
 import json
 import time
@@ -31,15 +31,15 @@ class Heartbeat(Wired):
         conn.close()
         self.assertEqual(reply.status, 200)
         first_data = next(i for i, l in enumerate(lines) if l.startswith(b"data: "))
-        self.assertLess(marks[first_data], 3, "첫 청크(역할)는 기다리지 않고 나간다")
+        self.assertLess(marks[first_data], 3, "role chunk must flush immediately")
         beats = [marks[i] for i, l in enumerate(lines) if l == b": keep-alive\n"]
-        self.assertTrue(beats, "기다리는 동안 keep-alive가 한 번은 와야 한다")
+        self.assertTrue(beats, "expected at least one keep-alive comment while waiting")
         self.assertLessEqual(beats[0] - marks[first_data], 15.5)
         gaps = [b - a for a, b in zip([marks[first_data]] + beats, beats)]
         self.assertTrue(all(g <= 15.5 for g in gaps), gaps)
         text = b"".join(lines).decode()
         payloads = [json.loads(l[len(b"data: "):]) for l in lines if l.startswith(b"data: ") and not l.startswith(b"data: [DONE]")]
-        self.assertEqual("".join(c["choices"][0]["delta"].get("content") or "" for c in payloads if c["choices"]), ANSWER, "조각으로 나뉘어 와도 이은 글이 답이다")
+        self.assertEqual("".join(c["choices"][0]["delta"].get("content") or "" for c in payloads if c["choices"]), ANSWER, "joined delta chunks must match full answer")
         self.assertTrue(text.endswith("data: [DONE]\n"), text[-60:])
 
 

@@ -1,6 +1,4 @@
-//! 활성 프로필 집합 + 호스트 등록부 → 라우팅 표. 기동 전(그리고 프로필 집합이 바뀔 때마다) 한 번에 만들고 검사한다.
-//! 입구 유일성(별칭·실제 ID 두 수준), 트리거 선택이 결정적인지, 민감(private) 트리거가 일반 처리기에 앞서 잡히는지를 본다.
-//! 오류에는 프로필·바인딩·트리거 ID와 호스트 별칭만 싣는다.
+//! Gateway routing table builder validating entrance uniqueness, trigger determinism, and private-DM precedence.
 use crate::{
     entrance::{Conflict, Entrance, Owner, Real, Table},
     host::{CliAccount, HostConfig, HostError},
@@ -14,7 +12,6 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 pub type Active = Arc<BTreeMap<ProfileId, Arc<Snapshot>>>;
 
-/// 인증된 바인딩의 원래 대화에 답하는 발송 어댑터.
 pub(crate) fn reply_transport(adapter: &Adapter) -> Option<PushTransportId> {
     match adapter {
         Adapter::SlackDm { .. } | Adapter::SlackChannel { .. } => Some(PushTransportId::SLACK),
@@ -22,7 +19,7 @@ pub(crate) fn reply_transport(adapter: &Adapter) -> Option<PushTransportId> {
     }
 }
 
-/// HTTP 요청 상태 조회가 쓰는 예약 경로. 트리거가 이 아래를 쓸 수 없다.
+/// Reserved HTTP path prefix for request status queries; triggers cannot bind under it.
 pub const STATUS_SEGMENT: &str = "_requests";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,19 +45,17 @@ impl From<HostError> for RoutesError {
     }
 }
 
-/// 한 바인딩에 걸린 사건·HTTP 트리거와 그것을 선언한 에이전트
 #[derive(Clone, Debug)]
 pub struct BoundTrigger {
     pub agent: AgentId,
     pub trigger: Trigger,
 }
 
-/// 실제 입구가 가리키는 바인딩과 그 프로필
 pub struct Route<'a> {
     pub snapshot: &'a Arc<Snapshot>,
     pub binding_id: &'a BindingId,
     pub binding: &'a Binding,
-    /// order 오름차순(같으면 에이전트·트리거 ID 순)
+    /// Sorted by ascending `(order, agent, trigger.id)`.
     pub triggers: &'a [BoundTrigger],
 }
 
@@ -89,9 +84,8 @@ impl Routes {
                 })
             })
         };
-        // 1) 프로필이 선언한 별칭 수준 입구는 활성 프로필 전체에서 한 번씩만
+        // Check uniqueness at both alias level and resolved host-target level.
         Table::build_described(owners())?;
-        // 2) 호스트 등록부로 풀어 실제 입구 수준에서도 겹치지 않는지
         let mut resolved = Vec::new();
         for (entrance, owner) in owners() {
             let real = resolve(&entrance, &owner, host, uid_of)?;
@@ -123,7 +117,6 @@ impl Routes {
         })
     }
 
-    /// 이 uid가 CLI로 닿는 프로필들(`bot chat`이 프로필을 생략했을 때 고르는 데 쓴다).
     pub fn cli_profiles(&self, uid: u32) -> Vec<ProfileId> {
         self.table
             .iter()
@@ -134,14 +127,12 @@ impl Routes {
             .collect()
     }
 
-    /// HTTP 입구 별칭을 쓰는 바인딩
     pub fn http_owner(&self, endpoint: &str) -> Option<&Owner> {
         self.table.get(&Real::Http {
             endpoint: endpoint.to_owned(),
         })
     }
 
-    /// OpenAI 호환 입구 별칭 위의 (공개 모델 이름, 바인딩) 목록. 모델 이름 순이다.
     pub fn openai_models<'a>(
         &'a self,
         endpoint: &'a str,
@@ -156,14 +147,12 @@ impl Routes {
             })
     }
 
-    /// OpenAI 호환 입구 별칭을 쓰는 프로필(별칭 하나는 활성 프로필 하나만 쓴다). 쓰는 바인딩이 없으면 None.
     pub fn openai_profile<'a>(&'a self, endpoint: &'a str) -> Option<&'a ProfileId> {
         self.openai_models(endpoint)
             .next()
             .map(|(_, owner)| &owner.profile)
     }
 
-    /// 활성 프로필 전체
     pub fn profiles(&self) -> impl Iterator<Item = &Arc<Snapshot>> {
         self.source.values()
     }
@@ -172,7 +161,6 @@ impl Routes {
         self.source.get(profile)
     }
 
-    /// 만든 뒤 활성 집합이 바뀌지 않았는가
     pub fn is_current(&self, active: &Active) -> bool {
         Arc::ptr_eq(&self.source, active)
     }
@@ -182,7 +170,7 @@ impl Routes {
     }
 }
 
-/// OpenAI 호환 입구 별칭 하나는 활성 프로필 하나만 쓴다: 키가 별칭을, 별칭이 프로필을 하나로 정하므로 두 프로필이 나눠 쓰면 어느 쪽의 권한으로 열지 정할 수 없다.
+/// Each OpenAI endpoint alias must map to at most one profile so key-to-profile authorization stays unambiguous.
 fn one_profile_per_openai_entrance(table: &Table<Real>) -> Result<(), RoutesError> {
     let mut first: BTreeMap<&str, &Owner> = BTreeMap::new();
     for (real, owner) in table.iter() {
@@ -192,7 +180,7 @@ fn one_profile_per_openai_entrance(table: &Table<Real>) -> Result<(), RoutesErro
         match first.get(endpoint.as_str()) {
             Some(earlier) if earlier.profile != owner.profile => {
                 return Err(RoutesError(format!(
-                    "입구가 겹쳐요: {earlier} 와 {owner} 가 모두 http 입구 {endpoint}를 써요. OpenAI 호환 입구 별칭 하나는 프로필 하나만 쓸 수 있어요 — 한쪽 바인딩의 `endpoint`를 바꾸거나 바인딩을 지워 주세요"
+                    "Entrance conflict: {earlier} and {owner} both use HTTP endpoint {endpoint}. Each OpenAI-compatible endpoint alias may belong to only one profile — change or remove one binding."
                 )));
             }
             Some(_) => {}
@@ -206,7 +194,7 @@ fn one_profile_per_openai_entrance(table: &Table<Real>) -> Result<(), RoutesErro
 
 fn unknown(owner: &Owner, what: &str, alias: &str) -> RoutesError {
     RoutesError(format!(
-        "{owner}: 호스트에 등록되지 않은 {what} 별칭 {alias}"
+        "{owner}: unregistered {what} alias {alias} in host config"
     ))
 }
 
@@ -222,7 +210,7 @@ fn resolve(
                 .cli
                 .accounts
                 .get(account)
-                .ok_or_else(|| unknown(owner, "cli 계정", account))?;
+                .ok_or_else(|| unknown(owner, "cli account", account))?;
             Ok(Real::Cli {
                 uid: uid_of(entry)?,
                 profile: owner.profile.clone(),
@@ -233,11 +221,11 @@ fn resolve(
                 .slack
                 .workspaces
                 .get(workspace)
-                .ok_or_else(|| unknown(owner, "slack 워크스페이스", workspace))?;
+                .ok_or_else(|| unknown(owner, "slack workspace", workspace))?;
             let id = ws
                 .channels
                 .get(channel)
-                .ok_or_else(|| unknown(owner, "slack 채널", channel))?;
+                .ok_or_else(|| unknown(owner, "slack channel", channel))?;
             Ok(Real::SlackChannel {
                 team: ws.team_id.clone(),
                 channel: id.clone(),
@@ -248,10 +236,10 @@ fn resolve(
                 .slack
                 .workspaces
                 .get(workspace)
-                .ok_or_else(|| unknown(owner, "slack 워크스페이스", workspace))?;
+                .ok_or_else(|| unknown(owner, "slack workspace", workspace))?;
             if !ws.dm {
                 return Err(RoutesError(format!(
-                    "{owner}: 호스트가 slack 워크스페이스 {workspace}의 DM 입구를 열지 않았어요(dm: true)"
+                    "{owner}: host has not enabled DM entrance for slack workspace {workspace} (dm: true)"
                 )));
             }
             Ok(Real::SlackDm {
@@ -260,7 +248,7 @@ fn resolve(
         }
         Entrance::Http { endpoint } => {
             if !host.http.endpoints.contains_key(endpoint) {
-                return Err(unknown(owner, "http 입구", endpoint));
+                return Err(unknown(owner, "http endpoint", endpoint));
             }
             Ok(Real::Http {
                 endpoint: endpoint.clone(),
@@ -268,7 +256,7 @@ fn resolve(
         }
         Entrance::HttpModel { endpoint, model } => {
             if !host.http.openai.contains_key(endpoint) {
-                return Err(unknown(owner, "OpenAI 호환 입구", endpoint));
+                return Err(unknown(owner, "OpenAI-compatible endpoint", endpoint));
             }
             Ok(Real::HttpModel {
                 endpoint: endpoint.clone(),
@@ -278,7 +266,6 @@ fn resolve(
     }
 }
 
-/// 같은 후보군(바인딩 + 사건 또는 method·path)을 가리키는 키
 fn candidate_key(trigger: &Trigger) -> String {
     match &trigger.on {
         TriggerSource::Event { event, .. } => format!("event {event}"),
@@ -304,7 +291,7 @@ fn collect_triggers(
                     TriggerSource::Event { binding, event } => {
                         if !matches!(event.as_str(), "message" | "thread-reply" | "reaction") {
                             return Err(RoutesError(format!(
-                                "{}/{}: 지원하지 않는 이벤트 {event}",
+                                "{}/{}: unsupported event {event}",
                                 profile.0, trigger.id
                             )));
                         }
@@ -313,7 +300,7 @@ fn collect_triggers(
                     TriggerSource::Http { binding, path, .. } => {
                         if reserved(path) {
                             return Err(RoutesError(format!(
-                                "{}/{}: 경로가 예약된 /{STATUS_SEGMENT} 아래예요",
+                                "{}/{}: path is under reserved /{STATUS_SEGMENT}",
                                 profile.0, trigger.id
                             )));
                         }
@@ -322,13 +309,13 @@ fn collect_triggers(
                 };
                 let binding = snapshot.bindings.get(binding_id).ok_or_else(|| {
                     RoutesError(format!(
-                        "{}/{}: 없는 바인딩 {}",
+                        "{}/{}: unknown binding {}",
                         profile.0, trigger.id, binding_id.0
                     ))
                 })?;
                 if matches!(binding.source, Adapter::Http { .. }) != http {
                     return Err(RoutesError(format!(
-                        "{}/{}: 트리거 종류가 바인딩 {}의 입구와 맞지 않아요",
+                        "{}/{}: trigger kind does not match binding {}",
                         profile.0, trigger.id, binding_id.0
                     )));
                 }
@@ -360,14 +347,13 @@ fn check_candidates(
     list: &[BoundTrigger],
     entry: &Binding,
 ) -> Result<(), RoutesError> {
-    // 같은 후보군(바인딩 + 사건 또는 method·path)에서 같은 순위가 둘 이상이면 먼저 잡을 쪽이 정해지지 않는다.
-    // 정렬 순서에서 이웃하지 않아도(A·B·A) 놓치지 않도록 (후보 키, order) 쌍 전체를 본다.
+    // Track `(candidate_key, order)` across the entire list so non-adjacent duplicates are caught too.
     let mut seen: BTreeMap<(String, i64), &str> = BTreeMap::new();
     for bound in list {
         let trigger = &bound.trigger;
         if let Some(first) = seen.insert((candidate_key(trigger), trigger.order), &trigger.id) {
             return Err(RoutesError(format!(
-                "{}/{}: 트리거 {} 와 {} 의 순위가 같아 먼저 잡을 쪽이 정해지지 않아요",
+                "{}/{}: triggers {} and {} have the same order; match priority is ambiguous",
                 profile.0, binding.0, first, trigger.id
             )));
         }
@@ -376,12 +362,12 @@ fn check_candidates(
         let who = format!("{}/{}", profile.0, private.trigger.id);
         if !matches!(entry.source, Adapter::SlackDm { .. }) {
             return Err(RoutesError(format!(
-                "{who}: private은 slack DM 바인딩에서만 쓸 수 있어요"
+                "{who}: private triggers are only allowed on Slack DM bindings"
             )));
         }
         if !matches!(private.trigger.target, TriggerTarget::Tool { .. }) {
             return Err(RoutesError(format!(
-                "{who}: private은 도구 직접 호출만 쓸 수 있어요"
+                "{who}: private triggers must target a tool directly"
             )));
         }
         let key = candidate_key(&private.trigger);
@@ -391,7 +377,7 @@ fn check_candidates(
                 && t.trigger.order <= private.trigger.order
         }) {
             return Err(RoutesError(format!(
-                "{who}: 트리거 {} 가 먼저 잡을 수 있어 민감 입력이 일반 처리기로 갈 수 있어요",
+                "{who}: trigger {} can match earlier and route private input to a normal handler",
                 earlier.trigger.id
             )));
         }

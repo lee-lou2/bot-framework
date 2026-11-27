@@ -1,4 +1,3 @@
-//! 구판 프로세스 닫기: 저장소의 활성 집합과 다른 프로세스는 새 접수도 결과 반환도 하지 않는다.
 use super::*;
 use crate::{
     active::{ActiveCheck, Release},
@@ -23,24 +22,25 @@ async fn a_process_that_is_not_the_active_set_accepts_nothing_and_asks_for_redel
     let active = MemoryActive::new(Some("set-1"));
     let rig = with_active(rig(base()), active.check("set-1"));
     assert!(is_accepted(
-        &rig.ingress.admit(cli_chat("a1", "첫 요청")).await
+        &rig.ingress.admit(cli_chat("a1", "first request")).await
     ));
-    // 다른 프로세스가 새 집합을 활성화했다
     active.set(Some("set-2"));
-    let stale = rig.ingress.admit(cli_chat("a2", "새 요청")).await;
+    let stale = rig.ingress.admit(cli_chat("a2", "new request")).await;
     assert_eq!(stale, Admission::Rejected(Rejection::Unavailable));
-    assert!(!stale.settled(), "구판은 ack하지 않아 상대가 다시 보낸다");
-    // 아직 게시되지 않은 것도 같다
+    assert!(!stale.settled(), "stale process must not ack");
     active.set(None);
     assert_eq!(
-        rig.ingress.admit(cli_chat("a2", "새 요청")).await,
+        rig.ingress.admit(cli_chat("a2", "new request")).await,
         Admission::Rejected(Rejection::Unavailable)
     );
-    assert_eq!(rig.store.accepted().len(), 1, "구판은 저장소에 쓰지 않는다");
-    // 같은 집합으로 돌아오면 같은 요청이 접수된다
+    assert_eq!(
+        rig.store.accepted().len(),
+        1,
+        "stale process must not write to store"
+    );
     active.set(Some("set-1"));
     assert!(is_accepted(
-        &rig.ingress.admit(cli_chat("a2", "새 요청")).await
+        &rig.ingress.admit(cli_chat("a2", "new request")).await
     ));
     assert_eq!(rig.store.accepted().len(), 2);
 }
@@ -57,12 +57,12 @@ async fn a_stale_process_does_not_forward_private_inputs_either() {
         }),
         active.check("set-1"),
     );
-    let stale = rig.ingress.admit(slack_dm("U1", "p1", "비밀")).await;
+    let stale = rig.ingress.admit(slack_dm("U1", "p1", "secret")).await;
     assert_eq!(stale, Admission::Rejected(Rejection::Unavailable));
     assert!(rig.private.received().is_empty());
     active.set(Some("set-1"));
     assert_eq!(
-        rig.ingress.admit(slack_dm("U1", "p1", "비밀")).await,
+        rig.ingress.admit(slack_dm("U1", "p1", "secret")).await,
         Admission::Private
     );
     assert_eq!(rig.private.received().len(), 1);
@@ -85,13 +85,11 @@ async fn releasing_a_result_needs_both_membership_and_the_active_set() {
         rig.ingress.release(&real, &owner, &me).await,
         Release::Allowed
     );
-    // 멤버가 아니면 활성 여부와 무관하게 막는다
     let ghost = PrincipalId("local:ghost".into());
     assert_eq!(
         rig.ingress.release(&real, &owner, &ghost).await,
         Release::Forbidden
     );
-    // 구판은 로컬 표가 멤버라고 해도 결과를 내보내지 않는다
     active.set(Some("set-2"));
     assert_eq!(
         rig.ingress.release(&real, &owner, &me).await,
@@ -104,7 +102,7 @@ async fn releasing_a_result_needs_both_membership_and_the_active_set() {
 async fn a_stale_conclusion_from_the_store_is_not_acked_either() {
     let rig = rig(base());
     rig.store.fail_next(Error::Stale);
-    let result = rig.ingress.admit(cli_chat("s1", "안녕")).await;
+    let result = rig.ingress.admit(cli_chat("s1", "hello")).await;
     assert_eq!(result, Admission::Rejected(Rejection::Unavailable));
     assert!(!result.settled());
 }

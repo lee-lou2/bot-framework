@@ -1,6 +1,4 @@
-//! 관측: 호스트 `admin.trace`·`admin.logs`·`admin.issues` 수집기를 한 번 띄워 이 프로세스의 모든 역할이 함께 쓴다.
-//! 알려진 자격 값은 내보내는 글·로그·이슈·관리 응답에서 가린다 — 시작 때 읽은 값뿐 아니라 이 프로세스가 비밀 보관소에서
-//! 읽어 쓰는 모든 값이 쓰이기 전에 가림 장치에 들어가므로(`Watched`) 키를 교체해도 새 값이 바로 가려진다.
+//! Process-wide observability setup: OTLP trace/log and Sentry issue exporters with live secret redaction.
 use super::watched::{Pace, Watched, declared, read_round};
 use crate::{host::HostFile, logging, secrets::env::EnvStore};
 use bot_admin::{
@@ -16,7 +14,7 @@ use bot_core::{
 use bot_profile::Registry;
 use std::{sync::Arc, time::Duration};
 
-/// 정상 흐름·사용자 거절이라 이슈 트래커에 올리지 않을 오류 분류.
+// Expected control-flow or policy-denial outcomes that should not open Sentry issues.
 const BENIGN_SPAN_ERRORS: [&str; 10] = [
     "cancelled",
     "denied",
@@ -30,7 +28,6 @@ const BENIGN_SPAN_ERRORS: [&str; 10] = [
     "unregistered",
 ];
 
-/// 스팬을 추적 수집기에 넘기면서, 비정상 실패 스팬은 이슈 트래커에도 자동 보고하는 래퍼.
 struct ReportingTracer {
     inner: Arc<Exporter>,
     issues: Arc<IssueExporter>,
@@ -68,21 +65,18 @@ impl Tracer for ReportingTracer {
     }
 }
 
-/// 이 프로세스의 관측 입력
 pub struct Observe {
     pub exporter: Arc<Exporter>,
     pub logs: Arc<LogExporter>,
     pub issues: Arc<IssueExporter>,
-    /// 알려진 비밀 값을 담은 **살아 있는** 가림 장치(관리 응답 검사·추적·로그·이슈가 같은 목록을 쓴다)
+    /// Shared live redactor fed by every secret read through `secrets`.
     pub redactor: Redactor,
-    /// 모든 역할이 써야 하는 비밀 보관소: 읽는 값을 `redactor`에 더하고 그대로 넘겨 준다.
+    /// Single secret store passed to all roles so rotated values are masked before use.
     pub secrets: Arc<Watched>,
-    /// 전역 로그·이슈 싱크 수명 가드(프로세스·시험 종료 시 자동 해제)
     _sinks: Option<logging::SinkGuard>,
 }
 
 impl Observe {
-    /// 모든 역할에 같은 수집기를 넘기는 추적 입력(이슈 트래커가 켜져 있으면 실패 스팬을 자동 보고한다)
     pub fn tracer(&self) -> Arc<dyn Tracer> {
         if self.issues.enabled() {
             Arc::new(ReportingTracer {
@@ -94,14 +88,12 @@ impl Observe {
         }
     }
 
-    /// 활성화 판본 확인 문을 추적·로그·이슈 내보내기 모두에 단다.
     pub fn set_gate(&self, check: Fence, timeout: Duration) {
         self.exporter.set_gate(check.clone(), timeout);
         self.logs.set_gate(check.clone(), timeout);
         self.issues.set_gate(check, timeout);
     }
 
-    /// 종료할 때 추적·로그·이슈의 남은 큐를 모두 비운다.
     pub async fn flush(&self) {
         let timeout = Duration::from_secs(5);
         tokio::join!(
@@ -112,7 +104,7 @@ impl Observe {
     }
 }
 
-/// `bot doctor`가 모델 별칭 판정(`models::build`)에 넘기는 **자리만 채우는** 보관소.
+/// Placeholder secret store used by `bot doctor` when checking model alias configuration offline.
 pub(super) fn inert_secrets() -> Arc<Watched> {
     Arc::new(Watched::new(
         Arc::new(EnvStore::default()),
@@ -120,7 +112,6 @@ pub(super) fn inert_secrets() -> Arc<Watched> {
     ))
 }
 
-/// 수집기 설정(`admin.trace`·`admin.logs`·`admin.issues`)으로 내보내기 작업을 띄운다.
 pub async fn start(
     host: &HostFile,
     registry: &Registry,

@@ -1,12 +1,9 @@
-//! OS CSPRNG(`uuid::Uuid::new_v4`) 기반 무작위 바이트와 소문자 16진 문자열 생성.
-//!
-//! UUID v4의 고정된 버전·변형 비트가 출력에 편향을 남기지 않도록, 32바이트 블록마다
-//! `Uuid::new_v4()` 두 개(244비트 엔트로피)를 SHA-256으로 해시해 균등한 바이트를 만든다.
+//! Uniform random bytes and lowercase hex encoding backed by OS CSPRNG (`Uuid::new_v4`).
 
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// 슬라이스 전체를 균등한 무작위 바이트로 채운다.
+/// Hashes two `Uuid::new_v4()` values (244 bits of entropy) with SHA-256 per 32-byte block so fixed UUID version/variant bits cannot bias the output.
 pub fn fill(out: &mut [u8]) {
     for chunk in out.chunks_mut(32) {
         let mut hasher = Sha256::new();
@@ -17,14 +14,12 @@ pub fn fill(out: &mut [u8]) {
     }
 }
 
-/// 길이 `N`의 균등한 무작위 바이트 배열을 만든다.
 pub fn bytes<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
     fill(&mut out);
     out
 }
 
-/// 바이트 슬라이스를 소문자 16진 문자열로 바꾼다.
 pub fn hex(bytes: &[u8]) -> String {
     const LUT: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -35,7 +30,6 @@ pub fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// `byte_len` 바이트의 무작위 값을 소문자 16진 문자열(`2 * byte_len`자)로 만든다.
 pub fn random_hex(byte_len: usize) -> String {
     let mut buf = vec![0u8; byte_len];
     fill(&mut buf);
@@ -61,8 +55,7 @@ mod tests {
         let wide_a = bytes::<48>();
         let wide_b = bytes::<48>();
         assert_ne!(wide_a, wide_b);
-        // RFC 4122 UUID v4는 6번째 바이트 상위 니블이 항상 0x4로 고정된다.
-        // SHA-256으로 섞었으므로 여러 표본에서 0x4 이외의 값도 나와야 한다.
+        // RFC 4122 UUID v4 fixes byte 6's upper nibble to 0x4; SHA-256 whitening removes that bias.
         assert!((0..64).any(|_| (bytes::<16>()[6] >> 4) != 0x4));
     }
 

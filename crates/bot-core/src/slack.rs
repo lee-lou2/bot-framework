@@ -1,11 +1,11 @@
-//! Slack 이벤트 선택: 바인딩이 받을 이벤트 종류, 어댑터가 인증한 이벤트 원천, 봇이 참여한 스레드의 증거.
+//! Slack event selection, authenticated event sources, and bot thread participation records.
 use crate::{
     id::{BindingId, ProfileId},
     port::Reply,
 };
 use std::collections::BTreeSet;
 
-/// 바인딩이 받는 Slack 이벤트 종류(profile.yaml의 `events`). 채널 바인딩은 `mention`·`thread_reply`·`reaction`, DM 바인딩은 `dm`이다.
+/// Slack event types configured under `events` in `profile.yaml` (`mention`, `thread_reply`, `reaction` for channels; `dm` for DMs).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum SlackEvent {
     Mention,
@@ -15,7 +15,6 @@ pub enum SlackEvent {
 }
 
 impl SlackEvent {
-    /// profile.yaml `events`의 값
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Mention => "mention",
@@ -35,7 +34,7 @@ impl SlackEvent {
         })
     }
 
-    /// 이 종류의 이벤트를 받는 트리거의 `on.event` 이름. 멘션과 DM은 같은 `message`다.
+    /// Matching trigger `on.event` name; both `Mention` and `Dm` map to `"message"`.
     pub const fn trigger_event(self) -> &'static str {
         match self {
             Self::Mention | Self::Dm => "message",
@@ -45,12 +44,12 @@ impl SlackEvent {
     }
 }
 
-/// `events`를 생략한 채널 바인딩의 기본: 멘션만(기존 동작)
+/// Default for channel bindings when `events` is omitted: mentions only.
 pub fn default_channel_events() -> BTreeSet<SlackEvent> {
     BTreeSet::from([SlackEvent::Mention])
 }
 
-/// 접수한 이벤트의 종류(트리거 `on.event`와 같은 가름): 멘션·DM은 `Message`
+/// Normalized intake event kind matching trigger `on.event` (`Message` covers mention and DM).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceKind {
     Message,
@@ -58,27 +57,23 @@ pub enum SourceKind {
     Reaction,
 }
 
-/// 인증된 Slack 어댑터가 **이번 이벤트에서 직접** 읽은 원천. 본문·모델·도구가 만들 수 없고 접수 명령의 `AcceptExtras`로만 간다(지정한 사람의 승인이 증거로 쓴다).
-/// 멤버 신원은 여기에 없다 — 접수의 `principal`(인증된 행위자)이 정한다.
+/// Event source read directly from an authenticated Slack payload and passed only via `AcceptExtras`; never constructed from model, tool, or message body input. Actor identity lives in `Accept.principal`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SlackSource {
     pub kind: SourceKind,
     pub team: String,
     pub channel: String,
-    /// 이벤트가 가리키는 글의 ts: 글·답글은 그 글의 ts, 반응은 반응 대상(`item.ts`)
+    /// Message timestamp; for reactions, the target item's `item.ts`.
     pub ts: String,
-    /// 답글이면 스레드 루트 ts
+    /// Thread root timestamp when the event is a reply.
     pub thread_ts: Option<String>,
-    /// 이번에 접수한 Slack 이벤트의 ID(재전달에 같다). 같은 글이 `app_mention`과 `message`로 다른 ID로 올 수 있어 글의 접수는 (팀·채널·ts)로 하나다.
+    /// Slack delivery event ID; identical across retries, though one post can arrive as both `app_mention` and `message` with distinct IDs.
     pub event_id: String,
-    /// 반응 이름(반응만)
     pub reaction: Option<String>,
 }
 
 impl SlackSource {
-    /// 이 Slack 이벤트의 식별: 같은 이벤트면 어떤 전달·바인딩·프로필로 와도 같다(접수는 이 키로 한 건이다).
-    /// 글(멘션·스레드 답글·DM)은 (팀, 채널, 글 ts) — `app_mention`과 `message`가 같은 글을 다른 `event_id`로 전달해도 같다 — 이고, 반응은 (팀, `event_id`)다.
-    /// 구분자는 제어 문자(`U+001F`)라 식별자(제어 문자를 허용하지 않는다)가 키의 경계를 옮길 수 없다.
+    /// Canonical deduplication key shared across deliveries, bindings, and profiles: `(team, channel, ts)` for posts (collapsing `app_mention` + `message` duplicates) and `(team, event_id)` for reactions. Uses `U+001F` as separator because identifiers forbid control characters, preventing boundary collisions.
     pub fn event_key(&self) -> String {
         match self.kind {
             SourceKind::Message | SourceKind::ThreadReply => {
@@ -92,23 +87,23 @@ impl SlackSource {
     }
 }
 
-/// 봇이 참여했다고 확인된 스레드: (프로필, 바인딩, 팀, 봇, 채널, 루트 ts). 설치(팀·봇)가 바뀌면 다른 소유로 본다.
+/// Proof that a specific bot installation participated in a thread; changing team or bot creates a distinct ownership key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BotThread {
     pub profile: ProfileId,
     pub binding: BindingId,
     pub team: String,
-    /// 봇 사용자 ID(`auth.test`)
+    /// Bot user ID from `auth.test`.
     pub bot: String,
     pub channel: String,
     pub root_ts: String,
 }
 
-/// 봇 참여 스레드의 증거 저장소(Slack 이벤트 선택 `thread_reply`의 입장 증거). 수신자가 준 `thread_ts`만으로는 입장시키지 않는다.
+/// Backing store proving bot thread participation before accepting `thread_reply` events; incoming `thread_ts` alone is never trusted.
 pub trait BotThreads: Send + Sync {
-    /// 확인된 게시(영수증)나 인증된 자기 봇 메시지로 이 스레드를 기록한다. 이미 있으면 그대로다.
+    /// Idempotently records a thread from a confirmed post receipt or authenticated self-bot message.
     fn note(&self, thread: BotThread) -> Reply<'_, ()>;
-    /// 기록돼 있는가. 읽지 못하면 `Err(Unavailable)`이다(확인할 수 없으면 접수하지 않는다).
+    /// Returns `Err(Unavailable)` on store error so callers fail closed instead of admitting unverified threads.
     fn known(&self, thread: BotThread) -> Reply<'_, bool>;
 }
 
@@ -127,7 +122,6 @@ mod tests {
             event_id: event_id.into(),
             reaction: None,
         };
-        // 같은 글: 전달 이벤트 ID와 분류(멘션·답글)가 달라도 키가 같다
         let mention = source(SourceKind::Message, "Ev1");
         assert_eq!(
             mention.event_key(),
@@ -137,7 +131,6 @@ mod tests {
             mention.event_key(),
             source(SourceKind::ThreadReply, "Ev3").event_key()
         );
-        // 반응은 (팀, event_id)다: 같은 글에 달린 다른 반응 이벤트는 다른 이벤트다
         let reaction = source(SourceKind::Reaction, "Ev9");
         assert_ne!(reaction.event_key(), mention.event_key());
         assert_ne!(
@@ -148,7 +141,6 @@ mod tests {
             reaction.event_key(),
             source(SourceKind::Reaction, "Ev9").event_key()
         );
-        // 팀·채널·글이 다르면 다른 이벤트다
         for other in [
             SlackSource {
                 team: "T2".into(),

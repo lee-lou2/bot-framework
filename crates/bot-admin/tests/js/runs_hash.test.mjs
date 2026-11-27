@@ -1,20 +1,17 @@
-// 실행 탭과 주소 조각(#runs/프로필/실행ID) 동기화 시험: 실제 app.js·runs.js를 DOM 모조품 위에서 돌린다.
-// 확인하는 것: (1) 다른 탭을 다녀와 같은 (profile, run)을 다시 열 때 #runs/{profile}/{run} 유지,
-// (2) 인자 없이 #runs 탭으로 돌아오면 상세 선택을 비워 해시와 일치, (3) hashchange로 #runs/p/r → #runs 뒤로 이동 시 상세가 닫힘.
+// URL hash synchronization tests for app.js + runs.js (#runs/{profile}/{run}) on fakedom.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { install, load, fakeFetch, settle, all, textOf } from "./support/fakedom.mjs";
 
 const { document, body } = install();
 
-// app.js가 기대하는 최소 DOM 뼈대와 브라우저 전역(location·history·hashchange)을 준비한다.
 const mk = (tag, id) => {
   const el = document.createElement(tag);
   if (id) el.setAttribute("id", id);
   return el;
 };
 const profileSel = mk("select", "profile");
-profileSel.appendChild(Object.assign(mk("option"), { value: "", textContent: "전체" }));
+profileSel.appendChild(Object.assign(mk("option"), { value: "", textContent: "All" }));
 Object.defineProperty(profileSel, "options", { get() { return this.children; } });
 profileSel.remove = function (i) { if (this.children[i]) this.removeChild(this.children[i]); };
 profileSel.value = "";
@@ -62,7 +59,7 @@ globalThis.fetch = fakeFetch((c) => {
   return { status: 200, body: { items: [] } };
 });
 
-// 다른 탭은 빈 대역으로 두고 app 객체를 붙잡는다(runs.js와 app.js는 실제 코드).
+// Stub unrelated tabs while capturing the real app object created by app.js.
 let capturedApp = null;
 const stub = { create(app) { capturedApp = app; return { load: () => Promise.resolve(), reset() {}, show() {}, hide() {} }; } };
 Object.assign(globalThis.window, {
@@ -81,7 +78,6 @@ test("runs URL hash stays consistent across revisit, bare tab switch, and hashch
   assert.equal(location.hash, "#runs");
   assert.equal(splitEl().classList.contains("has-detail"), false);
 
-  // 1) 실행 상세를 열고 다른 탭으로 갔다가 같은 (profile, run)을 다시 열면 #runs/personal/r-1이 유지된다
   runRow("personal|r-1").click();
   await settle();
   assert.equal(location.hash, "#runs/personal/r-1");
@@ -93,19 +89,17 @@ test("runs URL hash stays consistent across revisit, bare tab switch, and hashch
 
   capturedApp.go("runs", { profile: "personal", run: "r-1" });
   await settle();
-  assert.equal(location.hash, "#runs/personal/r-1", "같은 실행을 다시 열 때 해시가 #runs로 덮어씌워지면 안 된다");
+  assert.equal(location.hash, "#runs/personal/r-1", "reopening the same run must keep #runs/{profile}/{run}");
   assert.equal(splitEl().classList.contains("has-detail"), true);
 
-  // 2) 다른 탭에서 인자 없이 실행 탭(#runs)으로 돌아오면 상세 선택이 비워져 해시와 일치한다
   document.getElementById("tab-decide").click();
   await settle();
   document.getElementById("tab-runs").click();
   await settle();
   assert.equal(location.hash, "#runs");
-  assert.equal(splitEl().classList.contains("has-detail"), false, "인자 없는 #runs 전환은 상세 선택을 비워야 한다");
-  assert.ok(textOf(viewRuns()).includes("실행을 고르세요"));
+  assert.equal(splitEl().classList.contains("has-detail"), false, "bare #runs switch must clear detail selection");
+  assert.ok(textOf(viewRuns()).includes("Select a run"));
 
-  // 상태 필터만으로 넘어온 경우(run 없음)도 상세 선택을 비우고 #runs를 유지한다
   runRow("personal|r-1").click();
   await settle();
   assert.equal(location.hash, "#runs/personal/r-1");
@@ -114,7 +108,6 @@ test("runs URL hash stays consistent across revisit, bare tab switch, and hashch
   assert.equal(location.hash, "#runs");
   assert.equal(splitEl().classList.contains("has-detail"), false);
 
-  // 3) #runs/personal/r-1에서 브라우저 뒤로가기(hashchange → #runs)하면 상세 화면이 실제로 닫힌다
   capturedApp.go("runs", { profile: "personal", run: "r-1" });
   await settle();
   assert.equal(location.hash, "#runs/personal/r-1");
@@ -123,6 +116,6 @@ test("runs URL hash stays consistent across revisit, bare tab switch, and hashch
   fireHash("#runs");
   await settle();
   assert.equal(location.hash, "#runs");
-  assert.equal(splitEl().classList.contains("has-detail"), false, "hashchange로 #runs로 돌아오면 상세가 닫혀야 한다");
-  assert.ok(textOf(viewRuns()).includes("실행을 고르세요"));
+  assert.equal(splitEl().classList.contains("has-detail"), false, "navigating back to #runs via hashchange must close detail");
+  assert.ok(textOf(viewRuns()).includes("Select a run"));
 });

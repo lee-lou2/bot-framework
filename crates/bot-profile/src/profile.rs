@@ -1,4 +1,4 @@
-//! profile.yaml 해석. 다른 파일을 봐야 정해지는 참조(에이전트·스코프 존재 등)는 resolve가 맡는다.
+//! Parsing and local validation of `profile.yaml` (cross-file references are checked in `resolve`).
 use crate::{
     hint,
     issue::Issues,
@@ -30,7 +30,6 @@ fn strings(value: Option<&Value>) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-/// 스키마를 통과한 값에서 꺼낸다. 의미 검사 실패는 issues에 쌓고 None을 돌려준다.
 pub fn parse(
     value: &Value,
     folder: Option<&str>,
@@ -46,7 +45,7 @@ pub fn parse(
             "profile-id-mismatch",
             path,
             "/id",
-            format!("id `{id}`는 폴더 이름 `{folder}`와 같아야 해요"),
+            format!("id `{id}` must match the folder name `{folder}`"),
         );
     }
     let timezone = root
@@ -59,7 +58,7 @@ pub fn parse(
             "bad-timezone",
             path,
             "/timezone",
-            format!("IANA 시간대가 아니에요: {timezone}"),
+            format!("not a canonical IANA timezone: {timezone}"),
         );
     }
     let roles: BTreeMap<String, BTreeSet<String>> = root
@@ -108,7 +107,7 @@ fn parse_super_admins(
                 "bad-identity",
                 "profile.yaml",
                 at,
-                format!("신원은 `<종류>:<이름>` 모양이어야 해요: {identity}"),
+                format!("identity must have the form `<kind>:<name>`: {identity}"),
             );
             continue;
         };
@@ -117,7 +116,7 @@ fn parse_super_admins(
                 "super-admin-service",
                 "profile.yaml",
                 at,
-                format!("서비스 주체는 슈퍼 관리자가 될 수 없어요: {identity}"),
+                format!("service principals cannot be super admins: {identity}"),
             );
             continue;
         }
@@ -127,7 +126,7 @@ fn parse_super_admins(
                 "super-admin-not-member",
                 "profile.yaml",
                 at,
-                format!("슈퍼 관리자 `{identity}`가 members에 없어요"),
+                format!("super admin `{identity}` is not listed in members"),
             );
             continue;
         }
@@ -171,7 +170,7 @@ fn parse_members(
             "too-many",
             "profile.yaml",
             "/members",
-            format!("멤버가 너무 많아요(최대 {})", limits.max_members),
+            format!("too many members (max {})", limits.max_members),
         );
         return BTreeMap::new();
     }
@@ -187,7 +186,7 @@ fn parse_members(
                 "bad-identity",
                 "profile.yaml",
                 format!("{at}/identity"),
-                format!("신원은 `<종류>:<이름>` 모양이어야 해요: {identity}"),
+                format!("identity must have the form `<kind>:<name>`: {identity}"),
             );
             continue;
         };
@@ -200,7 +199,7 @@ fn parse_members(
                     "unknown-role",
                     "profile.yaml",
                     format!("{at}/roles"),
-                    format!("선언하지 않은 역할이에요: {role}"),
+                    format!("undeclared role: {role}"),
                 ),
             }
         }
@@ -216,14 +215,14 @@ fn parse_members(
                 "duplicate-member",
                 "profile.yaml",
                 at,
-                format!("같은 신원이 두 번 나와요: {identity}"),
+                format!("duplicate member identity: {identity}"),
             );
         }
     }
     out
 }
 
-/// OpenAI 바인딩의 `approvers`: HTTP 주체 → 승인 경로. `binding`이 있으면 Slack DM 경로, 없으면 로컬 경로(스키마가 둘을 가른다).
+/// Maps HTTP requester principals to approval routes (`binding` selects Slack DM; otherwise local).
 fn parse_approvers(value: Option<&Value>) -> BTreeMap<PrincipalId, ApprovalRoute> {
     let Some(map) = value.and_then(Value::as_object) else {
         return BTreeMap::new();
@@ -244,7 +243,7 @@ fn parse_approvers(value: Option<&Value>) -> BTreeMap<PrincipalId, ApprovalRoute
         .collect()
 }
 
-/// 채널 바인딩의 `events`. 스키마가 값(`mention`·`thread_reply`·`reaction`)·중복·빈 목록을 이미 거른다. 생략하면 멘션만(기존 동작).
+/// Parses channel `events`, defaulting to mention-only when omitted.
 fn channel_events(obj: &Map<String, Value>) -> BTreeSet<SlackEvent> {
     let parsed: BTreeSet<SlackEvent> = obj
         .get("events")
@@ -275,13 +274,13 @@ fn parse_bindings(
             "too-many",
             "profile.yaml",
             "/bindings",
-            format!("바인딩이 너무 많아요(최대 {})", limits.max_bindings),
+            format!("too many bindings (max {})", limits.max_bindings),
         );
         return BTreeMap::new();
     }
     let mut out: BTreeMap<BindingId, Binding> = BTreeMap::new();
     let mut entrances: BTreeMap<String, String> = BTreeMap::new();
-    // HTTP 별칭 → (OpenAI 모델 바인딩인가, 처음 쓴 바인딩 id). 한 별칭에는 두 방식을 섞지 않는다.
+    // Endpoint alias -> (is_openai, first_binding_id); webhook and OpenAI modes cannot share an alias.
     let mut http_kinds: BTreeMap<String, (bool, String)> = BTreeMap::new();
     for (i, item) in list.iter().enumerate() {
         let at = format!("/bindings/{i}");
@@ -304,7 +303,7 @@ fn parse_bindings(
                 channel: text(obj, "channel").to_owned(),
                 events: channel_events(obj),
             },
-            // `http`는 웹훅(JWT)이고, `model`이 있으면 OpenAI 호환 모델 바인딩이다.
+            // `http` with `model` is an OpenAI-compatible binding; without `model` it is a JWT webhook.
             ("http", _, true) => Adapter::OpenAi {
                 endpoint: text(obj, "endpoint").to_owned(),
                 model: text(obj, "model").to_owned(),
@@ -313,14 +312,14 @@ fn parse_bindings(
             ("http", _, false) => Adapter::Http {
                 endpoint: text(obj, "endpoint").to_owned(),
             },
-            // 스키마가 먼저 거르는 값이다. 스키마에 새 입구를 더하고 여기를 빠뜨려도 조용히 웹훅으로 읽지 않고 이름을 밝혀 거절한다.
+            // Guard against schema/parser drift instead of silently falling back to webhook.
             (other, ..) => {
                 issues.error_at(
                     "unknown-adapter",
                     "profile.yaml",
                     format!("{at}/adapter"),
                     format!(
-                        "입구 종류 `{other}`를 알 수 없어요(cli · slack · http). 스키마가 먼저 거르는 값이라, 여기까지 왔다면 스키마와 이 해석기가 어긋난 거예요"
+                        "unknown adapter `{other}` (expected cli, slack, or http); schema and parser are out of sync"
                     ),
                 );
                 continue;
@@ -338,7 +337,7 @@ fn parse_bindings(
                     "profile.yaml",
                     at,
                     format!(
-                        "HTTP 입구 `{endpoint}`를 웹훅 바인딩과 OpenAI 모델 바인딩(`model` 있음)이 함께 써요(`{first}`와 `{}`). {}",
+                        "HTTP endpoint `{endpoint}` mixes webhook and OpenAI model bindings (`{first}` and `{}`). {}",
                         id.0,
                         hint::MIXED_ENDPOINT
                     ),
@@ -353,7 +352,7 @@ fn parse_bindings(
                 "profile.yaml",
                 at,
                 format!(
-                    "같은 입구 `{key}`를 바인딩 `{first}`와 `{}`가 함께 써요. {}",
+                    "entrance `{key}` is shared by bindings `{first}` and `{}`. {}",
                     id.0,
                     hint::entrance_fix(&key, false)
                 ),
@@ -371,7 +370,7 @@ fn parse_bindings(
                 "duplicate-binding-id",
                 "profile.yaml",
                 format!("/bindings/{i}/id"),
-                format!("바인딩 id가 겹쳐요: {}", id.0),
+                format!("duplicate binding id: {}", id.0),
             );
         }
     }

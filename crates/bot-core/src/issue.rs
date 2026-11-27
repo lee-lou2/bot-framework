@@ -1,8 +1,4 @@
-//! 오류·이슈 보고 포트(특정 백엔드에 묶이지 않는 공통 계약).
-//!
-//! 호출하는 쪽은 오류 사건(`IssueEvent`)을 `IssueReporter::report`에 넘긴다.
-//! 모든 호출은 `Tracer`와 마찬가지로 **동기·무대기·무실패**여야 하며, 가득 차거나 내보낼 수 없으면 스스로 버린다.
-//! 실제 가림 처리·샘플링·전송(Sentry Envelope 등)은 어댑터(`bot-admin`)가 맡는다.
+//! Backend-agnostic error and issue reporting port (synchronous, non-blocking, infallible).
 
 use crate::{id::ProfileId, trace::now_nano};
 use sha2::{Digest, Sha256};
@@ -10,7 +6,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// 이슈 심각도.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IssueLevel {
     Error,
@@ -26,30 +21,23 @@ impl IssueLevel {
     }
 }
 
-/// 외부 이슈 트래커로 보낼 오류 사건 하나.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IssueEvent {
-    /// 사건 고유 ID(16바이트, 32자리 16진수 UUID v4 모양).
     pub event_id: [u8; 16],
-    /// 발생 시각(UTC 나노초).
     pub timestamp_nano: u64,
     pub level: IssueLevel,
-    /// 오류 분류(고정 어휘 또는 예외 종류, 예: `tool_failed`·`panic`·`log.error`).
+    /// Fixed-vocabulary error class or exception kind (e.g. `tool_failed`, `panic`, `log.error`).
     pub kind: String,
-    /// 요약 문구(어댑터가 내보내기 전에 비밀 가림과 길이 제한을 건다).
+    /// Redacted and length-capped by the exporter adapter before transmission.
     pub message: String,
-    /// 발생 모듈·타깃(예: `bot_gateway::delivery`, `worker.run`).
     pub target: String,
     pub profile: Option<ProfileId>,
-    /// 연결된 OTel 추적 ID(있으면 이슈와 추적을 잇는다).
     pub trace_id: Option<[u8; 16]>,
-    /// 연결된 OTel 스팬 ID(있으면 이슈를 정확한 스팬에 잇는다).
     pub span_id: Option<[u8; 8]>,
-    /// 추가 태그(키·값 모두 어댑터가 가림과 길이 제한을 건다).
+    /// Redacted and length-capped by the exporter adapter before transmission.
     pub tags: Vec<(String, String)>,
 }
 
-/// 프로세스 내에서 겹치지 않는 UUID v4 모양의 16바이트 사건 ID를 만든다.
 pub fn new_event_id() -> [u8; 16] {
     let seq = EVENT_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut hash = Sha256::new();
@@ -60,7 +48,7 @@ pub fn new_event_id() -> [u8; 16] {
     let digest = hash.finalize();
     let mut id = [0u8; 16];
     id.copy_from_slice(&digest[..16]);
-    // RFC 4122 UUID v4 비트
+    // RFC 4122 UUID v4 bits
     id[6] = (id[6] & 0x0f) | 0x40;
     id[8] = (id[8] & 0x3f) | 0x80;
     id
@@ -108,12 +96,11 @@ impl IssueEvent {
     }
 }
 
-/// 오류 사건을 받는 곳. **모든 메서드는 동기·무대기·무실패**여야 한다.
+/// All methods must be synchronous, non-blocking, and infallible (drop on overflow); redaction and transport live in the adapter.
 pub trait IssueReporter: Send + Sync {
     fn report(&self, event: IssueEvent);
 }
 
-/// 아무 일도 하지 않는 기본 구현.
 pub struct NoopIssueReporter;
 
 impl IssueReporter for NoopIssueReporter {

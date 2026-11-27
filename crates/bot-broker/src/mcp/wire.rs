@@ -1,10 +1,12 @@
-//! 원격 MCP 서버로 나가는 전송 포트. HTTP 한 건을 보내고 응답 머리와 본문 조각을 돌려준다. TLS·이름 풀이·연결은 구현(조립하는 곳)이 맡고 아래를 **반드시** 지킨다.
+//! Outbound HTTP transport port for remote MCP servers with per-connection egress vetting.
 //!
-//! - **연결마다** 이름 풀이 결과 전체를 검사하고(`egress::vet_resolved`) 검사한 주소로만 연결한다. 한 연결을 다음 요청에 다시 쓰지 않는다.
-//!   IP 리터럴 호스트도 같은 검사를 받는다. 예외는 `tls == false`인 **루프백 리터럴** 하나뿐이다(`allow_private`로 넓히지 않는다).
-//! - 리다이렉트를 따라가지 않는다(3xx는 상태 그대로 돌려준다). 재시도·재전송·프록시 사용·압축 해제를 하지 않는다.
-//! - 비밀인 머리 값(`Authorization`)은 어떤 로그·오류에도 싣지 않는다.
-//! - 연결을 맺기 전(이름 풀이·주소 검사·TCP·TLS)에 실패하면 `Unreached`다. 요청을 쓰기 시작한 뒤의 실패는 모두 `Lost`다(서버가 받았는지 모른다).
+//! Implementations must enforce:
+//! - Fresh DNS resolution per connection vetted via `egress::vet_resolved` (no connection pooling across
+//!   requests); IP literals undergo the same check except loopback literals with `tls == false`.
+//! - No redirects (return 3xx as-is), retries, proxies, or automatic decompression.
+//! - Secret header values (`Authorization`) must never appear in logs or errors.
+//! - Pre-connect failures return `Unreached`; any failure after starting to write the request returns `Lost`.
+
 use crate::model::ChunkSource;
 use std::{future::Future, pin::Pin};
 
@@ -16,23 +18,21 @@ pub enum WireMethod {
 
 pub struct WireRequest {
     pub method: WireMethod,
-    /// `https`이면 true. false는 루프백 IP 리터럴로 가는 `http`뿐이다.
+    /// `true` for HTTPS; `false` is permitted only for loopback IP literals.
     pub tls: bool,
     pub host: String,
     pub port: u16,
-    /// `/`로 시작하는 경로와 질의
     pub path: String,
-    /// (이름, 값, 비밀 여부). 비밀인 값은 진단 출력에 싣지 않는다.
+    /// `(name, value, is_secret)`; secret values are omitted from diagnostics.
     pub headers: Vec<(String, String, bool)>,
     pub body: Vec<u8>,
-    /// 운영자가 사설망을 명시적으로 열었을 때(`RunnerConfig::allow_private_egress`)만 true. 루프백 `http` 예외와는 무관하다.
+    /// True only when the operator explicitly enabled `RunnerConfig::allow_private_egress`.
     pub allow_private: bool,
-    /// 이 요청을 맺은 뒤 응답이 끝날 때까지 기다릴 수 있는 시간. 없으면 전송의 기본(응답 머리·본문 조각 사이의 무응답 제한)을 쓴다. 긴 호출(`tools/call`)이 서버가 답을
-    /// 늦게 주는 비스트림 응답에서 기본 제한에 먼저 끊기지 않게 하는 값이다. 연결을 맺기 전의 제한(이름 풀이·TCP·TLS)은 이 값과 무관하게 유지한다.
+    /// Post-connect response deadline for long `tools/call` requests; `None` uses the transport idle default.
     pub timeout: Option<std::time::Duration>,
 }
 
-/// 진단 출력에는 머리 이름만 싣는다(값에 자격이 들 수 있다).
+/// Logs header names only so credentials never leak through `Debug`.
 impl std::fmt::Debug for WireRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<&str> = self.headers.iter().map(|(n, _, _)| n.as_str()).collect();
@@ -50,18 +50,17 @@ impl std::fmt::Debug for WireRequest {
 
 pub struct WireResponse {
     pub status: u16,
-    /// 응답 머리(이름은 받은 그대로, 값은 글자 그대로)
     pub headers: Vec<(String, String)>,
     pub body: Box<dyn ChunkSource>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WireFail {
-    /// 연결을 맺기 전·맺는 중에 실패했다: 요청이 서버에 닿지 않았다(미실행이 입증된다).
+    /// Failed before or during connection setup; server was never reached.
     Unreached,
-    /// 요청을 쓰기 시작한 뒤 응답 머리를 받지 못했다(서버가 받았는지 모른다).
+    /// Failed after request transmission began; delivery outcome is unknown.
     Lost,
-    /// 보내기 직전 확인에서 이 프로세스의 판본이 더는 활성이 아니다(또는 확인하지 못했다): 아무것도 보내지 않았다.
+    /// Pre-send revision check failed or could not be confirmed; nothing was sent.
     Stale,
 }
 
@@ -71,7 +70,6 @@ pub trait RemoteWire: Send + Sync {
     fn send(&self, request: WireRequest) -> WireReply<'_>;
 }
 
-/// 응답 머리 값을 이름(대소문자 무시)으로 찾는다.
 pub fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()

@@ -1,4 +1,4 @@
-//! 맥락 조립 시험: 한도 · 출처 · 스코프 필터 · 직계 위임 · 기억 · 순서 고정.
+//! Context assembly tests: limits, sources, scope filtering, direct delegation, memory, and order.
 
 use super::*;
 use bot_core::{
@@ -40,7 +40,7 @@ fn agenda() -> Skill {
         instructions: Document {
             relative_path: "skills/agenda/SKILL.md".into(),
             text:
-                "일정 목록은 list로 조회한다. delete는 사용자가 확인한 일정 ID 하나에만 사용한다.\n"
+                "Use list to view events. Use delete only on a single event ID confirmed by the user.\n"
                     .into(),
         },
         tools: BTreeMap::from([
@@ -57,7 +57,7 @@ fn agenda() -> Skill {
                 tool(
                     Risk::Read,
                     &["calendar.read"],
-                    r#"{"type":"object","description":"일정 목록을 조회한다"}"#,
+                    r#"{"type":"object","description":"List scheduled events"}"#,
                 ),
             ),
         ]),
@@ -88,11 +88,11 @@ fn doc(path: &str, text: &str) -> Document {
 }
 
 fn snapshot() -> Snapshot {
-    let mut main = agent(None, "사용자의 오늘 할 일을 한국어로 짧게 정리한다.");
+    let mut main = agent(None, "Summarize the user's tasks for today briefly.");
     main.skills.insert("agenda".into(), agenda());
     let research = agent(
         Some("main"),
-        "사용자의 오늘 할 일을 한국어로 짧게 정리한다.\n\n부모가 맡긴 일정 조회를 수행한다.",
+        "Summarize the user's tasks for today briefly.\n\nLook up events delegated by the parent agent.",
     );
     Snapshot {
         id: ProfileId("personal".into()),
@@ -155,7 +155,7 @@ fn run_context(agent: &str, scope_list: &[&str], text: &str) -> RunContext {
     }
 }
 
-/// 2026-11-24 11:30 KST = 02:30 UTC (화요일)
+/// 2026-11-24 11:30 KST = 02:30 UTC (Tuesday)
 fn now() -> SystemTime {
     UNIX_EPOCH + std::time::Duration::from_secs(1_795_487_400)
 }
@@ -184,15 +184,15 @@ mod chat;
 #[test]
 fn system_has_a_fixed_shape_and_the_conversation_ends_with_the_input() {
     let snap = snapshot();
-    let run = run_context("main", &FULL, "오늘 일정 알려줘");
+    let run = run_context("main", &FULL, "Show today's agenda");
     let out = build(&snap, &run, &[], &[]);
     assert_eq!(out.model, "assistant");
     assert_eq!(
         out.system,
-        "사용자의 오늘 할 일을 한국어로 짧게 정리한다.\n\n\
-         ## 현재 시각\n2026-11-24(화) 11:30 (Asia/Seoul)\n\n\
-         ## 스킬\n### agenda\n일정 목록은 list로 조회한다. delete는 사용자가 확인한 일정 ID 하나에만 사용한다.\n\n\
-         ## 위임\n직계 하위 에이전트에게만 `delegate` 도구로 일을 맡길 수 있어요.\n- main/research: 부모가 맡긴 일정 조회를 수행한다."
+        "Summarize the user's tasks for today briefly.\n\n\
+         ## Current Time\n2026-11-24(Tue) 11:30 (Asia/Seoul)\n\n\
+         ## Skills\n### agenda\nUse list to view events. Use delete only on a single event ID confirmed by the user.\n\n\
+         ## Delegation\nYou may delegate work only to direct child agents using the `delegate` tool.\n- main/research: Look up events delegated by the parent agent."
     );
     assert_eq!(out.conversation.len(), 1);
     assert_eq!(out.conversation[0].role, Role::User);
@@ -200,9 +200,8 @@ fn system_has_a_fixed_shape_and_the_conversation_ends_with_the_input() {
         out.conversation[0].speaker,
         Some(PrincipalId("local:owner".into()))
     );
-    assert_eq!(out.conversation[0].text, "오늘 일정 알려줘");
+    assert_eq!(out.conversation[0].text, "Show today's agenda");
     assert!(out.knowledge.is_empty());
-    // 같은 입력이면 같은 출력
     let again = build(&snap, &run, &[], &[]);
     assert_eq!(
         (out.system.as_str(), &out.conversation),
@@ -219,12 +218,12 @@ fn tools_are_filtered_by_request_agent_and_policy_scopes() {
     assert_eq!(
         ids(&full),
         ["agenda.delete", "agenda.list", "delegate"],
-        "ID 순서 고정, 위임 도구는 맨 뒤"
+        "sorted by ID with delegate last"
     );
     let read = full.tools.iter().find(|t| t.id.0 == "agenda.list").unwrap();
     assert_eq!(
         (read.kind, read.class, read.description.as_str()),
-        (ToolKind::Skill, Risk::Read, "일정 목록을 조회한다")
+        (ToolKind::Skill, Risk::Read, "List scheduled events")
     );
     let delete = full
         .tools
@@ -236,7 +235,6 @@ fn tools_are_filtered_by_request_agent_and_policy_scopes() {
         (Risk::Irreversible, "agenda.delete")
     );
 
-    // 요청자에게 읽기만 있으면 삭제는 보이지 않는다
     let reader = build(
         &snap,
         &run_context("main", &["run", "calendar.read"], "x"),
@@ -245,7 +243,6 @@ fn tools_are_filtered_by_request_agent_and_policy_scopes() {
     );
     assert_eq!(ids(&reader), ["agenda.list", "delegate"]);
 
-    // 에이전트 상한이 좁으면 요청 범위가 넓어도 보이지 않는다
     let mut narrow = snapshot();
     narrow
         .agents
@@ -257,17 +254,15 @@ fn tools_are_filtered_by_request_agent_and_policy_scopes() {
         ["agenda.list", "delegate"]
     );
 
-    // 정책 상한도 마찬가지
     let mut capped = snapshot();
     capped.policy.scopes = scopes(&["run"]);
     let out = build(&capped, &run_context("main", &FULL, "x"), &[], &[]);
     assert_eq!(ids(&out), ["delegate"]);
     assert!(
-        !out.system.contains("## 스킬"),
-        "쓸 수 있는 도구가 하나도 없는 스킬은 지침에도 싣지 않는다"
+        !out.system.contains("## Skills"),
+        "skills with no visible tools are omitted from instructions"
     );
 
-    // 도구 스코프는 하나라도 모자라면 숨긴다(모두 덮어야 한다)
     let mut both = snapshot();
     both.agents
         .get_mut(&AgentId("main".into()))
@@ -291,11 +286,11 @@ fn delegation_targets_are_direct_children_only() {
     let mut snap = snapshot();
     snap.agents.insert(
         AgentId("main/research/deep".into()),
-        agent(Some("main/research"), "깊이 조사한다."),
+        agent(Some("main/research"), "Perform deep research."),
     );
     snap.agents.insert(
         AgentId("main/other".into()),
-        agent(Some("main"), "기타 일을 한다."),
+        agent(Some("main"), "Handle other tasks."),
     );
     let out = build(&snap, &run_context("main", &FULL, "x"), &[], &[]);
     assert_eq!(
@@ -304,7 +299,7 @@ fn delegation_targets_are_direct_children_only() {
             AgentId("main/other".into()),
             AgentId("main/research".into())
         ],
-        "손자(main/research/deep)는 없다"
+        "grandchildren (main/research/deep) are excluded"
     );
     let spec = out.tools.iter().find(|t| t.id.0 == DELEGATE_TOOL).unwrap();
     assert_eq!(spec.kind, ToolKind::Delegate);
@@ -325,7 +320,7 @@ fn delegation_targets_are_direct_children_only() {
         &[],
     );
     assert!(leaf.delegates.is_empty() && !leaf.tools.iter().any(|t| t.id.0 == DELEGATE_TOOL));
-    assert!(!leaf.system.contains("## 위임"));
+    assert!(!leaf.system.contains("## Delegation"));
 }
 
 #[cfg(test)]
@@ -337,36 +332,38 @@ mod memory;
 #[test]
 fn history_becomes_messages_and_old_turns_are_dropped_first() {
     let snap = snapshot();
-    let run = run_context("main", &FULL, "지금 질문");
+    let run = run_context("main", &FULL, "current question");
     let turn = |from: Option<&str>, text: &str| Turn {
         from: from.map(|p| PrincipalId(p.into())),
         text: text.into(),
     };
     let history = [
-        turn(Some("local:owner"), "안녕"),
-        turn(None, "네, 안녕하세요"),
-        turn(Some("local:owner"), "어제 일정은?"),
+        turn(Some("local:owner"), "hello"),
+        turn(None, "hi there"),
+        turn(Some("local:owner"), "yesterday's agenda?"),
     ];
     let out = build(&snap, &run, &history, &[]);
     let roles: Vec<Role> = out.conversation.iter().map(|m| m.role).collect();
     assert_eq!(roles, [Role::User, Role::Assistant, Role::User, Role::User]);
     assert_eq!(out.conversation[1].speaker, None);
-    assert_eq!(out.conversation.last().unwrap().text, "지금 질문");
+    assert_eq!(out.conversation.last().unwrap().text, "current question");
 
-    // 한도를 넘으면 오래된 차례부터 버린다(최근 것은 연속으로 남는다)
-    let big = "가".repeat(30_000);
+    let big = "€".repeat(30_000);
     let long = [
         turn(Some("a"), &big),
         turn(None, &big),
         turn(Some("a"), &big),
-        turn(None, "마지막 답"),
+        turn(None, "last reply"),
     ];
     let out = build(&snap, &run, &long, &[]);
     let total: usize = out.conversation.iter().map(|m| m.text.len()).sum();
-    assert!(total <= MAX_HISTORY_BYTES + "지금 질문".len(), "{total}");
+    assert!(
+        total <= MAX_HISTORY_BYTES + "current question".len(),
+        "{total}"
+    );
     assert_eq!(
         out.conversation[out.conversation.len() - 2].text,
-        "마지막 답"
+        "last reply"
     );
     assert!(out.conversation.len() < 5);
 }
@@ -376,15 +373,18 @@ fn trigger_instruction_and_event_body_are_combined_sensibly() {
     let snap = snapshot();
     let mut run = run_context("main", &FULL, "");
     let cases = [
-        // (instruction, body, 기대하는 입력)
-        ("아침 요약을 만든다", "{}", "아침 요약을 만든다"),
-        ("", r#"{"text":"안녕"}"#, "안녕"),
-        ("같은 말", r#"{"text":"같은 말"}"#, "같은 말"),
-        ("요약한다", r#"{"text":"본문"}"#, "요약한다\n\n입력:\n본문"),
+        ("Create morning summary", "{}", "Create morning summary"),
+        ("", r#"{"text":"hello"}"#, "hello"),
+        ("same text", r#"{"text":"same text"}"#, "same text"),
         (
-            "요약한다",
+            "Summarize",
+            r#"{"text":"body"}"#,
+            "Summarize\n\nInput:\nbody",
+        ),
+        (
+            "Summarize",
             r#"{"channel":"c1","n":2}"#,
-            "요약한다\n\n입력:\n{\"channel\":\"c1\",\"n\":2}",
+            "Summarize\n\nInput:\n{\"channel\":\"c1\",\"n\":2}",
         ),
         ("", "null", ""),
     ];
@@ -410,14 +410,14 @@ fn trigger_instruction_and_event_body_are_combined_sensibly() {
 fn clock_uses_the_profile_timezone_and_falls_back_to_utc() {
     assert_eq!(
         clock(now(), "Asia/Seoul"),
-        "2026-11-24(화) 11:30 (Asia/Seoul)"
+        "2026-11-24(Tue) 11:30 (Asia/Seoul)"
     );
     assert_eq!(
         clock(now(), "America/New_York"),
-        "2026-11-23(월) 21:30 (America/New_York)"
+        "2026-11-23(Mon) 21:30 (America/New_York)"
     );
-    assert_eq!(clock(now(), "Not/AZone"), "2026-11-24(화) 02:30 (UTC)");
-    assert_eq!(clock(UNIX_EPOCH, "UTC"), "1970-01-01(목) 00:00 (UTC)");
+    assert_eq!(clock(now(), "Not/AZone"), "2026-11-24(Tue) 02:30 (UTC)");
+    assert_eq!(clock(UNIX_EPOCH, "UTC"), "1970-01-01(Thu) 00:00 (UTC)");
 }
 
 #[test]
@@ -450,7 +450,7 @@ fn bad_runs_are_rejected_and_into_request_wires_every_field() {
     };
     assert_eq!(assemble(&input).unwrap_err(), ContextError::NotAnAgentRun);
 
-    let run = run_context("main", &FULL, "안녕");
+    let run = run_context("main", &FULL, "hello");
     let out = build(&snap, &run, &[], &[]);
     let (tx, rx) = watch::channel(false);
     let request = out.clone().into_request(

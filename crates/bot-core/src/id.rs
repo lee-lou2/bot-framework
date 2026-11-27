@@ -1,4 +1,4 @@
-//! 논리 ID는 재시도에서 유지하고 generation은 소유권 인계 때 바뀐다.
+//! Logical IDs (stable across retries), ownership generations, and claim epochs.
 macro_rules! identifiers {
     ($($name:ident),+ $(,)?) => {
         $(
@@ -33,14 +33,14 @@ pub struct Generation(pub u64);
 pub struct ClaimEpoch(pub u64);
 
 impl CallId {
-    /// 한 run 안에서 저장된 모델 차례의 첫 세션 레코드와 도구 순번을 가리킨다.
+    /// Identifies a CLI tool slot by the turn's first session record sequence and position.
     pub fn cli(turn: u64, slot: u32) -> Self {
         Self(format!("cli-{turn}-{slot}"))
     }
 }
 
 impl ToolId {
-    /// 프로필 도구의 skill.tool을 모델 릴레이의 MCP 이름으로 바꾼다.
+    /// Maps `skill.tool` to its reversible model-relay MCP name.
     pub fn mcp_name(&self) -> String {
         self.0.replacen('.', "_", 1)
     }
@@ -60,7 +60,7 @@ pub struct Attempt {
     pub claim: Option<ClaimEpoch>,
 }
 
-/// 프로필·역할·스킬·도구·비밀 이름 한 조각에 쓰는 ASCII kebab-case.
+/// Valid single-segment ASCII kebab-case identifier (<= 63 bytes).
 pub fn is_name(name: &str) -> bool {
     matches!(name.as_bytes().first(), Some(b'a'..=b'z'))
         && name.len() <= 63
@@ -72,7 +72,7 @@ pub fn is_name(name: &str) -> bool {
         })
 }
 
-/// 보관소 상대 이름 한 조각. 구분자·경로·임의 namespace를 표현할 수 없다.
+/// Single-segment vault-relative name; forbids separators, paths, and arbitrary namespaces.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SecretName(String);
 

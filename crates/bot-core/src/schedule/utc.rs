@@ -1,9 +1,8 @@
-//! RFC 3339 UTC 시각(`YYYY-MM-DDTHH:MM:SS[.소수]Z`)만 읽고 쓴다. 날짜 계산만 하므로 외부 의존성이 없다.
-//! 예약의 `at`은 UTC로만 받는다(오프셋·소문자·윤초는 거절한다).
+//! Dependency-free strict RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SS[.frac]Z`) parser and formatter.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// 1970-01-01부터 `year-month-day`(그레고리력)까지의 날 수. Howard Hinnant의 `days_from_civil`.
+/// Days since 1970-01-01 (Howard Hinnant's `days_from_civil`).
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
@@ -13,7 +12,6 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-/// `days_from_civil`의 역. (년, 월, 일).
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -45,7 +43,6 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     }
 }
 
-/// 고정 자릿수의 숫자 조각.
 fn digits(bytes: &[u8]) -> Option<i64> {
     if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
         return None;
@@ -55,7 +52,7 @@ fn digits(bytes: &[u8]) -> Option<i64> {
         .try_fold(0i64, |sum, b| Some(sum * 10 + i64::from(b - b'0')))
 }
 
-/// `2030-01-01T12:00:00Z`, `2030-01-01T12:00:00.5Z`(소수 1~9자리)만 받는다. 1970~9999년, 윤초(`:60`)·오프셋·소문자는 거절한다.
+/// Accepts only 1970..=9999 UTC with optional 1..=9 fractional digits; rejects offsets, lowercase, and leap seconds.
 pub fn parse_utc(text: &str) -> Option<SystemTime> {
     let b = text.as_bytes();
     if b.len() < 20 || b[b.len() - 1] != b'Z' {
@@ -80,7 +77,6 @@ pub fn parse_utc(text: &str) -> Option<SystemTime> {
     {
         return None;
     }
-    // 19번째 바이트 뒤: 바로 `Z`이거나 `.`과 1~9자리 숫자와 `Z`.
     let nanos = match &b[19..b.len() - 1] {
         [] => 0,
         [b'.', fraction @ ..] if (1..=9).contains(&fraction.len()) => {
@@ -94,7 +90,7 @@ pub fn parse_utc(text: &str) -> Option<SystemTime> {
     Some(UNIX_EPOCH + Duration::new(seconds, u32::try_from(nanos).ok()?))
 }
 
-/// `YYYY-MM-DDTHH:MM:SSZ`. 소수초가 0이 아니면 `.fff`(밀리초)를 붙인다. 1970년 이전은 1970-01-01로 본다.
+/// Formats as `YYYY-MM-DDTHH:MM:SS[.fff]Z` (millisecond precision when non-zero); clamps pre-1970 to epoch.
 pub fn format_utc(at: SystemTime) -> String {
     let since = at.duration_since(UNIX_EPOCH).unwrap_or_default();
     let total = i64::try_from(since.as_secs()).unwrap_or(i64::MAX / 2);
@@ -109,7 +105,7 @@ pub fn format_utc(at: SystemTime) -> String {
     }
 }
 
-/// 저장소가 표현하는 UTC 밀리초. 입구가 받는 1970~9999년을 벗어난 시각은 봉인하지 않는다.
+/// Formats UTC millisecond timestamps in 1970..=9999; rejects out-of-range instants to prevent aliasing.
 pub(super) fn schedule_instant(at: SystemTime) -> Option<String> {
     const LAST_SECOND: u64 = 253_402_300_799; // 9999-12-31T23:59:59Z
     (at.duration_since(UNIX_EPOCH).ok()?.as_secs() <= LAST_SECOND).then(|| format_utc(at))
@@ -172,12 +168,12 @@ mod tests {
             "2030-01-01T12:00:00+09:00",
             "2030-01-01T12:00:00.Z",
             "2030-01-01T12:00:00.1234567890Z",
-            "2030-01-01T12:00:60Z", // 윤초
+            "2030-01-01T12:00:60Z", // leap second
             "2030-01-01T24:00:00Z",
             "2030-01-01T12:60:00Z",
             "2030-13-01T12:00:00Z",
             "2030-00-10T12:00:00Z",
-            "2030-02-29T12:00:00Z", // 윤년이 아니다
+            "2030-02-29T12:00:00Z", // not a leap year
             "2023-04-31T12:00:00Z",
             "1969-12-31T23:59:59Z",
             "0000-01-01T00:00:00Z",
@@ -188,7 +184,6 @@ mod tests {
         ] {
             assert!(parse_utc(bad).is_none(), "{bad:?}");
         }
-        // 윤년의 2월 29일은 받는다
         assert!(parse_utc("2028-02-29T12:00:00Z").is_some());
         assert!(parse_utc("2000-02-29T12:00:00Z").is_some());
         assert!(parse_utc("1900-02-29T12:00:00Z").is_none());

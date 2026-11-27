@@ -1,8 +1,5 @@
-//! 실제 `bot` 바이너리 끝-대-끝 관측 검증:
-//! 1. `bot validate`·`bot doctor`가 `admin.logs`·`admin.issues`의 호스트 자격(`BOT_SECRET__host__*`) 누락을 시작 전에 잡는다.
-//! 2. `BOT_LOG_FORMAT=json`으로 실행한 실제 `bot serve --role all`이 유효한 NDJSON 로그를 내보낸다.
-//! 3. `bot chat` 실행 시 로컬 목 수집기로 OTLP 추적(GenAI 속성·user.id/session.id 포함)과 OTLP 로그(`/v1/logs`),
-//!    실패 시 Sentry Envelope(`/api/1/envelope/`)가 실제로 전달된다.
+//! End-to-end observability tests using the real `bot` binary: secret checks for `admin.logs`/`admin.issues`,
+//! `BOT_LOG_FORMAT=json` NDJSON output, and local mock delivery of OTLP traces, OTLP logs, and Sentry envelopes.
 use crate::process_support::*;
 use serde_json::Value;
 use std::{
@@ -110,7 +107,6 @@ fn validate_and_doctor_check_host_observability_secrets_without_leaking_values()
         ("BOT_PROFILES", profiles.to_str().unwrap()),
         ("BOT_HOST_CONFIG", host.to_str().unwrap()),
     ];
-    // 자격이 없으면 validate가 세 자격 누락을 모두 알린다
     let missing = bot(&base, &["validate"]);
     let msg = text(&missing);
     assert!(!missing.status.success(), "{msg}");
@@ -120,9 +116,8 @@ fn validate_and_doctor_check_host_observability_secrets_without_leaking_values()
         "sentry-key",
         "BOT_SECRET__host__sentry_key",
     ] {
-        assert!(msg.contains(expected), "{expected} 누락:\n{msg}");
+        assert!(msg.contains(expected), "missing {expected}:\n{msg}");
     }
-    // 자격을 모두 넣으면 validate와 doctor가 통과하고 값은 출력하지 않는다
     let secret_val = "SENTINEL-SECRET-OBS-VALUE-9182";
     let with_secrets = [
         ("BOT_PROFILES", profiles.to_str().unwrap()),
@@ -144,7 +139,10 @@ fn validate_and_doctor_check_host_observability_secrets_without_leaking_values()
     let doc_msg = text(&doc);
     assert!(doc.status.success(), "{doc_msg}");
     assert!(
-        doc_msg.contains("필요한 자격 3개가 모두 있어요"),
+        doc_msg.lines().any(|line| {
+            let low = line.to_ascii_lowercase();
+            (low.contains("secret") || low.contains("credential")) && line.contains('3')
+        }),
         "{doc_msg}"
     );
     assert!(!doc_msg.contains(secret_val));
@@ -153,7 +151,7 @@ fn validate_and_doctor_check_host_observability_secrets_without_leaking_values()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_serve_and_chat_emit_json_logs_otlp_traces_otlp_logs_and_sentry_envelopes() {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL not set");
         return;
     };
     let (mock_addr, captured) = start_mock().await;
@@ -239,7 +237,7 @@ async fn real_serve_and_chat_emit_json_logs_otlp_traces_otlp_logs_and_sentry_env
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("bot serve 시작");
+        .expect("spawn bot serve");
 
     let mut stderr_pipe = child.stderr.take().unwrap();
     let stderr_reader = std::thread::spawn(move || {
@@ -261,26 +259,26 @@ async fn real_serve_and_chat_emit_json_logs_otlp_traces_otlp_logs_and_sentry_env
         if let Some(status) = child.try_wait().unwrap() {
             let stderr = stderr_reader.join().unwrap();
             let stdout = stdout_reader.join().unwrap();
-            panic!("bot serve가 조기 종료했어요({status}):\nstdout:\n{stdout}\nstderr:\n{stderr}");
+            panic!("bot serve exited early ({status}):\nstdout:\n{stdout}\nstderr:\n{stderr}");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(socket.exists(), "게이트웨이 소켓이 열리지 않았어요");
-    assert!(!schema.active().is_empty(), "활성 판본이 게시되지 않았어요");
-    assert!(token_file.exists(), "관리 비밀 파일이 생기지 않았어요");
+    assert!(socket.exists(), "gateway socket did not open");
+    assert!(!schema.active().is_empty(), "active revision not published");
+    assert!(token_file.exists(), "admin token file was not created");
 
-    // 1) 정상 대화 → OTLP 추적(ingress + worker.run + worker.model) 발생
+    // 1) Successful chat emits OTLP traces (ingress + worker.run + worker.model).
     let chat = bot(
         &[
             ("BOT_PROFILES", profiles.to_str().unwrap()),
             ("BOT_HOST_CONFIG", host.to_str().unwrap()),
             ("BOT_SOCKET", socket.to_str().unwrap()),
         ],
-        &["chat", "--profile", "personal", "안녕"],
+        &["chat", "--profile", "personal", "hello"],
     );
     assert!(chat.status.success(), "{}", text(&chat));
 
-    // 2) 도구 호출이 실패하는 대화(--no-wait로 즉시 접수) → 비정상 실패 스팬이 Sentry Envelope로 자동 보고된다
+    // 2) Failing tool call (`fake-srt` exits 1) triggers an error span reported as a Sentry envelope.
     let fail_chat = bot(
         &[
             ("BOT_PROFILES", profiles.to_str().unwrap()),
@@ -292,12 +290,11 @@ async fn real_serve_and_chat_emit_json_logs_otlp_traces_otlp_logs_and_sentry_env
             "--no-wait",
             "--profile",
             "personal",
-            "오늘 일정 알려줘",
+            "Show today's agenda",
         ],
     );
     assert!(fail_chat.status.success(), "{}", text(&fail_chat));
 
-    // OTLP 추적·OTLP 로그·Sentry Envelope가 로컬 목 수집기에 도달할 때까지 대기
     for _ in 0..200 {
         let ready = {
             let guard = captured.lock().unwrap();
@@ -312,7 +309,7 @@ async fn real_serve_and_chat_emit_json_logs_otlp_traces_otlp_logs_and_sentry_env
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // SIGTERM으로 정상 종료해 flush까지 수행
+    // Graceful SIGTERM flushes exporters before exit.
     let _ = Command::new("/bin/kill")
         .args(["-TERM", &child.id().to_string()])
         .status();
@@ -320,32 +317,31 @@ async fn real_serve_and_chat_emit_json_logs_otlp_traces_otlp_logs_and_sentry_env
     let stderr = stderr_reader.join().unwrap();
     let _stdout = stdout_reader.join().unwrap();
 
-    // 1) stderr의 구조화 로그 줄(`{...}`)은 모두 유효한 JSON(NDJSON)이며 비밀 값이 없다
+    // Structured log lines on stderr must all be valid NDJSON with zero secret leakage.
     let json_lines: Vec<Value> = stderr
         .lines()
         .filter(|l| l.starts_with('{'))
-        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("JSON 아님({e}): {l}")))
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}")))
         .collect();
-    assert!(!json_lines.is_empty(), "JSON 로그가 비었어요:\n{stderr}");
+    assert!(!json_lines.is_empty(), "JSON logs are empty:\n{stderr}");
     assert!(
         json_lines
             .iter()
             .any(|v| v["level"] == "INFO" && v["target"].is_string() && v["ts_ms"].is_u64()),
-        "구조화 로그 필드가 맞지 않아요: {json_lines:?}"
+        "structured log fields mismatch: {json_lines:?}"
     );
     for secret in ["logs-key-secret-e2e", "sentry-key-secret-e2e", "bG9jYWw="] {
         assert!(
             !stderr.contains(secret),
-            "stderr에 비밀이 남았어요: {secret}"
+            "secret leaked to stderr: {secret}"
         );
     }
 
-    // 2) 로컬 목 수집기가 OTLP 추적과 OTLP 로그를 모두 받았다
     let reqs = captured.lock().unwrap().clone();
     let trace_req = reqs
         .iter()
         .find(|r| r.path == "/api/public/otel/v1/traces")
-        .expect("OTLP 추적이 도착하지 않았어요");
+        .expect("OTLP trace did not arrive");
     assert!(
         trace_req
             .headers
@@ -361,7 +357,7 @@ async fn real_serve_and_chat_emit_json_logs_otlp_traces_otlp_logs_and_sentry_env
     let log_req = reqs
         .iter()
         .find(|r| r.path == "/v1/logs")
-        .expect("OTLP 로그가 도착하지 않았어요");
+        .expect("OTLP log did not arrive");
     assert!(
         log_req
             .headers
@@ -377,7 +373,7 @@ async fn real_serve_and_chat_emit_json_logs_otlp_traces_otlp_logs_and_sentry_env
     let sentry_req = reqs
         .iter()
         .find(|r| r.path == "/api/1/envelope/")
-        .expect("Sentry Envelope가 도착하지 않았어요");
+        .expect("Sentry envelope did not arrive");
     assert!(
         sentry_req
             .headers

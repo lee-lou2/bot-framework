@@ -1,9 +1,4 @@
-//! 구판(`BOTPROFILE1`) 번들 복원과 신판(`BOTPROFILE2`) 판본 분리 회귀 시험:
-//! - 구판에서 유효했던 SKILL.md(정상 front matter·닫히지 않은 `---`·단독 `---`·미지 키·`allowed-tools`·이름 불일치·단일 64 KiB 초과·상속 합계 초과)로
-//!   만든 `BOTPROFILE1` 번들은 `from_bundle`로 거절 0건 복원되고, 조립된 스킬 지침이 구판(`md.trim_end()`)과 바이트 단위로 같다.
-//! - front matter가 있는 같은 폴더를 신판 로더로 읽으면 `BOTPROFILE2`로 묶여 구판과 판본 해시가 다르고, front matter가 제거되며 `description`이 보존된다.
-//! - 새 폴더 검증(`load`)과 `BOTPROFILE2` 복원에서는 새 규칙 거절이 그대로 집행된다.
-//! - `BOTPROFILE1` 복원에서도 해시·ID·예약 도구·BOM·총량 검사는 그대로 집행된다.
+//! Regression tests for `BOTPROFILE1` legacy skill restore compatibility and `BOTPROFILE2` revision separation.
 
 use crate::support::{Files, Temp, raw_bundle, write_profile};
 use bot_core::id::{AgentId, ProfileId};
@@ -132,28 +127,27 @@ fn legacy_v1_bundles_restore_every_previously_valid_skill_byte_identically() {
         assert!(v1_bundle.starts_with(b"BOTPROFILE1\n"), "{name}");
         let v1_rev = revision_of(&v1_bundle);
         let restored = from_bundle(&v1_bundle, &id, &v1_rev, &limits)
-            .unwrap_or_else(|e| panic!("{name}: 구판 번들 복원 실패: {e:?}"));
+            .unwrap_or_else(|e| panic!("{name}: legacy v1 restore failed: {e:?}"));
         assert_eq!(restored.revision, v1_rev, "{name}");
         let memo = &restored.agents[&main].skills["memo"];
         assert_eq!(
             memo.instructions.text, expected_memo,
-            "{name}: 구판 지침과 바이트 단위로 같아야 한다"
+            "{name}: restored instructions must match legacy bytes"
         );
         assert_eq!(
             memo.description, None,
-            "{name}: 구판 번들은 description 없음"
+            "{name}: legacy bundles have no skill description"
         );
         assert!(
             memo.tools.is_empty(),
-            "{name}: 어떤 헤더도 도구를 추가하지 않는다"
+            "{name}: front matter must never grant tools"
         );
 
-        // `read_legacy_bundle`은 같은 폴더에서 정확히 같은 V1 SHA-256과 바이트를 재생성한다
         let tmp = Temp::new(&format!("legacy-put-{name}"));
         write_profile(tmp.path(), "personal", &files);
         let (put_id, put_rev, put_bytes) =
             read_legacy_bundle(&tmp.path().join("personal"), &limits)
-                .unwrap_or_else(|r| panic!("{name}: read_legacy_bundle 실패:\n{r}"));
+                .unwrap_or_else(|r| panic!("{name}: read_legacy_bundle failed:\n{r}"));
         assert_eq!(put_id, id, "{name}");
         assert_eq!(put_rev, v1_rev, "{name}");
         assert_eq!(put_bytes, v1_bundle, "{name}");
@@ -166,7 +160,6 @@ fn front_matter_profiles_get_distinct_v2_revision_while_plain_profiles_keep_v1()
     let main = AgentId("main".into());
     let limits = Limits::default();
 
-    // front matter가 있는 정상 프로필: 새 로더는 BOTPROFILE2로 묶고 판본이 구판(BOTPROFILE1)과 다르다
     let valid_files = minimal_profile(VALID_FM);
     let v1_bundle = raw_bundle(&valid_files);
     let v1_rev = revision_of(&v1_bundle);
@@ -177,25 +170,23 @@ fn front_matter_profiles_get_distinct_v2_revision_while_plain_profiles_keep_v1()
     let v2_snap = set.profile(&id).unwrap();
     assert!(
         v2_bundle.starts_with(b"BOTPROFILE2\n"),
-        "front matter가 있는 프로필은 BOTPROFILE2여야 한다"
+        "profiles with skill front matter must use BOTPROFILE2"
     );
     assert_ne!(
         v2_snap.revision, v1_rev,
-        "같은 폴더여도 구판 해석(V1)과 신판 해석(V2)은 판본이 달라야 한다"
+        "V1 and V2 interpretations of the same tree must have distinct revisions"
     );
     let memo = &v2_snap.agents[&main].skills["memo"];
     assert_eq!(memo.description.as_deref(), Some("HEADER_SENTINEL"));
     assert_eq!(memo.instructions.text, "Visible stable paragraph.");
     assert!(!memo.instructions.text.contains("HEADER_SENTINEL"));
-    // V2 번들 복원도 신판 해석(본문 제거 + description 보존)을 유지한다
     let restored_v2 = from_bundle(v2_bundle, &id, &v2_snap.revision, &limits).unwrap();
     assert_eq!(format!("{restored_v2:?}"), format!("{:?}", **v2_snap));
-    // `read_bundle`도 V2 로더와 같은 바이트·판본을 만든다
     let (_, read_rev, read_bytes) = read_bundle(&tmp.path().join("personal"), &limits).unwrap();
     assert_eq!(read_rev, v2_snap.revision);
     assert_eq!(read_bytes, v2_bundle);
 
-    // description 없이 name만 있는 front matter도 제거됐으므로 반드시 BOTPROFILE2로 구별된다
+    // Stripped `name`-only front matter still requires BOTPROFILE2 to distinguish its revision from V1.
     let name_only = minimal_profile(&fm("name: memo"));
     let tmp_name = Temp::new("v2-name-only");
     write_profile(tmp_name.path(), "personal", &name_only);
@@ -206,7 +197,7 @@ fn front_matter_profiles_get_distinct_v2_revision_while_plain_profiles_keep_v1()
         revision_of(&raw_bundle(&name_only))
     );
 
-    // front matter가 없는 평문 프로필은 구판·신판 해석이 바이트 단위로 같고 BOTPROFILE1 판본을 유지한다
+    // Plain skills without front matter keep the BOTPROFILE1 format and revision.
     let clean_files = minimal_profile(BODY);
     let tmp_clean = Temp::new("v1-clean");
     write_profile(tmp_clean.path(), "personal", &clean_files);
@@ -252,23 +243,21 @@ fn new_disk_loads_and_v2_bundles_still_enforce_strict_skill_rules_and_v1_keeps_c
         ("agg", agg_profile(), "skill-too-large"),
     ];
     for (name, files, code) in strict_rejects {
-        // 1) 새 폴더 로드는 반드시 거절
         let tmp = Temp::new(&format!("strict-disk-{name}"));
         write_profile(tmp.path(), "personal", &files);
         let report = load(tmp.path(), &HostCatalog::demo(), &limits)
-            .expect_err(&format!("{name}: 새 폴더는 거절돼야 한다"));
-        assert!(report.has(code), "{name}: 기대 {code}\n{report}");
-        // 2) BOTPROFILE2 번들 복원도 반드시 거절
+            .expect_err(&format!("{name}: disk load must fail"));
+        assert!(report.has(code), "{name}: expected {code}\n{report}");
         let v2_bundle = raw_v2_bundle(&files);
         let issues = from_bundle(&v2_bundle, &id, &revision_of(&v2_bundle), &limits)
-            .expect_err(&format!("{name}: BOTPROFILE2는 거절돼야 한다"));
+            .expect_err(&format!("{name}: BOTPROFILE2 restore must fail"));
         assert!(
             issues.iter().any(|i| i.code == code),
-            "{name}: 기대 {code}, 실제 {issues:?}"
+            "{name}: expected {code}, got {issues:?}"
         );
     }
 
-    // BOTPROFILE1 복원도 BOM·프로필 ID 불일치·예약 도구·해시 불일치는 그대로 거절한다
+    // Legacy V1 restore still enforces core invariants (BOM, profile ID mismatch, hash, reserved tools).
     let bom_files = minimal_profile(&format!("\u{feff}{BODY}"));
     let bom_v1 = raw_bundle(&bom_files);
     let bom_err = from_bundle(&bom_v1, &id, &revision_of(&bom_v1), &limits).unwrap_err();

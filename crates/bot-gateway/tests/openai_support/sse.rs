@@ -1,4 +1,4 @@
-//! SSE 응답을 이벤트 단위로 읽는 시험용 클라이언트. HTTP 청크 경계와 이벤트 경계는 다를 수 있으므로(한 청크에 이벤트 여럿) 바이트를 이어 붙여 빈 줄로 나눈다.
+//! Event-oriented SSE test client that reassembles HTTP chunks and splits on blank lines.
 use super::{Rig, head_of};
 use serde_json::Value;
 use std::{collections::VecDeque, time::Duration};
@@ -7,12 +7,9 @@ use tokio::{
     net::TcpStream,
 };
 
-/// 응답을 이벤트 단위로 읽는 스트림 클라이언트(SSE)
 pub struct Sse {
     reader: BufReader<TcpStream>,
-    /// 아직 이벤트 하나로 끝맺지 못한 받은 글
     partial: String,
-    /// 읽었지만 아직 돌려주지 않은 이벤트(끝의 빈 줄 포함)
     ready: VecDeque<String>,
     pub status: u16,
     pub headers: Vec<(String, String)>,
@@ -43,9 +40,9 @@ impl Sse {
             let mut line = String::new();
             let n = tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
                 .await
-                .expect("머리 시간 초과")
+                .expect("header timeout")
                 .unwrap();
-            assert!(n > 0, "머리 도중 연결이 끊겼어요: {head:?}");
+            assert!(n > 0, "connection closed during headers: {head:?}");
             if line == "\r\n" {
                 break;
             }
@@ -68,7 +65,6 @@ impl Sse {
             .map(|(_, v)| v.as_str())
     }
 
-    /// 다음 이벤트 하나를 `within` 안에 읽는다(이벤트는 끝의 빈 줄까지 포함한다).
     pub async fn next(&mut self, within: Duration) -> Next {
         let deadline = tokio::time::Instant::now() + within;
         loop {
@@ -80,7 +76,7 @@ impl Sse {
                 if self.reader.read_line(&mut size).await.unwrap() == 0 {
                     return None;
                 }
-                let size = usize::from_str_radix(size.trim(), 16).expect("청크 크기");
+                let size = usize::from_str_radix(size.trim(), 16).expect("chunk size");
                 if size == 0 {
                     return None;
                 }
@@ -92,7 +88,7 @@ impl Sse {
             match tokio::time::timeout_at(deadline, read).await {
                 Err(_) => return Next::Idle,
                 Ok(None) => {
-                    // 끝났다: 끝맺지 못한 글이 남았으면 그대로 돌려준다(시험이 잘린 스트림을 알아본다)
+                    // Return trailing unterminated bytes so tests can detect truncated streams.
                     if self.partial.is_empty() {
                         return Next::End;
                     }
@@ -109,20 +105,18 @@ impl Sse {
         }
     }
 
-    /// 스트림이 끝날 때까지 모든 이벤트
     pub async fn rest(&mut self, within: Duration) -> Vec<String> {
         let mut all = Vec::new();
         loop {
             match self.next(within).await {
                 Next::Data(chunk) => all.push(chunk),
                 Next::End => return all,
-                Next::Idle => panic!("스트림이 {within:?} 안에 끝나지 않았어요: {all:?}"),
+                Next::Idle => panic!("stream did not finish within {within:?}: {all:?}"),
             }
         }
     }
 }
 
-/// `data: {json}\n\n` 한 줄을 JSON으로(아니면 None)
 pub fn data_json(chunk: &str) -> Option<Value> {
     let line = chunk.strip_prefix("data: ")?;
     assert!(

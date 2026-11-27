@@ -1,4 +1,4 @@
-//! OTLP 내보내기와 정책. 공통 계측 포트는 bot-core 소유다.
+//! OTLP trace exporter and redaction policy; shared instrumentation ports live in `bot-core`.
 pub use bot_core::trace::*;
 mod export;
 mod fingerprint;

@@ -1,4 +1,4 @@
-//! Slack 시험 공용 조립: 가짜 Slack 서버·메모리 포트·합성 프로필.
+//! Shared Slack test harness: fake Slack server, in-memory ports, and synthetic profiles.
 #![allow(dead_code)]
 pub mod events;
 pub mod ux;
@@ -105,7 +105,7 @@ pub async fn rig_with(
     rig_checked(profiles, secrets, config, None, tune).await
 }
 
-/// 저장소의 활성 집합과 견주는 확인(`active`)을 붙여 조립한다. None이면 확인하지 않는다.
+/// Builds a harness with an optional active-set check.
 pub async fn rig_checked(
     profiles: Vec<Fixture>,
     secrets: Arc<MemorySecrets>,
@@ -116,7 +116,7 @@ pub async fn rig_checked(
     rig_full(profiles, secrets, config, active, None, tune).await
 }
 
-/// 봇 토큰을 보관소에서 다시 읽는 간격(`ttl`)까지 정해 조립한다.
+/// Builds a harness with custom active-set check and bot-token cache TTL.
 pub async fn rig_full(
     profiles: Vec<Fixture>,
     secrets: Arc<MemorySecrets>,
@@ -196,11 +196,11 @@ pub async fn connected(profiles: Vec<Fixture>) -> Rig {
     rig
 }
 
-/// 기동 검사가 실패해 `serve`가 돌아온 오류
+/// Waits for `serve` to fail during startup validation.
 pub async fn startup_failure(rig: &mut Rig) -> SlackError {
     tokio::time::timeout(Duration::from_secs(5), &mut rig.serve)
         .await
-        .expect("기동 검사가 끝나지 않았어요")
+        .expect("startup check did not finish")
         .unwrap()
         .unwrap_err()
 }

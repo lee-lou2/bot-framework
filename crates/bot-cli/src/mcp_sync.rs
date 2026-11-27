@@ -1,16 +1,4 @@
-//! `bot mcp sync <스킬 폴더>`: 스킬의 `tools.yaml`이 선언한 도구의 정의(이름·설명·입력 스키마)를 서버에서 받아 같은 폴더의 `tools.lock.yaml`에 적는다.
-//! 프로필은 `input`을 생략한 도구의 입력 스키마·설명·정의 해시를 이 파일에서 읽고, 실행할 때 서버가 내세우는 정의가 해시와 다르면 호출하기 전에 막는다.
-//!
-//! 서버는 믿을 수 없다. 그래서:
-//! - **접속하기 전에** 대상 프로필과 대상 `SKILL.md`를 `validate`와 같은 로더로 확정·검증한다(루트 목록·링크 금지·구조·`profile.yaml`의 스키마와 `id`=폴더 이름·대상 `SKILL.md`의 front matter와 단일 64 KiB 상한, `bot_profile::locate`). 자격은 그 프로필의
-//!   보관소에서만 읽는다. 못 정하면 접속 0·자격 조회 0이다.
-//! - 접속 대상은 서버 주소의 `호스트:포트` 하나이고, 선언한 **모든** 도구의 egress ∩ 프로필 상한에 정확히 있어야 한다(운영과 같은 판정·같은 전송).
-//! - `tools/list`의 **모든 쪽**을 받은 뒤에만 쓴다(끝나지 않는 목록은 오류). 선언한 도구만 적고, 선언했는데 서버에 없거나 이름이 둘이면 실패한다.
-//!   도구는 tools.yaml의 `id`로 묶고(잠금의 키) 서버에서는 `name`(생략하면 id)으로 찾는다. 해시는 서버가 준 `{name, description, inputSchema}` 그대로다.
-//! - 쓰기 전에 모든 정의를 검사한다: **자격이 응답 어디에도(선언하지 않은 도구·키·숫자 표기·커서까지) 섞여 있지 않은가**(원격이 bearer를 되풀이하면 파일과 프로필 번들에
-//!   영구히 남는다), 입력 스키마가 프로필 어휘로 컴파일되는가, `x-mcp-header` 주석이 올바른가. 자격 검사가 **먼저**이고, 진단은 고정 코드와 JSON 포인터만 싣는다(서버가
-//!   고른 글을 되풀이하지 않는다). 만든 잠금은 `validate`와 같은 검사(크기·YAML 한도·잠금 모양·`tools.yaml`과의 짝)를 통과해야 쓴다. 하나라도 어긋나면 아무것도 쓰지 않는다.
-//! - 출력은 결정적이다(도구 id 순·고정 필드 순서). 임시 파일에 쓴 뒤 바꿔 넣는다.
+//! Remote MCP tool definition sync (`bot mcp sync`) into deterministic `tools.lock.yaml`.
 use crate::{
     load::{load_host, secret_store},
     serve::remote::ReqwestWire,
@@ -40,10 +28,9 @@ use std::{
     time::Duration,
 };
 
-/// 서버가 한 번 답하기를 기다리는 시간.
 const LIMIT: Duration = Duration::from_secs(10);
 
-/// 진단 한 줄: 고정 코드와 위치(경로·JSON 포인터)만. 설명 글은 싣지 않는다(서버가 고른 글이 섞일 수 있다).
+/// Emits only fixed codes and locations so untrusted server text is never echoed in diagnostics.
 fn fixed(issue: &Issue) -> String {
     if issue.at.is_empty() {
         format!("  [{}] {}", issue.code, issue.path)
@@ -61,7 +48,6 @@ fn fixed_lines(issues: &[Issue]) -> String {
         .join("\n")
 }
 
-/// 스키마 문제를 고정 코드와 JSON 포인터로만 적는다(최대 8건).
 fn schema_lines(found: &[SchemaProblem]) -> String {
     let shown: Vec<String> = found
         .iter()
@@ -83,14 +69,13 @@ fn schema_lines(found: &[SchemaProblem]) -> String {
         "{}{}",
         shown.join(", "),
         if more > 0 {
-            format!(" 외 {more}건")
+            format!(" (+{more} more)")
         } else {
             String::new()
         }
     )
 }
 
-/// 값 안의 모든 글(키·문자열)과 숫자 표기에 자격이 있는가. `shapes`면 토큰 모양도 자격으로 본다.
 fn exposes(value: &Value, credentials: &[Vec<u8>], shapes: bool) -> bool {
     let text = |text: &str| {
         if shapes {
@@ -110,16 +95,15 @@ fn exposes(value: &Value, credentials: &[Vec<u8>], shapes: bool) -> bool {
     }
 }
 
-/// 서버가 내세운 정의들 중 선언한 도구(`(id, 서버 이름)`)의 항목을 검사해 잠금 항목으로 만든다. 문제는 모두 모아 돌려준다.
 pub(crate) fn entries_of(
     declared: &[(String, String)],
     listed: &[Value],
     credentials: &[Vec<u8>],
 ) -> Result<BTreeMap<String, Entry>, Vec<String>> {
-    // 자격 검사가 먼저다: 응답 전체(선언하지 않은 도구 포함)에 자격이 섞여 있으면 어떤 진단도 만들지 않고 멈춘다(진단에 되풀이되지 않게)
+    // Check credentials across the entire response (including undeclared tools) before building any diagnostic.
     if listed.iter().any(|tool| exposes(tool, credentials, false)) {
         return Err(vec![
-            "서버 응답에 자격으로 보이는 값이 섞여 있어요 — 아무것도 기록하지 않아요. 서버를 확인하세요"
+            "server response contains a credential-like value — nothing was written; inspect the server"
                 .to_owned(),
         ]);
     }
@@ -131,15 +115,13 @@ pub(crate) fn entries_of(
             .collect();
         let tool = match found.as_slice() {
             [] => {
-                problems.push(format!(
-                    "`{id}`: 서버가 내세우는 도구에 `{name}`이(가) 없어요"
-                ));
+                problems.push(format!("`{id}`: server does not advertise tool `{name}`"));
                 continue;
             }
             [one] => *one,
             _ => {
                 problems.push(format!(
-                    "`{id}`: 서버가 같은 이름(`{name}`)의 도구를 둘 이상 내세워요"
+                    "`{id}`: server advertises multiple tools named `{name}`"
                 ));
                 continue;
             }
@@ -150,22 +132,22 @@ pub(crate) fn entries_of(
             entry_sha256(tool),
         ) else {
             problems.push(format!(
-                "`{id}`: 정의의 모양이 올바르지 않아요(설명은 글, inputSchema는 객체여야 해요)"
+                "`{id}`: invalid definition shape (description must be a string and inputSchema an object)"
             ));
             continue;
         };
         match Schema::compile_input_problems(schema.clone()) {
             Ok(compiled) if compiled.doc().get("type") != Some(&Value::from("object")) => {
                 problems.push(format!(
-                    "`{id}`: 입력 스키마의 최상위는 `type: object`여야 해요"
+                    "`{id}`: input schema root must have `type: object`"
                 ));
                 continue;
             }
             Ok(_) => {}
             Err(found) => {
-                // 진단은 고정 코드와 JSON 포인터만(스키마 안의 글을 되풀이하지 않는다)
+                // Report only fixed codes and JSON pointers so server-chosen text is never echoed.
                 problems.push(format!(
-                    "`{id}`: 입력 스키마를 프로필이 지원하는 어휘로 읽을 수 없어요: {}",
+                    "`{id}`: input schema uses unsupported profile vocabulary: {}",
                     schema_lines(&found)
                 ));
                 continue;
@@ -180,7 +162,7 @@ pub(crate) fn entries_of(
             || exposes(schema, credentials, true)
         {
             problems.push(format!(
-                "`{id}`: 정의(설명·스키마)에 자격으로 보이는 값이 섞여 있어 기록하지 않아요 — 서버를 확인하세요"
+                "`{id}`: definition (description or schema) contains a credential-like value — not written; inspect the server"
             ));
             continue;
         }
@@ -201,7 +183,6 @@ pub(crate) fn entries_of(
     }
 }
 
-/// 같은 폴더의 임시 파일에 쓰고 바꿔 넣는다. 기존 파일이 일반 파일이 아니면(링크 등) 쓰지 않는다.
 fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     write_atomic_with(path, text, || bot_core::random::random_hex(8))
 }
@@ -214,16 +195,16 @@ fn write_atomic_with(
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && !meta.is_file()
     {
-        return Err(format!("{}이(가) 일반 파일이 아니에요", path.display()));
+        return Err(format!("{} is not a regular file", path.display()));
     }
     let tmp = path.with_file_name(format!(".tools.lock.yaml.tmp-{}", suffix()));
-    // `create_new`가 실패한 경우(예: `AlreadyExists`)에는 남이 만든 파일일 수 있으므로 지우지 않는다.
+    // If `create_new` fails (e.g. `AlreadyExists`), do not unlink it because it may belong to someone else.
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o644)
         .open(&tmp)
-        .map_err(|e| format!("{}을(를) 쓰지 못했어요: {e}", path.display()))?;
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
     let finish = (|| -> std::io::Result<()> {
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
@@ -231,40 +212,39 @@ fn write_atomic_with(
     })();
     finish.map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!("{}을(를) 쓰지 못했어요: {e}", path.display())
+        format!("failed to write {}: {e}", path.display())
     })
 }
 
-/// 서버가 응답하지 못한 이유를 사람이 읽을 말로.
 pub(crate) fn describe(error: &McpError) -> String {
     match error {
         McpError::Unreached => {
-            "서버에 연결하지 못했어요(주소·인증서·이름 풀이 결과·egress를 확인하세요)".into()
+            "could not reach server (check URL, TLS certificate, DNS resolution, and egress)".into()
         }
         McpError::Status {
             status: 401 | 403, ..
         } => {
             format!(
-                "서버가 인증을 거절했어요(HTTP {}) — 자격을 확인하세요",
+                "server rejected authentication (HTTP {}) — check credentials",
                 match error {
                     McpError::Status { status, .. } => *status,
                     _ => 0,
                 }
             )
         }
-        McpError::Status { status, .. } => format!("서버가 HTTP {status}로 답했어요"),
+        McpError::Status { status, .. } => format!("server responded with HTTP {status}"),
         McpError::Version => {
-            "서버가 지원하는 MCP 판본이 2026-07-28·2025-11-25·2025-06-18·2025-03-26이 아니에요"
+            "server does not support MCP protocol version 2026-07-28, 2025-11-25, 2025-06-18, or 2025-03-26"
                 .into()
         }
-        McpError::Timeout => "서버가 시간 안에 답하지 않았어요".into(),
+        McpError::Timeout => "server timed out".into(),
         McpError::Exposed => {
-            "서버 응답에 자격이 섞여 있어요(도구 정의·커서·알림 어디든) — 아무것도 기록하지 않아요. 서버를 확인하세요".into()
+            "server response contains a credential (in tool definitions, cursors, or notifications) — nothing was written; inspect the server".into()
         }
         McpError::Changed => {
-            "도구 목록을 모으는 동안 서버가 목록이 바뀌었다고 알렸어요 — 다시 실행하세요".into()
+            "server reported that its tool list changed during pagination — retry".into()
         }
-        other => format!("서버의 응답을 해석하지 못했어요({other:?})"),
+        other => format!("could not parse server response ({other:?})"),
     }
 }
 
@@ -272,7 +252,6 @@ pub async fn run(settings: &Settings, dir: &Path) -> Result<(), String> {
     run_with(settings, dir, || secret_store(settings)).await
 }
 
-/// `run`과 같되 자격 보관소를 만드는 방법을 받는다(bearer가 필요할 때만 부른다).
 pub async fn run_with(
     settings: &Settings,
     dir: &Path,
@@ -281,17 +260,17 @@ pub async fn run_with(
     let root = settings
         .profiles
         .as_ref()
-        .ok_or("BOT_PROFILES가 필요해요(프로필 폴더 경로)")?;
-    // 1) 대상 프로필과 스킬을 `validate`와 같은 로더로 정한다 — 못 정하면 아무 데도 접속하지 않고 자격도 읽지 않는다
+        .ok_or("BOT_PROFILES is required (profiles root directory)")?;
+    // Validate profile and SKILL.md before touching secrets or opening any remote connection.
     let located = locate_skill(root, dir, &Limits::default()).map_err(|issues| {
         format!(
-            "프로필을 확정하지 못해 접속하지 않아요(비밀을 읽을 프로필을 정할 수 없어요):\n{}",
+            "cannot resolve profile, refusing to connect or read secrets:\n{}",
             fixed_lines(&issues)
         )
     })?;
     let profile = located.profile.0.clone();
     let text = String::from_utf8(located.tools_yaml.clone())
-        .map_err(|_| "tools.yaml이 UTF-8이 아니에요".to_owned())?;
+        .map_err(|_| "tools.yaml is not valid UTF-8".to_owned())?;
     let declared = lock::read_declared("tools.yaml", &text).map_err(|issues| {
         issues
             .iter()
@@ -300,22 +279,23 @@ pub async fn run_with(
             .join("\n")
     })?;
     if declared.tools.is_empty() {
-        return Err("tools.yaml에 선언한 도구가 없어요".into());
+        return Err("no tools declared in tools.yaml".into());
     }
-    // 2) 서버: 호스트가 등록한 원격 서버여야 한다
     let uid = current_uid().map_err(|e| e.to_string())?;
     let host = load_host(settings, uid)?;
     let Some(remote) = host.remote_servers.get(&declared.server) else {
         return Err(if host.servers.contains_key(&declared.server) {
             format!(
-                "서버 `{}`는 로컬(stdio) 서버예요 — `bot mcp sync`는 아직 원격(`transport: \"http\"`) 서버만 지원해요",
+                "server `{}` is a local (stdio) server — `bot mcp sync` currently supports remote (`transport: \"http\"`) servers only",
                 declared.server
             )
         } else {
-            format!("호스트에 등록하지 않은 서버예요: {}", declared.server)
+            format!(
+                "server is not registered in host config: {}",
+                declared.server
+            )
         });
     };
-    // 3) egress: 접속 대상이 선언한 모든 도구의 (선언 ∩ 프로필 상한)에 정확히 있어야 한다
     let cap: Option<Vec<HostPort>> = host
         .catalog
         .egress
@@ -336,42 +316,40 @@ pub async fn run_with(
         .collect();
     if !blocked.is_empty() {
         return Err(format!(
-            "서버 주소 `{}`가 도구 {}의 `egress`(와 운영자 상한 `egress.{}`)에 없어요 — 정확히 그 `호스트:포트`를 적으세요",
+            "server target `{}` is not permitted by `egress` for {} (and host cap `egress.{}`) — list the exact `host:port`",
             remote.target_text(),
             blocked.join(", "),
             profile
         ));
     }
-    // 4) 자격: 대상 프로필의 보관소에서 이름으로 읽는다(값은 머리에만 쓰고 정의 검사에만 더 쓴다)
     let (mut credentials, mut bearer) = (Vec::new(), None);
     if let Some(name) = &remote.bearer {
         let store = make_store()?;
         let handle = store
             .for_profile(located.profile.clone())
             .await
-            .map_err(|_| format!("프로필 {profile}의 보관소를 열지 못했어요"))?;
+            .map_err(|_| format!("could not open secret store for profile {profile}"))?;
         let value = handle.resolve(name.clone()).await.map_err(|e| match e {
             Error::Missing => {
                 format!(
-                    "자격 {}이(가) 프로필 {profile}의 보관소에 없어요",
+                    "secret `{}` is missing from profile `{profile}` store",
                     name.as_str()
                 )
             }
-            _ => format!("자격 {}을(를) 읽지 못했어요(보관소 오류)", name.as_str()),
+            _ => format!("could not read secret `{}` (store error)", name.as_str()),
         })?;
         let text = String::from_utf8(value.0.clone())
             .ok()
             .filter(|t| !t.is_empty() && !t.contains(['\0', '\r', '\n']))
             .ok_or_else(|| {
                 format!(
-                    "자격 {}의 값이 bearer로 쓸 수 없는 모양이에요",
+                    "secret `{}` has a value that cannot be used as a bearer token",
                     name.as_str()
                 )
             })?;
         credentials.push(value.0);
         bearer = Some(text);
     }
-    // 5) 운영과 같은 전송·판본 협상으로 도구 정의 전체를 받는다
     let wire = Arc::new(ReqwestWire::new(Arc::new(SystemResolver))?);
     let mut http = Http::new(wire, remote.clone(), bearer, false);
     let listed = async {
@@ -381,23 +359,23 @@ pub async fn run_with(
     .await;
     http.close().await;
     let listed =
-        listed.map_err(|e| format!("서버에서 도구 정의를 받지 못했어요: {}", describe(&e)))?;
-    // 6) 선언한 도구만 검사해 잠금 항목으로 만든다. 하나라도 어긋나면 아무것도 쓰지 않는다
+        listed.map_err(|e| format!("failed to fetch tool definitions: {}", describe(&e)))?;
     let wanted: Vec<(String, String)> = declared
         .tools
         .iter()
         .map(|t| (t.id.clone(), t.name.clone()))
         .collect();
-    let entries = entries_of(&wanted, &listed, &credentials)
-        .map_err(|problems| format!("tools.lock.yaml을 쓰지 않았어요:\n{}", problems.join("\n")))?;
+    let entries = entries_of(&wanted, &listed, &credentials).map_err(|problems| {
+        format!("refused to write tools.lock.yaml:\n{}", problems.join("\n"))
+    })?;
     let rendered = lock::render(&declared.server, &entries)
-        .ok_or("정의를 정규화할 수 없어요(안전 범위를 넘는 수가 있어요)")?;
-    // 만든 잠금을 `validate`가 프로필을 읽을 때와 같은 검사(파일 크기·YAML 한도·잠금의 모양과 해시·tools.yaml과의 짝)로 먼저 읽어 본다: 통과해야 쓴다
+        .ok_or("could not canonicalize tool definitions (number out of safe range)")?;
+    // Verify the rendered lock with the same validator `bot validate` uses before writing to disk.
     located
         .verify_lock(rendered.as_bytes(), &Limits::default())
         .map_err(|issues| {
             format!(
-                "tools.lock.yaml이 `validate`를 통과하지 못해 쓰지 않았어요:\n{}",
+                "generated tools.lock.yaml failed validation and was not written:\n{}",
                 fixed_lines(&issues)
             )
         })?;
@@ -407,14 +385,14 @@ pub async fn run_with(
         write_atomic(&path, &rendered)?;
     }
     println!(
-        "{}: 도구 {}개의 정의를 {}",
+        "{}: {} {} tool definitions",
         path.display(),
-        entries.len(),
         if same {
-            "확인했어요(바뀐 것 없음)"
+            "verified (unchanged)"
         } else {
-            "기록했어요"
-        }
+            "wrote"
+        },
+        entries.len(),
     );
     for (id, entry) in &entries {
         println!(
@@ -423,7 +401,7 @@ pub async fn run_with(
         );
     }
     eprintln!(
-        "잠금 기반 도구의 설명은 모델 요청에 실립니다. 배포 전에 tools.lock.yaml의 description을 검토하세요."
+        "Note: locked tool descriptions are included in model prompts. Review `description` fields in tools.lock.yaml before deploying."
     );
     Ok(())
 }

@@ -1,5 +1,4 @@
-//! 큐: claim(SKIP LOCKED·세대 +1)·renew·checkpoint·fail(백오프·dead letter)·history.
-//! 소유자의 모든 쓰기는 같은 트랜잭션에서 세대·리스를 대조한다. 긴 외부 호출 동안 잠금을 쥐지 않는다.
+//! Run queue operations (`claim`, `renew`, `checkpoint`, `fail`, `history`, and stale-worker handover).
 
 use crate::{
     audit::{self, Entry, OwnedEntry},
@@ -19,19 +18,16 @@ use serde_json::Value;
 use sqlx::Row;
 use std::{collections::BTreeSet, time::Duration};
 
-/// 체크포인트 한 묶음의 최대 건수(한 모델 응답의 레코드·도구·그룹을 담기에 넉넉하다).
 const MAX_BATCH: usize = 512;
 
 struct Cand {
     run: RunRow,
     state: String,
     generation: i64,
-    /// 직전 claim이 고정했던 호스트 활성 집합(없으면 구판 행·고정하지 않은 핸들)
     claim_set: Option<String>,
 }
 
-/// 가장 오래 기다린 집을 수 있는 run 하나를 잠근다(SKIP LOCKED): 때가 된 ready·retry, 또는 리스가 끝난 leased.
-/// 직렬 키는 고유 색인과 같이 leased 상태가 소유한다. 만료된 소유자 자신은 인계할 수 있다.
+/// Locks the oldest claimable run via `SKIP LOCKED` (due `ready`/`retry` or lease-expired `leased`).
 async fn pick(
     tx: &mut Tx<'_>,
     skipped_profiles: &[String],
@@ -58,7 +54,6 @@ async fn pick(
     }))
 }
 
-/// 집은 run의 실행 내용을 읽는다.
 pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunContext> {
     let r = sqlx::query(&format!(
         "select {}, x.private_memory_read as tree_private, x.agent as root_agent,
@@ -105,7 +100,7 @@ pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunConte
             thread,
         },
         binding: BindingId(r.get("binding")),
-        // 인증된 OpenAI 호환 입구의 접수 원장이 보증한 루트의 출처(위임 자식도 같다). 본문·레거시 webhook의 필드는 증거가 아니다
+        // Authenticated OpenAI-compatible API origin pinned on the root request row (inherited by children).
         api: r
             .get::<Option<String>, _>("root_api_endpoint")
             .zip(r.get::<Option<String>, _>("root_api_model"))
@@ -113,7 +108,6 @@ pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunConte
         scopes: scopes.into_iter().collect::<BTreeSet<_>>(),
         private_memory_read: r.get("tree_private"),
         approver: r.get::<Option<String>, _>("approver").map(PrincipalId),
-        // 예약 실행과 그 자식은 루트의 출처를 공유한다
         trigger: r
             .get::<Option<String>, _>("root_trigger")
             .map(|id| TriggerRef {
@@ -134,9 +128,8 @@ pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunConte
 }
 
 impl Store {
-    /// 가장 오래 기다린 run 하나를 집는다. 집을 때마다 세대가 오르고 리스가 시작되며, 이 핸들이 고정한 호스트 활성 집합을 같은 UPDATE에 기록한다.
-    /// 리스가 끝난 leased는 인계다(시도 횟수 +1). 다만 직전 claim의 집합과 이 핸들의 집합이 둘 다 있고 다르면 활성 집합 교체 때문에 생긴 만료라
-    /// 시도를 쓰지 않는다(`handover`). 한도를 넘었으면 집지 않고 dead letter로 보낸다.
+    /// Claims the oldest claimable run, bumping generation/claim epoch and recording the pinned active set.
+    /// Forgives attempt increment on lease reclaim when the active set changed (`handover`), and dead-letters runs past `max_attempts`.
     pub(crate) async fn claim_run(&self) -> R<Option<RunContext>> {
         self.expire_approvals().await?;
         self.sweep_private().await?;
@@ -164,7 +157,7 @@ impl Store {
                             .lease_run(&mut tx, &mut claimed.attempt, attempts)
                             .await
                         {
-                            // 같은 직렬 키의 다른 작업이 먼저 점유했다.
+                            // Another run with the same serial key won the unique lease index.
                             return if error.is_unique_violation() {
                                 Ok(None)
                             } else {
@@ -198,13 +191,13 @@ impl Store {
                         tx.commit().await?;
                         return Ok(Some(claimed));
                     }
-                    // 저장한 실행 대상의 해독 오류만 격리한다. SQL 오류는 트랜잭션을 되돌린다.
+                    // Isolate corrupted persisted targets as `Dead`; propagate SQL errors by rolling back.
                     Err(Fail::Core(Error::Invalid)) => End::Dead("invalid_target", attempts),
                     Err(error) => return Err(error),
                 }
             };
             if !try_lock_parent(&mut tx, &run.profile, run.parent.as_deref()).await? {
-                // 부모 → 자식 순서와 충돌하지 않도록 기다리지 않는다. 이번 점유에서 다른 후보를 본다.
+                // Skip rather than block to respect parent -> child lock order.
                 tx.rollback().await?;
                 skipped_profiles.push(run.profile);
                 skipped_runs.push(run.id);
@@ -216,7 +209,6 @@ impl Store {
         Ok(None)
     }
 
-    /// 잠근 후보의 작업을 해독한 뒤에만 새 점유 토큰을 발급한다.
     async fn lease_run(&self, tx: &mut Tx<'_>, at: &mut Attempt, attempts: i32) -> R<()> {
         let (generation, claim): (i64, i64) = sqlx::query_as(
             "update bot_runs set state = 'leased',
@@ -239,13 +231,12 @@ impl Store {
         Ok(())
     }
 
-    /// heartbeat. 다른 소유권 검사와 같이 행을 잠근 뒤 DB 시각을 확인하고 리스를 늘린다.
     pub(crate) async fn renew_run(&self, at: &Attempt) -> R<Beat> {
         let mut tx = self.pool.begin().await?;
         let run = match lock_leased(&mut tx, at).await {
             Ok(run) if run.private => return Err(Error::Denied.into()),
             Err(Fail::Core(Error::Stale)) => {
-                // 민감 DM 접수의 갱신은 토큰이나 만료 상태와 무관하게 전용 원장만 받는다.
+                // Private DM runs are managed exclusively by `PrivateLedger` regardless of lease state.
                 let private: Option<bool> = sqlx::query_scalar(
                     "select private from bot_runs where profile = $1 and id = $2",
                 )
@@ -277,8 +268,7 @@ impl Store {
         })
     }
 
-    /// 체크포인트 묶음을 현재 claim으로 한 트랜잭션에 기록한다. 같은 key의 재기록은 같은 내용일 때만 받고(멱등),
-    /// 하나라도 다르면 전체를 되돌린다. 비었거나 한 묶음 상한을 넘으면 Invalid다.
+    /// Idempotently writes a batch of checkpoints under the active lease; rolls back with `Conflict` on body mismatch.
     pub(crate) async fn checkpoint_batch_run(&self, at: &Attempt, steps: Vec<Step>) -> R<()> {
         if steps.is_empty() || steps.len() > MAX_BATCH {
             return invalid();
@@ -320,8 +310,6 @@ impl Store {
         Ok(())
     }
 
-    /// 실패 보고. 일시 오류는 제한된 지수 백오프·jitter로 다시 줄을 서고, 영구 오류·시도 한도 초과는 dead letter다.
-    /// 취소 요청이 서 있으면 재시도하지 않고 취소로 끝낸다.
     pub(crate) async fn fail_run(&self, at: &Attempt, failure: Failure) -> R<Retry> {
         let mut tx = self.pool.begin().await?;
         let parent = parent_of(&mut tx, at).await?;
@@ -335,22 +323,19 @@ impl Store {
         Ok(outcome)
     }
 
-    /// 같은 대화의 이전 차례(오래된 순). 에이전트 대상 run의 입력과 결과만, 같은 프로필·바인딩·대화·스레드에서만 읽는다.
+    /// Loads prior agent turns in chronological order scoped by conversation and principal boundaries, propagating private-recall taint.
     pub(crate) async fn history_of(&self, at: &Attempt, limit: u32) -> R<Vec<Turn>> {
-        // 결과를 확정하는 트랜잭션: 루트→run 잠금 뒤 claim·세대·리스·취소를 확인하고, 돌려주기 전에 보호 표지를 같은 커밋에 한다
         let (mut tx, me) = crate::memory::begin_read(self, at).await?;
         let root: String = me.get("root");
         let kind: String = me.get("conv_kind");
-        // 위임 자식도 루트의 에이전트·트리거로 이력을 가른다("원래 에이전트")
+        // Delegated children inherit the root run's agent and trigger for history scoping.
         let origin =
             sqlx::query("select agent, trigger from bot_runs where profile = $1 and id = $2")
                 .bind(&at.profile.0)
                 .bind(&root)
                 .fetch_one(&mut *tx)
                 .await?;
-        // 같은 대화(프로필·바인딩·종류·ID·스레드)의 끝난 에이전트 차례. 대화의 주체 경계를 지킨다:
-        // - HTTP 입구: 같은 이름의 대화에도 호출 주체별로 가른다(다른 호출자의 차례를 보지 못한다).
-        // - 예약: (원래 에이전트, 트리거, 주체)별로 가른다(다른 에이전트의 같은 이름 트리거와 섞이지 않는다).
+        // Isolate HTTP turns by principal and scheduled turns by `(root_agent, trigger, principal)`.
         let rows = sqlx::query(
             "select u.principal, u.input, u.result,
                     exists (select 1 from bot_runs t where t.profile = u.profile and t.id = u.root and t.private_memory_read) as tainted
@@ -375,7 +360,7 @@ impl Store {
         .bind(i64::from(limit.min(200)))
         .fetch_all(&mut *tx)
         .await?;
-        // private 기억을 읽은 실행의 답이 이 이력으로 들어온다: 보호 표지가 따라와야 한다(이 실행 트리에 같은 커밋으로 기록한다)
+        // Propagate private-memory taint into this run tree before returning tainted prior turns.
         if rows.iter().any(|row| row.get::<bool, _>("tainted")) {
             crate::memory::flag_private(&mut tx, at, &root).await?;
         }
@@ -397,9 +382,8 @@ impl Store {
 }
 
 impl Store {
-    /// 이 핸들이 고정한 활성 집합이 **더는 현재가 아닌가**(다른 프로세스가 교체했다). `bot_active`를 FOR SHARE로 읽어 판본 교체와 같은 잠금 아래에서
-    /// 판단하므로 교체가 진행 중이면 커밋 뒤의 집합으로 판정한다. 고정하지 않은 핸들·같은 집합·게시된 집합이 없음은 `false`다(구판이 아니다).
-    /// 잠금 순서: bot_active → (부모) → run → 감사 head.
+    /// Checks under `bot_active FOR SHARE` whether this handle's pinned active set has been replaced.
+    /// Lock order: `bot_active` -> (parent) -> run -> audit head.
     async fn superseded(&self, tx: &mut Tx<'_>) -> R<bool> {
         let Some(pinned) = self.pinned_revision() else {
             return Ok(false);
@@ -413,7 +397,6 @@ impl Store {
         )
     }
 
-    /// 잠근 run(지금 소유자)을 시도 횟수를 쓰지 않고 대기열(`ready`)로 돌리고 감사를 남긴다.
     async fn requeue_run(&self, tx: &mut Tx<'_>, run: &RunRow) -> R<()> {
         sqlx::query(
             "update bot_runs set state = 'ready', lease_until_ms = null, lease_owner = null,
@@ -433,11 +416,7 @@ impl Store {
         Ok(())
     }
 
-    /// 구판이 된 프로세스의 반납: 이 핸들이 고정한 활성 집합이 **더는 현재가 아니고**(다른 프로세스가 교체했다) 이 시도가 **지금** 리스·세대·claim의
-    /// 소유자일 때만, run을 시도 횟수를 쓰지 않고 대기열(`ready`)로 돌려 새 판본의 워커가 집게 한다. 활성 집합이 바뀌어 생긴 반납은 run의
-    /// 잘못이 아니므로 마지막 시도에서도 dead letter가 되지 않는다. 아니면 거절한다.
-    /// - `Denied`: 고정하지 않은 핸들·같은 집합(현재 판본의 워커)·게시된 집합이 없음·민감 run·취소 요청이 선 run
-    /// - `Stale`: 옛 세대·옛 claim·리스 만료·leased가 아님
+    /// Requeues a leased run without spending an attempt only when this handle's pinned active set has been superseded.
     pub(crate) async fn release_stale_run(&self, at: &Attempt) -> R<()> {
         let mut tx = self.pool.begin().await?;
         if !self.superseded(&mut tx).await? {
@@ -452,15 +431,11 @@ impl Store {
         Ok(())
     }
 
-    /// 구판이 된 프로세스가 run을 대기열로 돌려준다(`release_stale_run`). 공개 경계라 코어 오류로 바꿔 돌려준다.
     pub async fn release_stale(&self, at: &Attempt) -> Result<(), Error> {
         self.release_stale_run(at).await.map_err(Fail::into_core)
     }
 
-    /// 실패 보고와 구판 반납을 **한 DB 판정**으로 정한다. 한 트랜잭션에서 `bot_active`를 FOR SHARE로 읽어(교체와 같은 잠금) 이 핸들의 집합이 더는
-    /// 현재가 아니고 이 시도가 지금 소유자이면 시도 횟수를 쓰지 않고 대기열로 돌리고(`Retry::After(0)`), 아니면 `fail_run`과 같은 일반 실패로 정산한다
-    /// (현재 판본·고정하지 않은 핸들·취소 요청). 판정을 읽지 못하면(잠금 시간 초과 등) 아무것도 기록하지 않고 오류를 돌려준다 — 호출자는 일반
-    /// 실패로 넘어가지 말고 같은 호출을 다시 한다(마지막 시도에서 구판의 반납이 dead letter가 되지 않게).
+    /// Atomically decides under `bot_active FOR SHARE` between stale-worker handover (`Retry::After(0)`) and normal failure settlement.
     pub(crate) async fn fail_or_release_run(&self, at: &Attempt, failure: Failure) -> R<Retry> {
         let mut tx = self.pool.begin().await?;
         let stale = self.superseded(&mut tx).await?;
@@ -480,7 +455,6 @@ impl Store {
         Ok(outcome)
     }
 
-    /// 실패 보고(`fail_run`)에 구판 반납 판정을 더한 공개 경계(`fail_or_release_run`).
     pub async fn fail_or_release(&self, at: &Attempt, failure: Failure) -> Result<Retry, Error> {
         self.fail_or_release_run(at, failure)
             .await
@@ -489,8 +463,6 @@ impl Store {
 }
 
 impl Store {
-    /// 소유자 확인을 마친 run의 실패를 **같은 트랜잭션에서** 정산한다: 일시 오류는 제한된 지수 백오프·jitter로 다시 줄을 서고(시도 횟수 +1),
-    /// 영구 오류·시도 한도 초과는 dead letter, 취소 요청이 서 있으면 취소다. `fail_run`과 `fail_or_release_run`이 같은 본문을 쓴다.
     async fn settle_failure(&self, tx: &mut Tx<'_>, run: &RunRow, failure: Failure) -> R<Retry> {
         Ok(match failure {
             Failure::Permanent("cancelled") | Failure::Transient(_) if run.cancel_requested => {

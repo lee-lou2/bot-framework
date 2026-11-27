@@ -1,8 +1,6 @@
-//! HTTP(OpenAI 호환) 출처 승인 카드의 전달 전 대조(`CardDeliverer`, 가짜 Slack·메모리 저장소): 접수 때 고정한 승인 경로·전달 설치(팀)가 지금과 같을 때만 올리고,
-//! 어긋나면 올리지 않고 저장된 판정(`approver_revoked`·`route_changed`)으로 닫는다. 증거를 읽지 못하면 올리지 않고, 증거가 있는 카드는 채널 출처 경로로 되돌아가지 않는다.
-use crate::support;
-
+//! Pre-send verification for HTTP (OpenAI-compatible) approval cards against pinned origin and team.
 use crate::delivery_support::*;
+use crate::support;
 use bot_core::{
     api::ApprovalBlock,
     cards::{CardJob, CardKey, CardOrigin, CardOutcome},
@@ -40,12 +38,10 @@ fn slack(person: &str, binding: &str) -> ApprovalRoute {
     }
 }
 
-/// 모델 `assistant`(OpenAI)가 있고 승인자가 Slack 채널 바인딩 `team`으로 정해진 프로필(판본 `rev`)
 fn api_profile(rev: &str, route: Option<ApprovalRoute>, approver_member: bool) -> Fixture {
     api_profile_as(rev, route, approver_member, "assistant", "main")
 }
 
-/// 같은 바인딩 `assistant`가 공개 모델 `model`과 에이전트 `agent`를 가리키는 판본
 fn api_profile_as(
     rev: &str,
     route: Option<ApprovalRoute>,
@@ -93,7 +89,7 @@ fn job(nonce: &str, binding: &str, owner: &str) -> CardJob {
         binding: BindingId(binding.into()),
         owner: PrincipalId(owner.into()),
         card: JsonPayload(
-            json!({"nonce": nonce, "title": "도구 승인", "lines": ["메일 보내기"]}).to_string(),
+            json!({"nonce": nonce, "title": "Tool approval", "lines": ["Send email"]}).to_string(),
         ),
         generation: Generation(1),
     }
@@ -144,7 +140,7 @@ async fn a_card_whose_route_and_installation_are_unchanged_is_posted_once() {
 
 #[tokio::test]
 async fn the_same_alias_pointing_at_another_team_closes_the_card_without_posting() {
-    // 접수 때는 T1이었는데 재배포로 같은 워크스페이스 별칭이 다른 팀(T2)을 가리킨다: 프로필·사람·바인딩은 그대로다
+    // Same workspace alias now resolves to T2 instead of pinned T1.
     let rig = rig_for(
         "T2",
         api_profile("personal-r1", Some(slack(APPROVER, "team")), true),
@@ -158,7 +154,7 @@ async fn the_same_alias_pointing_at_another_team_closes_the_card_without_posting
         cards.blocked(),
         [("n-1".to_owned(), ApprovalBlock::RouteChanged)]
     );
-    assert_eq!(opens(&rig), 0, "새 팀에 DM을 열지도 않는다");
+    assert_eq!(opens(&rig), 0, "must not open DM on new team");
     assert!(cards.begun().is_empty() && cards.settled().is_empty());
     assert_eq!(rig.slack.calls("chat.postMessage").len(), 0);
 }
@@ -183,27 +179,26 @@ async fn an_http_origin_without_a_recorded_team_never_falls_back_to_the_channel_
 
 #[tokio::test]
 async fn the_reason_follows_what_changed_between_the_pinned_revision_and_now() {
-    // 고정 판본 r1과 지금의 r2를 모두 가진 조립: 고정 판본을 복원할 수 있다
     let pinned = || api_profile("personal-r1", Some(slack(APPROVER, "team")), true);
     let cases: Vec<(&str, Fixture, ApprovalBlock)> = vec![
         (
-            "승인 지정 철회",
+            "approver route removed",
             api_profile("personal-r2", None, true),
             ApprovalBlock::ApproverRevoked,
         ),
         (
-            "지정된 사람의 멤버 자격 철회",
+            "approver membership revoked",
             api_profile("personal-r2", Some(slack(APPROVER, "team")), false),
             ApprovalBlock::ApproverRevoked,
         ),
         (
-            "다른 사람으로 재지정",
+            "reassigned to another user",
             api_profile("personal-r2", Some(slack("slack:home/U2", "team")), true)
                 .member("slack:home/U2", &["owner"]),
             ApprovalBlock::RouteChanged,
         ),
         (
-            "로컬 승인으로 재지정",
+            "reassigned to local approval",
             api_profile(
                 "personal-r2",
                 Some(ApprovalRoute::Local {
@@ -215,7 +210,7 @@ async fn the_reason_follows_what_changed_between_the_pinned_revision_and_now() {
             ApprovalBlock::RouteChanged,
         ),
         (
-            "전달 바인딩 재지정",
+            "delivery binding reassigned",
             api_profile("personal-r2", Some(slack(APPROVER, "ops-channel")), true).binding(
                 "ops-channel",
                 Adapter::SlackChannel {
@@ -262,7 +257,6 @@ async fn a_pinned_revision_that_cannot_be_restored_cannot_be_compared_so_the_car
 
 #[tokio::test]
 async fn the_same_route_in_a_newer_revision_still_posts() {
-    // 판본이 바뀌어도(r1 → r2) 승인 경로와 설치가 같으면 올린다
     let rig = rig_for(
         "T1",
         api_profile("personal-r2", Some(slack(APPROVER, "team")), true),
@@ -310,7 +304,7 @@ async fn a_close_the_store_cannot_record_yet_is_retried_with_the_same_verdict_an
     cards.fail_settle([bot_core::port::Error::Unavailable]);
     let deliverer = rig.card_deliverer(cards.clone());
     deliverer.tick().await.unwrap();
-    assert!(cards.blocked().is_empty(), "저장소가 받지 못했다");
+    assert!(cards.blocked().is_empty(), "store rejected settle");
     deliverer.tick().await.unwrap();
     assert_eq!(
         cards.blocked(),
@@ -322,11 +316,11 @@ async fn a_close_the_store_cannot_record_yet_is_retried_with_the_same_verdict_an
 #[tokio::test]
 async fn a_reassigned_model_or_agent_closes_the_card_even_when_route_approver_and_team_are_unchanged()
  {
-    // 바인딩 id·승인자·전달 바인딩·팀은 그대로인데 같은 바인딩이 다른 공개 모델이나 다른 에이전트를 가리키게 재배포됐다: 카드의 옛 도구 인자는 새 대상의 것이 아니다
+    // Reassigning model or agent on the same binding invalidates pending tool args.
     let pinned = || api_profile("personal-r1", Some(slack(APPROVER, "team")), true);
     let cases: Vec<(&str, Fixture)> = vec![
         (
-            "모델 이름만 바뀜",
+            "model renamed",
             api_profile_as(
                 "personal-r2",
                 Some(slack(APPROVER, "team")),
@@ -336,7 +330,7 @@ async fn a_reassigned_model_or_agent_closes_the_card_even_when_route_approver_an
             ),
         ),
         (
-            "에이전트만 바뀜",
+            "agent changed",
             api_profile_as(
                 "personal-r2",
                 Some(slack(APPROVER, "team")),
@@ -346,7 +340,7 @@ async fn a_reassigned_model_or_agent_closes_the_card_even_when_route_approver_an
             ),
         ),
         (
-            "둘 다 바뀜",
+            "both changed",
             api_profile_as(
                 "personal-r2",
                 Some(slack(APPROVER, "team")),
@@ -368,7 +362,7 @@ async fn a_reassigned_model_or_agent_closes_the_card_even_when_route_approver_an
             [("n-1".to_owned(), ApprovalBlock::RouteChanged)],
             "{name}"
         );
-        assert_eq!(opens(&rig), 0, "{name}: DM을 열지도 않는다");
+        assert_eq!(opens(&rig), 0, "{name}: must not open DM");
         assert_eq!(rig.slack.calls("chat.postMessage").len(), 0, "{name}");
         assert!(cards.begun().is_empty(), "{name}");
     }
@@ -376,8 +370,7 @@ async fn a_reassigned_model_or_agent_closes_the_card_even_when_route_approver_an
 
 #[tokio::test]
 async fn a_publication_between_the_claim_and_the_post_leaves_nothing_posted() {
-    // 점유해 판정까지 통과한 뒤, 올리기 전에 다른 프로세스가 같은 승인자·같은 팀인데 모델만 재지정한 새 집합을 게시한다.
-    // `begin`은 확인한 판본이 지금의 활성 판본인지 다시 보므로 `Stale`이고, 카드는 올라가지 않는다. 다음에 다시 점유하면 판정이 막는다.
+    // Concurrent publication before `begin` makes the checked revision stale and prevents posting.
     let rig = rig_for(
         "T1",
         api_profile("personal-r1", Some(slack(APPROVER, "team")), true),
@@ -404,10 +397,10 @@ async fn a_publication_between_the_claim_and_the_post_leaves_nothing_posted() {
     assert_eq!(
         rig.slack.calls("chat.postMessage").len(),
         0,
-        "게시 사이에 끼어든 재배포인데 카드가 올라갔어요"
+        "card must not be posted after concurrent redeployment"
     );
     assert!(cards.begun().is_empty() && cards.settled().is_empty());
-    // 이어서 같은 카드를 다시 점유하면(리스가 끝난 뒤) 새 판본의 판정이 막는다
+    // Next claim checks against the new revision and blocks the card.
     let again = MemoryCards::new();
     again.push(job("n-1", "team", APPROVER));
     again.set_origin("n-1", origin("personal-r1", Some("T1")));
@@ -422,7 +415,7 @@ async fn a_publication_between_the_claim_and_the_post_leaves_nothing_posted() {
 #[tokio::test]
 async fn a_card_issued_for_someone_the_pinned_revision_never_named_is_closed_even_if_today_it_matches()
  {
-    // 접수 때 고정한 판본(r1)은 승인자를 U2로 정했는데 카드는 U1 앞으로 와 있다(지금 판본 r2는 U1이다): 카드가 가리키는 사람이 고정 판본의 경로가 아니다
+    // Pinned r1 named U2 rather than U1, even though current r2 names U1.
     let now = api_profile("personal-r2", Some(slack(APPROVER, "team")), true);
     let rig = rig_for("T1", now).await;
     rig.catalog.remember([

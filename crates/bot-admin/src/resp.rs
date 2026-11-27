@@ -1,4 +1,4 @@
-//! 응답 공통: 보안 헤더, 고정 오류 분류, 크기 상한, 포트 오류의 HTTP 대응.
+//! Shared admin HTTP response helpers: security headers, fixed error codes, size caps, and `Error` mapping.
 
 use axum::{
     http::{HeaderValue, StatusCode, header},
@@ -8,10 +8,9 @@ use bot_core::port::Error;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// 응답 상한(넘으면 거절한다).
 pub const MAX_BODY: usize = 512 * 1024;
 
-/// 응답에 비밀 값이 섞였는지 검사한다(참이면 통과).
+/// Returns true when the response JSON contains no known secret values.
 pub type LeakCheck = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
 
 pub fn harden(r: &mut Response) {
@@ -27,14 +26,13 @@ pub fn harden(r: &mut Response) {
     );
 }
 
-/// 오류 본문은 고정 분류 낱말 하나뿐이다(내부 사정·입력 원문 금지).
+/// Emits a fixed vocabulary error code without leaking internals or raw input.
 pub fn reply(status: StatusCode, code: &str) -> Response {
     let mut r = (status, axum::Json(json!({"error": code}))).into_response();
     harden(&mut r);
     r
 }
 
-/// 포트 오류 → (상태, 고정 낱말).
 pub fn classify(e: &Error) -> (StatusCode, &'static str) {
     match e {
         Error::Invalid => (StatusCode::BAD_REQUEST, "invalid"),
@@ -51,7 +49,6 @@ pub fn from_error(e: &Error) -> Response {
     reply(status, word)
 }
 
-/// 작은 오류 값: 상태와 고정 낱말. 응답은 경계에서 만든다(`Result` 오류로 크게 들고 다니지 않는다).
 #[derive(Debug)]
 pub struct Fail(pub StatusCode, pub &'static str);
 
@@ -68,7 +65,7 @@ impl From<Error> for Fail {
     }
 }
 
-/// 200 JSON. 비밀 검사에 걸리거나 상한을 넘으면 내보내지 않는다.
+/// Emits 200 JSON unless the leak check fails or the serialized body exceeds `MAX_BODY`.
 pub fn ok(body: &Value, leak: Option<&LeakCheck>) -> Response {
     if leak.is_some_and(|check| !check(body)) {
         return reply(StatusCode::INTERNAL_SERVER_ERROR, "leak");

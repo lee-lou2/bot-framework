@@ -1,13 +1,10 @@
-//! 정책을 거친 스팬(`Out`)을 OTLP/HTTP protobuf(`ExportTraceServiceRequest`)로 직접 인코딩한다(외부 의존 없음).
-//! 필드 번호는 opentelemetry-proto의 trace·common·resource·collector 정의를 따른다(시험이 독립 디코더로 대조한다).
+//! Dependency-free OTLP/HTTP protobuf encoder for `ExportTraceServiceRequest` following opentelemetry-proto field numbers.
 
 use super::{Key, SpanIds, SpanKind, Val};
 use crate::obs::proto::{bytes, fixed64, key_value, message, number, text};
 
-/// (이름, 시각, 속성).
 pub(super) type EventOut = (String, u64, Vec<(Key, Val)>);
 
-/// 내보낼 스팬. 정책(`policy::apply`)이 만든 값만 여기까지 온다.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Out {
     pub ids: SpanIds,
@@ -69,7 +66,6 @@ fn span(buf: &mut Vec<u8>, s: &Out) {
     }
 }
 
-/// 한 번의 내보내기 요청. 리소스는 프로세스·프로필 정보만, 범위는 이 계측의 이름이다.
 pub(super) fn request(resource: &[(&str, Val)], scope: (&str, &str), spans: &[Out]) -> Vec<u8> {
     let mut out = Vec::new();
     message(&mut out, 1, |rs| {

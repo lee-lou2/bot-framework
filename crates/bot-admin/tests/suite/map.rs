@@ -1,4 +1,4 @@
-//! 구조 지도: 스냅숏에서 만든 카드·연결·구조 버전과 `/v1/admin/map` 응답.
+//! Topology map: snapshot cards, links, revision hashing, and `/v1/admin/map` endpoint.
 
 use crate::support::*;
 use bot_admin::{
@@ -24,7 +24,7 @@ fn find<'a>(m: &'a map::Map, profile: &str, id: &str) -> &'a map::Card {
     m.nodes
         .iter()
         .find(|c| c.profile == profile && c.id() == id)
-        .unwrap_or_else(|| panic!("카드 없음: {profile}/{id}"))
+        .unwrap_or_else(|| panic!("missing card: {profile}/{id}"))
 }
 
 fn fact<'a>(c: &'a map::Card, key: &str) -> Option<&'a str> {
@@ -69,7 +69,7 @@ fn an_inherited_skill_is_one_card_owned_by_the_agent_that_defines_it() {
     assert_eq!(
         targets(child, Rel::Uses),
         ["main/skill:agenda"],
-        "자식은 부모의 카드를 가리킨다"
+        "child references parent's skill card"
     );
     assert_eq!(
         targets(find(&m, "personal", "agent:main"), Rel::Delegates),
@@ -122,7 +122,10 @@ fn tools_carry_class_approval_scopes_and_secret_names_only() {
     );
     let json = serde_json::to_string(&m.nodes.iter().map(map::Card::json).collect::<Vec<_>>())
         .expect("JSON");
-    assert!(!json.contains("MAIL_TOKEN"), "환경 변수 이름도 싣지 않는다");
+    assert!(
+        !json.contains("MAIL_TOKEN"),
+        "env var names must not appear"
+    );
 }
 
 #[test]
@@ -168,7 +171,7 @@ fn rev_is_stable_for_the_same_structure_and_changes_with_it() {
     assert_eq!(
         a.rev,
         build(vec![work(), personal()]).rev,
-        "입력 순서와 무관"
+        "independent of input order"
     );
     assert_eq!(a.rev.len(), 12);
     let mut changed = personal();
@@ -227,7 +230,7 @@ async fn the_map_endpoint_is_operator_only_and_supports_profile_and_rev() {
     );
     assert_eq!(j["access"]["work"]["policy"]["approve"][0], "mail.send");
     assert_eq!(j["build"]["name"], "bot");
-    // 같은 rev면 카드를 생략한다(접근 정보는 계속 온다).
+    // Matching rev omits graph nodes while keeping access metadata.
     let same = get(&s, OPERATOR, &format!("/v1/admin/map?rev={rev}"))
         .await
         .json();
@@ -239,14 +242,14 @@ async fn the_map_endpoint_is_operator_only_and_supports_profile_and_rev() {
     let one = get(&s, OPERATOR, "/v1/admin/map?profile=work").await.json();
     let profiles: std::collections::BTreeSet<&str> = one["graph"]["nodes"]
         .as_array()
-        .expect("카드")
+        .expect("nodes")
         .iter()
         .filter_map(|c| c["profile"].as_str())
         .collect();
     assert_eq!(profiles, ["work"].into_iter().collect());
     assert!(
         one["access"]["personal"].is_null(),
-        "고르지 않은 프로필은 싣지 않는다"
+        "unselected profiles must be omitted"
     );
     assert_eq!(
         get(&s, OPERATOR, "/v1/admin/map?profile=nope").await.status,
@@ -261,25 +264,39 @@ async fn the_map_endpoint_is_operator_only_and_supports_profile_and_rev() {
 
 #[test]
 fn an_agent_card_shows_its_builtin_tools_and_its_own_description() {
-    let m = build(vec![personal(), work()]);
+    let personal_snap = personal();
+    let expected_summary: String = personal_snap
+        .agents
+        .get(&bot_core::id::AgentId("main".into()))
+        .expect("main agent")
+        .description
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(140)
+        .collect();
+    assert!(!expected_summary.is_empty());
+    let m = build(vec![personal_snap, work()]);
     let main = find(&m, "personal", "agent:main");
     assert_eq!(
         fact(main, "builtin"),
         Some("read, grep"),
-        "열어 준 내장 도구만, 정해진 순서로"
+        "only enabled built-in tools in canonical order"
     );
-    assert!(
-        main.summary.starts_with("오늘 일정을 조회"),
-        "{}",
-        main.summary
-    );
-    // 상속하지 않는다: 자식과 설명이 없는 에이전트는 비어 있고 요약은 모델을 보인다.
+    assert_eq!(main.summary, expected_summary);
+    // Child agents do not inherit parent built-in tools or description; summary falls back to model.
     let child = find(&m, "personal", "agent:main/research");
     assert_eq!(fact(child, "builtin"), Some("-"));
-    assert!(child.summary.contains("모델"), "{}", child.summary);
+    assert!(
+        child.summary.contains("assistant") && child.summary != main.summary,
+        "{}",
+        child.summary
+    );
     let mut s = personal();
     if let Some(a) = s.agents.get_mut(&bot_core::id::AgentId("main".into())) {
-        a.description = format!("{}\n둘째 줄은 쓰지 않는다", "가".repeat(200));
+        a.description = format!("{}\nsecond line is ignored", "★".repeat(200));
         a.builtin = std::collections::BTreeSet::from([Builtin::Glob, Builtin::Read]);
     }
     let m = build(vec![s]);
@@ -287,7 +304,7 @@ fn an_agent_card_shows_its_builtin_tools_and_its_own_description() {
     assert_eq!(
         main.summary.chars().count(),
         140,
-        "요약은 첫 줄을 140자까지"
+        "summary truncates first line to 140 chars"
     );
     assert_eq!(fact(main, "builtin"), Some("read, glob"));
     assert!(map::problems(&m.nodes).is_empty());

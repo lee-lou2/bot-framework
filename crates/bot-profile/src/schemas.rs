@@ -1,4 +1,4 @@
-//! 번들 스키마(`schemas/v1`: profile·tools·triggers·env·agent·skill). 바이너리에 넣어 두고 처음 쓸 때 한 번만 컴파일한다.
+//! Bundled v1 JSON schemas compiled once on first use.
 use crate::schema::Schema;
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -13,13 +13,11 @@ const SKILL: &str = include_str!("../../../schemas/v1/skill.schema.json");
 pub struct Bundled {
     pub profile: Schema,
     pub tools: Schema,
-    /// 구판(`BOTPROFILE1`) 복원 전용 `tools.yaml` 스키마: 과거에 허용했던 128자 초과 `secrets` 키를 거절하지 않는다.
+    /// Legacy `BOTPROFILE1` restore schema: omits `maxLength` on `secrets` keys for backwards compatibility.
     pub tools_legacy: Schema,
     pub triggers: Schema,
     pub env: Schema,
-    /// AGENT.md 맨 위 front matter
     pub agent: Schema,
-    /// SKILL.md 맨 위 front matter
     pub skill: Schema,
 }
 
@@ -51,13 +49,12 @@ fn build() -> Result<Bundled, String> {
     })
 }
 
-/// 번들 스키마가 컴파일되는지는 시험이 보증한다.
 #[allow(clippy::missing_panics_doc)]
 pub fn bundled() -> &'static Bundled {
     static CELL: OnceLock<Result<Bundled, String>> = OnceLock::new();
     match CELL.get_or_init(build) {
         Ok(b) => b,
-        Err(e) => panic!("번들 스키마가 올바르지 않아요: {e}"),
+        Err(e) => panic!("bundled schema is invalid: {e}"),
     }
 }
 
@@ -98,7 +95,7 @@ mod tests {
                     let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         schema.validate(&value)
                     }));
-                    assert!(found.is_ok(), "패닉: {text:?}");
+                    assert!(found.is_ok(), "panic: {text:?}");
                 }
                 checked += 1;
             }

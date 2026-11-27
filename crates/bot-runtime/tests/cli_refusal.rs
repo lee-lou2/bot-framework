@@ -1,13 +1,6 @@
-//! 실제 `claude` CLI+PG+실제 프런트(PlannedCalls·사전 판정·CheckpointSink)로 확인하는 CLI 확정 거절.
-//! - 확정: 고정 판본에 없는 도구(`unknown_tool`)와 고정 스키마가 거절하는 입력(`invalid`)은 PG 표식을 쓴 **뒤에만** 그 단어(오류 표시)를 돌려주고,
-//!   재개는 브로커에 다시 묻지 않고 같은 단어로 그 자리를 닫으며 어떤 도구도 실행하지 않는다.
-//! - 미확정: 고정 판본을 확인하지 못함·claim 상실은 표식을 남기지 않고, 그 시도는 성공이 아니라 재시도이며 재개가 다시 판단한다.
-//! - 시작 뒤 실행 여부 불명(`call_start`로 `Started`를 기록한 뒤 결과를 남기기 전에 워커가 사라진 쓰기)은 실제 PG 행으로 `cli_started.rs`가 확인한다:
-//!   표식 0·재실행 0이고 그 호출은 `Held`(운영자 판정 대기)로 run이 멈춘다.
-//!
-//! 입력 검사는 실제 `JcsSealer`+`SchemaValidator`(시험용 봉인기가 아니다)가 한다.
-//!
-//! 실행: `BOT_CLAUDE_BIN=<claude 경로> BOT_CLAUDE_CANARY=required BOT_TEST_DATABASE_URL=… cargo test -p bot-runtime --test cli_refusal`
+//! Verifies definitive vs. tentative CLI tool refusals with the real `claude` CLI, PostgreSQL, broker front, and real `JcsSealer`+`SchemaValidator`.
+//! Definitive refusals (`unknown_tool`, `invalid`) persist a PG refusal marker before replying and replay without re-judging on resume; tentative failures (unconfirmed revision, lost claim) leave no marker and re-judge on retry.
+//! Run: `BOT_CLAUDE_BIN=<path> BOT_CLAUDE_CANARY=required BOT_TEST_DATABASE_URL=... cargo test -p bot-runtime --test cli_refusal`
 
 mod support;
 
@@ -29,12 +22,11 @@ use bot_runtime::Outcome;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use support::{cli::*, view::*, *};
 
-/// 실제 스키마 검증을 하는 세계.
 async fn strict_world() -> Option<World> {
     world_with(Arc::new(JcsSealer::new(Arc::new(SchemaValidator::new())))).await
 }
 
-/// 접수한 뒤(r1에 고정) 프로필이 r2로 올라갔다: 목록은 현재 판본(r2)이 정하고, 이 run은 r1로 판정한다.
+/// Promotes active revision from r1 to r2 after acceptance so listing sees r2 while the run stays pinned to r1.
 async fn promote(w: &World) {
     w.catalog.publish(profile_next());
     w.pg.store
@@ -60,7 +52,6 @@ fn json_word(refusal: CliRefusal) -> String {
     serde_json::to_string(refusal.word()).unwrap()
 }
 
-/// 그 `tool_use`의 결과가 정확히 이 단어이고 오류 표시다.
 fn assert_word(body: &serde_json::Value, id: &str, word: &str) {
     assert_eq!(
         (result_text(body, id), result_error(body, id)),
@@ -69,7 +60,7 @@ fn assert_word(body: &serde_json::Value, id: &str, word: &str) {
     );
 }
 
-/// 판본을 확인하지 못하는 판정자: 실행이 고정한 판본(r1)이 이 카탈로그에 없다.
+/// Preflight judge with an empty catalog so the run's pinned revision cannot be confirmed.
 fn blind_judge(w: &World) -> Arc<dyn Preflight> {
     let store = w.pg.store.clone();
     Arc::new(BrokerService::new(
@@ -89,7 +80,7 @@ fn blind_judge(w: &World) -> Arc<dyn Preflight> {
     ))
 }
 
-/// 판정하는 사이에 다른 워커가 이 run을 이어받는다(claim 상실): 판정은 `Stale`이다.
+/// Simulates another worker stealing the claim right before preflight runs.
 struct LosesTheClaim {
     inner: Arc<dyn Preflight>,
     pool: sqlx::PgPool,
@@ -124,7 +115,6 @@ async fn a_tool_missing_from_the_pinned_revision_and_a_schema_violation_are_stor
     };
     let sandbox = LocalSandbox::new(claude);
     let upstream = Arc::new(bot_broker::testing::FakeUpstream::new());
-    // 한 응답이 (고정 판본에 없는 도구, 고정 스키마가 거절하는 입력, 승인이 필요한 삭제)를 함께 부른다
     script(
         &upstream,
         tools_turn(
@@ -146,9 +136,9 @@ async fn a_tool_missing_from_the_pinned_revision_and_a_schema_violation_are_stor
     );
     script(
         &upstream,
-        final_turn("msg_r2", "거절된 것은 건너뛰고 삭제했어요"),
+        final_turn("msg_r2", "Skipped refused calls and deleted"),
     );
-    let run = w.accept("req-refusal", "일정을 정리해줘").await;
+    let run = w.accept("req-refusal", "Organize my agenda").await;
     promote(&w).await;
 
     let first = host(
@@ -161,13 +151,13 @@ async fn a_tool_missing_from_the_pinned_revision_and_a_schema_violation_are_stor
     .await;
     let outcome = tokio::time::timeout(Duration::from_secs(150), first.worker.run_once())
         .await
-        .expect("첫 실행이 끝나야 한다");
+        .expect("first run must complete");
     assert!(
         matches!(outcome, Some(Outcome::Lost | Outcome::Parked)),
-        "삭제 승인을 기다리며 멈춘다: {outcome:?}"
+        "expected pause awaiting delete approval: {outcome:?}"
     );
     assert_eq!(w.pg.state_of(&run).await, "waiting");
-    // 확정 거절 둘은 호출 ID별 표식(고정 낱말 JSON 문자열)으로 저장돼 있고, 어떤 도구도 실행되지 않았다
+
     let stored = marks(&w, &run).await;
     assert_eq!(stored.len(), 2, "{stored:?}");
     let mut words: Vec<&str> = stored.iter().map(|(_, body)| body.as_str()).collect();
@@ -184,15 +174,10 @@ async fn a_tool_missing_from_the_pinned_revision_and_a_schema_violation_are_stor
             .all(|(key, _)| key.starts_with("cli-refusal-cli-")),
         "{stored:?}"
     );
-    assert!(
-        w.runner.jobs().is_empty(),
-        "거절된 호출도 승인 대기 중인 삭제도 실행되지 않았다"
-    );
-    // 브로커가 입력 검사 실패를 감사한 횟수: 재개가 표식으로 닫으면 다시 판단하지 않아 늘지 않는다
+    assert!(w.runner.jobs().is_empty());
     let judged = audit_count(&w, "call.invalid").await;
     assert_eq!(judged, 1);
 
-    // 소유자가 삭제를 승인하고 프로세스를 통째로 바꾼다
     let nonce =
         w.pg.scalar::<String>("select nonce from bot_approvals where state = 'pending'")
             .await;
@@ -211,15 +196,14 @@ async fn a_tool_missing_from_the_pinned_revision_and_a_schema_violation_are_stor
     .await;
     let outcome = tokio::time::timeout(Duration::from_secs(150), second.worker.run_once())
         .await
-        .expect("재개한 실행이 끝나야 한다");
+        .expect("resumed run must complete");
     assert_eq!(outcome, Some(Outcome::Succeeded));
     assert_eq!(
         audit_count(&w, "call.invalid").await,
         judged,
-        "재개는 거절된 자리를 브로커에 다시 묻지 않고 표식으로 닫는다"
+        "resume must replay refusal markers without re-judging via broker"
     );
 
-    // 재개한 CLI는 거절된 두 자리를 정확히 같은 단어(오류 표시)로, 삭제는 실제 결과로 본다. 실행은 삭제 한 번뿐이다
     let jobs: Vec<String> = w
         .runner
         .jobs()
@@ -232,19 +216,15 @@ async fn a_tool_missing_from_the_pinned_revision_and_a_schema_violation_are_stor
     assert_eq!(seen.len(), 2);
     assert_word(&seen[1], "toolu_extra", "unknown_tool");
     assert_word(&seen[1], "toolu_move", "invalid");
-    let deleted = result_text(&seen[1], "toolu_del").expect("삭제 결과");
-    assert!(deleted.contains("산책"), "{deleted}");
+    let deleted = result_text(&seen[1], "toolu_del").expect("delete result");
+    assert!(deleted.contains("Walk"), "{deleted}");
     assert_eq!(result_error(&seen[1], "toolu_del"), Some(false));
-    // 표식은 그대로이고 새로 만들어지지 않았다
     assert_eq!(marks(&w, &run).await, stored);
 }
 
-/// 표식을 남기지 못하는 이유.
 #[derive(Clone, Copy, Debug)]
 enum Unmarked {
-    /// 판정자가 고정 판본을 확인하지 못한다
     Blind,
-    /// 판정하는 사이 다른 워커가 run을 이어받았다
     LostClaim,
 }
 
@@ -262,9 +242,9 @@ async fn unmarked(cause: Unmarked) {
         tool_turn("msg_u1", "toolu_extra2", "mcp__relay__agenda_extra", "{}"),
     );
     for n in 2..6 {
-        script(&upstream, final_turn(&format!("msg_u{n}"), "마무리했어요"));
+        script(&upstream, final_turn(&format!("msg_u{n}"), "All done"));
     }
-    let run = w.accept("req-unmarked", "일정을 정리해줘").await;
+    let run = w.accept("req-unmarked", "Organize my agenda").await;
     promote(&w).await;
 
     let tag = format!("{cause:?}");
@@ -286,19 +266,17 @@ async fn unmarked(cause: Unmarked) {
     .await;
     let outcome = tokio::time::timeout(Duration::from_secs(150), first.worker.run_once())
         .await
-        .expect("첫 실행이 끝나야 한다");
+        .expect("first run must complete");
     match cause {
-        // 답을 낸 CLI가 있어도 실행되지 못한 호출이 남았으니 성공이 아니라 재시도다
         Unmarked::Blind => assert!(
             matches!(outcome, Some(Outcome::Failed(_))),
-            "{cause:?}: 성공으로 끝나면 안 된다: {outcome:?}"
+            "{cause:?}: unresolved call must retry, not succeed: {outcome:?}"
         ),
-        // 이어받은 쪽이 있으니 이 시도는 아무것도 쓰지 않고 물러난다
         Unmarked::LostClaim => assert_eq!(outcome, Some(Outcome::Lost), "{cause:?}"),
     }
     assert!(
         marks(&w, &run).await.is_empty(),
-        "{cause:?}: 확정하지 못한 거절에는 표식이 없다"
+        "{cause:?}: tentative refusal must leave no marker"
     );
     assert!(w.runner.jobs().is_empty(), "{cause:?}");
     assert_ne!(w.pg.state_of(&run).await, "succeeded", "{cause:?}");
@@ -308,7 +286,6 @@ async fn unmarked(cause: Unmarked) {
         Unmarked::LostClaim => {}
     }
 
-    // 재개는 다시 판단한다: 같은 호출이 이번에는 확정 거절로 닫히고 도구 실행은 여전히 0이다
     w.pg.sql(
         "update bot_runs set not_before_ms = 0, lease_until_ms = case when state = 'leased' then 0 else lease_until_ms end",
     )
@@ -324,12 +301,12 @@ async fn unmarked(cause: Unmarked) {
     .await;
     let outcome = tokio::time::timeout(Duration::from_secs(150), second.worker.run_once())
         .await
-        .expect("재개한 실행이 끝나야 한다");
+        .expect("resumed run must complete");
     assert_eq!(outcome, Some(Outcome::Succeeded), "{cause:?}");
-    assert!(w.runner.jobs().is_empty(), "{cause:?}: 추가 도구 실행 0");
+    assert!(w.runner.jobs().is_empty(), "{cause:?}");
     let seen = bodies(&upstream);
     assert_word(
-        seen.last().expect("재개한 요청"),
+        seen.last().expect("resumed request"),
         "toolu_extra2",
         "unknown_tool",
     );
@@ -360,8 +337,8 @@ async fn a_marked_refusal_lets_the_run_finish_in_one_attempt_without_running_any
         &upstream,
         tool_turn("msg_m1", "toolu_nope", "mcp__relay__agenda_extra", "{}"),
     );
-    script(&upstream, final_turn("msg_m2", "그 도구는 쓸 수 없어요"));
-    let run = w.accept("req-marked", "일정을 정리해줘").await;
+    script(&upstream, final_turn("msg_m2", "That tool is unavailable"));
+    let run = w.accept("req-marked", "Organize my agenda").await;
     promote(&w).await;
     let host = host(
         &w,
@@ -373,8 +350,7 @@ async fn a_marked_refusal_lets_the_run_finish_in_one_attempt_without_running_any
     .await;
     let outcome = tokio::time::timeout(Duration::from_secs(150), host.worker.run_once())
         .await
-        .expect("실행이 끝나야 한다");
-    // 확정 거절은 끝난 호출이다: 모델이 그 단어를 보고 답했으면 재시도 없이 성공이다
+        .expect("run must complete");
     assert_eq!(outcome, Some(Outcome::Succeeded));
     assert_eq!(w.pg.state_of(&run).await, "succeeded");
     let stored = marks(&w, &run).await;
@@ -389,6 +365,6 @@ async fn a_marked_refusal_lets_the_run_finish_in_one_attempt_without_running_any
             run.0
         ))
         .await,
-        r#"{"text":"그 도구는 쓸 수 없어요"}"#
+        r#"{"text":"That tool is unavailable"}"#
     );
 }

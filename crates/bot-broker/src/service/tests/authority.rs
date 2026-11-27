@@ -1,4 +1,4 @@
-//! 현재 권한: 저장된 결과·승인자·판본·claim은 판정 시점이 아니라 실행 시점의 값으로 다시 본다.
+//! Live authority checks: stored results, approvers, revisions, and claims are re-verified at execution time.
 
 use super::*;
 use bot_core::{
@@ -40,7 +40,11 @@ fn a_stored_result_is_not_returned_after_the_role_is_revoked() {
         w.call("c1", "agenda.list", "{}"),
         Err(Error::Denied)
     ));
-    assert_eq!(w.runner.jobs().len(), 1, "철회 뒤 원격 재실행 0건");
+    assert_eq!(
+        w.runner.jobs().len(),
+        1,
+        "must not re-execute after revocation"
+    );
     assert!(
         w.audit
             .verdicts()
@@ -48,9 +52,8 @@ fn a_stored_result_is_not_returned_after_the_role_is_revoked() {
     );
     assert!(
         matches!(w.ledger.phase("r1", "c1"), CallPhase::Done(_)),
-        "결과는 돌려주지 않을 뿐 기록은 그대로"
+        "stored record must remain intact"
     );
-    // 권한이 돌아오면 같은 결과를 본다
     w.publish(base("r3").build());
     assert_eq!(done(w.call("c1", "agenda.list", "{}")), "{\"ok\":true}");
 }
@@ -92,7 +95,7 @@ fn a_recovery_receipt_is_not_returned_after_the_permission_is_revoked() {
                 ..
             }
         ),
-        "보류 증거는 지우지 않는다"
+        "held resolution evidence must be preserved"
     );
     assert!(w.runner.jobs().is_empty());
     w.publish(base("r3").build());
@@ -118,7 +121,7 @@ fn a_call_left_started_stays_held_for_evidence_when_the_permission_is_revoked() 
     ));
     assert!(
         w.runner.reaped().is_empty(),
-        "권한이 없으면 복구 판정도 하지 않는다"
+        "must not run recovery without authority"
     );
     assert!(matches!(
         w.ledger.phase("r1", "c1"),
@@ -135,7 +138,6 @@ fn approval_cards_follow_the_current_approver_not_the_one_recorded_at_acceptance
         w.ledger.stored_approval(&old).approval.approver.0,
         "local:alice"
     );
-    // 새 판본이 승인자를 owner로 바꾼다
     w.publish(
         base("r2")
             .clear_triggers("main")
@@ -144,14 +146,14 @@ fn approval_cards_follow_the_current_approver_not_the_one_recorded_at_acceptance
     );
     assert!(
         matches!(w.decide(&old, "local:alice", true), Err(Error::Stale)),
-        "옛 승인자의 버튼은 거절"
+        "old approver's button must be stale"
     );
     assert_eq!(w.ledger.approval_state(&old), ApprovalState::Superseded);
     let new = awaiting(w.call_on(&w.broker, "r2", 1, "c1", "agenda.delete", DELETE));
     assert_eq!(
         w.ledger.stored_approval(&new).approval.approver.0,
         "local:owner",
-        "새 카드는 새 승인자에게 간다"
+        "new card must target the new approver"
     );
     assert!(matches!(
         w.decide(&new, "local:alice", true),
@@ -166,7 +168,6 @@ fn approval_cards_follow_the_current_approver_not_the_one_recorded_at_acceptance
 fn nothing_that_needs_approval_runs_when_the_current_approver_cannot_be_confirmed() {
     let w = World::new();
     scheduled(&w, "r2", "local:alice");
-    // 트리거가 승인자를 잃었다 / 승인자가 멤버에서 빠졌다
     w.publish(
         base("r2")
             .clear_triggers("main")
@@ -210,7 +211,7 @@ fn a_requester_removed_from_the_profile_cannot_be_asked_or_run_anything() {
     );
     assert!(
         matches!(w.decide(&nonce, "local:owner", true), Err(Error::Stale)),
-        "멤버가 아니면 승인할 수 없다"
+        "non-member must not approve"
     );
     assert!(matches!(
         w.call("c1", "agenda.delete", DELETE),
@@ -234,10 +235,9 @@ fn a_revocation_between_judgement_and_start_never_reaches_the_runner() {
     ));
     assert!(
         w.runner.jobs().is_empty(),
-        "begin과 start 사이 철회 시 실행기 호출 0건"
+        "revocation between begin and start must not invoke runner"
     );
     assert!(matches!(w.ledger.phase("r1", "c1"), CallPhase::Open { .. }));
-    // 같은 호출 ID로 다시 들어오면 새 판본으로 다시 판정한다
     assert!(matches!(
         w.call("c1", "agenda.list", "{}"),
         Err(Error::Denied)
@@ -255,12 +255,11 @@ fn the_agent_ceiling_of_the_pinned_revision_still_applies_when_the_current_one_i
         ctx.work.revision = Revision("r0".into());
         ctx
     });
-    w.publish(base("r1b").build()); // 지금 판본은 넓다
+    w.publish(base("r1b").build());
     assert!(matches!(
         w.call_on(&w.broker, "r9", 1, "c1", "agenda.delete", DELETE),
         Err(Error::Denied)
     ));
-    // 지금 판본이 좁으면 고정 판본이 넓어도 거절한다
     w.publish(base("r2").agent_scopes("main", &narrow_then).build());
     assert!(matches!(
         w.call("c2", "agenda.delete", DELETE),
@@ -273,14 +272,13 @@ fn the_agent_ceiling_of_the_pinned_revision_still_applies_when_the_current_one_i
 fn an_approval_survives_a_normal_reclaim_but_a_stale_claim_cannot_operate() {
     let w = World::new();
     let nonce = awaiting(w.call("c1", "agenda.delete", DELETE));
-    // 승인 대기 중 워커가 리스를 놓았다가 같은 세대에서 새 리스를 잡았다
+    // Reclaiming the lease within the same generation preserves the generation-bound approval.
     let old_claim = w.ledger.claim_epoch("r1");
     let new_claim = w.ledger.bump_claim("r1");
     assert_ne!(old_claim, new_claim);
-    w.decide(&nonce, "local:owner", true).unwrap(); // 승인은 세대에 묶인다
-    done(w.call("c1", "agenda.delete", DELETE)); // 새 claim으로 소비한다
+    w.decide(&nonce, "local:owner", true).unwrap();
+    done(w.call("c1", "agenda.delete", DELETE));
     assert_eq!(w.ledger.approval_state(&nonce), ApprovalState::Consumed);
-    // 옛 claim을 쥔 워커는 같은 세대여도 아무것도 하지 못한다
     let stale = |claim: Option<ClaimEpoch>| Attempt {
         profile: ProfileId("personal".into()),
         run: RunId("r1".into()),
@@ -321,7 +319,7 @@ fn the_approval_context_is_actor_bound_and_identity_only() {
         Err(Error::Denied)
     ));
     let ctx = block_on(w.ledger.approval_context(nonce.clone(), who("local:owner"))).unwrap();
-    assert!(ctx.attempt.claim.is_none(), "신원만 돌려준다");
+    assert!(ctx.attempt.claim.is_none(), "must carry identity only");
     assert!(
         matches!(
             block_on(w.ledger.begin(
@@ -332,7 +330,7 @@ fn the_approval_context_is_actor_bound_and_identity_only() {
             )),
             Err(Error::Denied)
         ),
-        "워커 연산을 인가하지 못한다"
+        "must not authorize worker operations"
     );
     assert_eq!(ctx.principal.0, "local:owner");
     w.ledger.bump_generation("r1");
@@ -363,7 +361,6 @@ fn a_secret_the_profile_does_not_list_is_never_resolved() {
     needy
         .secrets
         .insert("TOKEN".into(), SecretName::parse("reader").unwrap());
-    // 도구는 reader를 선언했지만 이 프로필의 secrets 목록에는 없다
     w.publish(
         base("r0")
             .tool("main", "agenda.list", needy.clone())
@@ -384,7 +381,6 @@ fn a_secret_the_profile_does_not_list_is_never_resolved() {
             .contains(&("call.deny".into(), "secret_not_allowed".into()))
     );
     assert!(w.runner.jobs().is_empty());
-    // 프로필이 허용한 이름이면 실행기까지 간다
     w.publish(
         base("r0")
             .secret("reader")
@@ -405,13 +401,11 @@ fn a_stored_result_is_withheld_when_the_revision_changes_while_it_is_read() {
     );
     w.ledger
         .set_after_begin(move || catalog.publish(lowered.clone()));
-    // 판정에 쓴 판본(r1)이 결과를 돌려주기 직전에 이미 철회돼 있다
     assert!(matches!(
         w.call("c1", "agenda.list", "{}"),
         Err(Error::Conflict)
     ));
     assert_eq!(w.runner.jobs().len(), 1);
-    // 다시 들어오면 새 판본으로 판정한다
     assert!(matches!(
         w.call("c1", "agenda.list", "{}"),
         Err(Error::Denied)
@@ -422,7 +416,6 @@ fn a_stored_result_is_withheld_when_the_revision_changes_while_it_is_read() {
 fn the_store_closes_the_gap_between_the_last_recheck_and_the_start_commit() {
     let w = World::new();
     let ledger = w.ledger.clone();
-    // 브로커가 판본을 다시 확인한 뒤, 원장이 start를 받기 직전에 새 판본이 활성이 된다
     w.ledger
         .set_before_start(move || ledger.set_active_revision("personal", "r2"));
     assert!(matches!(
@@ -431,7 +424,7 @@ fn the_store_closes_the_gap_between_the_last_recheck_and_the_start_commit() {
     ));
     assert!(
         w.runner.jobs().is_empty(),
-        "start 커밋이 거절되면 실행기는 불리지 않는다"
+        "rejected start commit must not invoke runner"
     );
     assert!(matches!(w.ledger.phase("r1", "c1"), CallPhase::Open { .. }));
 }
@@ -440,7 +433,7 @@ fn the_store_closes_the_gap_between_the_last_recheck_and_the_start_commit() {
 fn removing_only_the_origin_triggers_approver_does_not_move_the_card_to_a_sibling_trigger() {
     let w = World::new();
     scheduled(&w, "r2", "local:alice");
-    // 같은 서비스 주체의 예약이 둘이고, 승인자는 한쪽(morning)만 지운다
+    // Two triggers share the service principal; removing only `morning`'s approver must not borrow `evening`'s.
     w.publish(
         base("r2")
             .clear_triggers("main")
@@ -469,19 +462,17 @@ fn a_result_is_kept_in_the_ledger_but_not_returned_when_the_revision_changes_whi
     );
     w.ledger
         .set_after_finish(move || catalog.publish(lowered.clone()));
-    // 완료를 기록하는 동안 철회됐다: 호출은 한 번 실행됐고 원장에는 Done이 있지만 본문은 돌려주지 않는다
     assert!(matches!(
         w.call("c1", "agenda.list", "{}"),
         Err(Error::Conflict)
     ));
     assert_eq!(w.runner.jobs().len(), 1);
     assert!(matches!(w.ledger.phase("r1", "c1"), CallPhase::Done(_)));
-    // 같은 호출 ID로 다시 들어오면 새 판본의 권한을 먼저 확인하므로 저장된 결과도 나가지 않는다
     assert!(matches!(
         w.call("c1", "agenda.list", "{}"),
         Err(Error::Denied)
     ));
-    assert_eq!(w.runner.jobs().len(), 1, "다시 실행하지 않는다");
+    assert_eq!(w.runner.jobs().len(), 1, "must not re-execute");
 }
 
 #[test]
@@ -518,7 +509,7 @@ fn a_recovery_receipt_is_kept_but_not_returned_when_the_revision_changes_while_i
     ));
     assert!(
         matches!(w.ledger.phase("r1", "c1"), CallPhase::Done(_)),
-        "영수증은 원장에 보존했다"
+        "receipt must remain preserved in the ledger"
     );
     assert!(w.runner.jobs().is_empty());
 }
@@ -526,7 +517,7 @@ fn a_recovery_receipt_is_kept_but_not_returned_when_the_revision_changes_while_i
 #[test]
 fn a_profile_that_is_no_longer_active_makes_the_store_refuse_to_start() {
     let w = World::new();
-    w.ledger.set_active_revision("other-profile", "x"); // personal의 활성 판본 기록이 없는 저장소
+    w.ledger.set_active_revision("other-profile", "x");
     let ledger = w.ledger.clone();
     w.ledger
         .set_before_start(move || ledger.set_active_revision("personal", "gone"));
@@ -544,7 +535,6 @@ fn a_tool_can_never_receive_the_hosts_private_intake_key_even_if_the_profile_lis
     greedy
         .secrets
         .insert("KEY".into(), SecretName::parse("private-intake").unwrap());
-    // 프로필의 허용 목록에 이름이 있어도 호스트 전용이라 풀지 않는다
     w.publish(
         base("r1")
             .secret("private-intake")

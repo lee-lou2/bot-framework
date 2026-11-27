@@ -1,4 +1,4 @@
-//! Apple `container` 어댑터: 가짜 `container` 실행 파일(파이썬 스크립트)로 명령줄·점검·시작·실행·종료를 확인한다. 진짜 CLI는 `tests/container_*.rs`가 본다.
+//! Apple `container` adapter unit tests using a fake Python `container` CLI script.
 
 use super::*;
 use args::{Entry, Plan, anchor_owner, build, build_anchor, name_of};
@@ -52,14 +52,12 @@ impl Fake {
         fake
     }
 
-    /// 상태를 통째로 바꿔 놓는다(가짜 `container`가 읽는 도중에 반쯤 쓰인 파일을 보지 않게 임시 파일을 거친다).
     fn state(&self, value: Value) {
         let temp = self.dir.join(format!("state.json.{}", std::process::id()));
         std::fs::write(&temp, value.to_string()).unwrap();
         std::fs::rename(temp, self.dir.join("state.json")).unwrap();
     }
 
-    /// 상태 일부를 바꾼다. 가짜 `container`의 읽고 고쳐 쓰기와 겹치지 않게 같은 잠금을 쥐고 한다.
     fn set(&self, patch: Value) {
         let lock = std::fs::OpenOptions::new()
             .create(true)
@@ -101,7 +99,6 @@ impl Fake {
             .collect()
     }
 
-    /// 방화벽 진입 없이(시험 전용) 시작하는 설정.
     fn config(&self) -> ContainerConfig {
         let mut config = ContainerConfig::new("alpine:3.20", "botvm-net", &self.root)
             .with_lock_dir(self.dir.join("locks"))
@@ -110,12 +107,10 @@ impl Fake {
         config
     }
 
-    /// 이 시험의 인스턴스 잠금 파일 경로.
     fn lock_file(&self, instance: &str) -> PathBuf {
         lock::lock_path(&self.dir.join("locks"), instance)
     }
 
-    /// 잠금 폴더를 미리 만든다(0700): 시작이 만들기 전에 잠금 파일을 쥐어 보려는 시험용.
     fn locks(&self) -> PathBuf {
         let dir = self.dir.join("locks");
         std::fs::DirBuilder::new()
@@ -126,7 +121,6 @@ impl Fake {
         dir
     }
 
-    /// 이미지의 신뢰 진입을 쓰는(운영 모양) 설정.
     fn firewalled(&self) -> ContainerConfig {
         let mut config = self.config();
         config.unfirewalled = false;
@@ -171,7 +165,6 @@ impl Fake {
         }
     }
 
-    /// 목록에 올라 있는 VM 하나(라벨은 가진 것만).
     fn vm(&self, id: &str, labels: Value) -> Value {
         json!({"configuration": {"id": id, "labels": labels}, "status": {"state": "running"}})
     }
@@ -199,7 +192,6 @@ fn plan(relay: Option<SocketAddr>) -> Plan<'static> {
     }
 }
 
-/// 호스트에 게이트웨이가 생기는 때를 흉내 낸다: 가짜 CLI가 닻 VM을 목록에 올린 뒤에야 주소가 있다(닻이 없으면 없다).
 fn address_while_anchored(fake: &Fake) -> impl Fn(Ipv4Addr) -> bool + Send + Sync + 'static {
     let state = fake.dir.join("state.json");
     move |_| {
@@ -215,13 +207,12 @@ fn address_while_anchored(fake: &Fake) -> impl Fn(Ipv4Addr) -> bool + Send + Syn
     }
 }
 
-/// 시작해서 릴레이까지 연 어댑터(가짜 CLI).
 async fn up(fake: &Fake) -> ContainerSandbox {
     start(fake, fake.config())
         .await
         .relay(8787)
         .await
-        .expect("릴레이")
+        .expect("relay")
 }
 
 async fn start(fake: &Fake, config: ContainerConfig) -> Anchored {
@@ -232,7 +223,7 @@ async fn start(fake: &Fake, config: ContainerConfig) -> Anchored {
         Duration::from_secs(5),
     )
     .await
-    .expect("시작")
+    .expect("start")
 }
 
 #[tokio::test]
@@ -244,7 +235,6 @@ async fn start_refuses_an_invalid_config_or_a_missing_firewall_before_any_comman
         ContainerSandbox::start(bad).await.err(),
         Some(StartError("config"))
     );
-    // 운영은 이미지의 신뢰 init이 있어야 한다
     let mut open = fake.config();
     open.unfirewalled = false;
     assert_eq!(
@@ -253,7 +243,7 @@ async fn start_refuses_an_invalid_config_or_a_missing_firewall_before_any_comman
     );
     assert!(
         fake.calls().is_empty(),
-        "container를 한 번도 부르지 않았다: {:?}",
+        "container CLI must not be invoked: {:?}",
         fake.calls()
     );
     assert!(!fake.lock_file("botvm").exists());
@@ -266,20 +256,18 @@ async fn start_requires_a_host_only_network_and_a_local_image_and_pins_the_image
     assert_eq!(anchored.address(), Ipv4Addr::new(192, 168, 99, 1));
     assert!(
         fake.argv("network").iter().all(|a| a[1] != "create"),
-        "있으면 만들지 않는다"
+        "existing network must not be recreated"
     );
-    // 태그가 아니라 고정한 다이제스트로 띄운다
     let run = fake.argv("run").pop().unwrap();
     assert!(run.contains(&PINNED.to_owned()), "{run:?}");
     anchored.abort().await;
-    // 없으면 호스트 전용(`--internal`)에 관리 라벨을 붙여 만든다
     fake.set(json!({"networks": {}}));
     start(&fake, fake.config()).await.abort().await;
     let created = fake
         .argv("network")
         .into_iter()
         .find(|a| a[1] == "create")
-        .expect("만들었다");
+        .expect("network created");
     assert!(created.contains(&"--internal".to_owned()), "{created:?}");
     assert!(
         created
@@ -288,7 +276,6 @@ async fn start_requires_a_host_only_network_and_a_local_image_and_pins_the_image
         "{created:?}"
     );
     assert_eq!(created.last().unwrap(), "botvm-net");
-    // 호스트 전용이 아니거나 게이트웨이를 모르거나 만들 수 없거나 이미지가 없으면 띄우지 않는다
     for (state, want) in [
         (
             json!({"networks": {"botvm-net": {"mode": "nat", "gateway": "1.2.3.4"}}}),
@@ -322,9 +309,7 @@ async fn start_requires_a_host_only_network_and_a_local_image_and_pins_the_image
         .err();
         assert_eq!(error, Some(StartError(want)), "{want}");
     }
-    // 이미지를 내려받지 않는다: `image pull`은 부르지 않는다
     assert!(fake.argv("image").iter().all(|a| a[1] == "inspect"));
-    // 고정한 이미지가 비정상이면(다이제스트를 못 읽음) 시작하지 않는다
     fake.set(json!({"images": {"alpine:3.20": "not-a-digest"}}));
     let error =
         ContainerSandbox::start_probed(fake.config(), |_| true, |_| true, Duration::from_secs(1))
@@ -348,7 +333,6 @@ async fn the_relay_must_be_listening_on_the_gateway_before_models_can_start() {
         down.relay(8787).await.err(),
         Some(StartError("relay_unreachable"))
     );
-    // 열지 못한 시작은 닻을 남기지 않고 소유권도 쥐지 않는다
     for _ in 0..100 {
         if fake.read()["killed"]
             .as_array()
@@ -368,11 +352,11 @@ async fn the_relay_must_be_listening_on_the_gateway_before_models_can_start() {
 async fn a_spawned_vm_streams_lines_takes_the_request_on_stdin_and_keeps_the_secret_in_the_client_env()
  {
     let fake = Fake::new("spawn");
-    fake.set(json!({"lines": ["{\"a\":1}", "두번째 줄"], "exit": 3}));
+    fake.set(json!({"lines": ["{\"a\":1}", "second line"], "exit": 3}));
     let sandbox = up(&fake).await;
     let mut process = sandbox.spawn(fake.spec()).await.unwrap();
     assert_eq!(process.next_line().await.as_deref(), Some("{\"a\":1}"));
-    assert_eq!(process.next_line().await.as_deref(), Some("두번째 줄"));
+    assert_eq!(process.next_line().await.as_deref(), Some("second line"));
     assert_eq!(process.next_line().await, None);
     let exit = process.wait().await;
     assert_eq!(exit.code, Some(3));
@@ -388,13 +372,12 @@ async fn a_spawned_vm_streams_lines_takes_the_request_on_stdin_and_keeps_the_sec
     let argv = run["argv"].to_string();
     assert!(
         !argv.contains("sess-token-secret-1"),
-        "값은 명령줄에 없다: {argv}"
+        "token must not appear in argv: {argv}"
     );
     assert_eq!(
         run["env"]["ANTHROPIC_AUTH_TOKEN"], "sess-token-secret-1",
-        "클라이언트 환경에는 있다"
+        "token must be passed via client env"
     );
-    // 호스트 환경은 상속하지 않는다(필요한 몇 개만)
     let keys: Vec<String> = run["keys"]
         .as_array()
         .unwrap()
@@ -415,7 +398,7 @@ async fn a_spawned_vm_streams_lines_takes_the_request_on_stdin_and_keeps_the_sec
             "PWD",
             "SHLVL",
             "_",
-            // macOS Xcode CLT `/usr/bin/python3` 심(shim)이 실행 시 스스로 주입하는 SDK·경로 변수
+            // Variables injected automatically by macOS Xcode CLT `/usr/bin/python3` shim.
             "CPATH",
             "LIBRARY_PATH",
             "MANPATH",
@@ -431,7 +414,6 @@ async fn a_spawned_vm_streams_lines_takes_the_request_on_stdin_and_keeps_the_sec
 async fn an_overlong_line_ends_the_container_and_kill_and_drop_end_it_too() {
     let fake = Fake::new("limits");
     let sandbox = up(&fake).await;
-    // 줄 하나가 상한을 넘으면 읽기를 끝내고 그 컨테이너를 끝낸다
     fake.set(json!({"lines": ["ok"], "big_line": process::MAX_LINE + 10, "killed": []}));
     let mut process = sandbox.spawn(fake.spec()).await.unwrap();
     assert_eq!(process.next_line().await.as_deref(), Some("ok"));
@@ -446,12 +428,10 @@ async fn an_overlong_line_ends_the_container_and_kill_and_drop_end_it_too() {
         "{killed}"
     );
     drop(process);
-    // 끝내라고 하면 컨테이너부터 끝낸다
     fake.set(json!({"lines": [], "big_line": 0, "hang": true, "killed": []}));
     let mut process = sandbox.spawn(fake.spec()).await.unwrap();
     process.kill().await;
     assert_eq!(fake.read()["killed"].as_array().unwrap().len(), 1);
-    // 끝났다는 확인 없이 놓으면(취소·패닉) 최선으로 끝내라고 한다
     fake.set(json!({"killed": []}));
     let process = sandbox.spawn(fake.spec()).await.unwrap();
     drop(process);
@@ -463,7 +443,7 @@ async fn an_overlong_line_ends_the_container_and_kill_and_drop_end_it_too() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!(
-        "놓은 컨테이너를 끝내라고 하지 않았다: {:?}",
+        "dropped container was not killed: {:?}",
         fake.read()["killed"]
     );
 }
@@ -472,7 +452,7 @@ async fn an_overlong_line_ends_the_container_and_kill_and_drop_end_it_too() {
 async fn every_spawn_rechecks_the_network_and_the_pinned_image_and_refuses_when_unsure() {
     let fake = Fake::new("recheck");
     let sandbox = up(&fake).await;
-    sandbox.spawn(fake.spec()).await.expect("처음에는 열린다");
+    sandbox.spawn(fake.spec()).await.expect("initial spawn");
     let refused = |what: &'static str| {
         let sandbox = &sandbox;
         let spec = fake.spec();
@@ -484,14 +464,12 @@ async fn every_spawn_rechecks_the_network_and_the_pinned_image_and_refuses_when_
         }
     };
     let good = json!({"networks": {"botvm-net": {"mode": "hostOnly", "gateway": "192.168.99.1"}}});
-    // 망이 호스트 전용이 아니게 바뀌었다·게이트웨이가 바뀌었다·망이 사라졌다·조회가 실패한다
     fake.set(json!({"networks": {"botvm-net": {"mode": "nat", "gateway": "192.168.99.1"}}}));
     refused("nat").await;
     fake.set(json!({"networks": {"botvm-net": {"mode": "hostOnly", "gateway": "192.168.99.7"}}}));
     refused("gateway").await;
     fake.set(json!({"networks": {}}));
     refused("no network").await;
-    // 고정한 이미지가 로컬에서 사라졌다(태그가 다른 이미지로 옮겨 가도 다이제스트가 다르면 같은 이미지가 아니다)
     fake.set(good.clone());
     fake.set(json!({"images": {}}));
     refused("image removed").await;
@@ -501,6 +479,6 @@ async fn every_spawn_rechecks_the_network_and_the_pinned_image_and_refuses_when_
     sandbox
         .spawn(fake.spec())
         .await
-        .expect("확인되면 다시 열린다");
+        .expect("spawn resumes once verified");
     sandbox.shutdown().await;
 }

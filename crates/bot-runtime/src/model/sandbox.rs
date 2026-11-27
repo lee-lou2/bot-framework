@@ -1,5 +1,4 @@
-//! 모델 샌드박스의 시험용 가짜: 각본대로 출력하는 `FakeSandbox`. 이 크레이트의 시험(`cfg(test)`)에서만 컴파일되고 다른 크레이트는 쓰지 않는다.
-//! 포트(`Sandbox<ModelSpec>`·`ModelProcess`·`ModelSpec`)와 구현이 지킬 계약은 `bot_core::sandbox`가 소유한다.
+//! Scripted test double (`FakeSandbox`) and file-tree secret scanner for `bot-runtime` tests.
 
 use bot_core::{
     port::{Error, Reply},
@@ -14,21 +13,16 @@ use std::{
 
 pub use bot_core::sandbox::Exit;
 
-/// 가짜 프로세스 한 번의 각본.
 #[derive(Clone)]
 pub struct Script {
     pub lines: Vec<String>,
     pub exit: Exit,
-    /// 줄마다 기다리는 시간
     pub delay: Duration,
-    /// 줄을 다 낸 뒤 끝나지 않고 멈춘다(`kill`되면 끝난다)
     pub hang: bool,
-    /// 있으면 시작을 이 코드로 거절한다
     pub refuse: Option<&'static str>,
 }
 
 impl Script {
-    /// 표본 출력의 줄들을 내고 종료 코드 0으로 끝난다.
     pub fn output(sample: &str) -> Script {
         Script {
             lines: sample.lines().map(str::to_owned).collect(),
@@ -78,7 +72,6 @@ struct FakeState {
     hook: Option<Hook>,
 }
 
-/// 각본대로 출력하는 가짜 샌드박스. 시작마다 각본 하나를 쓰고, 받은 명세를 기록한다.
 #[derive(Clone, Default)]
 pub struct FakeSandbox {
     state: Arc<Mutex<FakeState>>,
@@ -95,18 +88,15 @@ impl FakeSandbox {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 시작마다 명세를 들여다보는 훅(호출 폴더가 아직 있을 때 파일 내용을 확인하는 시험용).
     pub fn inspect(self, hook: impl Fn(&ModelSpec) + Send + Sync + 'static) -> Self {
         self.lock().hook = Some(Arc::new(hook));
         self
     }
 
-    /// 지금까지 받은 명세(시작 순서)
     pub fn specs(&self) -> Vec<ModelSpec> {
         self.lock().started.clone()
     }
 
-    /// `kill`이 불린 프로세스 수
     pub fn killed(&self) -> usize {
         self.lock().killed
     }
@@ -197,8 +187,7 @@ impl ModelProcess for FakeProcess {
     }
 }
 
-/// 시험용: `roots` 아래 모든 파일에서 `needle`을 이름이나 내용에 담은 것의 경로를 모은다(심볼릭 링크는 따라가지 않는다).
-/// 모델이 읽을 수 있는 폴더 전체를 훑어 비밀 값이 0건인지 확인하는 데 쓴다.
+/// Scans `roots` without following symlinks for any file whose path or content contains `needle`.
 pub(crate) fn files_holding(roots: &[&Path], needle: &str) -> Vec<PathBuf> {
     fn walk(dir: &Path, needle: &str, hits: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -222,7 +211,7 @@ pub(crate) fn files_holding(roots: &[&Path], needle: &str) -> Vec<PathBuf> {
             }
         }
     }
-    assert!(!needle.is_empty(), "빈 값은 훑을 수 없다");
+    assert!(!needle.is_empty(), "needle cannot be empty");
     let mut hits = Vec::new();
     for root in roots {
         walk(root, needle, &mut hits);

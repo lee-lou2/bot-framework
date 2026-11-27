@@ -1,4 +1,4 @@
-//! 호스트 설정의 `admin` 절: 문서의 예시가 그대로 읽히고, 잘못된 설정은 시작 전에 거절된다.
+//! Host config `admin` section parsing: documented examples parse cleanly and invalid configs are rejected.
 
 use bot_admin::{
     AdminSettings,
@@ -8,36 +8,36 @@ use bot_admin::{
 use bot_core::id::{ProfileId, SecretName};
 use serde_json::{Value, json};
 
-/// 문서(docs/admin.md)의 첫 JSON 예시. 문서와 구현이 어긋나면 이 시험이 알려 준다.
+/// First JSON example in `docs/admin.md`, kept in lockstep with `AdminSettings::from_json`.
 fn documented() -> Value {
     let doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/admin.md"));
-    let start = doc.find("```json\n").expect("문서의 JSON 예시") + "```json\n".len();
-    let end = start + doc[start..].find("```").expect("예시 끝");
-    serde_json::from_str(&doc[start..end]).expect("예시는 올바른 JSON")
+    let start = doc.find("```json\n").expect("JSON example in docs") + "```json\n".len();
+    let end = start + doc[start..].find("```").expect("end of example");
+    serde_json::from_str(&doc[start..end]).expect("valid JSON example")
 }
 
 fn err(v: Value) -> String {
-    AdminSettings::from_json(&v).expect_err("거절돼야 한다")
+    AdminSettings::from_json(&v).expect_err("expected error")
 }
 
 #[test]
 fn an_empty_section_gets_local_defaults() {
-    let s = AdminSettings::from_json(&json!({})).expect("기본값");
-    assert_eq!(s.bind, DEFAULT_BIND.parse().expect("주소"));
+    let s = AdminSettings::from_json(&json!({})).expect("defaults");
+    assert_eq!(s.bind, DEFAULT_BIND.parse().expect("addr"));
     assert!(s.bind.ip().is_loopback() && !s.remote && s.hosts.is_empty() && s.trace.is_empty());
     assert_eq!(s.max_failures, 5);
 }
 
 #[test]
 fn the_documented_example_parses_into_typed_settings() {
-    let s = AdminSettings::from_json(&documented()).expect("문서의 예시");
+    let s = AdminSettings::from_json(&documented()).expect("documented example");
     assert_eq!(
         (s.bind.to_string().as_str(), s.remote, s.max_failures),
         ("127.0.0.1:8787", false, 5)
     );
     let t = &s.trace[&ProfileId("personal".into())];
     assert_eq!((t.ids, t.content, t.sample), (Ids::Hash, false, 1.0));
-    let b = t.backend.as_ref().expect("수집기");
+    let b = t.backend.as_ref().expect("collector");
     assert_eq!(
         (b.name.as_str(), b.endpoint.as_str()),
         ("local-collector", "http://127.0.0.1:4318/v1/traces")
@@ -46,7 +46,7 @@ fn the_documented_example_parses_into_typed_settings() {
         b.link.as_deref(),
         Some("https://traces.example/t/{trace_id}")
     );
-    let secret = HeaderValue::Secret(SecretName::parse("collector-token").expect("이름"));
+    let secret = HeaderValue::Secret(SecretName::parse("collector-token").expect("name"));
     assert!(b.headers.contains(&("Authorization".to_owned(), secret)));
     assert!(
         b.headers
@@ -57,8 +57,8 @@ fn the_documented_example_parses_into_typed_settings() {
 #[test]
 fn config_builds_hosts_from_the_actual_address_and_the_extras() {
     let s = AdminSettings::from_json(&json!({"hosts": ["Admin.Internal:8443"], "max_failures": 3}))
-        .expect("설정");
-    let actual = "127.0.0.1:41234".parse().expect("주소");
+        .expect("settings");
+    let actual = "127.0.0.1:41234".parse().expect("addr");
     let cfg = s.config(actual);
     for h in [
         "127.0.0.1:41234",
@@ -78,7 +78,7 @@ fn bad_settings_are_refused_with_the_path_of_the_problem() {
         (json!({"bnd": "x"}), "bnd"),
         (json!({"bind": 8787}), "admin.bind"),
         (json!({"bind": "localhost"}), "admin.bind"),
-        (json!({"bind": "0.0.0.0:8787"}), "원격"),
+        (json!({"bind": "0.0.0.0:8787"}), "admin.bind"),
         (json!({"remote": "yes"}), "admin.remote"),
         (json!({"hosts": "a:1"}), "admin.hosts"),
         (json!({"hosts": ["no-port"]}), "admin.hosts"),
@@ -126,7 +126,7 @@ fn bad_settings_are_refused_with_the_path_of_the_problem() {
         ),
         (
             json!({"trace": {"p": {"endpoint": "http://127.0.0.1:4318", "link": "https://t.example/fixed"}}}),
-            "링크",
+            "{trace_id}",
         ),
         (
             json!({"trace": {"p": {"endpoint": "http://127.0.0.1:4318", "headers": {"A": 1}}}}),
@@ -134,7 +134,7 @@ fn bad_settings_are_refused_with_the_path_of_the_problem() {
         ),
         (
             json!({"trace": {"p": {"endpoint": "http://127.0.0.1:4318", "headers": {"A": {"secret": "Bad Name"}}}}}),
-            "비밀 이름",
+            "admin.trace.p.headers.A",
         ),
         (
             json!({"trace": {"p": {"endpoint": "http://127.0.0.1:4318", "headers": {"A": {"secret": "x", "more": 1}}}}}),
@@ -142,7 +142,7 @@ fn bad_settings_are_refused_with_the_path_of_the_problem() {
         ),
         (
             json!({"trace": {"p": {"endpoint": "http://127.0.0.1:4318", "headers": {"bad name": "v"}}}}),
-            "헤더",
+            "p:",
         ),
     ] {
         let e = err(v.clone());
@@ -153,22 +153,22 @@ fn bad_settings_are_refused_with_the_path_of_the_problem() {
 #[test]
 fn remote_binding_and_disabled_profiles_are_explicit() {
     let s = AdminSettings::from_json(&json!({"bind": "0.0.0.0:8787", "remote": true}))
-        .expect("명시한 원격");
+        .expect("explicit remote");
     assert!(s.remote && !s.bind.ip().is_loopback());
     let s = AdminSettings::from_json(
         &json!({"trace": {"off": null, "on": {"endpoint": "http://127.0.0.1:4318"}}}),
     )
-    .expect("설정");
+    .expect("settings");
     assert_eq!(
         s.trace.keys().map(|k| k.0.as_str()).collect::<Vec<_>>(),
         ["on"],
-        "null이면 꺼짐"
+        "null disables profile tracing"
     );
     let t = &s.trace[&ProfileId("on".into())];
     assert_eq!(
         (t.ids, t.content),
         (Ids::Hash, false),
-        "기본은 가명·내용 꺼짐"
+        "defaults to hashed IDs and content disabled"
     );
     assert_eq!(t.backend.as_ref().map(|b| b.name.as_str()), Some("default"));
 }
@@ -189,7 +189,7 @@ fn a_collector_outside_the_private_network_is_accepted_only_with_the_explicit_re
             "{e}"
         );
     }
-    let s = AdminSettings::from_json(&remote(Some(true))).expect("명시한 원격 수집기");
+    let s = AdminSettings::from_json(&remote(Some(true))).expect("explicit remote collector");
     assert!(
         s.trace[&ProfileId("p".into())]
             .backend
@@ -197,10 +197,9 @@ fn a_collector_outside_the_private_network_is_accepted_only_with_the_explicit_re
             .unwrap()
             .remote
     );
-    // 루프백은 명시 없이 받고, 그때 옵션은 꺼져 있다
     let s =
         AdminSettings::from_json(&json!({"trace": {"p": {"endpoint": "http://127.0.0.1:4318"}}}))
-            .expect("루프백");
+            .expect("loopback");
     assert!(
         !s.trace[&ProfileId("p".into())]
             .backend
@@ -216,8 +215,8 @@ async fn parsed_trace_settings_start_an_exporter_and_unknown_profiles_stay_silen
     let s = AdminSettings::from_json(
         &json!({"trace": {"p": {"endpoint": "http://127.0.0.1:9/v1/traces"}}}),
     )
-    .expect("설정");
-    let e = Exporter::start(s.trace, None, Redactor::default(), Options::default()).expect("시작");
+    .expect("settings");
+    let e = Exporter::start(s.trace, None, Redactor::default(), Options::default()).expect("start");
     assert!(e.stats(&ProfileId("p".into())).is_some_and(|x| x.enabled));
     assert!(e.stats(&ProfileId("other".into())).is_none());
 }
@@ -225,12 +224,12 @@ async fn parsed_trace_settings_start_an_exporter_and_unknown_profiles_stay_silen
 #[test]
 fn langfuse_langsmith_otlp_logs_and_sentry_examples_parse_and_validate() {
     let doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/admin.md"));
-    let first = doc.find("```json\n").expect("첫 예시") + "```json\n".len();
+    let first = doc.find("```json\n").expect("first example") + "```json\n".len();
     let second_start =
-        first + doc[first..].find("```json\n").expect("둘째 예시") + "```json\n".len();
-    let second_end = second_start + doc[second_start..].find("```").expect("예시 끝");
+        first + doc[first..].find("```json\n").expect("second example") + "```json\n".len();
+    let second_end = second_start + doc[second_start..].find("```").expect("end of example");
     let parsed: Value = serde_json::from_str(&doc[second_start..second_end]).expect("JSON");
-    let s = AdminSettings::from_json(&parsed).expect("Langfuse/LangSmith/logs/issues 예시");
+    let s = AdminSettings::from_json(&parsed).expect("Langfuse/LangSmith/logs/issues example");
     assert_eq!(
         s.trace[&ProfileId("personal".into())]
             .backend
@@ -273,7 +272,6 @@ fn langfuse_langsmith_otlp_logs_and_sentry_examples_parse_and_validate() {
         Some(("host", "sentry-key"))
     );
 
-    // 잘못된 logs/issues 설정은 경로를 밝혀 거절한다
     for (v, needle) in [
         (json!({"logs": {}}), "admin.logs.endpoint"),
         (

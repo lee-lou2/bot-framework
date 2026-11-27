@@ -1,4 +1,4 @@
-//! OpenAI 출처 승인 시험용 기록: 카드를 보낼 전달 바인딩, 확정한 게시 영수증, 호출을 막은 이유. 실제 저장소는 같은 값을 승인·호출 기록과 같은 커밋에 저장한다.
+//! In-memory OpenAI-origin approval metadata (delivery bindings, card receipts, and block reasons).
 
 use bot_core::{api::ApprovalBlock, cards::CardReceipt, id::*, ledger::StoredApproval};
 use std::{collections::HashMap, sync::Mutex};
@@ -30,7 +30,6 @@ impl Notes {
             .insert((run.clone(), call.clone()), why);
     }
 
-    /// 게시를 확인한 카드면 그 영수증을 싣는다.
     pub(super) fn with_receipt(
         &self,
         mut stored: StoredApproval,

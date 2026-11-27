@@ -1,6 +1,6 @@
-//! 인증된 접수·민감 DM 분기·원래 대화 회신. 어댑터(CLI·Slack·HTTP)는 같은 순서를 따른다:
-//! verify → normalize → durable accept → ack.
-//! 수락 시험: routes_private_dm_before_queue(`src/ingress/tests.rs`), replays_http_result(`tests/http.rs`).
+//! Authenticated ingress, private DM routing, and reply delivery across CLI, Slack, and HTTP adapters.
+//!
+//! Every adapter follows the same ingress sequence: `verify → normalize → durable accept → ack`.
 pub mod active;
 pub mod cli;
 pub mod delivery;

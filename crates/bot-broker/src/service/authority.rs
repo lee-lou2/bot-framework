@@ -1,5 +1,7 @@
-//! 직접 호출의 권한(사전 승인·지정한 사람의 승인 증거) 판정. 판정은 브로커가 하고, 저장소가 호출을 시작하는 커밋에서 같은 잠금으로 다시 대조한다.
-//! 권한은 루트 run의 직접 호출(`{run}:tool`)에만 붙는다: 모델·위임한 자식·다른 후보·본문 속 트리거 ID는 어느 쪽도 물려받지 못한다.
+//! Direct-call authority evaluation (pre-approval grants and designated human approval evidence).
+//!
+//! Authority applies only to root direct `{run}:tool` calls and is never inherited by model calls
+//! or delegated children; the store re-verifies the authority under the start lock.
 
 use super::{BrokerService, call::Flow};
 use crate::{
@@ -13,17 +15,16 @@ use bot_core::{
     state::ConversationKind,
 };
 
-/// 이 호출에 붙는 권한 판정.
 pub(super) enum Verdict {
-    /// 해당 선언이 없다: 기존 규칙(카드·승인자)을 그대로 따른다.
+    /// No authority declaration applies; fall back to normal approval rules.
     None,
-    /// 이 권한으로 시작을 시도한다.
     Use(Authority),
-    /// 선언은 있지만 지금은 쓸 수 없다: 기존 승인 경로로 대신하지 않고 이 사유로 닫는다.
+    /// Authority is declared but unusable; close with this reason rather than falling back to cards.
     Deny(&'static str),
 }
 
-/// 위험 이유가 승인 한 단계(`Irreversible`·`Policy`)뿐인가. 민감 회상 뒤 확인 같은 독립적인 요건은 대신하지 않는다.
+/// Returns true only when all approval reasons are single-stage (`Irreversible`/`Policy`),
+/// preserving independent gates such as `PrivateRecall`.
 pub(super) fn waivable(class: &Class) -> bool {
     class
         .reasons
@@ -31,7 +32,6 @@ pub(super) fn waivable(class: &Class) -> bool {
         .all(|r| matches!(r, Reason::Irreversible | Reason::Policy))
 }
 
-/// `snapshot`에서 에이전트가 소유한 트리거 하나.
 fn owned<'a>(
     snapshot: &'a Snapshot,
     agent: &bot_core::id::AgentId,
@@ -60,7 +60,6 @@ impl BrokerService {
         }
     }
 
-    /// 사전 승인: 지금 판본이 이 트리거에 `preapproved`를 선언했으면, 지금 선언·설치 판본으로 지문을 다시 계산해 권한으로 낸다.
     fn grant_authority(&self, flow: &Flow) -> Verdict {
         let ctx = &flow.ctx;
         let Some(origin) = ctx.trigger.as_ref().filter(|o| o.agent == ctx.agent) else {
@@ -95,8 +94,8 @@ impl BrokerService {
         }
     }
 
-    /// 지정한 사람의 승인: 승인이 필요한 호출이고 접수 때 묶은 증거가 지금·고정 판본이 지정한 승인자의 이번 이벤트일 때만 권한으로 낸다.
-    /// 어긋나면 증거는 쓰지 않고(감사에 고정 사유만 남긴다) 기존 카드 규칙을 따른다.
+    /// Uses intake human-approval evidence only when both current and pinned snapshots designate the
+    /// same human approver on the matching event trigger; mismatches audit `HUMAN_MISMATCH` and fall back to cards.
     async fn human_authority(&self, flow: &Flow, class: &Class, pointer: bool) -> Verdict {
         if !class.needs_approval() || pointer {
             return Verdict::None;

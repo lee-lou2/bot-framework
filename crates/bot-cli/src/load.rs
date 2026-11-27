@@ -1,4 +1,4 @@
-//! 명령이 함께 쓰는 로딩: 호스트 등록부 → 프로필 집합 검증 → 입구 표 검사. 어느 단계든 실패하면 아무것도 시작하지 않는다.
+//! Shared host, profile set, entrance route, and secret store loading.
 use crate::{
     host::{self, HostFile},
     secrets::admin::SecretAdmin,
@@ -17,11 +17,9 @@ pub struct Loaded {
     pub host: Arc<HostFile>,
     pub registry: Arc<Registry>,
     pub set: Arc<ProfileSet>,
-    /// 이 프로세스를 실행한 OS 사용자
     pub uid: u32,
 }
 
-/// 호스트 등록부를 읽는다. `BOT_HOST_CONFIG`가 없으면 내장 데모 호스트다.
 pub fn load_host(settings: &Settings, uid: u32) -> Result<HostFile, String> {
     let mut host = match &settings.host_config {
         Some(path) => host::load(path).map_err(|e| e.to_string())?,
@@ -31,7 +29,7 @@ pub fn load_host(settings: &Settings, uid: u32) -> Result<HostFile, String> {
             demo
         }
     };
-    // OS 사용자 이름은 여기서 한 번만 풀어 고정한다(지문·입구 표·관리 신원이 같은 표를 쓴다)
+    // Resolve OS user names once so fingerprint, routes, and admin identity share one UID table.
     host.pin_uids()?;
     Ok(host)
 }
@@ -40,7 +38,7 @@ pub fn load(settings: &Settings) -> Result<Loaded, String> {
     let root = settings
         .profiles
         .as_ref()
-        .ok_or("BOT_PROFILES가 필요해요(프로필 폴더 경로)")?;
+        .ok_or("BOT_PROFILES is required (profiles root directory)")?;
     let uid = current_uid().map_err(|e| e.to_string())?;
     let host = load_host(settings, uid)?;
     let registry = Arc::new(Registry::new());
@@ -55,17 +53,14 @@ pub fn load(settings: &Settings) -> Result<Loaded, String> {
     })
 }
 
-/// 활성 프로필 집합 + 호스트 gateway 절로 입구 표를 만들어 본다(별칭 해석·입구 유일성·트리거 검사).
 pub fn check_entrances(active: Active, host: &HostFile) -> Result<Routes, String> {
     Routes::build(active, &host.gateway, &resolve_uid).map_err(|e| e.to_string())
 }
 
-/// 설정한 보관소로 SecretAdmin(읽기·관리 쓰기·캐시 무효화 공유 핸들)을 만든다.
 pub fn secret_admin(settings: &Settings) -> Result<Arc<SecretAdmin>, String> {
     SecretAdmin::from_settings(settings).map(Arc::new)
 }
 
-/// 설정한 보관소로 SecretStore를 만든다.
 pub fn secret_store(settings: &Settings) -> Result<Arc<dyn SecretStore>, String> {
     Ok(secret_admin(settings)?)
 }

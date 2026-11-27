@@ -1,10 +1,4 @@
-//! Slack 이벤트 선택: 채널의 멘션·스레드 답글·반응을 바인딩의 `events`에 따라 접수한다. 인증된 설치(소켓)가 받은 이벤트만 다루고, 팀·프로필·바인딩·멤버 확인은 일반 접수와 같다.
-//!
-//! - **한 글은 한 번만**: 같은 글이 `app_mention`과 `message.channels`로 다른 이벤트 ID로 올 수 있다. 어느 쪽이 먼저 오든 같은 판정이 나오게 글의 **내용**으로 가른다 —
-//!   봇 멘션이 있고 `mention`이 켜져 있으면 멘션(우선), 아니면 스레드 답글이고 `thread_reply`가 켜져 있고 증거가 있으면 답글이다. 요청 ID는 `채널.ts`라 접수는 하나다.
-//! - **스레드 증거**: 답글은 봇이 참여했다고 확인된 스레드(`BotThreads`)에서만 받는다. 수신자가 준 `thread_ts`만으로는 들이지 않는다. 증거를 확인할 수 없으면(저장소 장애)
-//!   ack하지 않아 다시 받고, 증거가 없으면 받았다고만 한다(`thread_unverified`). 자기 봇의 글은 증거로만 기록하고 트리거를 실행하지 않는다.
-//! - **반응**: 등록 채널 글에 단 `reaction_added`. 행위자(`event.user`)가 멤버여야 하고 봇 자신의 반응은 받지 않는다. 이 사건을 받는 트리거가 없으면 한도를 쓰지 않고 받았다고만 한다.
+//! Slack channel event routing for mentions, verified thread replies, and human reactions.
 use super::{
     SlackGateway,
     frame::{Message, Post, Reaction},
@@ -31,7 +25,6 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use tokio_util::sync::CancellationToken;
 
-/// DM과 채널 글 접수가 함께 쓰는 공통 입력 묶음.
 pub(super) struct SlackAdmission {
     pub real: Real,
     pub principal: PrincipalId,
@@ -51,7 +44,6 @@ pub(super) struct SlackAdmission {
     pub track_ux: bool,
 }
 
-/// 채널 글 한 건(`app_mention`과 `message.channels`가 같은 모양으로 합쳐진다)
 pub(super) struct ChannelMsg {
     pub team: String,
     pub channel: String,
@@ -61,7 +53,6 @@ pub(super) struct ChannelMsg {
     pub thread_ts: Option<String>,
     pub files: Vec<String>,
     pub event_id: Option<String>,
-    /// `app_mention` 이벤트로 왔다(그 자체로 멘션이다)
     pub mention_event: bool,
 }
 
@@ -81,15 +72,12 @@ impl From<Message> for ChannelMsg {
     }
 }
 
-/// 이 글이 어떤 종류로 받아지는가
 enum Pick {
     Mention,
-    /// 스레드 답글(루트 ts)
     Reply(String),
 }
 
 impl SlackGateway {
-    /// 스레드에서 중단 명령("중단해줘" 등)을 받으면 진행 중 작업을 가로채 중단한다.
     pub(super) async fn try_stop_mention(
         &self,
         install: &Installation,
@@ -112,7 +100,6 @@ impl SlackGateway {
         .await
     }
 
-    /// 인증된 Slack 글(DM·채널 멘션·스레드 답글)을 소유자를 확인한 `routes`로 접수하고 필요하면 진행 추적을 시작한다.
     pub(super) async fn admit_slack_message(
         &self,
         install: &Installation,
@@ -137,7 +124,6 @@ impl SlackGateway {
             body: msg.body,
             event: msg.event,
         };
-        // 인증된 이벤트 원천은 일반 접수의 넘김·승인 증거와 민감 DM의 봉투 지문에 쓰인다.
         let source = SlackSource {
             kind: msg.source_kind,
             team: msg.team.clone(),
@@ -147,7 +133,7 @@ impl SlackGateway {
             event_id: msg.event_id.unwrap_or(msg.request),
             reaction: None,
         };
-        // 소유자를 확인한 바로 그 표로 접수한다(그 사이 입구 소유자가 바뀌어도 이 설치의 프로필 밖으로 새지 않는다)
+        // Admit against the ownership-verified `routes` snapshot so concurrent updates cannot cross profiles.
         let admission = self
             .ingress
             .admit_sourced(routes, inbound, Some(source))
@@ -173,7 +159,6 @@ impl SlackGateway {
         admission.settled()
     }
 
-    /// 이 설치의 프로필이 소유한 채널 바인딩과 그 `events`. 설치와 맞지 않는 채널·바인딩이 아니면 `None`.
     fn channel_route<'a>(
         &self,
         install: &Installation,
@@ -194,7 +179,7 @@ impl SlackGateway {
         }
     }
 
-    /// 봇이 이 스레드에 참여했다고 기록돼 있는가. 저장소를 읽지 못하면 `None`(확인할 수 없다 — 접수하지 않고 ack도 하지 않는다).
+    /// Returns `None` on store outage so the caller leaves the event unacked for redelivery.
     async fn thread_known(
         &self,
         install: &Installation,
@@ -211,7 +196,8 @@ impl SlackGateway {
             .ok()
     }
 
-    /// 채널 글(멘션 또는 스레드 답글) 접수. 돌려주는 값은 «ack해도 되는가»다.
+    /// Classifies a channel message consistently across `app_mention` and `message.channels` deliveries.
+    /// Returns whether the socket envelope may be acknowledged.
     pub(super) async fn on_channel_message(
         &self,
         install: &Installation,
@@ -222,14 +208,13 @@ impl SlackGateway {
             return true;
         }
         let Ok(routes) = self.ingress.routes() else {
-            return false; // 표를 만들 수 없으면 ack하지 않아 Slack이 다시 보낸다
+            return false;
         };
         let Some((binding, events)) = self.channel_route(install, &routes, &msg.team, &msg.channel)
         else {
             return true;
         };
         let mentioned = msg.mention_event || mentions_bot(&msg.text, &install.bot_user);
-        // 스레드 답글: `thread_ts`가 있고 글 자신이 루트가 아니다
         let root = msg.thread_ts.as_deref().filter(|root| *root != msg.ts);
         let pick = if mentioned && events.contains(&SlackEvent::Mention) {
             Pick::Mention
@@ -239,18 +224,16 @@ impl SlackGateway {
                 .await
             {
                 Some(true) => Pick::Reply(root.to_owned()),
-                // 봇이 참여한 것으로 확인되지 않은 스레드(`thread_unverified`): 접수하지 않는다
                 Some(false) => return true,
                 None => return false,
             }
         } else {
-            // 이 바인딩이 받지 않는 종류(`event_not_allowed`)
             return true;
         };
         let Some(principal) = identity::slack(&install.alias, &msg.user) else {
             return true;
         };
-        // 같은 글은 어떤 이벤트·재전달로 와도 같은 요청이다(채널 + 글 ts)
+        // Deduplicate `app_mention` and `message.channels` for the same post via `channel.ts`.
         let request = format!("{}.{}", msg.channel, msg.ts);
         if !valid_request_id(&request) {
             return true;
@@ -305,7 +288,6 @@ impl SlackGateway {
         .await
     }
 
-    /// 채널의 글 한 건(`message.channels`·`message.groups`). 자기 봇의 글은 스레드 증거로만 기록하고, 사람의 글은 접수 판정으로 보낸다.
     pub(super) async fn on_post(
         &self,
         install: &Installation,
@@ -319,7 +301,7 @@ impl SlackGateway {
             return self.note_own_post(install, &post).await;
         }
         let (true, Some(user)) = (post.human, post.user) else {
-            return true; // 다른 앱·봇의 글은 받지 않는다
+            return true;
         };
         self.on_channel_message(
             install,
@@ -339,7 +321,7 @@ impl SlackGateway {
         .await
     }
 
-    /// 인증된 자기 봇의 글을 스레드 증거로 기록한다(트리거는 실행하지 않는다). 글이 스레드 안이면 그 루트, 아니면 글 자신이 루트다.
+    /// Records the bot's own channel post as thread-participation evidence without firing triggers.
     async fn note_own_post(&self, install: &Installation, post: &Post) -> bool {
         let (Some(threads), Ok(routes)) = (&self.threads, self.ingress.routes()) else {
             return self.threads.is_none() || self.ingress.routes().is_ok();
@@ -359,12 +341,10 @@ impl SlackGateway {
             .is_ok()
     }
 
-    /// 등록 채널 글에 단 반응 접수. 돌려주는 값은 «ack해도 되는가»다.
-    /// 순서: 팀·봇 자신 → 등록 채널·`events`·이 사건을 받는 트리거 → 프로필 멤버 → **지금 활성 사람 계정인가**(`users.info`, 기억하지 않는다) → 회신 스레드 확인 → 접수.
-    /// 사람이 아니거나 확인하지 못하면 후보·기본 대화·승인 증거 없이 고정 사유만 남기고 ack한다(Slack의 ack 기한 안에 끝난다).
+    /// Admits channel reactions only after verifying trigger match, membership, and live human actor status.
     pub(super) async fn on_reaction(&self, install: &Installation, reaction: Reaction) -> bool {
         if reaction.team != install.team || reaction.user == install.bot_user {
-            return true; // 다른 팀·봇 자신의 반응
+            return true;
         }
         let Ok(routes) = self.ingress.routes() else {
             return false;
@@ -377,7 +357,6 @@ impl SlackGateway {
         if !events.contains(&SlackEvent::Reaction) {
             return true;
         }
-        // 이 사건을 받는 트리거가 하나도 없으면 한도를 쓰지 않고 받았다고만 한다(기본 대화는 직접 도구 후보가 있을 때만 의미가 있다)
         let route = routes.find(&Real::SlackChannel {
             team: reaction.team.clone(),
             channel: reaction.channel.clone(),
@@ -394,20 +373,19 @@ impl SlackGateway {
         if !wanted || !valid_request_id(&reaction.event_id) {
             return true;
         }
-        // 멤버가 아니면 Slack을 부르지 않는다(멤버·한도 확인은 접수가 다시 한다)
+        // Skip Slack `users.info` lookup for non-members.
         if !route.is_some_and(|route| route.snapshot.members.contains_key(&principal)) {
             return true;
         }
         if let Actor::Refused(reason) = self.reaction_actor(install, &reaction.user).await {
-            // 고정 사유만 남긴다(사용자·글 내용은 싣지 않는다). scope 부족은 운영자가 고쳐야 하니 눈에 띄게 남긴다
             if reason == NOT_HUMAN {
-                tracing::debug!(workspace = %install.alias, reason, "사람이 아닌 계정의 반응은 받지 않아요");
+                tracing::debug!(workspace = %install.alias, reason, "ignoring reaction from non-human account");
             } else {
-                tracing::warn!(workspace = %install.alias, reason, "반응한 사람을 확인하지 못해 받지 않아요 — 봇 scope `users:read`와 Slack 연결을 확인하세요");
+                tracing::warn!(workspace = %install.alias, reason, "could not verify reacting user — check bot scope `users:read` and Slack connectivity");
             }
             return true;
         }
-        // 회신은 봇이 참여한 것으로 확인된 스레드(그 글이 루트)로만 간다. 반응이 달린 글의 ts를 스레드 루트로 짐작하지 않는다(답글일 수 있다): 확인되지 않으면 채널 최상위다.
+        // Only reply in-thread when `item_ts` is a verified bot thread root; otherwise post top-level.
         let thread = match self
             .thread_known(install, binding, &reaction.channel, &reaction.item_ts)
             .await

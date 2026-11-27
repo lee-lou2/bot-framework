@@ -1,13 +1,4 @@
-//! CLI 어댑터. 로컬 유닉스 소켓으로 받고, 접속한 프로세스의 uid(피어 자격)로 OS 사용자를 확인한다 — 요청 글로는 신원을
-//! 정할 수 없다. 접수 순서는 다른 입구와 같다: 신원 확인 → 정규화 → `Ingress::admit` → 응답.
-//!
-//! 한 연결에 요청 한 줄(UTF-8 JSON)과 응답 여러 줄이다. `v`는 프로토콜 판본(1).
-//! - 요청 `{"v":1,"op":"chat","profile"?,"request","thread"?,"text","wait"?}` 또는
-//!   `{"v":1,"op":"result","profile"?,"request","wait"?}`(같은 요청 ID로 결과 재조회·재부착).
-//! - 응답 `accepted` → (`state`)* → `result`, 또는 `error`(`code`, 고정 문구 `message`, 선택 `retry_after_secs`).
-//!
-//! 요청 ID는 호출자가 정하고 재시도에도 같아야 한다(`client::new_request_id`). 연결이 끊겨도 run은 계속되고,
-//! 같은 요청 ID로 다시 붙으면 기존 결과를 받는다. 회신은 outbox가 아니라 상태 조회로 전달한다.
+//! CLI Unix-socket adapter using OS peer UID for caller identity and line-delimited JSON framing.
 pub mod client;
 pub mod socket;
 
@@ -39,10 +30,9 @@ use tokio_util::sync::CancellationToken;
 
 pub const VERSION: u64 = 1;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
-/// 한 연결이 결과를 기다리는 최대 시간. 넘으면 끊고, 같은 요청 ID로 다시 붙으면 된다.
 const MAX_WAIT: Duration = Duration::from_secs(3600);
 const MAX_CONNECTIONS: usize = 64;
-/// 요청 줄에서 본문 한도 외에 허용하는 JSON 틀의 여유
+/// Extra byte allowance for JSON envelope framing beyond `limits.body_bytes`.
 const FRAME_SLACK: usize = 1024;
 
 pub struct CliGateway {
@@ -66,26 +56,25 @@ struct Request {
     wait: bool,
 }
 
-/// 결과·상태를 돌려주기 직전에 지금의 바인딩·멤버 권한을 다시 확인하는 데 쓰는 신원 묶음
 struct Guard {
     real: Real,
     owner: Owner,
     principal: PrincipalId,
 }
 
-/// 오류 코드와 사람이 읽는 고정 문구. 요청 내용은 싣지 않는다.
+/// Fixed user-facing messages per error code; never echo request content.
 fn message_of(code: &str) -> &'static str {
     match code {
-        "invalid" => "요청 형식이 올바르지 않아요",
-        "too_large" => "요청이 너무 커요",
-        "forbidden" => "이 사용자는 이 프로필을 쓸 수 없어요",
-        "no_entrance" => "이 사용자에게 연결된 입구가 없어요",
-        "profile_required" => "프로필이 여러 개예요 — --profile로 골라 주세요",
-        "rate_limited" => "요청이 너무 많아요 — 잠시 뒤 다시 시도해 주세요",
-        "conflict" => "같은 요청 ID에 다른 내용이 왔어요",
-        "not_found" => "그런 요청이 없어요",
-        "timeout" => "결과를 기다리는 시간이 지났어요 — 같은 요청 ID로 다시 붙어 보세요",
-        _ => "지금은 접수할 수 없어요 — 같은 요청 ID로 다시 시도해 주세요",
+        "invalid" => "Invalid request format",
+        "too_large" => "Request is too large",
+        "forbidden" => "This user cannot access this profile",
+        "no_entrance" => "No entrance is mapped to this user",
+        "profile_required" => "Multiple profiles available — select one with --profile",
+        "rate_limited" => "Too many requests — try again shortly",
+        "conflict" => "A different request already exists with this request ID",
+        "not_found" => "Request not found",
+        "timeout" => "Timed out waiting for result — reattach with the same request ID",
+        _ => "Temporarily unavailable — retry with the same request ID",
     }
 }
 
@@ -135,7 +124,6 @@ enum LineError {
     Closed,
 }
 
-/// 줄바꿈까지 읽되 `limit` 바이트를 넘으면 멈춘다.
 async fn read_line(
     reader: &mut BufReader<OwnedReadHalf>,
     limit: usize,
@@ -168,7 +156,6 @@ async fn read_line(
     String::from_utf8(line).map_err(|_| LineError::Closed)
 }
 
-/// 한 줄을 쓴다. 쓰지 못하면(상대가 끊음) false.
 async fn emit(out: &mut OwnedWriteHalf, value: Value) -> bool {
     let mut line = value.to_string();
     line.push('\n');
@@ -179,7 +166,6 @@ async fn fail(out: &mut OwnedWriteHalf, code: &str, retry_after: Option<u64>) {
     fail_with(out, code, message_of(code), retry_after).await;
 }
 
-/// 고정 문구 대신 상황에 맞는 문구를 싣는 오류. `code`는 그대로라 기계가 읽는 쪽은 달라지지 않는다.
 async fn fail_with(out: &mut OwnedWriteHalf, code: &str, message: &str, retry_after: Option<u64>) {
     let mut value = json!({"v": VERSION, "type": "error", "code": code, "message": message});
     if let Some(secs) = retry_after {
@@ -188,7 +174,7 @@ async fn fail_with(out: &mut OwnedWriteHalf, code: &str, message: &str, retry_af
     emit(out, value).await;
 }
 
-/// 이 OS 사용자가 CLI로 닿는 프로필 이름들(쉼표로 이은 글). 이 사용자의 입구만 담으므로 다른 사용자의 프로필은 드러나지 않는다.
+/// Only lists profiles reachable by this OS user so other users' profiles are never disclosed.
 fn names(profiles: &[ProfileId]) -> String {
     profiles
         .iter()
@@ -197,17 +183,15 @@ fn names(profiles: &[ProfileId]) -> String {
         .join(", ")
 }
 
-/// 입구가 없을 때의 문구. `asked`는 사용자가 고른 프로필, `mine`은 이 사용자가 닿는 프로필들이다.
-/// 닿는 프로필이 있으면 그 이름과 고르는 법을, 하나도 없으면 호스트 설정에서 확인할 곳을 알려 준다.
 fn no_entrance_message(asked: Option<&ProfileId>, mine: &[ProfileId]) -> String {
     match (mine.first(), asked) {
         (Some(first), Some(asked)) => format!(
-            "프로필 `{}`에는 이 사용자에게 연결된 입구가 없어요. 이 사용자가 쓸 수 있는 프로필: {} — `--profile {}`처럼 골라 주세요",
+            "No entrance is mapped to this user for profile `{}`. Available profiles: {} — select one with `--profile {}`",
             asked.0,
             names(mine),
             first.0
         ),
-        _ => "이 사용자에게 연결된 입구가 없어요. 프로필의 cli 바인딩 `account`가 호스트 설정 `gateway.cli.accounts`에서 이 OS 사용자에게 연결돼 있는지 확인해 주세요".to_owned(),
+        _ => "No entrance is mapped to this user. Check that the profile's CLI binding `account` is mapped to this OS user in `gateway.cli.accounts`.".to_owned(),
     }
 }
 
@@ -237,7 +221,6 @@ impl CliGateway {
         }
     }
 
-    /// stop이 오면 새 연결을 받지 않고 돌아온다(진행 중인 연결은 stop을 보고 스스로 끝낸다).
     pub async fn serve(self: Arc<Self>, listener: UnixListener, stop: CancellationToken) {
         loop {
             tokio::select! {
@@ -248,7 +231,7 @@ impl CliGateway {
                         continue;
                     };
                     let Ok(permit) = self.connections.clone().try_acquire_owned() else {
-                        continue; // 한도를 넘는 연결은 바로 닫는다
+                        continue;
                     };
                     let gateway = self.clone();
                     let stop = stop.clone();
@@ -262,7 +245,7 @@ impl CliGateway {
     }
 
     async fn connection(&self, stream: UnixStream, stop: CancellationToken) {
-        // 신원은 접속한 프로세스의 uid뿐이다
+        // Identity comes solely from kernel peer credentials, never from request text.
         let Ok(credential) = stream.peer_cred() else {
             return;
         };
@@ -303,7 +286,7 @@ impl CliGateway {
                 }
                 _ => {
                     let message = format!(
-                        "프로필이 여러 개예요: {} — `--profile`로 골라 주세요(예: `--profile {}`)",
+                        "Multiple profiles available: {} — select one with `--profile` (e.g. `--profile {}`)",
                         names(&mine),
                         mine[0].0
                     );
@@ -355,7 +338,7 @@ impl CliGateway {
                     body: json!({"text": request.text}),
                     event: Event::Message,
                 };
-                // 인증에 쓴 바로 그 표로 접수한다(그 사이 입구 소유자가 바뀌어도 같은 스냅숏으로 커밋된다)
+                // Admit against the exact route snapshot used for authentication.
                 let admission = self.ingress.admit_with(&routes, inbound).await;
                 drop(routes);
                 match admission {
@@ -380,7 +363,7 @@ impl CliGateway {
             Op::Result => {
                 drop(routes);
                 let read = self.store.status(key.clone()).await;
-                // 철회된 사용자에게는 요청이 있는지도 알리지 않고, 구판 프로세스는 결과를 내보내지 않는다
+                // Do not reveal request existence to revoked users or emit results from stale processes.
                 if let Some((code, retry)) = self.withheld(&guard).await {
                     return fail(out, code, retry).await;
                 }
@@ -404,8 +387,6 @@ impl CliGateway {
         }
     }
 
-    /// 응답 직전 재확인. 막아야 하면 오류 코드(와 재시도 초)를 준다: 멤버가 아니면 `forbidden`, 이 프로세스의
-    /// 판본이 저장소의 활성 판본이 아니면(구판) `unavailable`이다.
     async fn withheld(&self, guard: &Guard) -> Option<(&'static str, Option<u64>)> {
         match self
             .ingress
@@ -418,7 +399,6 @@ impl CliGateway {
         }
     }
 
-    /// 끝날 때까지 상태를 지켜보며 상태가 바뀔 때마다 알린다. 상대가 끊으면 멈춘다(run은 계속된다).
     async fn follow(
         &self,
         key: RequestKey,
@@ -432,7 +412,7 @@ impl CliGateway {
         let mut last: Option<&'static str> = None;
         loop {
             let read = self.store.status(key.clone()).await;
-            // 읽는 사이·기다리는 동안 권한이 철회됐을 수 있다 — 상태·결과를 내보내기 직전에 다시 확인한다
+            // Re-check membership and active set right before emitting status or result.
             if let Some((code, retry)) = self.withheld(guard).await {
                 return fail(out, code, retry).await;
             }
@@ -462,7 +442,7 @@ impl CliGateway {
                 return fail(out, "timeout", None).await;
             }
             let disconnected = async {
-                // 상대가 더 보내는 바이트는 버리고, 닫히면(0바이트) 끊긴 것이다
+                // Drain any unexpected client bytes; EOF means the peer disconnected.
                 loop {
                     match input.fill_buf().await {
                         Ok([]) | Err(_) => return,

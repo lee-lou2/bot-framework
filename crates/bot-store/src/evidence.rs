@@ -1,5 +1,5 @@
-//! 지정한 사람의 승인 증거: 접수 때 루트 run에 묶고, 호출 시작 커밋에서만 한 번 소비한다(`authority::human`).
-//! 본문·반응 대상 메시지 전문은 저장하지 않는다. 증거 ID는 (프로필, 팀, 이벤트)다.
+//! Human-origin approval evidence bound to root runs at intake and consumed once at call start (`authority::human`).
+//! Never stores message bodies; evidence identity is `(profile, team, event_id)`.
 
 use crate::{
     calls::fence,
@@ -14,9 +14,7 @@ use bot_core::{
 };
 use sqlx::Row;
 
-/// 어댑터가 인증한 이번 이벤트의 원천(`extras.source`)과 접수 명령에서 승인 증거를 만들어 접수 커밋 안에서 루트 run에 묶는다.
-/// 행위자는 접수의 요청자(사람), 바인딩은 접수의 바인딩이며 대상은 직접 도구여야 한다. 첫 후보 트리거 ID(`extras.chain`)가 없으면 만들지 않는다
-/// (증거가 없으면 지정한 사람의 승인은 쓰이지 않고 기존 카드 규칙을 따른다).
+/// Records adapter-verified event evidence on a direct-tool root run when human-triggered with a matching first trigger candidate.
 pub(crate) async fn bind_in(
     tx: &mut Tx<'_>,
     a: &Accept,
@@ -72,7 +70,7 @@ pub(crate) async fn bind_in(
 }
 
 impl Store {
-    /// 이 run(루트)이 접수 때 묶은 증거. 없으면 None. 현재 claim을 확인하는 읽기 전용이다.
+    /// Returns the run's intake-bound evidence after checking the active set and current claim.
     pub(crate) async fn call_evidence(&self, at: &Attempt) -> R<Option<Evidence>> {
         let mut tx = self.pool.begin().await?;
         self.check_pinned(&mut tx).await?;

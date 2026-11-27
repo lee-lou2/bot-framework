@@ -133,12 +133,12 @@ fn only_the_exact_builtin_tool_id_is_reserved() {
     assert_eq!(
         named("memory", "recall"),
         (true, vec![]),
-        "memory 스킬 자체는 허용"
+        "memory skill itself is allowed"
     );
     assert_eq!(
         named("mail", "share"),
         (true, vec![]),
-        "같은 도구 이름은 허용"
+        "same tool name under another skill is allowed"
     );
     assert_eq!(named("memory-notes", "share"), (true, vec![]));
 }
@@ -152,7 +152,6 @@ fn locked(server: &str, id: &str, description: &str, schema: Value) -> Lock {
     locked_as(server, id, id, description, schema)
 }
 
-/// 서버가 `name`으로 내세우는 도구를 `id`로 묶은 잠금.
 fn locked_as(server: &str, id: &str, name: &str, description: &str, schema: Value) -> Lock {
     let sha = bot_core::mcp::definition_sha256(name, description, &schema).unwrap();
     Lock {
@@ -194,7 +193,7 @@ fn remote_schema() -> Value {
 
 #[test]
 fn an_omitted_input_comes_from_the_lock_and_its_definition_binds_into_the_revision() {
-    let lock = locked("demo", "send", "보낸다", remote_schema());
+    let lock = locked("demo", "send", "Sends a message", remote_schema());
     let (parsed, codes) = parse_locked(doc(bare()), Some(&lock));
     assert!(codes.is_empty(), "{codes:?}");
     let tools = parsed.unwrap();
@@ -205,11 +204,9 @@ fn an_omitted_input_comes_from_the_lock_and_its_definition_binds_into_the_revisi
     );
     assert!(tool.schema.validate(&json!({"q": "a"})).is_empty());
     assert!(!tool.schema.validate(&json!({"q": 1})).is_empty());
-    // 같은 스키마라도 설명이 바뀌면(정의 해시가 바뀌면) 도구 판본이 달라진다
-    let described = locked("demo", "send", "다른 설명", remote_schema());
+    let described = locked("demo", "send", "Different description", remote_schema());
     let changed = parse_locked(doc(bare()), Some(&described)).0.unwrap();
     assert_ne!(changed[0].revision, tool.revision);
-    // 같은 스키마를 인라인으로 적은 도구와도 판본이 다르다(해시가 고정돼 있다)
     let mut inline = bare();
     inline["input"] = remote_schema();
     let inline = parse_locked(doc(inline), None).0.unwrap();
@@ -229,9 +226,7 @@ fn an_inline_input_wins_and_omitting_both_is_an_error() {
     assert!(tools[0].definition.is_none());
     assert!(tools[0].schema.validate(&json!({"q": "a"})).is_empty());
     assert!(!tools[0].schema.validate(&json!({"zzz": "a"})).is_empty());
-    // 잠금도 input도 없다
     assert_eq!(parse_locked(doc(bare()), None).1, ["missing-input"]);
-    // 잠금에 이 도구가 없다(다른 항목은 쓰이지 않는다고 알린다)
     let elsewhere = locked("demo", "other", "d", remote_schema());
     let (parsed, codes) = parse_locked(doc(bare()), Some(&elsewhere));
     assert!(parsed.is_none());
@@ -266,12 +261,11 @@ fn a_lock_schema_outside_the_vocabulary_is_an_error_like_an_inline_one() {
 }
 
 fn revision_of(parsed: (Option<Vec<Arc<Tool>>>, Vec<&'static str>)) -> bot_core::id::Revision {
-    parsed.0.expect("받아들여야 해요")[0].revision.clone()
+    parsed.0.expect("expected acceptance")[0].revision.clone()
 }
 
 #[test]
 fn a_remote_name_is_optional_binds_the_revision_and_must_match_the_lock() {
-    // 이름을 id와 같게 적은 것은 쓰지 않은 것과 같다(판본도 그대로)
     let lock = locked("demo", "send", "d", remote_schema());
     let mut same = bare();
     same["name"] = json!("send");
@@ -281,7 +275,6 @@ fn a_remote_name_is_optional_binds_the_revision_and_must_match_the_lock() {
         parsed.unwrap()[0].revision,
         revision_of(parse_locked(doc(bare()), Some(&lock)))
     );
-    // 서버 이름이 다르면 그 이름이 도구에 실리고, 해시는 그 이름으로 계산한다
     let mut named = bare();
     named["name"] = json!("send_mail");
     let locked_mail = locked_as("demo", "send", "send_mail", "d", remote_schema());
@@ -294,7 +287,6 @@ fn a_remote_name_is_optional_binds_the_revision_and_must_match_the_lock() {
         tool.definition.as_deref(),
         bot_core::mcp::definition_sha256("send_mail", "d", &remote_schema()).as_deref()
     );
-    // 다른 서버 이름은 다른 도구다(판본이 다르다)
     let mut renamed = bare();
     renamed["name"] = json!("send_mail_v2");
     let locked_v2 = locked_as("demo", "send", "send_mail_v2", "d", remote_schema());
@@ -302,14 +294,12 @@ fn a_remote_name_is_optional_binds_the_revision_and_must_match_the_lock() {
         revision_of(parse_locked(doc(renamed), Some(&locked_v2))),
         tool.revision
     );
-    // 같은 이름을 인라인 input으로 쓴 도구도 이름이 판본에 든다
     let mut inline = named.clone();
     inline["input"] = remote_schema();
     let inline_named = revision_of(parse_locked(doc(inline.clone()), None));
     inline.as_object_mut().unwrap().remove("name");
     inline["input"] = remote_schema();
     assert_ne!(inline_named, revision_of(parse_locked(doc(inline), None)));
-    // 잠금과 tools.yaml이 정한 서버 이름이 다르면 거절한다(어느 쪽이 낡았는지 다시 동기화하라고 알린다)
     let (parsed, codes) = parse_locked(doc(bare()), Some(&locked_mail));
     assert!(parsed.is_none());
     assert_eq!(codes, ["lock-name-mismatch"]);
@@ -330,7 +320,7 @@ fn an_input_whose_top_level_is_a_reference_is_checked_after_expansion() {
     let (parsed, codes) = parse_text(doc(write));
     assert!(codes.is_empty(), "{codes:?}");
     let tools = parsed.unwrap();
-    // 컴파일한 스키마는 펼친 것이고, 도구가 고정한 입력(실행할 때 서버와 견주는 값)은 받은 그대로다
+    // Compiled schema is expanded; pinned `input` preserves `$defs` for runtime server comparison.
     assert!(
         tools[0]
             .schema

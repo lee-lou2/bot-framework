@@ -1,4 +1,4 @@
-//! 해독 오류는 행 단위로 격리하며, DB 장애는 현재 트랜잭션을 되돌린다.
+//! Decode errors quarantine individual rows; database failures roll back the current transaction.
 
 use crate::support::*;
 use bot_core::{command::Delegate, id::*, port::*};
@@ -22,13 +22,13 @@ async fn an_undecodable_target_is_quarantined_and_the_next_run_claims() {
         return;
     };
     let bad = runs(&db)
-        .accept(accept("personal", "broken", "원래 입력"))
+        .accept(accept("personal", "broken", "original input"))
         .await
         .unwrap();
-    let raw = json!({"kind": "agent", "agent": "main", "legacy": "원래 대상"});
+    let raw = json!({"kind": "agent", "agent": "main", "legacy": "original target"});
     set_target(&db, &bad, &raw).await;
     let healthy = runs(&db)
-        .accept(accept("work", "healthy", "작업"))
+        .accept(accept("work", "healthy", "task"))
         .await
         .unwrap();
 
@@ -48,7 +48,7 @@ async fn an_undecodable_target_is_quarantined_and_the_next_run_claims() {
     assert_eq!(target, raw);
     assert_eq!(
         serde_json::from_str::<Value>(&input).unwrap()["text"],
-        "원래 입력"
+        "original input"
     );
     assert_eq!(db.scalar::<i64>("select count(*) from bot_audit where action = 'run.dead' and verdict = 'invalid_target'").await, 1);
 
@@ -57,7 +57,7 @@ async fn an_undecodable_target_is_quarantined_and_the_next_run_claims() {
             profile_id(),
             bad.clone(),
             PrincipalId("operator".into()),
-            "점검".into(),
+            "checked".into(),
         )
     };
     assert!(matches!(resume().await, Err(Error::Invalid)));
@@ -65,7 +65,7 @@ async fn an_undecodable_target_is_quarantined_and_the_next_run_claims() {
     set_target(
         &db,
         &bad,
-        &json!({"kind": "agent", "agent": "main", "instruction": "수정"}),
+        &json!({"kind": "agent", "agent": "main", "instruction": "fixed"}),
     )
     .await;
     resume().await.unwrap();
@@ -84,7 +84,7 @@ async fn an_undecodable_child_waits_for_its_parent_lock_without_blocking_other_r
             parent: parent.clone(),
             step: "child".into(),
             child: AgentId("main/child".into()),
-            instruction: "조사".into(),
+            instruction: "investigate".into(),
             scopes: scopes(&["run"]),
             checked_revision: Revision("r1".into()),
         })
@@ -97,7 +97,7 @@ async fn an_undecodable_child_waits_for_its_parent_lock_without_blocking_other_r
     )
     .await;
     let healthy = runs(&db)
-        .accept(accept("work", "independent", "작업"))
+        .accept(accept("work", "independent", "task"))
         .await
         .unwrap();
     let mut tx = db.store.pool().begin().await.unwrap();
@@ -138,7 +138,7 @@ async fn a_database_error_during_claim_leaves_the_run_ready() {
         return;
     };
     let run = runs(&db)
-        .accept(accept("personal", "unavailable", "작업"))
+        .accept(accept("personal", "unavailable", "task"))
         .await
         .unwrap();
     db.sql("alter table bot_steps rename to test_broken_steps")

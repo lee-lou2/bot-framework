@@ -1,16 +1,16 @@
-# 요구사항 정리
+# Requirements Spec Writing
 
-흩어진 요청(대화·메모·이슈)을 한 장의 요구사항으로 묶는다. 없는 정보는 만들지 않고 「열린 질문」으로 남긴다.
+Turn scattered inputs (chats, notes, issues) into a single-page spec. Never invent missing details; capture them under Open Questions.
 
-## 틀
-1. **배경**: 왜 필요한가. 누가 겪는 문제인가.
-2. **목표와 비목표**: 이번에 이루는 것, 일부러 하지 않는 것.
-3. **사용자 시나리오**: 누가 어떤 순서로 무엇을 하는가(2~3개).
-4. **요구사항**: 필수와 선택으로 나눠 번호를 붙인다. 각 항목은 확인할 수 있는 문장으로 쓴다.
-5. **성공 지표**: 무엇이 어떻게 변하면 성공인가(숫자와 기준 시점).
-6. **일정과 의존성**: 먼저 끝나야 하는 일, 필요한 사람.
-7. **열린 질문**: 답이 필요한 것과 답할 사람.
+## Template
+1. **Background**: Why is this needed and who has the problem?
+2. **Goals & Non-Goals**: What is in scope and what is intentionally excluded.
+3. **User Scenarios**: Who does what, in what order (2-3 scenarios).
+4. **Requirements**: Numbered items split into must-have and nice-to-have; each item must be verifiable.
+5. **Success Metrics**: Measurable targets and baseline timeframes.
+6. **Schedule & Dependencies**: Prerequisites and required owners.
+7. **Open Questions**: Unanswered questions and who needs to answer them.
 
-## 우선순위
-영향(사용자·매출·위험)과 노력으로 먼저 나눈다. 같으면 마감이 가까운 일, 되돌리기 어려운 일을 앞에 둔다.
-항목마다 한 줄 이유를 적고, 근거가 추정이면 추정이라고 쓴다.
+## Prioritization
+Rank by impact (users, revenue, risk) versus effort. Break ties by nearest deadline and irreversibility.
+Add a one-line rationale per item and label estimates as estimates.

@@ -1,5 +1,4 @@
-//! triggers.yaml의 `preapproved`(운영자가 사전 승인한 정적 호출)와 `human_approval`(지정한 사람의 메시지·반응 승인).
-//! 모양은 파일 안에서(`parse`), 도구·바인딩·멤버가 얽힌 규칙은 해석 단계에서(`check`) 본다. 코드는 계약의 고정 사유를 그대로 쓴다.
+//! Parsing and semantic validation of trigger `preapproved` and `human_approval` declarations.
 use crate::{
     issue::Issues,
     model::{Binding, ProfileParts, Source, Tool, Trigger, TriggerTarget},
@@ -16,17 +15,14 @@ use bot_core::{
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
-/// 한 트리거에서 읽은 두 선언.
 #[derive(Default)]
 pub struct Declared {
     pub preapproved: Option<Preapproval>,
     pub human_approval: Option<HumanApproval>,
 }
 
-/// 지정한 사람의 승인(`human_approval`) 승인자 목록의 최대 길이.
 const MAX_APPROVERS: usize = 16;
 
-/// `preapproved`·`human_approval`의 모양을 읽는다. 어긋나면 고정 코드로 보고하고 해당 선언은 없는 것으로 둔다(오류가 이미 났다).
 pub fn parse(obj: &Map<String, Value>, path: &str, at: &str, issues: &mut Issues) -> Declared {
     Declared {
         preapproved: obj
@@ -49,7 +45,7 @@ fn preapproved(value: &Value, path: &str, at: &str, issues: &mut Issues) -> Opti
             issues,
             path,
             at,
-            "preapproved는 {max_per_day, targets} 객체여야 해요",
+            "preapproved must be a {max_per_day, targets} object",
         );
     };
     if let Some(extra) = map
@@ -60,7 +56,9 @@ fn preapproved(value: &Value, path: &str, at: &str, issues: &mut Issues) -> Opti
             issues,
             path,
             at,
-            &format!("preapproved에 알 수 없는 키 `{extra}`가 있어요(max_per_day·targets만 써요)"),
+            &format!(
+                "preapproved has unknown key `{extra}` (only max_per_day and targets are allowed)"
+            ),
         );
     }
     let Some(max) = map
@@ -72,7 +70,7 @@ fn preapproved(value: &Value, path: &str, at: &str, issues: &mut Issues) -> Opti
             issues,
             path,
             at,
-            &format!("max_per_day는 1..={MAX_PER_DAY} 정수여야 해요"),
+            &format!("max_per_day must be an integer in 1..={MAX_PER_DAY}"),
         );
     };
     let Some(list) = map
@@ -84,7 +82,7 @@ fn preapproved(value: &Value, path: &str, at: &str, issues: &mut Issues) -> Opti
             issues,
             path,
             at,
-            &format!("targets는 1..={MAX_PAIRS}개의 {{operation, target}} 목록이어야 해요"),
+            &format!("targets must be a list of 1..={MAX_PAIRS} {{operation, target}} entries"),
         );
     };
     let mut targets = BTreeSet::new();
@@ -100,7 +98,7 @@ fn preapproved(value: &Value, path: &str, at: &str, issues: &mut Issues) -> Opti
                 issues,
                 path,
                 at,
-                "targets의 각 항목은 정확한 {operation, target}이어야 해요(와일드카드·접두어·URL·공백·자격 값은 쓸 수 없어요)",
+                "each target entry must be an exact {operation, target} pair (no wildcards, prefixes, URLs, whitespace, or credential values)",
             );
         };
         if !targets.insert(pair) {
@@ -108,7 +106,7 @@ fn preapproved(value: &Value, path: &str, at: &str, issues: &mut Issues) -> Opti
                 issues,
                 path,
                 at,
-                "targets에 같은 (operation, target)이 두 번 있어요",
+                "targets contains a duplicate (operation, target) pair",
             );
         }
     }
@@ -124,25 +122,25 @@ fn human(value: &Value, path: &str, at: &str, issues: &mut Issues) -> Option<Hum
         None
     };
     let Some(map) = value.as_object() else {
-        return fail("human_approval은 {approvers: [...]} 객체여야 해요");
+        return fail("human_approval must be an {approvers: [...]} object");
     };
     if map.len() != 1 {
-        return fail("human_approval은 approvers만 가져요");
+        return fail("human_approval must only contain approvers");
     }
     let Some(list) = map
         .get("approvers")
         .and_then(Value::as_array)
         .filter(|l| !l.is_empty() && l.len() <= MAX_APPROVERS)
     else {
-        return fail("approvers는 1..=16명의 사람 신원 목록이어야 해요");
+        return fail("approvers must be a list of 1..=16 human identities");
     };
     let mut seen = BTreeSet::new();
     for item in list {
         let Some(who) = item.as_str() else {
-            return fail("approvers의 각 항목은 `slack:<워크스페이스>/<사용자>` 문자열이어야 해요");
+            return fail("each approver must be a `slack:<workspace>/<user>` string");
         };
         if !seen.insert(who.to_owned()) {
-            return fail("approvers에 같은 사람이 두 번 있어요");
+            return fail("approvers contains a duplicate identity");
         }
     }
     Some(HumanApproval {
@@ -150,7 +148,6 @@ fn human(value: &Value, path: &str, at: &str, issues: &mut Issues) -> Option<Hum
     })
 }
 
-/// 도구·바인딩·멤버를 아는 해석 단계의 규칙. `tool`은 트리거가 부르는 고정 도구(있으면).
 pub fn check(
     p: &ProfileParts,
     t: &Trigger,
@@ -175,28 +172,30 @@ fn preapproved_rules(
 ) {
     let mut invalid = |why: &str| issues.error_at(INVALID, file, at, why);
     if !matches!(t.on, Source::Cron { beat: false, .. }) {
-        invalid("preapproved는 beat가 아닌 cron 트리거에만 쓸 수 있어요");
+        invalid("preapproved is only allowed on non-beat cron triggers");
     }
     if !matches!(t.target, TriggerTarget::Tool { .. }) {
-        invalid("preapproved는 모델 없이 고정 도구를 부르는 트리거(target.tool)에만 쓸 수 있어요");
+        invalid(
+            "preapproved is only allowed on direct tool triggers (`target.tool`) without a model",
+        );
     }
     if !t.input.is_empty() {
-        invalid("preapproved는 input 매핑과 함께 쓸 수 없어요(인자는 고정이어야 해요)");
+        invalid("preapproved cannot be combined with input mappings (args must be static)");
     }
     if t.private {
-        invalid("preapproved는 private 트리거에 쓸 수 없어요");
+        invalid("preapproved is not allowed on private triggers");
     }
     if t.human_approval.is_some() {
-        invalid("preapproved와 human_approval은 함께 쓸 수 없어요");
+        invalid("preapproved and human_approval cannot be used together");
     }
     if let Some(tool) = tool {
-        // 판본 고정·대상 결박·쓰기 경유(`effect.request`)를 보증하려면 단계 원장을 쓰는 도구여야 한다
+        // Requires an effect-ledger tool to guarantee revision pinning, target binding, and `effect.request` mediation.
         if !tool.effects {
             issues.error_at(
                 UNENFORCEABLE,
                 file,
                 at,
-                "preapproved는 `effects: true`인 도구(모든 쓰기가 effect.request를 거치는 도구)에만 쓸 수 있어요",
+                "preapproved requires a tool with `effects: true` (all writes routed through effect.request)",
             );
         }
     }
@@ -211,16 +210,16 @@ fn human_rules(
     issues: &mut Issues,
 ) {
     let mut invalid = |why: &str| issues.error_at("invalid_human_approval", file, at, why);
-    // 멘션·DM 메시지, 봇이 참여한 스레드의 답글, 반응(행위자 = 반응한 사람) 이벤트 트리거만 승인이 될 수 있다
+    // Only mention/DM messages, replies in bot-participating threads, and reactions can act as human approval.
     let confirm = match &t.on {
         Source::Message { .. } | Source::ThreadReply { .. } => Some("body.text"),
         Source::Reaction { .. } => Some("body.reaction"),
         Source::Cron { .. } | Source::Http { .. } => None,
     };
     if confirm.is_none() {
-        invalid("human_approval은 Slack 이벤트 트리거(on.event)에만 쓸 수 있어요");
+        invalid("human_approval is only allowed on Slack event triggers (`on.event`)");
     }
-    // 아무 이벤트나 승인이 되지 않게 정확한 확인 문구(메시지·답글: body.text)나 이모지(반응: body.reaction)를 match로 고정해야 한다
+    // Require an exact confirmation phrase (`body.text`) or emoji (`body.reaction`) so arbitrary events cannot approve.
     if let Some(path) = confirm {
         let pinned = t.matches.iter().any(|m| {
             m.path == path
@@ -230,17 +229,17 @@ fn human_rules(
         });
         if !pinned {
             invalid(&format!(
-                "human_approval 트리거는 정확한 확인 문구나 이모지를 `match: {{{path}: <정확한 값>}}`으로 지정해야 해요"
+                "human_approval triggers must pin an exact confirmation phrase or emoji via `match: {{{path}: <exact value>}}`"
             ));
         }
     }
     if !matches!(t.target, TriggerTarget::Tool { .. }) {
         invalid(
-            "human_approval은 모델 없이 고정 도구를 부르는 트리거(target.tool)에만 쓸 수 있어요",
+            "human_approval is only allowed on direct tool triggers (`target.tool`) without a model",
         );
     }
     if t.private {
-        invalid("human_approval은 private 트리거에 쓸 수 없어요");
+        invalid("human_approval is not allowed on private triggers");
     }
     let workspace = match binding.map(|b| &b.kind) {
         Some(Adapter::SlackChannel { workspace, .. } | Adapter::SlackDm { workspace }) => {
@@ -255,14 +254,14 @@ fn human_rules(
             || !prefix.is_some_and(|prefix| who.0.starts_with(&prefix))
         {
             invalid(&format!(
-                "승인자 `{}`는 이 바인딩의 워크스페이스의 Slack 사람 신원(`slack:<워크스페이스>/<사용자>`)이어야 해요",
+                "approver `{}` must be a Slack human identity in this binding's workspace (`slack:<workspace>/<user>`)",
                 who.0
             ));
             continue;
         }
         if !p.members.contains_key(who) {
             invalid(&format!(
-                "승인자 `{}`가 profile.yaml의 members에 없어요",
+                "approver `{}` is not listed in profile.yaml members",
                 who.0
             ));
         }

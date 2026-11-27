@@ -1,4 +1,4 @@
-/* 승인·보류 탭: 승인 대기 카드, 보류 카드와 판정 폼, 최근 처리한 승인(접힘). */
+/* Approvals & Holds view styles. */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: var(--s4); align-items: start; margin-top: var(--s3); }
 .cards:empty { display: none; }
 .acard, .hcard { display: grid; gap: var(--s3); min-width: 0; padding: var(--s5); border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--shadow-1); }

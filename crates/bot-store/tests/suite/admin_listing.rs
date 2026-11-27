@@ -1,8 +1,9 @@
-//! 관리 조회(PG): 승인 목록의 필터·정렬·커서, 기억 공유 카드 본문의 공개 범위와 형식, 실행·감사 목록의 쪽 나누기.
+//! Admin read queries (PG): approval filtering/ordering/cursors, memory-share body visibility and rendering, and run/audit paging.
 
 use crate::support::{admin::*, *};
 use bot_core::{
     admin::*,
+    cards::{LABEL_BODY, LABEL_MEMORY_ID, LABEL_SHARE_SCOPE, LABEL_TOOL},
     command::*,
     id::*,
     ledger::*,
@@ -11,7 +12,6 @@ use bot_core::{
 };
 use sha2::Digest;
 
-/// 승인 하나를 연다(run마다 호출 하나). 만료까지 남은 시간(초)을 고른다.
 async fn approval(db: &TestDb, name: &str, nonce: &str, ttl_secs: u64) -> RunContext {
     let run = leased(db, name).await;
     begin_call(db, &run.attempt, "c1").await;
@@ -67,7 +67,6 @@ async fn approvals_are_filtered_before_paging_and_ordered_by_the_documented_keys
     decide("n-denied", false).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     decide("n-approved", true).await.unwrap();
-    // 자동으로 닫힌 행(처리 시각 없음)
     calls(&db)
         .supersede(ApprovalId("n-sup".into()), PrincipalId(OWNER.into()))
         .await
@@ -78,17 +77,16 @@ async fn approvals_are_filtered_before_paging_and_ordered_by_the_documented_keys
     );
     let _ = sup;
 
-    // 필터를 쪽 나누기 전에 적용하고, 어느 쪽 크기로 넘겨도 같은 순서다
     for size in [1, 2, 200] {
         assert_eq!(
             pages(&db, ApprovalFilter::Pending, size).await,
             ["n-soon", "n-mid", "n-mid2", "n-late"],
-            "Pending은 expires_at 오름차순"
+            "Pending orders by expires_at ascending"
         );
         assert_eq!(
             pages(&db, ApprovalFilter::Decided, size).await,
             ["n-approved", "n-denied", "n-sup"],
-            "Decided는 처리 시각 최신순, 시각 없는 행은 뒤"
+            "Decided orders by decided_ms descending, with null decided_ms last"
         );
         assert_eq!(
             pages(&db, ApprovalFilter::All, size).await,
@@ -101,7 +99,7 @@ async fn approvals_are_filtered_before_paging_and_ordered_by_the_documented_keys
                 "n-mid2",
                 "n-late"
             ],
-            "All은 처리 행이 먼저, 대기 묶음은 마지막이며 만료가 가까운 순"
+            "All lists decided rows first, then pending rows by earliest expiry"
         );
     }
 }
@@ -115,7 +113,7 @@ async fn a_memory_share_card_body_is_shown_only_to_the_owner_who_requested_and_a
     begin_call(&db, &run.attempt, "c1").await;
     let mut a = binding(&run.attempt, "c1", "n-share");
     a.tool = ToolId("memory.share".into());
-    let card = r#"{"approval":{"nonce":"n-share","title":"기억 공유","lines":["내용: 비밀 본문-SENTINEL"]}}"#;
+    let card = r#"{"approval":{"nonce":"n-share","title":"Memory share approval","lines":["Content: secret body-SENTINEL"]}}"#;
     calls(&db)
         .open_approval(OpenApproval {
             approval: a,
@@ -125,24 +123,24 @@ async fn a_memory_share_card_body_is_shown_only_to_the_owner_who_requested_and_a
         })
         .await
         .unwrap();
-    let shows = |view: &ApprovalView| format!("{:?}", view.render).contains("본문-SENTINEL");
+    let shows = |view: &ApprovalView| format!("{:?}", view.render).contains("body-SENTINEL");
     let nonce = ApprovalId("n-share".into());
-    // 소유자 본인: 상세·목록 모두 본문이 보인다
     let mine = AdminRead::approval(&db.store, &owner(), nonce.clone())
         .await
         .unwrap();
     assert!(shows(&mine));
-    // 다른 운영자: 메타데이터는 보이지만 본문은 없다(상세·목록 모두)
+
+    // Another operator sees metadata only; rendered card lines stay empty.
     let other = AdminRead::approval(&db.store, &operator(), nonce.clone())
         .await
         .unwrap();
     assert!(!shows(&other));
     assert!(
         other.render.is_empty(),
-        "비소유자에게는 빈 배열(문구는 화면 몫)"
+        "non-owners receive an empty render list"
     );
     assert_eq!(other.tool.0, "memory.share");
-    assert_eq!(other.args_sha256, mine.args_sha256, "메타데이터는 그대로");
+    assert_eq!(other.args_sha256, mine.args_sha256);
     let listing = AdminRead::approvals(
         &db.store,
         &operator(),
@@ -171,7 +169,7 @@ async fn a_memory_share_card_body_is_shown_only_to_the_owner_who_requested_and_a
     .await
     .unwrap();
     assert!(listing.items.iter().any(shows));
-    // 운영자이면서 소유자여도 요청자·승인자가 본인일 때만 본다
+
     let both = Viewer {
         principal: PrincipalId(OWNER.into()),
         operator: true,
@@ -213,7 +211,7 @@ async fn the_audit_listing_can_return_one_extra_row_to_detect_a_next_page() {
     assert_eq!(
         rows.len(),
         201,
-        "한 쪽 최대(200)보다 한 건 더 요청할 수 있다"
+        "audit query allows limit = page max (200) + 1 for lookahead"
     );
 }
 
@@ -225,14 +223,15 @@ async fn the_share_card_body_comes_back_as_one_row_that_hashes_to_the_approval()
     let run = leased(&db, "card").await;
     begin_call(&db, &run.attempt, "c1").await;
     let id = MemoryId("m-1".into());
-    let body = "첫 줄\n\"따옴표\"와 역슬래시 \\ 그리고 아주 긴 글이 이어진다. ".repeat(6);
+    let body =
+        "First line\n\"quotes\" and backslash \\ followed by a much longer sentence. ".repeat(6);
     let digest: [u8; 32] = sha2::Sha256::digest(body.as_bytes()).into();
-    // 브로커 카드와 같은 모양: 본문을 JSON 문자열로 쓰고 줄 상한(여기서는 80바이트)마다 이어 쓴다
+    // Matches broker card layout: JSON-quoted body wrapped across 80-byte continuation lines.
     let quoted = serde_json::to_string(&body).unwrap();
     let mut lines = vec![
-        "도구: memory.share".to_owned(),
-        "기억 ID: m-1".to_owned(),
-        "공유 범위: 프로필 전체".to_owned(),
+        format!("{LABEL_TOOL}: memory.share"),
+        format!("{LABEL_MEMORY_ID}: m-1"),
+        format!("{LABEL_SHARE_SCOPE}: Profile-wide (currently private to you)"),
     ];
     let (mut first, mut rest) = (true, quoted.as_str());
     while !rest.is_empty() {
@@ -242,13 +241,23 @@ async fn the_share_card_body_comes_back_as_one_row_that_hashes_to_the_approval()
         }
         lines.push(format!(
             "{}{}",
-            if first { "본문: " } else { "  " },
+            if first {
+                format!("{LABEL_BODY}: ")
+            } else {
+                "  ".to_owned()
+            },
             &rest[..end]
         ));
         (first, rest) = (false, &rest[end..]);
     }
-    assert!(lines.len() > 5, "여러 줄로 쪼개진다");
-    let card = serde_json::json!({"approval": {"nonce": "n-card", "title": "기억 공유 승인", "lines": lines}});
+    assert!(lines.len() > 5, "body should wrap across multiple lines");
+    let card = serde_json::json!({
+        "approval": {
+            "nonce": "n-card",
+            "title": "Memory share approval",
+            "lines": lines,
+        }
+    });
     let mut a = binding(&run.attempt, "c1", "n-card");
     a.tool = ToolId("memory.share".into());
     a.args_sha256 = memory_share_hash(&id, &digest);
@@ -267,25 +276,24 @@ async fn the_share_card_body_comes_back_as_one_row_that_hashes_to_the_approval()
     let bodies: Vec<_> = view
         .render
         .iter()
-        .filter(|(label, _)| label == "본문")
+        .filter(|(label, _)| label == LABEL_BODY)
         .collect();
-    assert_eq!(bodies.len(), 1, "본문은 한 행이다");
-    assert_eq!(bodies[0].1, body, "조각을 이어 푼 원문 전체");
+    assert_eq!(bodies.len(), 1, "body must collapse into one row");
+    assert_eq!(bodies[0].1, body, "decoded body must match original text");
     assert!(
         view.render.iter().all(|(label, _)| !label.is_empty()),
-        "이어 쓴 조각 줄이 따로 남지 않는다"
+        "continuation chunks must not remain as separate rows"
     );
     let shown: [u8; 32] = sha2::Sha256::digest(bodies[0].1.as_bytes()).into();
     assert_eq!(
         memory_share_hash(&id, &shown),
         view.args_sha256,
-        "보이는 본문 = 승인 지문"
+        "rendered body must match approval digest"
     );
-    // 다른 카드는 줄을 그대로 둔다(본문 규칙은 기억 공유 카드에만)
     assert!(
         view.render
             .iter()
-            .any(|(l, v)| l == "기억 ID" && v == "m-1")
+            .any(|(l, v)| l == LABEL_MEMORY_ID && v == "m-1")
     );
 }
 
@@ -332,7 +340,7 @@ async fn run_pages_include_the_profile_so_equal_ids_and_times_are_not_skipped() 
         assert_eq!(
             seen,
             ["personal/same", "work/same"],
-            "쪽 크기 {size}: 같은 ID·시각도 빠지지 않고 프로필 순"
+            "page size {size}: ties on id and timestamp order by profile without skipping"
         );
     }
 }
@@ -343,38 +351,54 @@ async fn a_card_with_two_body_blocks_or_an_undecodable_body_does_not_collapse_in
         return;
     };
     let id = MemoryId("m-1".into());
-    let first = serde_json::to_string("첫 본문").unwrap();
-    let second = serde_json::to_string("둘째 본문").unwrap();
+    let first = serde_json::to_string("first body").unwrap();
+    let second = serde_json::to_string("second body").unwrap();
     for (name, nonce, body_lines) in [
         (
             "dup",
             "n-dup",
-            vec![format!("본문: {first}"), format!("본문: {second}")],
+            vec![
+                format!("{LABEL_BODY}: {first}"),
+                format!("{LABEL_BODY}: {second}"),
+            ],
         ),
-        ("bad", "n-bad", vec!["본문: \"끝나지 않는 글".to_owned()]),
-        // 한쪽만 풀려도 둘 이상이면 승인할 수 없다: 풀린 하나가 유일한 본문 행으로 보이면 안 된다
+        (
+            "bad",
+            "n-bad",
+            vec![format!("{LABEL_BODY}: \"unterminated string")],
+        ),
+        // Even if one block decodes, multiple body blocks must not yield a single approvable row.
         (
             "mixed",
             "n-mixed",
             vec![
-                format!("본문: {first}"),
-                "본문: \"끝나지 않는 글".to_owned(),
+                format!("{LABEL_BODY}: {first}"),
+                format!("{LABEL_BODY}: \"unterminated string"),
             ],
         ),
         (
             "mixed-last",
             "n-mixed-last",
             vec![
-                "본문: \"끝나지 않는 글".to_owned(),
-                format!("본문: {second}"),
+                format!("{LABEL_BODY}: \"unterminated string"),
+                format!("{LABEL_BODY}: {second}"),
             ],
         ),
     ] {
         let run = leased(&db, name).await;
         begin_call(&db, &run.attempt, "c1").await;
-        let mut lines = vec!["도구: memory.share".to_owned(), "기억 ID: m-1".to_owned()];
+        let mut lines = vec![
+            format!("{LABEL_TOOL}: memory.share"),
+            format!("{LABEL_MEMORY_ID}: m-1"),
+        ];
         lines.extend(body_lines);
-        let card = serde_json::json!({"approval": {"nonce": nonce, "title": "기억 공유 승인", "lines": lines}});
+        let card = serde_json::json!({
+            "approval": {
+                "nonce": nonce,
+                "title": "Memory share approval",
+                "lines": lines,
+            }
+        });
         let mut a = binding(&run.attempt, "c1", nonce);
         a.tool = ToolId("memory.share".into());
         a.args_sha256 = memory_share_hash(&id, &[0; 32]);
@@ -397,7 +421,7 @@ async fn a_card_with_two_body_blocks_or_an_undecodable_body_does_not_collapse_in
                 .unwrap()
                 .render
                 .into_iter()
-                .filter(|(label, _)| label == "본문")
+                .filter(|(label, _)| label == LABEL_BODY)
                 .map(|(_, text)| text)
                 .collect::<Vec<_>>()
         }
@@ -405,11 +429,11 @@ async fn a_card_with_two_body_blocks_or_an_undecodable_body_does_not_collapse_in
     for nonce in ["n-dup", "n-mixed", "n-mixed-last"] {
         assert!(
             rows(nonce).await.is_empty(),
-            "{nonce}: 본문 묶음이 둘 이상이면 풀리는 것이 있어도 본문 행이 없다(승인 불가)"
+            "{nonce}: duplicate body blocks must emit no body row"
         );
     }
     assert!(
         rows("n-bad").await.is_empty(),
-        "풀 수 없는 본문은 행이 없다"
+        "undecodable body must emit no body row"
     );
 }

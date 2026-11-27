@@ -1,4 +1,4 @@
-//! `bot-profile` 통합 시험 진입점(단일 바이너리).
+//! Single-binary integration test entry point for `bot-profile`.
 
 mod support;
 

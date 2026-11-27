@@ -1,6 +1,4 @@
-//! 호스트 설정(host.json) 해석, 모델 제공자, 도구 서버 점검. 읽기만 한다(서버·모델을 시작하지 않는다). 판정은 운영 경로의 함수를 그대로 쓴다 —
-//! 호스트 해석 `load_host`, 모델 별칭 `serve::check_model_aliases`(worker 시작이 쓰는 `models::build`), 서버 판본 `install::measure`와 worker가 쓰는
-//! `serve::refuse_required_state`.
+//! Read-only host config, model provider, and tool server checks for `bot doctor`.
 use super::{Item, State, capped};
 use crate::{
     host::HostFile,
@@ -13,7 +11,6 @@ use bot_core::id::Revision;
 use bot_gateway::cli::socket::current_uid;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// 해석한 호스트와 도구 서버의 설치 판본(계산하지 못했으면 None)
 pub struct Checked {
     pub file: HostFile,
     pub revisions: Option<BTreeMap<String, Revision>>,
@@ -23,8 +20,8 @@ pub fn check(settings: &Settings, items: &mut Vec<Item>) -> Option<Checked> {
     let Ok(uid) = current_uid() else {
         items.push(Item::new(
             State::Fail,
-            "호스트 설정",
-            "OS 사용자 번호(id -u)를 확인하지 못했어요",
+            "Host config",
+            "could not determine OS user ID (id -u)",
         ));
         return None;
     };
@@ -33,13 +30,13 @@ pub fn check(settings: &Settings, items: &mut Vec<Item>) -> Option<Checked> {
         Err(error) => {
             let mut details = Vec::new();
             if let Some(path) = &settings.host_config {
-                details.push(format!("파일: {}", path.display()));
+                details.push(format!("file: {}", path.display()));
             }
             details.push(
-                "경로와 JSON 형식을 확인해 주세요(예시는 docs/profile-spec.md, 새로 만들려면 `bot init <이름>`)"
+                "check the path and JSON format (see docs/profile-spec.md, or run `bot init <name>`)"
                     .to_owned(),
             );
-            items.push(Item::new(State::Fail, "호스트 설정", error).with(details));
+            items.push(Item::new(State::Fail, "Host config", error).with(details));
             return None;
         }
     };
@@ -56,7 +53,7 @@ pub fn check(settings: &Settings, items: &mut Vec<Item>) -> Option<Checked> {
 fn summary(host: &HostFile, settings: &Settings) -> Item {
     let aliases: BTreeSet<&String> = host.catalog.models.values().flatten().collect();
     let counts = format!(
-        "모델 별칭 {} · 제공자 {} · 도구 서버 {} · CLI 계정 {} · Slack 워크스페이스 {} · HTTP 입구 {} · OpenAI 입구 {}",
+        "model aliases {} · providers {} · tool servers {} · CLI accounts {} · Slack workspaces {} · HTTP endpoints {} · OpenAI endpoints {}",
         aliases.len(),
         host.providers.len(),
         host.servers.len() + host.remote_servers.len(),
@@ -67,16 +64,16 @@ fn summary(host: &HostFile, settings: &Settings) -> Item {
     );
     match &settings.host_config {
         Some(path) => {
-            Item::new(State::Pass, "호스트 설정", path.display().to_string()).with([counts])
+            Item::new(State::Pass, "Host config", path.display().to_string()).with([counts])
         }
         None => Item::new(
             State::Warn,
-            "호스트 설정",
-            "BOT_HOST_CONFIG·--host가 없어 내장 데모 호스트를 써요(운영 설정이 아니에요)",
+            "Host config",
+            "neither BOT_HOST_CONFIG nor --host is set; using the built-in demo host (not for production)",
         )
         .with([
             counts,
-            "실제 설정은 `--host <host.json>`이나 BOT_HOST_CONFIG로 지정해요".to_owned(),
+            "pass `--host <host.json>` or set BOT_HOST_CONFIG for real configuration".to_owned(),
         ]),
     }
 }
@@ -87,25 +84,26 @@ fn providers(host: &HostFile) -> Item {
         .iter()
         .map(|(alias, provider)| provider.describe(alias))
         .collect();
-    // 프로필이 허용한 별칭에 실행 방법이 없으면 worker가 시작하지 않는다(그 판정을 그대로 쓴다)
+    // Reuse the exact worker startup alias check.
     let problems = serve::check_model_aliases(host).err();
     let state = if problems.is_none() {
         State::Pass
     } else {
         State::Fail
     };
-    Item::new(state, "모델 제공자", format!("{}개", host.providers.len()))
-        .with(problems)
-        .with(capped(lines, 20))
+    Item::new(
+        state,
+        "Model providers",
+        format!("{}", host.providers.len()),
+    )
+    .with(problems)
+    .with(capped(lines, 20))
 }
 
-/// 도구 서버: 설치 폴더(로컬)와 주소(원격)에서 판본을 계산하고(`serve`·`bot validate`가 시작 전에 하는 `measure_all`), worker가 거절하는 설정
-/// (`state: required`)과 원격 서버의 IP 리터럴 정책(연결 때 쓰는 `serve::remote::literal_ok`)도 같은 함수로 거른다. 접속하지 않으므로 이름 풀이와
-/// 연결은 확인하지 않는다.
 fn servers(host: &HostFile) -> (Item, Option<BTreeMap<String, Revision>>) {
     if host.servers.is_empty() && host.remote_servers.is_empty() {
         return (
-            Item::new(State::Pass, "도구 서버", "등록된 서버가 없어요"),
+            Item::new(State::Pass, "Tool servers", "none configured"),
             Some(BTreeMap::new()),
         );
     }
@@ -114,7 +112,7 @@ fn servers(host: &HostFile) -> (Item, Option<BTreeMap<String, Revision>>) {
     if let Err(problem) = &measured {
         problems.push(problem.clone());
         problems.push(
-            "설치 폴더(root)가 절대 경로의 실제 폴더이고 실행 파일이 그 안에 있는지 확인해 주세요"
+            "verify that `root` is an existing absolute directory containing the server executable"
                 .to_owned(),
         );
     }
@@ -126,27 +124,31 @@ fn servers(host: &HostFile) -> (Item, Option<BTreeMap<String, Revision>>) {
         let literal = remote.host.parse::<std::net::IpAddr>().is_ok();
         if literal && !literal_ok(&remote.host, remote.tls, false) {
             problems.push(format!(
-                "servers.{alias}: 연결할 수 없는 IP 주소예요 — https는 공개 주소여야 하고 http는 loopback 주소만 돼요(사설·예약 주소는 거절해요)"
+                "servers.{alias}: disallowed IP literal — https requires a public IP and http allows loopback only (private/reserved addresses are rejected)"
             ));
         }
         let auth = remote.bearer.as_ref().map_or_else(
-            || "인증 없음".to_owned(),
-            |name| format!("bearer 자격 이름 {}", name.as_str()),
+            || "no auth".to_owned(),
+            |name| format!("bearer secret {}", name.as_str()),
         );
         let scheme = if remote.tls { "https" } else { "http" };
         let resolve = if literal {
             ""
         } else {
-            " · 이름 풀이는 접속할 때 검사해요"
+            " · DNS resolution checked at connect time"
         };
         lines.push(format!(
-            "{alias}: 원격 {scheme} · {}:{} · {auth}{resolve}",
+            "{alias}: remote {scheme} · {}:{} · {auth}{resolve}",
             remote.host, remote.port
         ));
     }
     if !problems.is_empty() {
-        let item =
-            Item::new(State::Fail, "도구 서버", "시작할 수 없는 설정이 있어요").with(problems);
+        let item = Item::new(
+            State::Fail,
+            "Tool servers",
+            "invalid configuration prevents startup",
+        )
+        .with(problems);
         return (item, measured.ok());
     }
     let revisions = measured.unwrap_or_default();
@@ -156,16 +158,16 @@ fn servers(host: &HostFile) -> (Item, Option<BTreeMap<String, Revision>>) {
             .filter_map(|alias| revisions.get(alias).map(|revision| (alias, revision)))
             .map(|(alias, revision)| {
                 format!(
-                    "{alias}: 로컬 판본 {}",
+                    "{alias}: local revision {}",
                     revision.0.get(..12).unwrap_or(&revision.0)
                 )
             }),
     );
     let item = Item::new(
         State::Pass,
-        "도구 서버",
+        "Tool servers",
         format!(
-            "{}개 — 판본을 계산했어요(서버는 시작하지 않고 접속하지 않아요)",
+            "{} — revisions computed (no servers started or contacted)",
             revisions.len()
         ),
     )

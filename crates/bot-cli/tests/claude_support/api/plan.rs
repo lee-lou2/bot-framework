@@ -1,18 +1,17 @@
-//! 모델이 할 일(시험이 `POST /__ctl/script`로 정한다)을 상류(가짜)의 SSE 응답으로 바꾼다. 공식 Anthropic 스트림 모양이고 사용량은 시험이 정한 값 그대로다 —
-//! 알면 `message_start.usage.input_tokens`와 `message_delta.usage.output_tokens`에, 모르면(공급자가 계수를 안 준 경우) 그 필드를 아예 싣지 않는다.
+//! Translates scripted test plans (`POST /__ctl/script`) into Anthropic-format SSE responses for `FakeUpstream`.
 use crate::claude_support::tool_turn;
 use bot_broker::testing::{End, FakeUpstream};
 use serde_json::Value;
 use std::time::Duration;
 
-/// 모델 호출이 확정 거절(4xx)로 끝나게 하는 상류 응답 본문(CLI는 이런 오류를 다시 보내지 않는다)
+/// 4xx refusal payload that the CLI treats as terminal without retrying.
 pub const ERROR_BODY: &[u8] = br#"{"type":"error","error":{"type":"invalid_request_error","message":"e2e: the model refused"}}"#;
 
 fn event(name: &str, data: &str) -> Vec<u8> {
     format!("event: {name}\ndata: {data}\n\n").into_bytes()
 }
 
-/// 글 하나를 내는 모델 차례. `usage`는 (입력, 출력) 토큰 또는 모름(None), `stop`은 `end_turn`(정상) 또는 `max_tokens`(실제 제한 종료).
+/// Single text turn; omits `usage` fields completely when `usage` is `None`.
 pub fn text_turn(message: &str, text: &str, usage: Option<(u32, u32)>, stop: &str) -> Vec<Vec<u8>> {
     let start_usage = usage
         .map(|(input, _)| format!(r#","usage":{{"input_tokens":{input},"output_tokens":1}}"#))
@@ -52,23 +51,23 @@ pub fn text_turn(message: &str, text: &str, usage: Option<(u32, u32)>, stop: &st
     ]
 }
 
-/// 모델 차례에서 사용량 필드를 모두 걷어 낸다(공급자가 계수를 보고하지 않은 차례).
 fn without_usage(chunks: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     chunks
         .into_iter()
         .map(|chunk| {
-            let text = String::from_utf8(chunk).expect("SSE는 UTF-8");
+            let text = String::from_utf8(chunk).expect("SSE must be UTF-8");
             let lines: Vec<String> = text
                 .lines()
                 .map(|line| {
                     let Some(data) = line.strip_prefix("data: ") else {
                         return line.to_owned();
                     };
-                    let mut event: Value = serde_json::from_str(data).expect("SSE data는 JSON");
+                    let mut event: Value =
+                        serde_json::from_str(data).expect("SSE data must be JSON");
                     if let Some(message) = event.get_mut("message").and_then(Value::as_object_mut) {
                         message.remove("usage");
                     }
-                    event.as_object_mut().expect("객체").remove("usage");
+                    event.as_object_mut().expect("object").remove("usage");
                     format!("data: {event}")
                 })
                 .collect();
@@ -77,7 +76,7 @@ fn without_usage(chunks: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// 상류 대본에 쌓는다. 응답 전체가 `delay_ms`쯤 걸리도록 조각마다 같은 간격을 둔다. 쌓은 모델 응답 수를 돌려준다(남은 대본 수를 세려고).
+/// Enqueues SSE responses on `upstream` and returns the number of upstream turns added.
 pub fn push(upstream: &FakeUpstream, plan: &Value) -> usize {
     let text = plan["text"].as_str().unwrap_or("e2e-answer-ok");
     let delay = plan["delay_ms"].as_u64().unwrap_or(0);
@@ -107,7 +106,6 @@ pub fn push(upstream: &FakeUpstream, plan: &Value) -> usize {
         return 1;
     }
     if let Some(tool) = plan["tool_call"].as_str() {
-        // 한 CLI 실행 안에서 도구를 한 번 부르고(첫 차례) 최종 답을 낸다(둘째 차례). 첫 차례의 계수는 기본 5/4이고 `first_usage: null`이면 보고하지 않는다.
         let first = tool_turn(
             "msg_tc1",
             "toolu_tc1",
@@ -123,17 +121,16 @@ pub fn push(upstream: &FakeUpstream, plan: &Value) -> usize {
         return 2;
     }
     if plan["stop"] == "max_tokens" && plan.get("then").is_some() {
-        // 앞선 차례는 공급자 제한(max_tokens)으로 끝나고, CLI가 이어서 받은 다음 차례가 정상 최종 답이다
         send(text_turn(
             "msg_lim1",
-            "앞 차례의 잘린 글",
+            "Truncated text from previous turn",
             usage,
             "max_tokens",
         ));
         return 1 + push(upstream, &plan["then"]);
     }
     if plan["approval"] == true {
-        // 모델이 승인이 필요한 도구를 부르고, 도구가 막힌 뒤에도 «성공했다»고 말하려 한다
+        // Calls an approval-gated tool, then attempts to claim success even though blocked.
         send(tool_turn(
             "msg_ap1",
             "toolu_ap1",

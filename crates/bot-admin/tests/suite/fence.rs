@@ -1,4 +1,4 @@
-//! «같은 집합 확인» 훅: 옛 활성화로 남은 프로세스가 조회 결과를 내주지 않는다.
+//! Active-set fence hook: stale activations refuse admin reads and writes with 503 `unavailable`.
 
 use crate::support::*;
 use bot_admin::{FenceFuture, fake::Fake};
@@ -10,7 +10,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// 호출 수를 세고 `same`이 가리키는 값을 돌려주는 훅.
 fn hook(
     same: Arc<AtomicBool>,
     calls: Arc<AtomicUsize>,
@@ -54,7 +53,7 @@ async fn a_matching_set_changes_nothing_and_is_checked_once_per_read_and_twice_p
         assert_eq!(
             calls.load(SeqCst) - before,
             1,
-            "{path}: 조회는 응답 직전에 한 번"
+            "{path}: reads check fence once before responding"
         );
     }
     let before = calls.load(SeqCst);
@@ -67,9 +66,8 @@ async fn a_matching_set_changes_nothing_and_is_checked_once_per_read_and_twice_p
     )
     .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    // 변경 요청은 CSRF 토큰을 받는 조회(`/me`) 한 번과 판정의 «핸들러 전·응답 직전» 두 번이다.
+    // 1 check for GET /me (CSRF) + 2 checks for POST (before handler and before response).
     assert_eq!(calls.load(SeqCst) - before, 1 + 2);
-    // 모르는 경로는 이전처럼 404다.
     assert_eq!(get(&s, OPERATOR, "/v1/admin/nothing").await.status, 404);
 }
 
@@ -86,7 +84,6 @@ async fn a_stale_set_closes_every_json_route_with_an_empty_unavailable_answer() 
             "{path}"
         );
         assert_eq!(r.header("cache-control"), Some("no-store"), "{path}");
-        // 프로필 이름·신원·비밀·CSRF 토큰·내용이 하나도 없다.
         for secret in [
             "personal",
             "work",
@@ -100,7 +97,7 @@ async fn a_stale_set_closes_every_json_route_with_an_empty_unavailable_answer() 
             assert!(!r.body.contains(secret), "{path}: {secret}");
         }
     }
-    // 인증과 CSRF 확인이 훅보다 먼저다: 토큰이 틀린 변경 요청은 훅까지 가지 않고 403이다.
+    // Auth and CSRF run before the fence hook, so invalid CSRF still returns 403.
     let decide = raw(
         s.addr,
         "POST",
@@ -144,7 +141,7 @@ async fn writes_never_start_when_the_set_is_stale_and_resume_cleanly_when_it_mat
     );
     assert!(
         s.fake.decisions().is_empty(),
-        "옛 집합에서는 브로커까지 가지 않는다"
+        "stale activation must not reach broker"
     );
     let hold = raw(
         s.addr,
@@ -175,7 +172,7 @@ async fn a_decision_committed_before_the_set_changed_is_not_applied_twice_on_ret
     let flag = Arc::new(AtomicBool::new(true));
     let calls = Arc::new(AtomicUsize::new(0));
     let (f, c) = (flag.clone(), calls.clone());
-    // 판정의 핸들러 전 확인(2번째 호출)은 통과시키고 응답 직전 확인(3번째)에서 닫는다.
+    // Allow pre-handler check (2nd call) and fail post-handler check (3rd call, index 2).
     let s = start_cfg(Fake::demo(), move |cfg| {
         cfg.fence(move || {
             let n = c.fetch_add(1, SeqCst);
@@ -184,7 +181,7 @@ async fn a_decision_committed_before_the_set_changed_is_not_applied_twice_on_ret
         })
     })
     .await;
-    let csrf = csrf(&s, OPERATOR).await; // 확인 1번째
+    let csrf = csrf(&s, OPERATOR).await; // 1st fence call (index 0)
     let seen = bot_admin::json::hex(&bot_admin::fake::digest("c-1:agenda.delete"));
     let body = format!(r#"{{"allow":true,"seen":"{seen}"}}"#);
     let hs = [
@@ -203,10 +200,10 @@ async fn a_decision_committed_before_the_set_changed_is_not_applied_twice_on_ret
     .await;
     assert_eq!(
         first.status, 503,
-        "응답 직전 확인에서 닫혔다: {}",
+        "closed at post-handler fence check: {}",
         first.body
     );
-    assert_eq!(s.fake.decisions().len(), 1, "판정은 이미 커밋됐다");
+    assert_eq!(s.fake.decisions().len(), 1, "decision already committed");
     let again = raw(
         s.addr,
         "POST",
@@ -219,9 +216,9 @@ async fn a_decision_committed_before_the_set_changed_is_not_applied_twice_on_ret
     assert_eq!(
         (again.status, again.json()["repeated"].as_bool()),
         (200, Some(true)),
-        "다시 보내면 기존 결과를 돌려준다"
+        "retry returns existing result"
     );
-    assert_eq!(s.fake.decisions().len(), 1, "두 번 적용되지 않는다");
+    assert_eq!(s.fake.decisions().len(), 1, "must not apply twice");
 }
 
 #[tokio::test]
@@ -231,11 +228,10 @@ async fn static_screen_assets_and_failed_logins_never_consult_the_hook() {
         assert_eq!(
             get(&s, OPERATOR, url).await.status,
             200,
-            "{url}: 데이터가 없는 자산은 항상 열린다"
+            "{url}: static assets bypass fence"
         );
     }
     assert_eq!(calls.load(SeqCst), 0);
-    // 인증을 통과하지 못하면 훅까지 가지 않고 평소 응답이다.
     let none = raw(s.addr, "GET", "/v1/admin/runs", None, &[], None).await;
     assert_eq!(none.status, 401);
     let bad_host = raw(

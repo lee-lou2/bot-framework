@@ -1,4 +1,4 @@
-//! `stream: true`(실제 리스너): SSE 틀·사용량 규칙·UTF-8 조각·keep-alive·기한/승인 안내·헤더 뒤 오류·끊김과 재조회·종료.
+//! OpenAI `stream: true` SSE framing, usage rules, UTF-8 chunking, keep-alive, notices, errors, disconnect, and shutdown tests.
 use crate::openai_support::*;
 use bot_core::{api::ApiState, command::TokenUsage};
 use serde_json::{Value, json};
@@ -18,7 +18,6 @@ fn tuned(wait_ms: u64, keep_alive: Option<Duration>) -> Setup {
     }
 }
 
-/// 이벤트를 JSON(데이터)·keep-alive·DONE으로 나눈다
 #[derive(Debug)]
 enum Event {
     Json(Value),
@@ -57,7 +56,7 @@ fn text_of(events: &[Event]) -> String {
 #[tokio::test]
 async fn a_stream_has_the_official_frame_and_never_carries_usage_unless_asked() {
     let rig = rig().await;
-    rig.api.start_as(answer("안녕하세요 😀 세계"));
+    rig.api.start_as(answer("Hello 😀 world"));
     let mut sse = Sse::open(
         &rig,
         BUILD_KEY,
@@ -77,7 +76,6 @@ async fn a_stream_has_the_official_frame_and_never_carries_usage_unless_asked() 
     let all = events(&sse.rest(WITHIN).await);
     assert!(matches!(all.last(), Some(Event::Done)), "{all:?}");
     let chunks = objects(&all);
-    // 첫 청크는 역할만, 마지막 선택지는 빈 delta와 종료 사유
     assert_eq!(
         chunks[0]["choices"][0]["delta"],
         json!({"role": "assistant", "content": ""})
@@ -91,7 +89,7 @@ async fn a_stream_has_the_official_frame_and_never_carries_usage_unless_asked() 
         ),
         (json!({}), json!("stop"))
     );
-    assert_eq!(text_of(&all), "안녕하세요 😀 세계");
+    assert_eq!(text_of(&all), "Hello 😀 world");
     for chunk in &chunks {
         assert_eq!(chunk["object"], "chat.completion.chunk");
         assert_eq!(chunk["id"], "chatcmpl-00000000-0000-4000-8000-000000000001");
@@ -99,7 +97,7 @@ async fn a_stream_has_the_official_frame_and_never_carries_usage_unless_asked() 
         assert_eq!(chunk["model"], "assistant");
         assert!(
             chunk.get("usage").is_none(),
-            "요청하지 않으면 usage 키 자체가 없다: {chunk}"
+            "usage key must be omitted when not requested: {chunk}"
         );
     }
     assert_eq!(rig.api.runs(), 1);
@@ -109,7 +107,7 @@ async fn a_stream_has_the_official_frame_and_never_carries_usage_unless_asked() 
 async fn usage_chunks_follow_include_usage_and_only_measured_numbers_are_sent() {
     let rig = rig().await;
     rig.api.start_as(ApiState::Final {
-        text: "측정된 답".into(),
+        text: "measured reply".into(),
         truncated: false,
         usage: Some(TokenUsage {
             prompt: 5,
@@ -126,7 +124,7 @@ async fn usage_chunks_follow_include_usage_and_only_measured_numbers_are_sent() 
     let all = events(&sse.rest(WITHIN).await);
     let chunks = objects(&all);
     let (stats, ordinary) = chunks.split_last().unwrap();
-    // 일반 청크는 usage:null, 마지막 통계 청크만 choices:[] + 실측값
+    // Ordinary chunks carry usage:null; the final stats chunk carries choices:[] and measured usage.
     assert!(
         ordinary
             .iter()
@@ -143,8 +141,8 @@ async fn usage_chunks_follow_include_usage_and_only_measured_numbers_are_sent() 
         ordinary.last().unwrap()["choices"][0]["finish_reason"],
         "stop"
     );
-    // 사용량을 모르면 통계 청크를 생략한다(일반 청크의 usage:null은 유지)
-    rig.api.start_as(answer("모르는 답"));
+    // Omit stats chunk when usage is unknown while keeping usage:null on ordinary chunks.
+    rig.api.start_as(answer("unknown usage reply"));
     let mut unknown = Sse::open(
         &rig,
         BUILD_KEY,
@@ -161,9 +159,8 @@ async fn usage_chunks_follow_include_usage_and_only_measured_numbers_are_sent() 
         "{chunks:?}"
     );
     assert!(matches!(all.last(), Some(Event::Done)));
-    // 잘린 답은 length
     rig.api.start_as(ApiState::Final {
-        text: "잘림".into(),
+        text: "truncated".into(),
         truncated: true,
         usage: None,
     });
@@ -184,7 +181,7 @@ async fn usage_chunks_follow_include_usage_and_only_measured_numbers_are_sent() 
 #[tokio::test]
 async fn a_long_answer_is_split_without_breaking_characters_and_rebuilds_exactly() {
     let rig = rig().await;
-    let text = format!("{}\n\"끝\"\\{}", "한글 😀 ".repeat(3000), "e\u{301}");
+    let text = format!("{}\n\"end\"\\{}", "★★ 😀 ".repeat(3000), "e\u{301}");
     rig.api.start_as(answer(&text));
     let mut sse = Sse::open(
         &rig,
@@ -196,11 +193,11 @@ async fn a_long_answer_is_split_without_breaking_characters_and_rebuilds_exactly
     let raw = sse.rest(WITHIN).await;
     assert!(
         raw.iter().filter(|c| c.contains("\"content\":\"")).count() > 3,
-        "여러 조각이다"
+        "expected multiple chunks"
     );
     assert!(
         raw.iter().all(|c| c.is_char_boundary(c.len())),
-        "각 이벤트가 온전한 UTF-8"
+        "each chunk must be valid UTF-8"
     );
     assert_eq!(text_of(&events(&raw)), text);
 }
@@ -220,7 +217,6 @@ async fn keep_alive_comments_arrive_while_waiting_and_the_answer_follows() {
         matches!(&first, Next::Data(chunk) if chunk.contains("\"role\":\"assistant\"")),
         "{first:?}"
     );
-    // 쓸 것이 없는 동안 keep-alive가 이어진다(간격의 몇 배 안에 둘 이상)
     let mut beats = 0;
     let started = Instant::now();
     while beats < 2 {
@@ -230,20 +226,20 @@ async fn keep_alive_comments_arrive_while_waiting_and_the_answer_follows() {
                 beats += 1;
             }
             other => panic!(
-                "keep-alive가 와야 해요({:?} 경과): {other:?}",
+                "expected keep-alive after {:?}: {other:?}",
                 started.elapsed()
             ),
         }
     }
-    rig.api.set_state("ka1", answer("기다린 보람"));
+    rig.api.set_state("ka1", answer("worth the wait"));
     let rest = events(&sse.rest(WITHIN).await);
-    assert_eq!(text_of(&rest), "기다린 보람");
+    assert_eq!(text_of(&rest), "worth the wait");
     assert!(matches!(rest.last(), Some(Event::Done)));
 }
 
 #[tokio::test]
 async fn the_default_keep_alive_stays_under_the_documented_fifteen_seconds() {
-    // 운영 기본값의 상한을 코드로 고정한다(느린 시험이 아니라 값 자체를 본다)
+    // Guard the documented 15s upper bound on the default keep-alive interval.
     assert!(bot_gateway::http::KEEP_ALIVE_DEFAULT <= Duration::from_secs(15));
 }
 
@@ -261,18 +257,15 @@ async fn the_deadline_and_an_approval_wait_end_the_stream_with_the_fixed_notice(
     let all = events(&sse.rest(WITHIN).await);
     let waited = started.elapsed();
     assert!(waited < Duration::from_millis(1250), "{waited:?}");
-    assert_eq!(
-        text_of(&all),
-        "작업을 처리 중입니다. 같은 Idempotency-Key와 같은 요청으로 다시 조회하세요."
-    );
+    assert_eq!(text_of(&all), RUNNING);
     assert!(matches!(all.last(), Some(Event::Done)));
-    // 고정 안내에는 측정값이 없다: include_usage여도 통계 청크가 없다
+    // Fixed notices have no measured usage even when include_usage is true.
     assert!(
         objects(&all)
             .iter()
             .all(|c| !c["choices"].as_array().unwrap().is_empty())
     );
-    // 승인 대기는 기한을 기다리지 않고 즉시 안내한다
+    // Approval wait responds immediately without waiting for the deadline.
     rig.api.set_state("dl1", ApiState::NeedsHuman);
     let started = Instant::now();
     let mut approval = Sse::open(
@@ -288,14 +281,13 @@ async fn the_deadline_and_an_approval_wait_end_the_stream_with_the_fixed_notice(
         "{:?}",
         started.elapsed()
     );
-    assert_eq!(
-        text_of(&all),
-        "승인 대기 중입니다. 같은 Idempotency-Key와 같은 요청으로 다시 조회하세요."
-    );
-    // 같은 키로 비스트림 재조회하면 최종 답을 새 실행 없이 받는다
-    rig.api.set_state("dl1", answer("최종 답"));
+    assert_eq!(text_of(&all), PENDING);
+    rig.api.set_state("dl1", answer("final reply"));
     let json = chat(&rig, BUILD_KEY, Some("dl1"), &ask("assistant", "q")).await;
-    assert_eq!(json.json()["choices"][0]["message"]["content"], "최종 답");
+    assert_eq!(
+        json.json()["choices"][0]["message"]["content"],
+        "final reply"
+    );
     assert_eq!(rig.api.runs(), 1);
 }
 
@@ -312,7 +304,7 @@ async fn an_error_after_the_headers_is_one_error_event_and_a_closed_stream() {
         &ask_stream("assistant", "q", false),
     )
     .await;
-    assert_eq!(sse.status, 200, "접수까지 끝난 뒤라 이미 200이다");
+    assert_eq!(sse.status, 200, "headers already sent after admission");
     let raw = sse.rest(WITHIN).await;
     let all = events(&raw);
     let objects = objects(&all);
@@ -324,12 +316,12 @@ async fn an_error_after_the_headers_is_one_error_event_and_a_closed_stream() {
     );
     assert!(
         !all.iter().any(|e| matches!(e, Event::Done)),
-        "성공 종료 표지가 없다"
+        "must not emit [DONE] on error"
     );
     assert!(!raw.iter().any(|c| c.contains("finish_reason\":\"stop")));
     assert!(
         !raw.iter().any(|c| c.contains("model_error")),
-        "내부 사유를 되풀이하지 않는다"
+        "must not leak internal failure reason"
     );
 }
 
@@ -339,7 +331,7 @@ async fn revoking_access_while_streaming_ends_with_an_error_event_and_no_content
     finish_later(
         &rig,
         "rv1",
-        answer("권한 철회 뒤에 나가면 안 되는 글"),
+        answer("must not leak after revocation"),
         Duration::from_millis(400),
     );
     let mut sse = Sse::open(
@@ -365,7 +357,7 @@ async fn revoking_access_while_streaming_ends_with_an_error_event_and_no_content
         ),
         (Some("permission_error"), Some("access_denied"))
     );
-    assert!(!raw.concat().contains("나가면 안 되는"));
+    assert!(!raw.concat().contains("must not leak"));
 }
 
 #[tokio::test]
@@ -416,7 +408,7 @@ async fn problems_before_acceptance_are_plain_json_errors_even_when_streaming_wa
 
 #[tokio::test]
 async fn a_dropped_connection_stops_waiting_but_not_the_work_and_the_same_key_collects_it() {
-    // keep-alive는 기본(10초)이다: 끊김을 주석 쓰기로 알아챌 수 없으니 기다림이 끊김 자체를 지켜보아야 곧바로 멈춘다
+    // With default 10s keep-alive, disconnect must stop polling immediately without waiting for a heartbeat.
     let rig = rig_with(tuned(5000, None)).await;
     let mut sse = Sse::open(
         &rig,
@@ -427,27 +419,26 @@ async fn a_dropped_connection_stops_waiting_but_not_the_work_and_the_same_key_co
     .await;
     assert!(matches!(sse.next(WITHIN).await, Next::Data(_)));
     drop(sse);
-    // 서버의 기다림이 멈춘다(조회가 더는 늘지 않는다)
     tokio::time::sleep(Duration::from_millis(300)).await;
     let settled = rig.api.lookups();
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(
         rig.api.lookups(),
         settled,
-        "끊긴 스트림이 계속 조회한다: {} → {}",
+        "disconnected stream kept polling: {} -> {}",
         settled,
         rig.api.lookups()
     );
-    // 작업은 그대로이고 같은 키·같은 요청으로 새 실행 없이 되찾는다
     assert_eq!(
         rig.api.run_of("dc1").map(|r| r.state),
         Some(ApiState::Active)
     );
-    rig.api.set_state("dc1", answer("끊겨도 남은 결과"));
+    rig.api
+        .set_state("dc1", answer("result preserved after disconnect"));
     let again = chat(&rig, BUILD_KEY, Some("dc1"), &ask("assistant", "q")).await;
     assert_eq!(
         again.json()["choices"][0]["message"]["content"],
-        "끊겨도 남은 결과"
+        "result preserved after disconnect"
     );
     assert_eq!(rig.api.runs(), 1);
 }
@@ -471,14 +462,14 @@ async fn shutting_down_ends_a_waiting_stream_with_the_notice_and_the_done_marker
         "{:?}",
         started.elapsed()
     );
-    assert!(text_of(&all).starts_with("작업을 처리 중입니다."));
+    assert_eq!(text_of(&all), RUNNING);
     assert!(matches!(all.last(), Some(Event::Done)));
 }
 
 #[tokio::test]
 async fn a_replayed_run_whose_model_was_reassigned_is_a_plain_404_before_any_stream_starts() {
     let rig = rig().await;
-    rig.api.start_as(answer("접수 당시의 결과"));
+    rig.api.start_as(answer("original admission result"));
     assert_eq!(
         chat(&rig, BUILD_KEY, Some("sr1"), &ask("assistant", "q"))
             .await
@@ -500,14 +491,14 @@ async fn a_replayed_run_whose_model_was_reassigned_is_a_plain_404_before_any_str
         reply.body
     );
     assert_eq!(reply.error().1, "model_not_found");
-    assert!(!reply.body.contains("접수 당시"));
+    assert!(!reply.body.contains("original admission"));
 }
 
 #[tokio::test]
 async fn measured_usage_is_never_streamed_when_it_was_not_asked_for() {
     let rig = rig().await;
     rig.api.start_as(ApiState::Final {
-        text: "측정된 답".into(),
+        text: "measured reply".into(),
         truncated: false,
         usage: Some(TokenUsage {
             prompt: 5,
@@ -524,7 +515,6 @@ async fn measured_usage_is_never_streamed_when_it_was_not_asked_for() {
         assert!(!raw.concat().contains("usage"), "{raw:?}");
         assert!(!raw.concat().contains("prompt_tokens"));
     }
-    // include_usage:false를 명시해도 같다
     let body = json!({"model": "assistant", "stream": true, "stream_options": {"include_usage": false},
         "messages": [{"role": "user", "content": "q"}]});
     let mut sse = Sse::open(&rig, BUILD_KEY, Some("nu3"), &body).await;
@@ -544,11 +534,7 @@ async fn a_stream_whose_lookup_is_pending_at_the_deadline_ends_with_the_notice_n
         )
         .await;
         let all = events(&sse.rest(WITHIN).await);
-        assert_eq!(
-            text_of(&all),
-            "작업을 처리 중입니다. 같은 Idempotency-Key와 같은 요청으로 다시 조회하세요.",
-            "조회 {lookup_ms}ms"
-        );
+        assert_eq!(text_of(&all), RUNNING, "lookup {lookup_ms}ms");
         assert!(matches!(all.last(), Some(Event::Done)), "{all:?}");
     }
 }

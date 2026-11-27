@@ -1,7 +1,6 @@
-//! 종료 반납(PG): 정상 종료 유예가 지난 뒤 호스트가 프로세스 종료와 세션 회수를 확인하고 부르는 `RunStore::release_for_shutdown`.
-//! 지금도 유효한 소유자(리스가 끝나지 않았고 세대·claim_epoch가 같은 시도)만 run을 시도 횟수를 쓰지 않고 `ready`로 돌린다.
-//! 같은 커밋에서 세대를 한 번 올리고 옛 승인을 무효화하며, 다음 점유는 세대를 또 올리지 않는다(새 claim_epoch만 받는다).
-//! 이미 반납했거나 소유권을 잃은 시도·끝난 run·취소 요청이 선 run은 아무것도 바꾸지 못한다.
+//! Graceful shutdown release (`RunStore::release_for_shutdown`, PG): returns a live leased run
+//! to `ready` without spending an attempt, bumps generation once (kept by the next claim),
+//! supersedes stale approvals, and ignores stale or cancel-requested runs.
 
 use crate::support::*;
 use bot_core::{
@@ -18,7 +17,6 @@ fn rev(value: &str) -> Revision {
     Revision(value.into())
 }
 
-/// 시도 한도 1: 반납이 시도를 쓰면 다음 만료에서 바로 dead letter다.
 fn one_attempt() -> Config {
     Config {
         max_attempts: 1,
@@ -26,13 +24,15 @@ fn one_attempt() -> Config {
     }
 }
 
-/// 접수해 이 핸들로 집는다.
 async fn claimed_by(db: &TestDb, handle: &Store, request: &str) -> RunContext {
     runs(db)
-        .accept(accept("personal", request, "한 번 더"))
+        .accept(accept("personal", request, "one more time"))
         .await
         .unwrap();
-    RunStore::claim(handle).await.unwrap().expect("집을 run")
+    RunStore::claim(handle)
+        .await
+        .unwrap()
+        .expect("run to claim")
 }
 
 struct Row {
@@ -87,20 +87,19 @@ async fn the_current_owner_returns_the_run_to_ready_and_the_next_claim_keeps_the
         .unwrap();
     let released = row(&db, &id).await;
     assert_eq!(released.state, "ready");
-    assert_eq!(released.attempts, 0, "시도 횟수를 쓰지 않는다");
+    assert_eq!(released.attempts, 0, "release must not spend an attempt");
     assert_eq!(
         released.generation,
         before.generation + 1,
-        "세대를 한 번 올린다"
+        "release bumps generation once"
     );
     assert!(
         released.keep_generation,
-        "다음 점유는 이 세대를 그대로 쓴다"
+        "next claim must preserve the released generation"
     );
-    assert!(!released.leased, "리스를 놓았다");
+    assert!(!released.leased, "lease must be cleared");
     assert_eq!(releases(&db).await, 1);
 
-    // 옛 claim은 더 아무것도 못 한다(두 번째 반납도 마찬가지다)
     assert!(matches!(
         old.renew(run.attempt.clone()).await,
         Err(Error::Stale)
@@ -111,30 +110,28 @@ async fn the_current_owner_returns_the_run_to_ready_and_the_next_claim_keeps_the
     ));
     assert_eq!(releases(&db).await, 1);
 
-    // 다른 워커가 집는다: 세대는 또 오르지 않고 claim_epoch만 오른다. 시도는 여전히 0이다
     let new = db.peer("new-worker").await.for_activation(rev("set-1"));
     let again = RunStore::claim(&new)
         .await
         .unwrap()
-        .expect("다른 워커가 이어받는다");
+        .expect("next worker claims released run");
     assert_eq!(again.attempt.run, id);
     assert_eq!(
         again.attempt.generation.0 as i64, released.generation,
-        "다음 점유는 세대를 또 올리지 않는다"
+        "next claim must not bump generation again"
     );
     assert_eq!(
         again.attempt.claim.unwrap().0 as i64,
         before.claim_epoch + 1,
-        "새 claim_epoch를 받는다"
+        "next claim receives a new claim_epoch"
     );
     let resumed = row(&db, &id).await;
     assert_eq!((resumed.attempts, resumed.keep_generation), (0, false));
-    // 옛 시도의 쓰기는 새 소유자를 덮지 못한다
     assert!(matches!(
-        RunStore::finish(&old, run.attempt.clone(), done("옛 결과")).await,
+        RunStore::finish(&old, run.attempt.clone(), done("stale result")).await,
         Err(Error::Stale)
     ));
-    RunStore::finish(&new, again.attempt.clone(), done("이어서 마쳤어요"))
+    RunStore::finish(&new, again.attempt.clone(), done("finished after handoff"))
         .await
         .unwrap();
     assert_eq!(state_of_run(&db, &id).await, "succeeded");
@@ -147,7 +144,6 @@ async fn a_handle_whose_active_set_was_replaced_can_still_release_its_own_claim(
     };
     let old = db.peer("old-worker").await.for_activation(rev("set-1"));
     let run = claimed_by(&db, &old, "r1").await;
-    // 종료 신호가 오기 전에 다른 프로세스가 활성 집합을 교체했다
     db.store
         .replace(
             Some(rev("set-1")),
@@ -160,7 +156,7 @@ async fn a_handle_whose_active_set_was_replaced_can_still_release_its_own_claim(
         .unwrap();
     RunStore::release_for_shutdown(&old, run.attempt.clone())
         .await
-        .expect("활성 집합과 무관하게 지금 소유자의 반납은 받는다");
+        .expect("live owner must be able to release regardless of active set");
     assert_eq!(state_of_run(&db, &run.attempt.run).await, "ready");
 }
 
@@ -173,14 +169,12 @@ async fn only_the_live_owner_may_release_and_nobody_else_is_touched() {
     let run = claimed_by(&db, &old, "r1").await;
     let id = run.attempt.run.clone();
 
-    // 리스가 끝나 다른 워커가 인계했다: 옛 시도는 소유자가 아니다
     let owner_ctx = db.takeover(&id).await;
     let before = row(&db, &id).await;
     assert!(matches!(
         RunStore::release_for_shutdown(&old, run.attempt.clone()).await,
         Err(Error::Stale)
     ));
-    // 세대만 맞고 claim이 다른 시도·claim이 없는 시도도 반납하지 못한다
     let mut wrong_claim = owner_ctx.attempt.clone();
     wrong_claim.claim = Some(ClaimEpoch(owner_ctx.attempt.claim.unwrap().0 + 7));
     assert!(matches!(
@@ -207,11 +201,10 @@ async fn only_the_live_owner_may_release_and_nobody_else_is_touched() {
             before.claim_epoch,
             before.attempts
         ),
-        "새 소유자의 행을 건드리지 않았어요"
+        "new owner's row must stay untouched"
     );
     assert_eq!(releases(&db).await, 0);
 
-    // 리스가 이미 끝난 시도는 소유자가 아니다(인계 규칙이 맡는다)
     db.expire_lease(&id).await;
     assert!(matches!(
         RunStore::release_for_shutdown(&old, owner_ctx.attempt.clone()).await,
@@ -219,9 +212,8 @@ async fn only_the_live_owner_may_release_and_nobody_else_is_touched() {
     ));
     assert_eq!(row(&db, &id).await.state, "leased");
 
-    // 끝난 run은 반납할 수 없다
     let next = db.takeover(&id).await;
-    RunStore::finish(&old, next.attempt.clone(), done("끝"))
+    RunStore::finish(&old, next.attempt.clone(), done("done"))
         .await
         .unwrap();
     assert!(matches!(
@@ -249,7 +241,10 @@ async fn a_run_with_a_cancel_request_is_not_requeued() {
         Err(Error::Denied)
     ));
     let after = row(&db, &run.attempt.run).await;
-    assert_eq!(after.state, "leased", "취소는 일반 경로가 끝낸다");
+    assert_eq!(
+        after.state, "leased",
+        "normal cancel path handles finishing"
+    );
     assert_eq!(releases(&db).await, 0);
 }
 
@@ -264,7 +259,6 @@ async fn the_release_closes_an_approval_of_the_old_generation_in_the_same_commit
         .open_approval(open_approval(binding(&run.attempt, "c1", "n1")))
         .await
         .unwrap();
-    // 승인자가 허용했다: run은 같은 세대로 깨어나 다시 집힌다(승인은 아직 소비되지 않았다)
     calls(&db)
         .decide(bot_core::ledger::Decision {
             nonce: ApprovalId("n1".into()),
@@ -295,7 +289,7 @@ async fn the_release_closes_an_approval_of_the_old_generation_in_the_same_commit
             .unwrap()
             .state,
         ApprovalState::Superseded,
-        "세대가 오른 같은 커밋에서 옛 승인이 닫힌다"
+        "old-generation approval must be superseded in the same commit"
     );
     assert_eq!(state_of_run(&db, &resumed.attempt.run).await, "ready");
 }
@@ -312,9 +306,11 @@ async fn a_released_run_still_spends_an_attempt_when_a_later_lease_expires_under
         .await
         .unwrap();
     let second = db.peer("second").await.for_activation(rev("set-1"));
-    RunStore::claim(&second).await.unwrap().expect("이어받는다");
+    RunStore::claim(&second)
+        .await
+        .unwrap()
+        .expect("reclaimed run");
     assert_eq!(row(&db, &id).await.attempts, 0);
-    // 반납은 시도를 쓰지 않았지만 이후의 만료는 평소처럼 쓴다(같은 집합이라 용서도 없다)
     db.expire_lease(&id).await;
     let third = db.peer("third").await.for_activation(rev("set-1"));
     assert!(RunStore::claim(&third).await.unwrap().is_none());
@@ -332,8 +328,7 @@ async fn the_started_calls_of_an_attempt_are_listed_by_owner_for_the_cleanup() {
             .started_owners(&run.attempt)
             .await
             .unwrap()
-            .is_empty(),
-        "시작한 호출이 없다"
+            .is_empty()
     );
     for id in ["c2", "c1"] {
         begin_call(&db, &run.attempt, id).await;
@@ -342,7 +337,6 @@ async fn the_started_calls_of_an_attempt_are_listed_by_owner_for_the_cleanup() {
             .await
             .unwrap();
     }
-    // 열려 있기만 한 호출은 시작한 것이 아니다
     begin_call(&db, &run.attempt, "c3").await;
     let owners = db.store.started_owners(&run.attempt).await.unwrap();
     assert_eq!(
@@ -351,13 +345,11 @@ async fn the_started_calls_of_an_attempt_are_listed_by_owner_for_the_cleanup() {
             format!("{}.{}.c1", run.attempt.run.0, run.attempt.generation.0),
             format!("{}.{}.c2", run.attempt.run.0, run.attempt.generation.0)
         ],
-        "시작한 호출만, 호출 ID 순서로"
+        "only started calls, ordered by call ID"
     );
-    // 다른 세대의 시도는 이 목록에 없다(옛 세대가 시작한 호출은 다음 점유의 복구가 맡는다)
     let mut other = run.attempt.clone();
     other.generation = Generation(run.attempt.generation.0 + 1);
     assert!(db.store.started_owners(&other).await.unwrap().is_empty());
-    // 끝난 호출은 빠진다
     calls(&db)
         .finish(bot_core::ledger::FinishCall {
             attempt: run.attempt.clone(),

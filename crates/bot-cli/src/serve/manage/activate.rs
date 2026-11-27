@@ -1,5 +1,4 @@
-//! 디스크 변경의 전체 검증·번들 보관·PostgreSQL CAS 커밋·메모리 원자적 교체(즉시 활성화).
-//! 어느 단계라도 실패하면 `DiskTxn`이 디스크 변경을 모두 되돌리고 기존 활성 집합을 그대로 유지한다.
+//! Validates disk edits, stores bundles, CAS-commits active revision, and swaps live state.
 use super::{LiveManager, yaml_edit::DiskTxn};
 use crate::{
     host, install,
@@ -24,8 +23,7 @@ fn reject(code: &'static str, message: impl Into<String>) -> ManageError {
 }
 
 impl LiveManager {
-    /// 디스크에 써 둔 프로필·호스트 변경을 검증하고 DB·메모리에 즉시 활성화한다.
-    /// 실패하면 `txn`이 드롭되면서 디스크 변경 전체가 자동으로 롤백된다.
+    /// Validates staged disk changes and activates them immediately; dropping `txn` on error rolls back disk edits.
     pub(super) async fn activate_disk(
         &self,
         profile: &ProfileId,
@@ -51,7 +49,7 @@ impl LiveManager {
             .map_err(|report| reject("validation_failed", report.to_string()))?;
         let new_profile_rev = next_set
             .profile(profile)
-            .ok_or_else(|| reject("unknown_profile", "프로필이 검증 결과에서 사라졌어요"))?
+            .ok_or_else(|| reject("unknown_profile", "profile disappeared during validation"))?
             .revision
             .clone();
 
@@ -72,14 +70,12 @@ impl LiveManager {
         let publication = Publication::of(&next_set, &next_host, &revisions)
             .map_err(|e| reject("publication_failed", e))?;
 
-        // 로컬 stdio 서버가 바뀌었으면 읽기 전용 설치본과 srt 샌드박스 준비를 커밋 전에 끝낸다
         let prepared_runner = self
             .live_runner
             .prepare_update(&next_host, &self.settings, self.uid)
             .await
             .map_err(|e| reject("runner_prepare_failed", e))?;
 
-        // 번들을 먼저 저장하고 진행 중 작업이 고정한 옛 판본을 확보한다
         let mut prepared = restore::prepare(
             self.raw_store.as_ref(),
             self.registry.as_ref(),
@@ -134,7 +130,7 @@ impl LiveManager {
             return Err(ManageError::Unavailable("active_replace_stale"));
         }
 
-        // DB 커밋 성공 뒤 디스크 확정 + 프로세스 내 모든 상태를 await 없이 원자적으로 교체한다
+        // After DB commit, finalize disk and swap all in-process state atomically with no await points.
         txn.commit();
         let (_applied, displaced) = self.registry.apply(next_set);
         {
@@ -159,7 +155,7 @@ impl LiveManager {
         tracing::info!(
             profile = %profile.0,
             revision = %new_profile_rev.0,
-            "스킬·MCP 변경을 즉시 활성화했어요"
+            "activated live skill/MCP changes"
         );
         Ok(new_profile_rev)
     }

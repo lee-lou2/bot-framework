@@ -1,4 +1,4 @@
-//! 추적 내보내기 설정: 헤더 비밀은 프로필마다 자기 SecretStore에서, 잘못된 설정은 시작 전에 거절.
+//! Trace exporter config: per-profile header secrets, endpoint validation, redaction, and clean shutdown.
 
 use crate::support::collector::{self, Collector, Mode};
 use bot_admin::trace::{
@@ -50,7 +50,10 @@ fn fast() -> Options {
 }
 
 async fn drain(e: &Exporter) {
-    assert!(e.flush(Duration::from_secs(10)).await, "큐가 비지 않았다");
+    assert!(
+        e.flush(Duration::from_secs(10)).await,
+        "queue did not drain"
+    );
 }
 
 struct Store(BTreeMap<(String, String), String>);
@@ -88,7 +91,7 @@ async fn header_secrets_come_from_each_profiles_own_secret_store() {
             b.headers = vec![
                 (
                     "Authorization".into(),
-                    HeaderValue::Secret(SecretName::parse("collector-token").expect("이름")),
+                    HeaderValue::Secret(SecretName::parse("collector-token").expect("secret name")),
                 ),
                 ("X-Static".into(), HeaderValue::Plain("one".into())),
             ];
@@ -111,7 +114,8 @@ async fn header_secrets_come_from_each_profiles_own_secret_store() {
         (pid("gamma"), with(&c)),
     ]
     .into();
-    let e = Exporter::start(map, Some(Arc::new(store)), Redactor::default(), fast()).expect("시작");
+    let e =
+        Exporter::start(map, Some(Arc::new(store)), Redactor::default(), fast()).expect("start");
     for p in ["alpha", "beta", "gamma"] {
         e.record(span(p, "r-1", "attempt main"));
     }
@@ -128,11 +132,11 @@ async fn header_secrets_come_from_each_profiles_own_secret_store() {
     assert_eq!(
         auth(&b).as_deref(),
         Some("Bearer beta-token"),
-        "같은 이름이어도 프로필마다 자기 값만"
+        "same secret name must resolve per profile"
     );
     assert!(
         c.requests().is_empty(),
-        "비밀을 못 받으면 인증 없이 보내지 않는다"
+        "must not send unauthenticated requests when secret is missing"
     );
     assert_eq!(
         e.stats(&pid("gamma")).and_then(|s| s.last_error),
@@ -150,7 +154,7 @@ async fn header_secrets_come_from_each_profiles_own_secret_store() {
 fn bad_configuration_is_refused_before_anything_starts() {
     let backend = |endpoint: &str, header: &str, link: Option<&str>| ProfileTrace {
         backend: Some(Backend {
-            remote: true, // 이 시험은 다른 규칙을 본다: `collector` 같은 이름도 받도록 명시한다(주소 규칙은 아래 시험이 따로 본다)
+            remote: true, // host-policy rules are tested separately below
             name: "x".into(),
             endpoint: endpoint.into(),
             headers: vec![(header.into(), HeaderValue::Plain("v".into()))],
@@ -169,15 +173,15 @@ fn bad_configuration_is_refused_before_anything_starts() {
     for (what, t) in [
         ("ftp", backend("ftp://collector:4318", "X-A", None)),
         (
-            "사용자 정보",
+            "userinfo",
             backend("http://user:pw@collector:4318", "X-A", None),
         ),
         (
-            "헤더 이름",
+            "header name",
             backend("http://collector:4318", "bad name", None),
         ),
         (
-            "링크 틀",
+            "link template",
             backend(
                 "http://collector:4318",
                 "X-A",
@@ -185,7 +189,7 @@ fn bad_configuration_is_refused_before_anything_starts() {
             ),
         ),
         (
-            "링크 스킴",
+            "link scheme",
             backend(
                 "http://collector:4318",
                 "X-A",
@@ -193,7 +197,7 @@ fn bad_configuration_is_refused_before_anything_starts() {
             ),
         ),
         (
-            "표본",
+            "sample",
             ProfileTrace {
                 sample: 1.5,
                 ..ProfileTrace::default()
@@ -209,16 +213,15 @@ fn bad_configuration_is_refused_before_anything_starts() {
     );
     let err = try_start(ok).err().unwrap_or_default();
     assert!(
-        err.contains("런타임"),
-        "런타임 밖에서는 시작하지 않는다: {err}"
+        err.to_ascii_lowercase().contains("runtime"),
+        "must refuse start outside tokio runtime: {err}"
     );
     assert!(
         try_start(ProfileTrace::default()).is_ok(),
-        "내보낼 곳이 없으면 런타임이 없어도 된다"
+        "no-op exporter needs no runtime"
     );
 }
 
-/// 헤더 하나(자격 이름)를 단 설정. `remote`는 사설망 밖 평문 전송을 허용하는 운영자의 명시다.
 fn at(endpoint: &str, remote: bool) -> ProfileTrace {
     ProfileTrace {
         backend: Some(Backend {
@@ -235,7 +238,6 @@ fn at(endpoint: &str, remote: bool) -> ProfileTrace {
     }
 }
 
-/// 수집기 주소는 평문 http라 헤더 비밀과 내용이 그대로 나간다. 루프백·사설 주소(와 localhost)만 명시 없이 받는다.
 #[test]
 fn only_loopback_and_private_collectors_are_accepted_without_the_explicit_remote_option() {
     for host in [
@@ -269,7 +271,7 @@ fn only_loopback_and_private_collectors_are_accepted_without_the_explicit_remote
 #[test]
 fn any_other_collector_is_refused_by_name_unless_remote_is_explicit() {
     for host in [
-        // 공개 주소와 사설 대역 바로 옆
+        // Public addresses and boundaries just outside private ranges.
         "8.8.8.8",
         "1.1.1.1",
         "11.0.0.1",
@@ -286,7 +288,7 @@ fn any_other_collector_is_refused_by_name_unless_remote_is_explicit() {
         "[2606:4700::1111]",
         "[::ffff:8.8.8.8]",
         "[fec0::1]",
-        // 이름은 어디로 풀릴지 모른다(`localhost`만 표준상 루프백이다)
+        // Hostnames can resolve anywhere (only RFC 6761 localhost is pinned to loopback).
         "collector.example.com",
         "collector",
         "otel-collector",
@@ -294,7 +296,7 @@ fn any_other_collector_is_refused_by_name_unless_remote_is_explicit() {
         "localhost.example.com",
         "notlocalhost",
         "localhost.",
-        // 루프백·사설처럼 보이지만 IP 리터럴이 아니다(시스템 해석기는 다른 곳으로 풀 수 있다)
+        // Non-canonical numeric/lookalike forms that are not IP literals.
         "127.0.0.1.example.com",
         "10.0.0.5.example.com",
         "2130706433",
@@ -304,18 +306,18 @@ fn any_other_collector_is_refused_by_name_unless_remote_is_explicit() {
     ] {
         let endpoint = format!("http://{host}:4318/v1/traces");
         let e = at(&endpoint, false).check(&pid("alpha")).expect_err(host);
-        assert!(e.contains("alpha"), "프로필 이름을 밝힌다: {e}");
+        assert!(e.contains("alpha"), "error should name profile: {e}");
         assert!(
             e.contains(host.trim_matches(['[', ']'])),
-            "호스트를 밝힌다: {host} → {e}"
+            "error should name host: {host} -> {e}"
         );
         assert!(
             e.contains("admin.trace.alpha.remote"),
-            "고치는 법(옵션 이름)을 알린다: {e}"
+            "error should name remediation option: {e}"
         );
         assert!(
             at(&endpoint, true).check(&pid("alpha")).is_ok(),
-            "명시하면 받는다: {host}"
+            "explicit remote=true must allow {host}"
         );
     }
 }
@@ -329,12 +331,12 @@ fn the_refusal_names_the_profile_and_the_host_but_nothing_else() {
         assert!(e.contains(shown), "{shown}: {e}");
     }
     for hidden in ["private-path", "4318", "collector-token", "Authorization"] {
-        assert!(!e.contains(hidden), "{hidden}이(가) 오류에 실렸다: {e}");
+        assert!(!e.contains(hidden), "{hidden} leaked in error: {e}");
     }
 }
 
-/// 허용 검사는 이름만 본다: `localhost`·`*.localhost`는 시스템 해석기가 무엇을 돌려주든 루프백으로 접속한다(`Host` 헤더만 원래 이름). 63자를 넘는 라벨은 시스템
-/// 해석기가 풀지 못하는 이름이라, 해석기를 거치면 보내지 못하고 고정해 접속하면 루프백의 수집기에 닿는다.
+/// `localhost` and `*.localhost` dial loopback directly while preserving the original `Host` header.
+/// A 64-char label cannot be resolved by OS DNS, proving the dial bypasses DNS.
 #[tokio::test]
 async fn a_localhost_collector_is_dialed_at_loopback_and_keeps_its_name_in_the_host_header() {
     let c = collector::start(Mode::Ok).await;
@@ -368,29 +370,24 @@ async fn a_localhost_collector_is_dialed_at_loopback_and_keeps_its_name_in_the_h
             Redactor::default(),
             fast(),
         )
-        .expect("시작");
+        .expect("start");
         e.record(span("alpha", &format!("r-{n}"), "attempt main"));
         drain(&e).await;
         let requests = c.requests();
         assert_eq!(
             requests.len(),
             n + 1,
-            "{name}: 루프백의 수집기에 닿지 못했다"
+            "{name}: failed to reach loopback collector"
         );
         let host = requests[n]
             .headers
             .iter()
             .find(|(k, _)| k == "host")
             .map(|(_, v)| v.as_str());
-        assert_eq!(
-            host,
-            Some(format!("{name}:{port}").as_str()),
-            "Host 헤더는 원래 이름"
-        );
+        assert_eq!(host, Some(format!("{name}:{port}").as_str()));
     }
 }
 
-/// `serve`(내보내기 시작)도 같은 규칙으로 시작 전에 멈춘다.
 #[tokio::test]
 async fn the_exporter_refuses_to_start_a_remote_collector_without_the_option() {
     let start = |remote| {
@@ -405,12 +402,12 @@ async fn the_exporter_refuses_to_start_a_remote_collector_without_the_option() {
             Options::default(),
         )
     };
-    let e = start(false).err().expect("명시 없이는 시작하지 않는다");
+    let e = start(false).err().expect("must refuse without remote=true");
     assert!(
         e.contains("alpha") && e.contains("collector.example.com"),
         "{e}"
     );
-    assert!(start(true).is_ok(), "명시하면 시작한다");
+    assert!(start(true).is_ok());
 }
 
 #[test]
@@ -424,7 +421,7 @@ fn diagnostic_output_never_shows_secret_values_or_plain_header_values() {
         !shown.contains("synthetic") && !shown.contains("other-secret"),
         "{shown}"
     );
-    assert!(shown.contains('2'), "개수만 보인다: {shown}");
+    assert!(shown.contains('2'), "only count should appear: {shown}");
     let t = ProfileTrace {
         backend: Some(Backend {
             remote: false,
@@ -437,7 +434,7 @@ fn diagnostic_output_never_shows_secret_values_or_plain_header_values() {
                 ),
                 (
                     "X-Key".into(),
-                    HeaderValue::Secret(SecretName::parse("collector-token").expect("이름")),
+                    HeaderValue::Secret(SecretName::parse("collector-token").expect("secret name")),
                 ),
             ],
             link: None,
@@ -446,7 +443,7 @@ fn diagnostic_output_never_shows_secret_values_or_plain_header_values() {
     };
     let shown = format!("{t:?}");
     assert!(!shown.contains("plain-token-xyz"), "{shown}");
-    assert!(shown.contains("collector-token"), "비밀 이름은 보여도 된다");
+    assert!(shown.contains("collector-token"), "secret name may appear");
 }
 
 async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
@@ -456,7 +453,7 @@ async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("제한 시간 안에 이루어지지 않았다: {what}");
+    panic!("timed out waiting for: {what}");
 }
 
 #[tokio::test]
@@ -470,7 +467,7 @@ async fn dropping_the_exporter_drains_the_queue_then_stops_workers_and_releases_
     if let Some(b) = &mut t.backend {
         b.headers = vec![(
             "Authorization".into(),
-            HeaderValue::Secret(SecretName::parse("collector-token").expect("이름")),
+            HeaderValue::Secret(SecretName::parse("collector-token").expect("secret name")),
         )];
     }
     let shared: Arc<dyn SecretStore> = store.clone();
@@ -480,15 +477,14 @@ async fn dropping_the_exporter_drains_the_queue_then_stops_workers_and_releases_
         Redactor::default(),
         fast(),
     )
-    .expect("시작");
-    assert!(Arc::strong_count(&store) > 1, "작업이 SecretStore를 쥔다");
+    .expect("start");
+    assert!(Arc::strong_count(&store) > 1, "worker holds SecretStore");
     for i in 0..3 {
         e.record(span("alpha", &format!("r-{i}"), "attempt main"));
     }
     drop(e);
-    // 놓기 전에 큐에 있던 스팬은 끝까지 보내고, 작업은 끝나 SecretStore 참조를 놓는다.
-    wait_until("남은 스팬 전송", || c.spans().len() == 3).await;
-    wait_until("작업 종료와 참조 해제", || {
+    wait_until("queued spans flushed", || c.spans().len() == 3).await;
+    wait_until("worker exit and store release", || {
         Arc::strong_count(&store) == 1
     })
     .await;
@@ -505,10 +501,12 @@ async fn a_hung_collector_cannot_keep_a_dropped_exporters_workers_alive_forever(
         Redactor::default(),
         fast(),
     )
-    .expect("시작");
+    .expect("start");
     e.record(span("alpha", "r-1", "attempt main"));
     tokio::time::sleep(Duration::from_millis(60)).await;
     drop(e);
-    // 전송 제한 시간(300ms)이 지나면 작업이 끝난다.
-    wait_until("작업 종료", || Arc::strong_count(&store) == 1).await;
+    wait_until("worker exit after timeout", || {
+        Arc::strong_count(&store) == 1
+    })
+    .await;
 }

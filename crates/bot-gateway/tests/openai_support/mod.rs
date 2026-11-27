@@ -1,4 +1,4 @@
-//! OpenAI 호환 입구 시험 공용 조립: 실제 TCP 서버(루트 `/v1`), 메모리 `ApiRuns`, 원시 HTTP/1.1 클라이언트(JSON·SSE).
+//! Shared OpenAI-compatible ingress test harness: live TCP server (`/v1`), in-memory `ApiRuns`, and raw HTTP/1.1 client.
 #![allow(dead_code, unused_imports)]
 mod handoffs;
 mod secrets;
@@ -42,7 +42,7 @@ use tokio_util::sync::CancellationToken;
 pub const BUILD_KEY: &str = concat!("build-key-", "0123456789", "abcdef0123", "456789");
 pub const BUILD_NEXT_KEY: &str = concat!("build-next-", "0123456789", "abcdef0123", "456789");
 pub const OPS_KEY: &str = concat!("ops-key-", "0123456789", "abcdef0123", "456789ab");
-/// 웹훅 입구 `inbox`의 HS256 키(같은 호스트에서 JWT 웹훅이 그대로인지 보는 데 쓴다)
+/// HS256 key for the co-hosted `inbox` webhook endpoint.
 pub const JWT_KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
 pub const NOW: u64 = 1_800_000_000;
 
@@ -65,16 +65,13 @@ pub fn secrets() -> Arc<MemorySecrets> {
     ])
 }
 
-/// 프로필의 모양을 바꿔 보는 값(권한 철회·재지정 시험)
+/// Profile mutation parameters for revocation and reassignment tests.
 #[derive(Clone, Copy)]
 pub struct Shape {
-    /// 멤버 `http:openai/build`가 있는가
     pub build_member: bool,
-    /// 모델 `assistant`가 가리키는 에이전트
     pub assistant_agent: &'static str,
-    /// 모델 `assistant`의 바인딩이 있는가
     pub assistant_binding: bool,
-    /// 멤버 `build`의 역할이 `run` 스코프를 주는가(참이 아니면 읽기 스코프만 준다)
+    /// When false, `build` receives only `calendar.read` instead of `run`.
     pub build_runs: bool,
 }
 
@@ -89,7 +86,6 @@ impl Default for Shape {
     }
 }
 
-/// 프로필 `personal`: 모델 `assistant`(에이전트 main)와 `helper`(에이전트 side), 멤버 `build`(실행 가능)·`ops`(읽기만)
 pub fn fixture() -> Fixture {
     fixture_shaped(Shape::default())
 }
@@ -143,9 +139,8 @@ pub fn fixture_shaped(shape: Shape) -> Fixture {
 }
 
 pub struct Rig {
-    /// 접속 주소(IPv4 루프백)
     pub addr: SocketAddr,
-    /// 듀얼 스택일 때 다른 출처로 접속하는 IPv6 루프백 주소
+    /// IPv6 loopback address when bound dual-stack to simulate a second source IP.
     pub alt: Option<SocketAddr>,
     pub api: Arc<MemoryApi>,
     pub bundles: Arc<MemoryBundles>,
@@ -167,11 +162,10 @@ pub struct Setup {
     pub keep_alive: Option<Duration>,
     pub models_budget: Option<Duration>,
     pub probe: Option<Probe>,
-    /// 키 인증 실패 예산(횟수, 집계 창, 차단 시간). 기본은 사실상 무제한이라 일반 시험이 영향받지 않는다.
+    /// Auth failure budget `(max, window, block)`; defaults effectively unlimited for unrelated tests.
     pub auth_failures: (usize, Duration, Duration),
-    /// 동시 연결 한도(없으면 운영 기본값)
     pub connections: Option<usize>,
-    /// 듀얼 스택(`[::]`)으로 열어 IPv4(`127.0.0.1`)와 IPv6(`::1`) 두 출처로 접속할 수 있게 한다
+    /// Bind `[::]` so tests can connect from both IPv4 (`127.0.0.1`) and IPv6 (`::1`).
     pub dual_stack: bool,
     pub tune: Box<dyn FnOnce(&mut HostConfig)>,
     pub bundles: Option<i64>,
@@ -288,7 +282,7 @@ impl Resp {
         serde_json::from_str(&self.body).unwrap_or(Value::Null)
     }
 
-    /// `{"error":{...}}`의 (type, code, param)
+    /// Extracts `(type, code, param)` from an OpenAI error JSON envelope.
     pub fn error(&self) -> (String, String, Value) {
         let error = &self.json()["error"];
         (
@@ -300,7 +294,7 @@ impl Resp {
 }
 
 fn head_of(raw: &str) -> (u16, Vec<(String, String)>, &str) {
-    let (head, body) = raw.split_once("\r\n\r\n").expect("머리와 본문");
+    let (head, body) = raw.split_once("\r\n\r\n").expect("head and body");
     let mut lines = head.lines();
     let status = lines
         .next()
@@ -317,11 +311,10 @@ fn head_of(raw: &str) -> (u16, Vec<(String, String)>, &str) {
     (status, headers, body)
 }
 
-/// 청크 전송 본문을 풀어 합친다(청크 하나가 SSE 이벤트 하나)
 fn dechunk(mut body: &str) -> Vec<String> {
     let mut chunks = Vec::new();
     while let Some((size, rest)) = body.split_once("\r\n") {
-        let size = usize::from_str_radix(size.trim(), 16).expect("청크 크기");
+        let size = usize::from_str_radix(size.trim(), 16).expect("chunk size");
         if size == 0 {
             break;
         }
@@ -348,7 +341,7 @@ pub async fn send(
     let mut raw = Vec::new();
     tokio::time::timeout(Duration::from_secs(15), stream.read_to_end(&mut raw))
         .await
-        .expect("응답 시간 초과")
+        .expect("response timeout")
         .unwrap();
     let raw = String::from_utf8(raw).unwrap();
     let (status, headers, body) = head_of(&raw);
@@ -371,7 +364,6 @@ pub fn bearer(key: &str) -> String {
     format!("Bearer {key}")
 }
 
-/// `POST /v1/chat/completions` (인증·Content-Type 포함). `idem`이 None이면 키 헤더를 보내지 않는다.
 pub async fn chat(rig: &Rig, key: &str, idem: Option<&str>, body: &Value) -> Resp {
     chat_raw(rig, key, idem, &[], &body.to_string()).await
 }
@@ -425,7 +417,6 @@ pub fn principal(subject: &str) -> PrincipalId {
     PrincipalId(format!("http:openai/{subject}"))
 }
 
-/// 웹훅 입구용 JWT(같은 호스트에서 웹훅이 그대로인지 보는 데 쓴다)
 pub fn jwt(sub: &str) -> String {
     sign(
         &json!({"iss": "https://issuer.example", "aud": "bot", "sub": sub, "exp": NOW + 3600}),
@@ -433,14 +424,13 @@ pub fn jwt(sub: &str) -> String {
     )
 }
 
-/// 요청 바이트를 그대로 보내고 응답을 읽는다(청크 전송·느린 본문·헤더 조작용)
 pub async fn send_raw(addr: SocketAddr, request: &[u8]) -> Resp {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream.write_all(request).await.unwrap();
     let mut raw = Vec::new();
     tokio::time::timeout(Duration::from_secs(15), stream.read_to_end(&mut raw))
         .await
-        .expect("응답 시간 초과")
+        .expect("response timeout")
         .unwrap();
     let raw = String::from_utf8(raw).unwrap();
     let (status, headers, body) = head_of(&raw);
@@ -451,7 +441,6 @@ pub async fn send_raw(addr: SocketAddr, request: &[u8]) -> Resp {
     }
 }
 
-/// `delay` 뒤에 이 멱등 키의 작업을 끝낸다(worker 완료 흉내)
 pub fn finish_later(rig: &Rig, key: &str, state: ApiState, delay: Duration) {
     let (api, key) = (rig.api.clone(), key.to_owned());
     tokio::spawn(async move {
@@ -465,7 +454,6 @@ pub fn finish_later(rig: &Rig, key: &str, state: ApiState, delay: Duration) {
     });
 }
 
-/// 요청을 백그라운드로 보낸다(대기 중 상황을 바꾸는 시험용)
 pub fn spawn_chat(
     rig: &Rig,
     key: &'static str,
@@ -495,11 +483,10 @@ pub fn spawn_chat(
 }
 
 pub const PENDING: &str =
-    "승인 대기 중입니다. 같은 Idempotency-Key와 같은 요청으로 다시 조회하세요.";
+    "Awaiting approval. Query again with the same Idempotency-Key and request.";
 pub const RUNNING: &str =
-    "작업을 처리 중입니다. 같은 Idempotency-Key와 같은 요청으로 다시 조회하세요.";
+    "Request is still in progress. Query again with the same Idempotency-Key and request.";
 
-/// 입구 `openai`의 총 대기 시간(ms)과 실행 수 한도를 바꾼 조립
 pub fn tuned(wait_ms: u64, max_active: u32) -> Setup {
     Setup {
         tune: Box::new(move |host| {
@@ -511,7 +498,6 @@ pub fn tuned(wait_ms: u64, max_active: u32) -> Setup {
     }
 }
 
-/// 성공 응답의 `choices[0].message.content`
 pub fn content(reply: &Resp) -> String {
     reply.json()["choices"][0]["message"]["content"]
         .as_str()

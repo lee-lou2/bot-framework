@@ -1,5 +1,4 @@
-//! HTTP 입구의 접수: 대화 종류와 경로 정보는 함께만 오고, 최초 응답 방식은 저장돼 이후 조회가 그대로 돌려준다.
-//! 새 외부 접수만 활성 판본과 대조한다(재전달은 기존 run으로 수렴).
+//! HTTP ingress acceptance (PG): route validation, first response mode persistence, and active-revision fencing on fresh requests.
 
 use crate::support::*;
 use bot_core::{
@@ -90,7 +89,7 @@ async fn the_first_response_mode_is_stored_and_returned_and_is_not_part_of_the_h
         .accept(http("h1", ResponseMode::Accepted))
         .await
         .unwrap();
-    assert_eq!(run, again, "응답 방식이 달라도 같은 요청이다");
+    assert_eq!(run, again, "response mode does not change request identity");
     let state = runs(&db)
         .status(key_of(&http("h1", ResponseMode::Sync)))
         .await
@@ -100,16 +99,14 @@ async fn the_first_response_mode_is_stored_and_returned_and_is_not_part_of_the_h
     assert_eq!(
         (route.method.as_str(), route.path.as_str(), route.response),
         ("POST", "/agenda", ResponseMode::Sync),
-        "최초 접수의 응답 방식이 그대로 남는다"
+        "first response mode is preserved"
     );
-    // 메서드·경로가 다르면 다른 요청이다
     let mut other = http("h1", ResponseMode::Sync);
     other.event.http.as_mut().unwrap().path = "/other".into();
     assert!(matches!(
         runs(&db).accept(other).await,
         Err(Error::Conflict)
     ));
-    // HTTP가 아닌 입구는 경로 정보가 없다
     let cli = accept("personal", "c1", "x");
     runs(&db).accept(cli.clone()).await.unwrap();
     assert!(
@@ -128,7 +125,6 @@ async fn a_new_request_is_checked_against_the_active_revision_but_a_redelivery_i
     let Some(db) = TestDb::bare().await else {
         return;
     };
-    // 아무것도 게시되지 않았으면 새 외부 접수는 받지 않는다(접수 행도 남지 않는다)
     assert!(matches!(
         runs(&db).accept(http("n0", ResponseMode::Accepted)).await,
         Err(Error::Stale)
@@ -155,7 +151,7 @@ async fn a_new_request_is_checked_against_the_active_revision_but_a_redelivery_i
         )
         .await
         .unwrap();
-    // 판본이 바뀐 뒤에도 같은 요청의 재전달은 최초 접수로 수렴하고, 새 요청은 새 판본으로만 받는다
+    // Redelivery converges to the original run even after revision changes; fresh requests require r2.
     assert_eq!(
         runs(&db)
             .accept(http("n1", ResponseMode::Accepted))

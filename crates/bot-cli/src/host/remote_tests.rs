@@ -1,4 +1,3 @@
-//! 호스트 설정의 원격(Streamable HTTP) 서버 항목: 프로필 등록부에 어떻게 드는가.
 use super::*;
 
 const REMOTE: &str = r#"{
@@ -25,7 +24,6 @@ fn a_remote_server_is_registered_beside_the_local_ones_with_its_exact_target() {
             .map(|name| name.as_str()),
         Some("docs-token")
     );
-    // 설치할 파일이 있는 서버(로컬)와 갈라서 담는다
     assert!(host.servers.contains_key("demo-agenda") && !host.servers.contains_key("docs"));
     assert!(!host.catalog.remote_servers.contains_key("demo-agenda"));
 }
@@ -38,10 +36,13 @@ fn a_bad_remote_entry_fails_the_whole_file() {
         r#"{"transport": "http", "url": "https://mcp.example/api", "extra": 1}"#,
     ] {
         let text = format!(r#"{{"version": 1, "servers": {{"docs": {entry}}}}}"#);
-        let error = parse(&text).err().expect("거절해야 해요").to_string();
+        let error = parse(&text)
+            .err()
+            .expect("must reject invalid entry")
+            .to_string();
         assert!(
             error.contains("servers.docs"),
-            "어느 항목인지 알려야 해요: {error}"
+            "error must name the offending entry: {error}"
         );
     }
 }

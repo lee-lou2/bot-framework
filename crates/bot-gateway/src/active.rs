@@ -1,18 +1,12 @@
-//! 이 프로세스가 쓰는 프로필 집합이 저장소가 게시한 활성 집합과 같은지 확인한다.
-//!
-//! 접수·결과 반환의 권한 검사는 이 프로세스의 로컬 표로 한다. 다른 프로세스가 새 판본을 활성화했다면 이 프로세스는
-//! 구판이다. 구판은 새 접수도 결과 반환도 하지 않고 일시 실패로 닫는다(HTTP 503·CLI `unavailable`·Slack ack 보류) —
-//! 상대가 다시 시도하고, 운영자는 이 프로세스를 새 판본으로 다시 시작한다. 새 접수의 최종 대조(활성 판본 교체와
-//! 같은 잠금 아래)는 저장소가 한다. 여기는 그 앞에서 구판 프로세스를 일찍 닫고, 저장소가 대조하지 않는 결과 반환을 지킨다.
+//! Active profile set check against the store-published active revision.
 pub use bot_core::active::{ActiveCheck, ActiveSet};
 
-/// 응답(결과·상태) 직전 확인의 결과
+/// Result of the pre-response authorization and active-set check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Release {
-    /// 지금도 멤버이고 이 프로세스의 판본이 활성 판본이다.
     Allowed,
-    /// 접수 뒤 멤버가 철회됐거나 입구 소유자가 바뀌었다. 요청이 있는지도 알리지 않는다.
+    /// Membership was revoked or entrance ownership changed; do not reveal request existence.
     Forbidden,
-    /// 이 프로세스의 판본을 확인하지 못했거나 구판이다. 일시 실패로 닫는다.
+    /// Stale process or check failed; fail closed as temporarily unavailable.
     Unavailable,
 }

@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# 합성 프로필 조립기와 메모리 가짜 저장소. 다른 크레이트의 시험이 쓴다. 운영 빌드에는 넣지 않는다.
+# Synthetic profile builders and in-memory test doubles for cross-crate tests; excluded from production builds.
 testing = []
 
 [dependencies]
@@ -27,5 +27,5 @@ tracing.workspace = true
 [dev-dependencies]
 bot-gateway = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
-# 가짜 시계(`start_paused`)로 기다림·기한 시험을 결정적으로 돌린다
+# Fake clock (`start_paused`) for deterministic wait and deadline tests.
 tokio = { workspace = true, features = ["test-util"] }

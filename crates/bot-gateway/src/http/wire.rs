@@ -1,4 +1,4 @@
-//! HTTP 입구의 요청 읽기·응답 만들기(순수 보조). 상태 코드와 오류 문구는 이 파일이 정한다.
+//! Webhook HTTP request reading and status/response wire helpers.
 use super::reply::{self, error, json_response, retry_after, tool_result, with_header};
 use crate::{inbound::Respond, ingress::Rejection, routes::STATUS_SEGMENT};
 use axum::{
@@ -32,7 +32,7 @@ pub(super) fn not_found() -> Response {
     error(StatusCode::NOT_FOUND, "not_found")
 }
 
-/// `/{endpoint}{rest}` — rest는 항상 `/`로 시작한다.
+/// Splits `/{endpoint}{rest}` where `rest` always starts with `/`.
 pub(super) fn split_endpoint(path: &str) -> Option<(&str, &str)> {
     let trimmed = path.strip_prefix('/')?;
     let (endpoint, rest) = match trimmed.find('/') {
@@ -101,7 +101,6 @@ impl BodyError {
     }
 }
 
-/// 인증 단계의 실패. 이유는 밖으로 알리지 않는다.
 pub(super) enum AuthError {
     Unauthorized,
     Unavailable,
@@ -116,7 +115,6 @@ impl AuthError {
     }
 }
 
-/// 본문을 한도까지만 읽는다(청크가 한도를 넘으면 그 자리에서 413).
 pub(super) async fn read_body(
     body: Body,
     limit: usize,
@@ -146,7 +144,6 @@ pub(super) async fn read_body(
         .unwrap_or(Err(BodyError::Timeout))
 }
 
-/// 202와 요청 상태 URL. 응답 방식은 접수 때 저장소에 저장돼 재조회가 그 값만 쓴다.
 pub(super) fn accepted(endpoint: &str, request: &str) -> Response {
     let location = format!("/{endpoint}/{STATUS_SEGMENT}/{request}");
     with_header(
@@ -159,10 +156,8 @@ pub(super) fn accepted(endpoint: &str, request: &str) -> Response {
     )
 }
 
-/// 끝난 요청의 응답. 최초 응답과 재조회가 같은 렌더러를 쓴다(`mode`가 접수 때 정한 응답 방식).
-/// 성공한 도구 결과가 `{status, body}`이면 그대로 쓴다. 그 모양을 시도했지만(`status` 키가 있다) 검증을 통과하지
-/// 못하면 502다. `Sync`는 모양이 다른 결과도 502이고, `Accepted`만 도구 결과 모양이 아닌 값(에이전트의 답 등)을
-/// `{request_id, state, result}`로 감싸 200으로 준다.
+/// Renders a finished request identically for initial and polled responses according to the stored `mode`.
+/// Invalid `{status, ...}` attempts always fail with 502; only `Accepted` wraps non-tool JSON results.
 pub(super) fn finished(state: &RequestState, request: &str, mode: Respond) -> Response {
     let lenient = mode == Respond::Accepted;
     match state.state {
@@ -203,7 +198,7 @@ pub(super) fn forbidden() -> Response {
     error(StatusCode::FORBIDDEN, "forbidden")
 }
 
-/// 저장된 응답 방식. HTTP 경로 메타가 없는 옛 행은 보수적으로 accepted다.
+/// Defaults legacy rows lacking stored HTTP route metadata conservatively to `Accepted`.
 pub(super) fn stored_mode(state: Option<&RequestState>) -> Respond {
     state
         .and_then(|s| s.http.as_ref())

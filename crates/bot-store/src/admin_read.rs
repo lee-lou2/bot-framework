@@ -1,6 +1,4 @@
-//! 관리 조회(AdminRead). 모든 조회는 인증된 `Viewer`로 한정한다: 운영자는 호스트 전체, 그 밖의 주체는 자기 요청과
-//! 자기에게 지정된(또는 자기가 요청한) 승인만 본다. 보이지 않는 대상은 `Missing`이다(존재 여부도 알리지 않는다).
-//! 읽기 전용이며 인자·본문·비밀 원문을 싣지 않는다(해시와 브로커가 렌더링한 카드 줄만).
+//! Read-only admin queries (`AdminRead`) scoped by `Viewer`; hidden targets return `Missing` without leaking existence.
 
 use crate::{
     audit,
@@ -27,7 +25,7 @@ fn operator(viewer: &Viewer) -> R<()> {
     }
 }
 
-/// 실행 목록의 커서 `<갱신 시각 ms>:<프로필>:<run ID>`. 같은 run ID가 다른 프로필에 있을 수 있으므로 프로필이 정렬 키에 든다.
+/// Run listing cursor `<updated_ms>:<profile>:<run_id>` (profile breaks cross-profile ID ties).
 fn run_cursor(after: &Option<String>) -> Option<(i64, String, String)> {
     let mut parts = after.as_deref()?.splitn(3, ':');
     let ms = parts.next()?.parse().ok()?;
@@ -69,9 +67,7 @@ fn run_view(row: &PgRow) -> R<RunView> {
     })
 }
 
-/// 호출의 고정 실패 분류. 저장된 상태·사유 코드에서 기계적으로 옮기고 원문·추측은 쓰지 않는다.
-/// 거절(`denied`)은 Denied. 보류(`held`)는 사유가 `timeout`이면 Timeout, 결과를 막은 `result_*`면 InvalidResult,
-/// 그 밖에는 결과를 알 수 없어 멈춘 것이므로 OutcomeUnknown이다. 그 밖의 상태는 분류가 없다(None).
+/// Mechanical failure classification derived strictly from stored state and reason code.
 fn call_error(row: &PgRow) -> Option<CallError> {
     match row.get::<String, _>("state").as_str() {
         "denied" => Some(CallError::Denied),
@@ -118,8 +114,7 @@ fn call_view(row: &PgRow) -> R<CallView> {
     })
 }
 
-/// 단계 한 줄. 운영자가 미실행으로 판정한 보류 단계(`resolution`이 있다)는 더 이상 보류가 아니다:
-/// 다시 보낼 수 있는 시작 상태로 보이고 사유는 비운다(미결 단계만 held다).
+/// Maps an operator-resolved `not_executed` held step back to `Started` and clears `reason` so only unresolved steps appear held.
 fn effect_view(row: &PgRow, holds: &BTreeMap<String, HoldId>) -> R<EffectView> {
     let decided = row.get::<Option<String>, _>("resolution").is_some();
     let mut state = crate::effects::state_of(&row.get::<String, _>("state"))?;
@@ -127,11 +122,10 @@ fn effect_view(row: &PgRow, holds: &BTreeMap<String, HoldId>) -> R<EffectView> {
         state = bot_core::state::EffectState::Started;
     }
     Ok(EffectView {
-        // 운영자가 미실행을 확인한 보류 단계만(원래 상태가 held이고 resolution이 not_executed일 때). 다시 시작한 뒤에는 표시하지 않는다
+        // Surface `NotExecuted` only while the step is still `held` prior to restart.
         resolution: (row.get::<String, _>("state") == "held"
             && row.get::<Option<String>, _>("resolution").as_deref() == Some("not_executed"))
         .then_some(EffectResolution::NotExecuted),
-        // 지금 판정할 수 있는 보류(열린 발생)가 있는 단계만 ID를 가진다
         hold_id: holds.get(&row.get::<String, _>("id")).cloned(),
         effect: EffectId(row.get("id")),
         run: RunId(row.get("run")),
@@ -146,7 +140,6 @@ fn effect_view(row: &PgRow, holds: &BTreeMap<String, HoldId>) -> R<EffectView> {
     })
 }
 
-/// 열린 단계 보류의 발생 ID(단계 ID별).
 async fn step_holds<'e>(
     ex: impl PgExecutor<'e>,
     profile: &str,
@@ -167,7 +160,7 @@ impl Store {
     pub(crate) async fn admin_runs(&self, viewer: &Viewer, q: RunQuery) -> R<Listing<RunView>> {
         let limit = i64::from(q.page.limit.clamp(1, 200));
         let after = run_cursor(&q.page.after);
-        // 갱신 시각 최신순, 같으면 프로필·run ID 오름차순(바이트 순서: 조회 가짜와 같은 동률 순서)
+        // Byte-order tie-break matches in-memory test fakes.
         let rows = sqlx::query(&format!(
             "select {RUN_COLUMNS} from bot_runs r
              where ($1::text is null or r.profile = $1) and ($2::text is null or r.state = $2) and ($3::text is null or r.root = $3)
@@ -210,7 +203,8 @@ impl Store {
         profile: &ProfileId,
         run: &RunId,
     ) -> R<RunDetail> {
-        let mut tx = self.pool.begin().await?; // 같은 스냅숏에서 읽는다
+        // Single snapshot across run, lineage, calls, effects, and holds.
+        let mut tx = self.pool.begin().await?;
         sqlx::query("set transaction isolation level repeatable read")
             .execute(&mut *tx)
             .await?;
@@ -284,16 +278,17 @@ impl Store {
         })
     }
 
-    /// 열린 보류: 호출 단위는 판정 전까지, 다단계는 미결 보류 단계가 남은 동안. 회신 발송·민감 DM의 보류도 함께 싣는다.
+    /// Lists open tool, outbox reply, and private DM holds from a single `REPEATABLE READ` snapshot.
     pub(crate) async fn admin_holds(
         &self,
         viewer: &Viewer,
         profile: Option<&ProfileId>,
     ) -> R<Vec<HoldView>> {
         operator(viewer)?;
-        self.sweep_private().await?; // 리스가 끝난 민감 DM 접수는 재전달 없이도 보류로 보인다
+        // Promote lease-expired private DM runs to held before listing.
+        self.sweep_private().await?;
         let profile = profile.map(|p| p.0.as_str());
-        // 보류 내용(사유·단계)과 발생 ID를 한 스냅숏에서 읽는다: 읽는 도중 같은 대상이 다시 보류돼도 한 카드에 옛 사유와 새 ID가 섞이지 않는다
+        // Read hold details and open hold IDs in one snapshot so a re-held target cannot mix old reasons with new IDs.
         let mut tx = self.pool.begin().await?;
         sqlx::query("set transaction isolation level repeatable read read only")
             .execute(&mut *tx)
@@ -324,7 +319,6 @@ impl Store {
         .bind(profile)
         .fetch_all(&mut *tx)
         .await?;
-        // 열린 호출의 단계와 모든 열린 보류 발생을 각각 한 번씩 묶어 조회한다(N+1 방지)
         let mut effects_by_call: BTreeMap<(String, String, String), Vec<PgRow>> = BTreeMap::new();
         if !calls.is_empty() {
             let ep: Vec<String> = calls.iter().map(|c| c.get("profile")).collect();
@@ -411,7 +405,6 @@ impl Store {
                 steps,
             });
         }
-        // 회신 발송·민감 DM은 단계가 없는 호출 단위 보류다: 열린 발생 ID가 곧 판정 ID다
         for r in &replies {
             let (profile, run, call): (String, String, String) =
                 (r.get("profile"), r.get("run"), r.get("call"));
@@ -495,7 +488,8 @@ impl Store {
 
     pub(crate) async fn admin_status(&self, viewer: &Viewer) -> R<Vec<ProfileStatus>> {
         operator(viewer)?;
-        self.sweep_private().await?; // 리스가 끝난 민감 DM 접수를 집계 전에 보류로 옮긴다
+        // Promote lease-expired private DM runs to held before aggregating counts.
+        self.sweep_private().await?;
         let mut tx = self.pool.begin().await?;
         sqlx::query("set transaction isolation level repeatable read read only")
             .execute(&mut *tx)

@@ -1,12 +1,8 @@
-//! 로그 설정. `BOT_LOG`(기본 `warn`)는 **이 프로그램의 크레이트**에만 그 수준으로 적용한다. 그 밖의 라이브러리(웹소켓·HTTP·TLS·런타임)는
-//! `BOT_LOG`가 무엇이든 경고까지만 낸다 — 이 라이브러리들은 `trace`에서 오가는 프레임·본문을 그대로 기록하므로(예: 웹소켓 라이브러리의 «Received message …»)
-//! 민감 DM 원문이나 요청·응답 본문이 stderr에 남는다. 수준을 올려도 외부 전송 라이브러리의 상세 로그는 나오지 않는다.
+//! Tracing subscriber setup with crate-scoped levels, NDJSON formatting, and sqlx suppression.
 //!
-//! `BOT_LOG_FORMAT`(`text` 기본 · `json`)으로 출력 형식을 고른다. `json`은 줄마다 하나의 JSON 객체(NDJSON)를 stderr에 쓴다.
-//! 호스트 설정에 `admin.logs`나 `admin.issues`가 켜져 있으면 `serve` 시작 시 같은 필터 아래에 OTLP 로그·이슈 트래커 싱크를 붙인다(`sinks`).
-//!
-//! 데이터베이스 드라이버(sqlx)는 아예 끈다: 접속 주소를 구문 분석하다 모르는 매개변수의 **값**(예: 합성 `sslpassword`)을 경고에 싣는다.
-//! 이 프로그램의 크레이트가 남기는 로그는 식별자·분류 낱말만 싣고 본문·인자·자격 값은 싣지 않는다(시험이 trace에서 확인한다).
+//! External transport crates are capped at `WARN` regardless of `BOT_LOG` so `trace` frames never
+//! leak private DM bodies or HTTP payloads; `sqlx` targets are disabled entirely because option
+//! parsing can log unknown URL parameter values.
 
 mod sinks;
 
@@ -30,7 +26,6 @@ use tracing_subscriber::{
     util::{SubscriberInitExt, TryInitError},
 };
 
-/// 이 프로그램의 로그 타깃(크레이트 이름). 바이너리 `bot`의 타깃도 포함한다.
 const OWN: [&str; 9] = [
     "bot",
     "bot_admin",
@@ -43,10 +38,8 @@ const OWN: [&str; 9] = [
     "bot_store",
 ];
 
-/// 외부 라이브러리가 낼 수 있는 가장 상세한 수준
 const OUTSIDE: Level = Level::WARN;
 
-/// 로그 출력 형식(`BOT_LOG_FORMAT`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LogFormat {
     #[default]
@@ -54,13 +47,11 @@ pub enum LogFormat {
     Json,
 }
 
-/// `BOT_LOG` 값을 수준으로 읽는다. 없거나 알아볼 수 없으면 `warn`.
 pub fn level_of(text: Option<&str>) -> Level {
     text.and_then(|text| text.parse::<Level>().ok())
         .unwrap_or(Level::WARN)
 }
 
-/// `BOT_LOG_FORMAT` 값을 형식으로 읽는다. `json`(대소문자 무시)이면 `Json`, 그 밖에는 `Text`.
 pub fn format_of(text: Option<&str>) -> LogFormat {
     match text.map(str::trim) {
         Some(v) if v.eq_ignore_ascii_case("json") => LogFormat::Json,
@@ -68,11 +59,9 @@ pub fn format_of(text: Option<&str>) -> LogFormat {
     }
 }
 
-/// 데이터베이스 드라이버의 기록 타깃. 접속 주소를 구문 분석하다 모르는 매개변수의 **값**을 경고로 남기므로(예: 주소에 든 인증서 비밀번호)
-/// 어떤 명령에서도 어떤 수준에서도 이 기록을 받지 않는다.
+/// Suppressed unconditionally because sqlx warns with raw values of unrecognized connection URL parameters.
 const DATABASE_DRIVERS: [&str; 3] = ["sqlx", "sqlx_core", "sqlx_postgres"];
 
-/// 타깃별 수준 상한: 이 프로그램의 크레이트는 요청한 수준, 데이터베이스 드라이버는 끔, 나머지는 요청한 수준과 `warn` 중 덜 상세한 쪽.
 pub fn filter(level: Level) -> Targets {
     let targets = OWN.iter().fold(
         Targets::new().with_default(level.min(OUTSIDE)),
@@ -83,7 +72,6 @@ pub fn filter(level: Level) -> Targets {
     })
 }
 
-/// 구조화 로그(NDJSON) 한 줄을 만드는 방문자(외부 `tracing-subscriber/json` 의존 없이 workspace `serde_json`만 쓴다).
 #[derive(Default)]
 struct JsonVisitor {
     message: Option<String>,
@@ -161,7 +149,6 @@ where
     }
 }
 
-/// 이 프로세스의 로그를 `writer`로 보내도록 한 번 설치한다(`text` 기본 형식, 기존 호출자 호환).
 pub fn init_to<W>(level: Level, writer: W) -> Result<(), TryInitError>
 where
     W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
@@ -169,7 +156,6 @@ where
     init_with(level, LogFormat::Text, writer)
 }
 
-/// 형식(`text`·`json`)을 지정해 전역 로그 구독자를 한 번 설치한다(OTLP 로그·이슈 싱크 레이어 포함).
 pub fn init_with<W>(level: Level, format: LogFormat, writer: W) -> Result<(), TryInitError>
 where
     W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
@@ -181,15 +167,14 @@ where
         LogFormat::Text => registry.with(fmt::layer().with_writer(writer)).try_init()?,
         LogFormat::Json => registry.with(JsonLayer { writer }).try_init()?,
     }
-    tracing::debug!(%level, format = ?format, "로그를 시작했어요");
+    tracing::debug!(%level, format = ?format, "logging initialized");
     Ok(())
 }
 
-/// 표준 오류로 설치한다. `BOT_LOG`·`BOT_LOG_FORMAT`을 환경에서 읽는다.
 pub fn init() {
     let level = level_of(std::env::var("BOT_LOG").ok().as_deref());
     let format = format_of(std::env::var("BOT_LOG_FORMAT").ok().as_deref());
-    // 이미 설치돼 있으면(시험) 그대로 둔다
+    // Ignore already-initialized error when tests install a subscriber first.
     let _ = init_with(level, format, io::stderr);
 }
 
@@ -244,9 +229,9 @@ mod tests {
                 writer: buf.clone(),
             });
         tracing::subscriber::with_default(subscriber, || {
-            tracing::info!(target: "bot_cli::test", run = "r-1", count = 3u64, ok = true, "시작했어요");
-            tracing::info!(target: "reqwest::connect", "외부 info는 필터가 막는다");
-            tracing::warn!(target: "sqlx::query", "DB 드라이버 경고도 막는다");
+            tracing::info!(target: "bot_cli::test", run = "r-1", count = 3u64, ok = true, "started");
+            tracing::info!(target: "reqwest::connect", "external info is filtered out");
+            tracing::warn!(target: "sqlx::query", "database driver warning is filtered out");
         });
         let raw = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         let lines: Vec<&str> = raw.lines().collect();
@@ -254,7 +239,7 @@ mod tests {
         let parsed: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(parsed["level"], "INFO");
         assert_eq!(parsed["target"], "bot_cli::test");
-        assert_eq!(parsed["message"], "시작했어요");
+        assert_eq!(parsed["message"], "started");
         assert_eq!(parsed["fields"]["run"], "r-1");
         assert_eq!(parsed["fields"]["count"], 3);
         assert_eq!(parsed["fields"]["ok"], true);

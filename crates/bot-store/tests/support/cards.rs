@@ -1,4 +1,4 @@
-//! 소유자 DM 승인 카드 전달 작업(`bot_card_jobs`) 시험 도구.
+//! Test helpers for owner-DM approval card delivery jobs (`bot_card_jobs`).
 #![allow(dead_code)]
 
 use super::{admin::*, delivery::*, schedule::*, *};
@@ -12,12 +12,10 @@ use bot_core::{
 use bot_store::Store;
 use std::time::Duration;
 
-/// 프로필 `personal`의 활성 판본(`TestDb`가 게시한다).
 pub fn rev() -> Revision {
     Revision("r1".into())
 }
 
-/// 게이트웨이가 확인해 준 DM 게시 영수증.
 pub fn posted() -> CardOutcome {
     CardOutcome::Posted {
         team: "T1".into(),
@@ -33,14 +31,14 @@ pub fn not_sent(retry: Option<Duration>) -> CardOutcome {
     }
 }
 
-/// 채널 출처 run이 전송 초안 승인 카드를 열었다: 카드는 닫힌 채 소유자 DM 전달 작업이 쌓인다(공개 채널에는 아무것도 가지 않는다).
+/// Opens a scheduled delivery approval card from a public channel (stages an owner-DM card job, posting nothing publicly).
 pub async fn channel_card(db: &TestDb, request: &str, nonce: &str) -> (RunContext, Approval) {
     let run = destination_run_as(db, request, ConversationKind::Channel).await;
     let draft = replies(db)
-        .draft(run.attempt.clone(), Some(answers(&["하나", "둘"])))
+        .draft(run.attempt.clone(), Some(answers(&["one", "two"])))
         .await
         .unwrap()
-        .expect("초안이 필요하다");
+        .expect("draft required");
     let hash = draft.sha256().unwrap();
     calls(db)
         .begin(
@@ -59,7 +57,7 @@ pub async fn channel_card(db: &TestDb, request: &str, nonce: &str) -> (RunContex
     (run, approval)
 }
 
-/// 채널 출처 run이 다른 수신자를 지정한 예약 생성 카드를 열었다(활성 집합을 고정한 핸들로만 열린다).
+/// Opens an explicit-destination `schedule.create` approval card from a channel using a set-pinned handle.
 pub async fn channel_create(db: &TestDb, request: &str, nonce: &str) -> (RunContext, Approval) {
     let run = run_in(db, request, OWNER, ConversationKind::Channel).await;
     let (approval, open) = create_card(db, &run, nonce).await;
@@ -68,7 +66,6 @@ pub async fn channel_create(db: &TestDb, request: &str, nonce: &str) -> (RunCont
     (run, approval)
 }
 
-/// 예약 생성 카드(수신자를 지정한)와 그 승인. 호출은 이미 열었다.
 pub async fn create_card(db: &TestDb, run: &RunContext, nonce: &str) -> (Approval, OpenApproval) {
     let mut spec = spec_in(db, 3_600_000).await;
     spec.destination = Some(DeliveryTarget {
@@ -97,7 +94,6 @@ pub async fn state(db: &TestDb, table: &str, nonce: &str) -> String {
     .await
 }
 
-/// 원래 대화(outbox)에 이 run이 남긴 줄들(순서대로).
 pub async fn public_lines(db: &TestDb, run: &RunContext) -> Vec<String> {
     sqlx::query_scalar("select body from bot_outbox where run = $1 order by seq")
         .bind(&run.attempt.run.0)
@@ -123,7 +119,6 @@ pub async fn decide_as_owner(db: &TestDb, approval: &Approval) -> Result<Approva
         .await
 }
 
-/// 소유자가 관리 화면에서 보는 대기 승인의 nonce들.
 pub async fn owner_pending(db: &TestDb) -> Vec<String> {
     AdminRead::approvals(
         &db.store,
@@ -145,7 +140,6 @@ pub async fn owner_pending(db: &TestDb) -> Vec<String> {
     .collect()
 }
 
-/// 전달자가 쓰는 포트(`CardOutbox`)를 한 줄로.
 pub async fn claim(store: &Store, limit: u32) -> Result<Vec<CardJob>, Error> {
     CardOutbox::claim(store, limit).await
 }
@@ -158,12 +152,10 @@ pub async fn settle(store: &Store, key: &CardKey, outcome: CardOutcome) -> Resul
     CardOutbox::settle(store, key.clone(), outcome).await
 }
 
-/// 게시를 확인한 영수증(`StoredApproval::delivery`). 확정 전이면 `None`.
 pub async fn receipt(db: &TestDb, nonce: &ApprovalId) -> Option<CardReceipt> {
     calls(db).approval(nonce.clone()).await.unwrap().delivery
 }
 
-/// 점유하고 최초 전송자 확인까지 마친 작업.
 pub async fn sending(db: &TestDb) -> CardJob {
     let mut jobs = claim(&db.store, 8).await.unwrap();
     assert_eq!(jobs.len(), 1, "{jobs:?}");

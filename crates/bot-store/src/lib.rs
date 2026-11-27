@@ -1,10 +1,14 @@
-//! PG 저장소: 접수·큐·리스·세대 펜싱·재시도·dead letter·감사 체인. 예약·위임·outbox·호출 원장·기억이 이어진다.
-//! 수락 시험: accepts_duplicate_request_once(`tests/accept.rs`), protects_owner_memory(`tests/memory.rs`).
+//! PostgreSQL store for durable intake, run queue, leases, generation fencing, retries, outbox, ledger, memory, and audit chain.
 //!
-//! 규칙: ① 접수 성공은 커밋 성공이다 ② 시각은 DB 시계만 쓴다 ③ 소유자의 모든 쓰기는 같은 트랜잭션에서 세대·리스를 대조한다
-//! ④ 긴 외부 호출 동안 잠금을 쥐지 않는다 ⑤ 상태를 바꾸는 트랜잭션은 마지막에 감사 체인에 한 줄을 더한다.
-//! 잠금 순서: 부모 run → 자식 run → 감사 head. 어기면 교착이 생긴다.
-//! 다른 크레이트는 `bot_core::port`의 트레이트로만 이 저장소를 쓴다(`ports.rs`).
+//! Invariants:
+//! 1. Intake succeeds only when the transaction commits.
+//! 2. All timestamps come solely from the DB clock (`bot_now_ms()`).
+//! 3. Every owner mutation verifies generation and lease in the same transaction.
+//! 4. Never hold DB locks across external I/O.
+//! 5. State-changing transactions append to the audit chain last.
+//!
+//! Lock order: parent run -> child run -> audit head (violating this causes deadlocks).
+//! Other crates access `Store` solely through `bot_core::port` traits (`ports.rs`).
 
 mod accept;
 mod activation_guard;

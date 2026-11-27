@@ -1,4 +1,4 @@
-//! 두 발송자가 하나의 실제 PG outbox를 독립적으로 처리한다.
+//! Verifies two delivery senders independently drain a shared PG outbox scoped by transport or binding.
 
 use crate::process_support::Schema;
 use bot_core::{

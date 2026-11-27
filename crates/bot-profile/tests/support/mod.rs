@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-//! 시험 공용: 임시 폴더, 기본 프로필(파일 지도), 호스트 등록부, 한 줄 편집.
+//! Shared test fixtures, temporary directories, host catalog, and single-file edit helpers.
 use bot_profile::{HostCatalog, Limits, ProfileSet, Report, SlackWorkspace, load};
 use std::{
     fs,
@@ -103,34 +103,37 @@ triggers:
     target: {tool: agenda.list, args: {}}
 "#;
 
-/// 기본 프로필 `personal`의 파일들. 호스트 등록부(`host()`)와 짝이다.
+/// Base `personal` profile fixture paired with `host()`.
 pub fn base() -> Files {
     let files = [
         ("profile.yaml", PROFILE),
-        ("rules.md", "- 답은 한국어로 짧게 쓴다.\n"),
+        ("rules.md", "- Keep answers brief and in English.\n"),
         (
             "knowledge/guide.md",
-            "# 안내\n일정은 agenda 스킬로 다룬다.\n",
+            "# Guide\nUse the agenda skill to manage events.\n",
         ),
         (
             "agents/main/AGENT.md",
-            "오늘 일정을 조회하고 변경 전에는 정확한 일정을 확인한다.\n",
+            "Check today's schedule and confirm the exact event before making changes.\n",
         ),
         ("agents/main/env.yaml", "AGENDA_VIEW: today\n"),
         ("agents/main/triggers.yaml", TRIGGERS),
-        ("agents/main/knowledge/habits.md", "아침에 일정을 본다.\n"),
+        (
+            "agents/main/knowledge/habits.md",
+            "Check the schedule in the morning.\n",
+        ),
         (
             "agents/main/memory/routine.md",
-            "---\nowner: \"local:owner\"\n---\n아침에 일정을 확인한다.\n",
+            "---\nowner: \"local:owner\"\n---\nCheck the schedule every morning.\n",
         ),
         (
             "agents/main/skills/agenda/SKILL.md",
-            "일정 목록은 list로 조회한다.\n",
+            "Use list to view the schedule.\n",
         ),
         ("agents/main/skills/agenda/tools.yaml", TOOLS),
         (
             "agents/main/agents/research/AGENT.md",
-            "부모가 맡긴 일정 조회를 수행한다.\n",
+            "Handle schedule lookups delegated by the parent agent.\n",
         ),
     ];
     files
@@ -139,7 +142,7 @@ pub fn base() -> Files {
         .collect()
 }
 
-/// 파일 하나를 고친다. `from`을 `DELETE`로 주면 지우고, 파일이 없으면 `to`로 새로 만든다.
+/// Edits one file in place, deletes it when `from == DELETE`, or inserts it if absent.
 pub fn edit(mut files: Files, path: &str, from: &str, to: &str) -> Files {
     let at = files.iter().position(|(p, _)| p == path);
     match (at, from == DELETE) {
@@ -147,26 +150,29 @@ pub fn edit(mut files: Files, path: &str, from: &str, to: &str) -> Files {
             files.remove(i);
         }
         (Some(i), false) => {
-            assert!(files[i].1.contains(from), "{path}에 `{from}`가 없어요");
+            assert!(
+                files[i].1.contains(from),
+                "{path} does not contain `{from}`"
+            );
             files[i].1 = files[i].1.replacen(from, to, 1);
         }
         (None, false) => files.push((path.to_owned(), to.to_owned())),
-        (None, true) => panic!("{path}가 없어요"),
+        (None, true) => panic!("missing file {path}"),
     }
     files
 }
 
-/// 파일 끝에 덧붙인다(트리거를 더 넣을 때).
 pub fn append(mut files: Files, path: &str, text: &str) -> Files {
     let file = files
         .iter_mut()
         .find(|(p, _)| p == path)
-        .unwrap_or_else(|| panic!("{path}가 없어요"));
+        .unwrap_or_else(|| panic!("missing file {path}"));
     file.1.push_str(text);
     files
 }
 
-/// 검증 없이 묶음 바이트를 만든다(복원 경로 시험용): `BOTPROFILE1\n | u32 개수 | (u32 경로 길이 | 경로 | u64 길이 | 바이트)…`, 경로 오름차순.
+/// Encodes a `BOTPROFILE1` bundle without validation for restore-path tests.
+/// Layout: `BOTPROFILE1\n | u32 count | (u32 path_len | path | u64 len | bytes)...` sorted by path.
 pub fn raw_bundle(files: &Files) -> Vec<u8> {
     let mut sorted: Vec<&(String, String)> = files.iter().collect();
     sorted.sort();
@@ -189,7 +195,7 @@ pub fn write_profile(root: &Path, name: &str, files: &Files) {
     }
 }
 
-/// 기본 프로필이 쓰는 별칭을 모두 등록한 호스트. 두 번째 프로필 `second`도 허용한다.
+/// Host catalog registering all aliases used by `base()` and the `second` profile fixture.
 pub fn host() -> HostCatalog {
     let set = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect();
     let mut host = HostCatalog::demo();
@@ -209,7 +215,6 @@ pub fn host() -> HostCatalog {
     host
 }
 
-/// 파일 지도를 임시 폴더에 `personal`로 쓰고 읽어 본다(읽은 뒤 폴더는 지운다).
 pub fn check(files: &Files) -> Result<ProfileSet, Report> {
     let root = Temp::new("check");
     write_profile(root.path(), "personal", files);
@@ -226,7 +231,7 @@ pub fn codes(files: &Files) -> Vec<&'static str> {
 pub fn ok(files: &Files) -> ProfileSet {
     match check(files) {
         Ok(set) => set,
-        Err(report) => panic!("검증이 실패했어요:\n{report}"),
+        Err(report) => panic!("validation failed:\n{report}"),
     }
 }
 
@@ -237,7 +242,6 @@ pub fn agent(s: &str) -> bot_core::id::AgentId {
     bot_core::id::AgentId(s.to_owned())
 }
 
-/// 기본 프로필 형태의 `personal` 스냅샷(검증 통과 필수)
 pub fn snapshot(files: &Files) -> bot_core::profile::Snapshot {
     let set = ok(files);
     let snap = set
@@ -246,15 +250,15 @@ pub fn snapshot(files: &Files) -> bot_core::profile::Snapshot {
     (**snap).clone()
 }
 
-/// 기본 프로필에 형제·손자 에이전트를 더한 가족: main · main/research · main/research/deep · main/other
+/// Extends `base()` with sibling and grandchild agents: `main`, `main/research`, `main/research/deep`, `main/other`.
 pub fn family() -> Files {
     let mut files = base();
     for (path, text) in [
         (
             "agents/main/agents/research/agents/deep/AGENT.md",
-            "깊이 파고든다.\n",
+            "Dig deeper.\n",
         ),
-        ("agents/main/agents/other/AGENT.md", "다른 갈래.\n"),
+        ("agents/main/agents/other/AGENT.md", "Other branch.\n"),
     ] {
         files = edit(files, path, "", text);
     }

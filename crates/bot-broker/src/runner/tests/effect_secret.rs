@@ -1,5 +1,4 @@
-//! 단계 원장 콜백(파이프·프록시 전용 주소)으로 도구가 보고하는 영수증·보류 사유에도 최종 결과와 같은 자격 검사를 한다: 이 호출이 쓰는 선언 자격(과 프록시 암호)이
-//! 섞이면 원문을 저장하지 않고 고정 사유로 보류한다. 두 채널 모두 채널을 만드는 자리에서 자격을 넘겨야 이 검사가 선다.
+//! Effect-journal callbacks (pipe and proxy endpoints) check receipts and hold reasons against declared and proxy credentials.
 
 use super::*;
 use bot_core::state::EffectState;
@@ -8,9 +7,9 @@ const REQUEST: &str =
     r#"{"v":1,"id":"1","method":"effect.request","step":"upload","args":{"file":"summary"}}"#;
 const SECOND: &str =
     r#"{"v":1,"id":"3","method":"effect.request","step":"notify","args":{"to":"inbox"}}"#;
-/// 보관소의 `password` 값(`pw1`)을 영수증에 섞어 보고한다.
+/// Embeds the store `password` secret (`pw1`) inside a reported receipt.
 const LEAKY_RECEIPT: &str = r#"{"v":1,"id":"2","method":"effect.status","effect":"e-1","outcome":"confirmed","receipt":"uploaded;pw1;done"}"#;
-/// 보류 사유 낱말은 소문자·숫자·밑줄이라 짧은 자격(`pw1`)이 사유 전체로 들어올 수 있다.
+/// Short credentials like `pw1` match the hold-reason charset (`[a-z0-9_]`) and must still be blocked.
 const LEAKY_REASON: &str =
     r#"{"v":1,"id":"4","method":"effect.status","effect":"e-2","outcome":"held","reason":"pw1"}"#;
 
@@ -18,7 +17,6 @@ fn needs_password() -> Tool {
     decl(&[("PASS", "password")], &[], true)
 }
 
-/// 원장에 남은 것에 자격 값이 한 글자도 없다.
 fn nothing_secret_is_stored(r: &Rig) {
     for (step, _, text) in r.journal.states() {
         assert!(!step.contains("pw1"), "{step}");
@@ -26,7 +24,6 @@ fn nothing_secret_is_stored(r: &Rig) {
     }
 }
 
-/// 단계 이름 순으로 본 원장(가짜 원장의 순서는 정해져 있지 않다).
 fn states(r: &Rig) -> Vec<(String, EffectState, Option<String>)> {
     let mut states = r.journal.states();
     states.sort_by(|a, b| a.0.cmp(&b.0));
@@ -52,7 +49,7 @@ fn expected_states() -> Vec<(String, EffectState, Option<String>)> {
 async fn the_pipe_channel_holds_a_receipt_and_a_reason_that_carry_a_declared_credential() {
     let server = Server::new(&[("delete", schema())]).answering(|ctx| {
         Box::pin(async move {
-            let mut pipe = ctx.effects.expect("콜백 채널");
+            let mut pipe = ctx.effects.expect("effects pipe");
             let mut reader = BufReader::new(pipe.read);
             let mut seen = Vec::new();
             for frame in [REQUEST, LEAKY_RECEIPT, SECOND, LEAKY_REASON] {
@@ -75,13 +72,12 @@ async fn the_pipe_channel_holds_a_receipt_and_a_reason_that_carry_a_declared_cre
     assert!(seen.contains(r#""receipt":"reason_credential""#), "{seen}");
     assert!(
         !seen.contains("pw1"),
-        "도구에 되돌려 주는 글에도 원문이 없다: {seen}"
+        "secret must not echo back to the tool: {seen}"
     );
     assert_eq!(states(&r), expected_states());
     nothing_secret_is_stored(&r);
 }
 
-/// 도구가 프록시의 전용 주소로 단계 원장 프레임을 보낸다. `frames`는 프록시 암호를 받아 프레임을 만든다.
 fn proxy_client(frames: fn(&str) -> Vec<String>) -> Server {
     Server::new(&[("delete", schema())]).answering(move |ctx| {
         Box::pin(async move {
@@ -111,7 +107,6 @@ fn declared_credential_frames(_: &str) -> Vec<String> {
         .to_vec()
 }
 
-/// 프록시 암호는 호출마다 호스트가 만든 값이라 프레임을 만드는 쪽이 받아서 쓴다.
 fn proxy_password_frames(password: &str) -> Vec<String> {
     vec![
         REQUEST.to_owned(),
@@ -137,7 +132,6 @@ async fn the_proxy_channel_holds_a_receipt_and_a_reason_that_carry_a_declared_cr
 
 #[tokio::test]
 async fn the_proxy_password_is_one_of_the_credentials_a_report_may_not_carry() {
-    // 선언한 자격이 없어도(프록시만 쓴다) 이 호출의 프록시 암호가 영수증에 섞이면 막는다
     let r = rig(proxy_client(proxy_password_frames), |_| {}, |_| {});
     r.sandbox.set_effects_via_proxy(true);
     let ran = run(&r, job(decl(&[], &[], true), r#"{"event":"a"}"#)).await;
@@ -152,7 +146,7 @@ async fn the_proxy_password_is_one_of_the_credentials_a_report_may_not_carry() {
             Some("receipt_credential".to_string())
         )]
     );
-    // 깨끗한 영수증은 그대로 저장한다(대조: 같은 경로로 보낸 보고)
+    // Clean receipts through the same proxy path are stored normally.
     let r = rig(
         proxy_client(|_| {
             vec![

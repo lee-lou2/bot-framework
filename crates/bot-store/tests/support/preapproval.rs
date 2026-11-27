@@ -1,4 +1,4 @@
-//! 사전 승인 시험 도구: 실제 PG 저장소와 실제 브로커(가짜 실행기) 위에 `preapproved` cron 트리거를 올린다.
+//! Test helpers for pre-approved cron triggers running against PG and the real broker.
 #![allow(dead_code)]
 
 use super::*;
@@ -25,7 +25,7 @@ pub const SERVICE: &str = "service:morning";
 pub const IMAGE: &str = "reports-img-1";
 pub const ARGS: &str = r#"{"report":"daily"}"#;
 pub const TOOL: &str = "reports.notify";
-/// 승인 ID에 묶인 도구 판본(설치 판본까지): 브로커가 `StartCall`에 싣는 값과 같다.
+/// Pinned tool revision (including installed image) matching `StartCall::tool_revision`.
 pub const TOOL_REVISION: &str = "t1@reports-img-1";
 
 static SETS: AtomicU32 = AtomicU32::new(0);
@@ -38,7 +38,6 @@ impl InputValidator for AnyArgs {
     }
 }
 
-/// `preapproved` 선언이 있는 cron 트리거 `notify`를 가진 프로필 personal(r1).
 pub fn world(max: u32, pairs: &[(&str, &str)]) -> Arc<Snapshot> {
     let mut notify = fake_tool(Risk::Irreversible, &["reports.post"]);
     notify.server = "reports".into();
@@ -75,7 +74,6 @@ pub fn run_scopes_of_trigger() -> std::collections::BTreeSet<String> {
     scopes(&["reports.post"])
 }
 
-/// 브로커가 호출 시작 때 같은 선언에서 다시 계산하는 승인 범위.
 pub fn spec_of(snap: &Snapshot, image: &str) -> GrantSpec {
     let agent = AgentId("main".into());
     grant_spec(
@@ -86,7 +84,7 @@ pub fn spec_of(snap: &Snapshot, image: &str) -> GrantSpec {
         image,
         &[],
     )
-    .expect("승인 범위")
+    .expect("grant spec")
 }
 
 pub fn target() -> Target {
@@ -97,7 +95,6 @@ pub fn target() -> Target {
     }
 }
 
-/// 활성 집합을 게시한다(예약 정의와 사전 승인 포함). 돌려주는 값은 이번에 발급한 승인이다.
 pub async fn publish(
     db: &TestDb,
     snap: &Snapshot,
@@ -116,7 +113,6 @@ pub async fn publish(
         (ProfileId("work".into()), Revision("r1".into())),
     ]);
     let schedules = BTreeMap::from([(ProfileId("personal".into()), vec![spec])]);
-    // 게시 전 준비: 이 집합의 ID들이 고정한 판본 전부(실제 호스트는 번들을 복원해 이 목록을 만든다)
     let prepared = bot_core::profile::ProfileBundles::pinned_revisions(&db.store, &profiles)
         .await
         .unwrap();
@@ -170,7 +166,7 @@ pub async fn rig(max: u32, pairs: &[(&str, &str)]) -> Option<Rig> {
     let spec = spec_of(&snap, IMAGE);
     let issued = publish(&db, &snap, vec![spec.clone()]).await;
     db.backdate_schedule().await;
-    let grant = issued.into_iter().next().expect("발급").0;
+    let grant = issued.into_iter().next().expect("issued grant").0;
     Some(Rig {
         db,
         broker,
@@ -187,7 +183,7 @@ pub fn at(ms: i64) -> std::time::SystemTime {
 }
 
 impl Rig {
-    /// 다음 발생(커서 뒤 `k`분, 마지막 정지·재개 전환보다 앞서지 않는 시각)을 접수한다.
+    /// Accepts the next occurrence (`k` minutes after cursor, clamped between last pause change and `now`).
     pub async fn occur(&self, k: i64) -> Result<RunId, Error> {
         let cursor = self
             .db
@@ -197,7 +193,6 @@ impl Rig {
             .db
             .scalar::<i64>("select coalesce(max(changed_ms), 0) from bot_trigger_pause")
             .await;
-        // 커서 뒤 `k`분(과거로 되돌려 둔 구간)이되, 전환 뒤로 밀리면 지금까지로 눌러 담는다(미래 시각은 접수하지 않는다)
         let now = self.db.now_ms().await;
         let ms = (cursor + 60_000 * k).max(changed).min(now);
         let ms = if ms > cursor {
@@ -209,7 +204,6 @@ impl Rig {
         self.occur_at(ms).await
     }
 
-    /// 예정 시각이 `ms`인 발생을 접수한다(밀린 따라잡기를 흉내 낼 때).
     pub async fn occur_at(&self, ms: i64) -> Result<RunId, Error> {
         self.db
             .store
@@ -225,13 +219,11 @@ impl Rig {
             .await
     }
 
-    /// 발생을 접수하고 claim한다.
     pub async fn next_run(&self) -> RunContext {
         self.occur(1).await.unwrap();
         runs(&self.db).claim().await.unwrap().unwrap()
     }
 
-    /// 발생을 접수해 claim한다. 접수가 없으면(건너뛴 발생) None이다.
     pub async fn next_run_unchecked(&self) -> Option<RunContext> {
         match self.occur(1).await {
             Ok(_) => runs(&self.db).claim().await.unwrap(),
@@ -239,7 +231,6 @@ impl Rig {
         }
     }
 
-    /// 직접 호출 기록(`{run}:tool`)을 만든다.
     pub async fn begin(&self, ctx: &RunContext, args: &str) -> CallId {
         let call = CallId(format!("{}:tool", ctx.attempt.run.0));
         calls(&self.db)
@@ -249,7 +240,6 @@ impl Rig {
         call
     }
 
-    /// 브로커가 보내는 모양 그대로 사전 승인으로 시작한다.
     pub async fn start(&self, ctx: &RunContext, call: &CallId) -> Result<Granted, Error> {
         let authority = Authority::Grant {
             fingerprint: self.spec.fingerprint,
@@ -259,7 +249,6 @@ impl Rig {
             .await
     }
 
-    /// 시작한 직접 호출이 있는 run(효과 요청을 받을 수 있다).
     pub async fn started(&self) -> (RunContext, CallId) {
         let ctx = self.next_run().await;
         let call = self.begin(&ctx, ARGS).await;
@@ -369,7 +358,6 @@ pub fn key() -> bot_core::grant::TriggerKey {
     }
 }
 
-/// 정지(`on`)·재개 명령을 보낸다(관리 API가 부르는 포트와 같다).
 pub async fn pause(r: &Rig, grant: &str, epoch: i64, on: bool) -> Result<PauseOutcome, Error> {
     let cas = GrantCas {
         grant_id: grant.into(),

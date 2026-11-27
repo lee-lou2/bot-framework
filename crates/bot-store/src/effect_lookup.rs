@@ -1,8 +1,7 @@
-//! 단계 조회(`EffectJournal::lookup`): 이 호출의 그 단계 하나만 같은 인자 지문으로 읽는다. 단계·영수증·감사를 쓰지 않고 전송을 허가하지 않는다
-//! (시작만 한 옛 세대의 단계도 보류로 바꾸지 않는다: 그것은 `request`만 한다). 보류 단계의 미소비 운영자 판정(`resolution`)은 실어 주되 반복 조회해도 소비하지 않는다.
+//! Read-only effect step lookup (`EffectJournal::lookup`) verifying lease, bound tool, and args digest.
 //!
-//! 검증 순서: 입력(`Invalid`) → run과 현재 claim(`Missing`·`Denied`·`Stale`) → 호출이 기록돼 있고 채널이 묶인 도구의 것인지(`Denied`: 없는 호출과 다른 도구의 호출을
-//! 가르지 않는다) → 단계(`None`) → 인자 지문(`Conflict`). 모든 읽기는 (프로필, run, 호출, 단계) 키 안에서만 한다.
+//! Never writes steps, receipts, or audit rows, and never consumes pending hold resolutions.
+//! Validation order: input (`Invalid`) -> lease fence -> bound tool (`Denied`, hiding missing vs mismatched calls) -> step (`None`) -> args digest (`Conflict`).
 
 use crate::{
     calls::fence,

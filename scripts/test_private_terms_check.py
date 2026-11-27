@@ -18,7 +18,7 @@ TERM = "quokka"
 
 def rows(done):
     """The finding rows of a run: `(location, list lines)`."""
-    return re.findall(r"^  (.+?)  \[목록 ([0-9, ]+)번째 줄\]$", done.stdout, re.MULTILINE)
+    return re.findall(r"^  (.+?)  \[list line ([0-9, ]+)\]$", done.stdout, re.MULTILINE)
 
 
 def where(done):
@@ -32,7 +32,7 @@ class WorkingTree(unittest.TestCase):
         repo.commit()
         done = repo.scan("zebrafish")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn("금칙어 없음", done.stdout)
+        self.assertIn("no private terms found", done.stdout)
 
     def test_reports_file_line_and_list_line_but_never_the_term(self):
         repo = Repo(self)
@@ -40,7 +40,7 @@ class WorkingTree(unittest.TestCase):
         repo.commit()
         done = repo.scan("# header", TERM, "zebrafish")
         self.assertEqual(done.returncode, 1)
-        self.assertIn(("작업 트리 src/a.txt:2", "3"), rows(done))
+        self.assertIn(("worktree src/a.txt:2", "3"), rows(done))
         self.assertNotIn("zebrafish", everything(done).lower())
 
     def test_new_untracked_and_hidden_files_are_scanned(self):
@@ -50,8 +50,8 @@ class WorkingTree(unittest.TestCase):
         repo.write("new/untracked.txt", f"has {TERM}\n")
         repo.write(".config/hidden.toml", f"x = '{TERM}'\n")
         found = where(repo.scan(TERM))
-        self.assertIn("작업 트리 new/untracked.txt:1", found)
-        self.assertIn("작업 트리 .config/hidden.toml:1", found)
+        self.assertIn("worktree new/untracked.txt:1", found)
+        self.assertIn("worktree .config/hidden.toml:1", found)
 
     def test_ignored_files_are_not_published_so_not_scanned_except_the_lock_file(self):
         repo = Repo(self)
@@ -60,7 +60,7 @@ class WorkingTree(unittest.TestCase):
         repo.write("Cargo.lock", f'name = "{TERM}"\n')
         repo.commit()
         found = where(repo.scan(TERM))
-        self.assertIn("작업 트리 Cargo.lock:1", found)
+        self.assertIn("worktree Cargo.lock:1", found)
         self.assertFalse([w for w in found if "local/notes" in w])
 
     def test_a_name_or_link_target_with_a_term_is_reported_without_being_printed(self):
@@ -71,15 +71,15 @@ class WorkingTree(unittest.TestCase):
         repo.commit()
         done = repo.scan(TERM)
         found = where(done)
-        self.assertTrue([w for w in found if re.fullmatch(r"작업 트리 경로#[0-9a-f]{8} \(이름\)", w)], found)
-        self.assertIn("작업 트리 alias (링크 대상)", found, "깨끗한 이름은 그대로 보인다")
+        self.assertTrue([w for w in found if re.fullmatch(r"worktree path#[0-9a-f]{8} \(name\)", w)], found)
+        self.assertIn("worktree alias (symlink target)", found, "clean names are printed as-is")
         self.assertNotIn(TERM, everything(done).lower())
 
     def test_binary_files_are_reported_without_a_line_number(self):
         repo = Repo(self)
         (repo.repo / "blob.bin").write_bytes(b"\x00\x01" + TERM.encode() + b"\x00")
         repo.commit()
-        self.assertIn("작업 트리 blob.bin (이진)", where(repo.scan(TERM)))
+        self.assertIn("worktree blob.bin (binary)", where(repo.scan(TERM)))
 
 
 class Index(unittest.TestCase):
@@ -89,17 +89,17 @@ class Index(unittest.TestCase):
         repo.commit()
         repo.write("a.txt", f"fine\nstaged {TERM}\n")
         repo.git("add", "a.txt")
-        repo.write("a.txt", "fine\n")  # 작업 트리에서는 지웠지만 커밋하면 인덱스의 내용이 올라간다
+        repo.write("a.txt", "fine\n")  # Removed in worktree, but still staged in index.
         done = repo.scan(TERM)
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertIn("인덱스 a.txt:2", where(done))
-        self.assertFalse([w for w in where(done) if w.startswith("작업 트리")])
+        self.assertIn("index a.txt:2", where(done))
+        self.assertFalse([w for w in where(done) if w.startswith("worktree")])
 
     def test_a_clean_index_adds_nothing(self):
         repo = Repo(self)
         repo.write("a.txt", f"{TERM}\n")
         repo.commit()
-        self.assertFalse([w for w in where(repo.scan(TERM)) if w.startswith("인덱스")])
+        self.assertFalse([w for w in where(repo.scan(TERM)) if w.startswith("index")])
 
 
 class EntryKinds(unittest.TestCase):
@@ -109,7 +109,7 @@ class EntryKinds(unittest.TestCase):
         self.repo.commit()
 
     def lines(self, *entries):
-        return {w.split()[-1] for w in where(self.repo.scan(*entries)) if w.startswith("작업 트리")}
+        return {w.split()[-1] for w in where(self.repo.scan(*entries)) if w.startswith("worktree")}
 
     def test_word_entries_stop_at_letters_and_digits_only(self):
         self.assertEqual(self.lines("word:zed"), {"a.txt:1", "a.txt:3"})
@@ -139,8 +139,8 @@ class History(unittest.TestCase):
         repo.commit("second")
         done = repo.scan(TERM)
         self.assertEqual(done.returncode, 1)
-        self.assertTrue([w for w in where(done) if re.fullmatch(r"이력 blob [0-9a-f]{8} a\.txt:2", w)], where(done))
-        self.assertFalse([w for w in where(done) if w.startswith("작업 트리")])
+        self.assertTrue([w for w in where(done) if re.fullmatch(r"history blob [0-9a-f]{8} a\.txt:2", w)], where(done))
+        self.assertFalse([w for w in where(done) if w.startswith("worktree")])
 
     def test_a_path_that_existed_only_in_the_past_is_found_without_being_printed(self):
         repo = Repo(self)
@@ -151,7 +151,7 @@ class History(unittest.TestCase):
         repo.commit("remove")
         done = repo.scan(TERM)
         self.assertEqual(done.returncode, 1)
-        self.assertTrue([w for w in where(done) if w.startswith("이력 경로 경로#")], where(done))
+        self.assertTrue([w for w in where(done) if w.startswith("history path path#")], where(done))
         self.assertNotIn(TERM, everything(done).lower())
 
     def test_commit_message_author_branch_and_tag_are_scanned(self):
@@ -159,16 +159,16 @@ class History(unittest.TestCase):
         repo.write("a.txt", "fine\n")
         repo.commit(f"mentions {TERM} in the message")
         found = where(repo.scan(TERM))
-        self.assertTrue([w for w in found if re.fullmatch(r"이력 commit [0-9a-f]{8} \(작성자·메시지\)", w)], found)
+        self.assertTrue([w for w in found if re.fullmatch(r"history commit [0-9a-f]{8} \(author/message\)", w)], found)
         repo.write("b.txt", "fine\n")
         repo.commit("second", env={"GIT_AUTHOR_NAME": "Quokka Person"})
         self.assertEqual(len([w for w in where(repo.scan("person")) if "commit" in w]), 1)
         repo.git("branch", "feature-wombat")
-        refs = [w for w in where(repo.scan("wombat")) if w.startswith("이력 참조")]
-        self.assertTrue(refs and re.fullmatch(r"이력 참조 경로#[0-9a-f]{8} \(이름\)", refs[0]), refs)
+        refs = [w for w in where(repo.scan("wombat")) if w.startswith("history ref")]
+        self.assertTrue(refs and re.fullmatch(r"history ref path#[0-9a-f]{8} \(name\)", refs[0]), refs)
         repo.git("tag", "-a", "v1", "-m", "release for the numbat team")
         tags = where(repo.scan("numbat"))
-        self.assertTrue([w for w in tags if re.fullmatch(r"이력 태그 [0-9a-f]{8} \(이름·메시지\)", w)], tags)
+        self.assertTrue([w for w in tags if re.fullmatch(r"history tag [0-9a-f]{8} \(name/message\)", w)], tags)
 
     def test_a_tag_pointing_at_a_tag_is_followed(self):
         repo = Repo(self)
@@ -186,10 +186,10 @@ class History(unittest.TestCase):
         )
         self.assertEqual(outer.returncode, 0, outer.stderr)
         repo.git("update-ref", "refs/tags/outer", outer.stdout.strip())
-        repo.git("tag", "-d", "inner")  # 안쪽 태그는 바깥 태그를 통해서만 닿는다
+        repo.git("tag", "-d", "inner")  # Inner tag is reachable only through outer tag.
         done = repo.scan("numbat")
         self.assertEqual(done.returncode, 1, done.stdout)
-        self.assertTrue([w for w in where(done) if w.startswith("이력 태그")], where(done))
+        self.assertTrue([w for w in where(done) if w.startswith("history tag")], where(done))
 
     def test_content_that_exists_only_in_a_conflict_resolution_is_found(self):
         repo = Repo(self)
@@ -207,19 +207,19 @@ class History(unittest.TestCase):
         repo.write("a.txt", "resolved again\n")
         repo.commit("clean up")
         done = repo.scan(TERM)
-        self.assertTrue([w for w in where(done) if re.fullmatch(r"이력 blob [0-9a-f]{8} a\.txt:1", w)], where(done))
-        self.assertFalse([w for w in where(done) if w.startswith("작업 트리")])
+        self.assertTrue([w for w in where(done) if re.fullmatch(r"history blob [0-9a-f]{8} a\.txt:1", w)], where(done))
+        self.assertFalse([w for w in where(done) if w.startswith("worktree")])
 
     def test_refs_are_scanned_even_when_head_points_at_nothing(self):
         repo = Repo(self)
         repo.write("a.txt", "fine\n")
         repo.commit()
         repo.git("tag", "-a", "v1", "-m", f"tagged by the {TERM} team")
-        repo.git("checkout", "-q", "--orphan", "unborn")  # HEAD가 아직 없는 브랜치를 가리킨다
+        repo.git("checkout", "-q", "--orphan", "unborn")  # HEAD points to an unborn branch.
         repo.git("rm", "-q", "-rf", ".")
         done = repo.scan(TERM)
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertTrue([w for w in where(done) if w.startswith("이력 태그")], where(done))
+        self.assertTrue([w for w in where(done) if w.startswith("history tag")], where(done))
 
     def test_blob_line_numbers_follow_the_file_in_every_version(self):
         repo = Repo(self)
@@ -228,7 +228,7 @@ class History(unittest.TestCase):
         repo.commit("base")
         repo.write("a.txt", "".join(lines[:29] + [f"{TERM} new\n"] + lines[30:]))
         repo.commit("edit")
-        found = [w for w in where(repo.scan(TERM)) if w.startswith("이력 blob")]
+        found = [w for w in where(repo.scan(TERM)) if w.startswith("history blob")]
         self.assertEqual(len(found), 2, found)
         self.assertTrue(all(w.endswith("a.txt:30") for w in found), found)
 
@@ -237,8 +237,8 @@ class History(unittest.TestCase):
         repo.write("a.txt", f"{TERM}\n")
         done = repo.scan(TERM)
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-        self.assertIn("커밋 0개", done.stdout)
-        self.assertIn("작업 트리 a.txt:1", where(done))
+        self.assertIn("commits: 0", done.stdout)
+        self.assertIn("worktree a.txt:1", where(done))
 
     def test_a_pinned_clone_is_scanned_instead_of_the_live_repository(self):
         repo = Repo(self)
@@ -249,8 +249,8 @@ class History(unittest.TestCase):
         repo.write("later.txt", f"{TERM}\n")
         repo.commit(f"later {TERM}")
         found = where(repo.scan(TERM, git_dir=pinned))
-        self.assertIn("작업 트리 later.txt:1", found, "작업 트리는 늘 본다")
-        self.assertFalse([w for w in found if w.startswith("이력")], "이력은 고정한 복제본 것만 본다")
+        self.assertIn("worktree later.txt:1", found, "worktree is always scanned")
+        self.assertFalse([w for w in found if w.startswith("history")], "history scans only the pinned mirror")
 
 
 class OutputHygiene(unittest.TestCase):
@@ -270,9 +270,9 @@ class OutputHygiene(unittest.TestCase):
         done = repo.scan(TERM, f"re:{TERM}.*message", f"word:{TERM}")
         self.assertEqual(done.returncode, 1)
         self.assertGreaterEqual(len(rows(done)), 8, done.stdout)
-        self.assertNotIn(TERM, everything(done).lower(), "금칙어·이름이 출력에 나오면 안 된다")
+        self.assertNotIn(TERM, everything(done).lower(), "private terms and names must never appear in output")
         for needle in (str(repo.repo), str(repo.outside)):
-            self.assertNotIn(needle, everything(done), "절대 경로가 출력에 나오면 안 된다")
+            self.assertNotIn(needle, everything(done), "absolute paths must never appear in output")
 
     def test_error_text_never_carries_repository_content(self):
         repo = Repo(self)
@@ -295,7 +295,7 @@ class ListHandling(unittest.TestCase):
         repo.commit()
         done = repo.scan(terms=inside)
         self.assertEqual(done.returncode, 2)
-        self.assertIn("저장소 안에 있다", done.stderr)
+        self.assertIn("inside the repository", done.stderr)
 
     def test_a_missing_empty_or_broken_list_is_an_error_without_echoing_entries(self):
         repo = Repo(self)
@@ -304,10 +304,10 @@ class ListHandling(unittest.TestCase):
         self.assertEqual(repo.scan(terms=repo.outside / "missing.txt").returncode, 2)
         done = repo.scan("# only a comment")
         self.assertEqual(done.returncode, 2)
-        self.assertIn("항목이 없다", done.stderr)
+        self.assertIn("no entries", done.stderr)
         done = repo.scan(TERM, "re:(unclosed")
         self.assertEqual(done.returncode, 2)
-        self.assertIn("2번째 줄", done.stderr)
+        self.assertIn("line 2", done.stderr)
         self.assertNotIn("unclosed", done.stderr)
 
     def test_usage_errors_and_a_directory_that_is_not_a_repository(self):
@@ -337,7 +337,7 @@ class Failures(unittest.TestCase):
         source.git("clone", "-q", "--depth", "1", f"file://{source.repo}", str(shallow), cwd=source.outside)
         done = source.scan("nothing-here", cwd=shallow)
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
-        self.assertIn("얕은 복제", done.stderr)
+        self.assertIn("shallow clone", done.stderr)
 
     def test_a_git_directory_that_is_not_a_repository_fails(self):
         repo = Repo(self)
@@ -352,11 +352,11 @@ class Failures(unittest.TestCase):
             repo = Repo(self)
             repo.write("a.txt", f"{TERM}\n")
             repo.commit()
-            repo.write("a.txt", f"{TERM} changed\n")  # 인덱스 검사(diff)도 일을 하게 한다
+            repo.write("a.txt", f"{TERM} changed\n")  # Ensure index diff has work to do.
             done = repo.scan(TERM, env=GitShim(self, sub).env())
             self.assertEqual(done.returncode, 2, f"{sub}: {done.stdout}{done.stderr}")
             self.assertEqual(rows(done), [], sub)
-            self.assertNotIn("금칙어 없음", done.stdout, sub)
+            self.assertNotIn("no private terms found", done.stdout, sub)
 
     def test_a_git_that_dies_while_reading_objects_is_a_failure_not_a_clean_scan(self):
         repo = Repo(self)
@@ -364,7 +364,7 @@ class Failures(unittest.TestCase):
         repo.commit()
         done = repo.scan(TERM, env=GitShim(self, "cat-file").env())
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
-        self.assertNotIn("금칙어 없음", done.stdout)
+        self.assertNotIn("no private terms found", done.stdout)
         self.assertEqual(rows(done), [])
 
     def test_an_unreadable_object_fails_instead_of_being_skipped(self):
@@ -377,8 +377,8 @@ class Failures(unittest.TestCase):
         loose.write_bytes(b"garbage")
         done = repo.scan("nothing-here")
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
-        self.assertIn("git 객체를 읽지 못했다", done.stderr, "내부 오류가 아니라 읽지 못했다는 분명한 실패여야 한다")
-        self.assertNotIn("내부 오류", done.stderr)
+        self.assertIn("failed to read git object", done.stderr, "must report a clear read failure, not an internal error")
+        self.assertNotIn("internal error", done.stderr)
 
 
 if __name__ == "__main__":

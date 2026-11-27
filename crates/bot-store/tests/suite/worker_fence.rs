@@ -1,5 +1,4 @@
-//! 호스트 활성 집합 펜싱(PG): 옛 집합에 묶인 워커·스케줄러 핸들은 claim·호출 시작·정적 발생·사용자 예약 발화·위임을 하지 못하고,
-//! 교체가 진행 중이면 커밋 뒤의 집합으로 판정한다. 권한을 판정한 판본이 지금도 활성인 채로 자식 생성과 부모 대기를 커밋한다.
+//! Host active-set fencing for workers, schedulers, delegation, and ledger reads.
 
 use crate::support::{schedule::*, *};
 use bot_core::{
@@ -18,7 +17,7 @@ fn rev(value: &str) -> Revision {
     Revision(value.into())
 }
 
-/// 프로필 판본은 그대로 두고 집합 판본만 올린다(호스트 매핑 교체).
+/// Advances the active set revision while keeping profile revisions unchanged.
 async fn remap(db: &TestDb, from: &str, to: &str) {
     let profiles = BTreeMap::from([
         (profile_id(), rev("r1")),
@@ -35,11 +34,10 @@ async fn a_worker_bound_to_an_old_set_cannot_claim_or_start_and_the_new_one_can(
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 시작은 이미 집은 run에서, claim은 대기 중인 run에서 본다
     let run = leased(&db, "r1").await;
     begin_call(&db, &run.attempt, "c1").await;
     runs(&db)
-        .accept(accept("personal", "r2", "또 하나"))
+        .accept(accept("personal", "r2", "another"))
         .await
         .unwrap();
     let old = db.peer("old-worker").await.for_activation(rev("set-1"));
@@ -50,7 +48,7 @@ async fn a_worker_bound_to_an_old_set_cannot_claim_or_start_and_the_new_one_can(
         db.scalar::<i64>("select count(*) from bot_runs where state = 'ready'")
             .await,
         1,
-        "옛 핸들은 아무것도 집지 않았다"
+        "stale handle must not claim ready runs"
     );
     let started =
         bot_core::ledger::CallLedger::start(&old, start_call(&run.attempt, "c1", None)).await;
@@ -59,11 +57,15 @@ async fn a_worker_bound_to_an_old_set_cannot_claim_or_start_and_the_new_one_can(
         db.scalar::<String>("select state from bot_calls where call = 'c1'")
             .await,
         "open",
-        "옛 핸들은 호출도 시작하지 못했다"
+        "stale handle must not start calls"
     );
 
     let current = db.peer("new-worker").await.for_activation(rev("set-2"));
-    let claimed = current.claim().await.unwrap().expect("새 핸들은 집는다");
+    let claimed = current
+        .claim()
+        .await
+        .unwrap()
+        .expect("new handle should claim");
     assert_eq!(claimed.principal.0, "local:owner");
     bot_core::ledger::CallLedger::start(&current, start_call(&run.attempt, "c1", None))
         .await
@@ -76,13 +78,12 @@ async fn a_claim_waits_for_a_replacement_in_flight_and_then_sees_the_committed_s
         return;
     };
     runs(&db)
-        .accept(accept("personal", "r1", "기다리는 run"))
+        .accept(accept("personal", "r1", "waiting run"))
         .await
         .unwrap();
     let worker = db.peer("worker").await.for_activation(rev("set-1"));
     let mut connection = db.raw().await;
     let mut tx = connection.begin().await.unwrap();
-    // 교체가 진행 중이다: 같은 행을 쓰고 아직 커밋하지 않았다
     let writer: i32 = sqlx::query_scalar(
         "update bot_active set revision = 'set-2' where singleton returning pg_backend_pid()",
     )
@@ -102,12 +103,15 @@ async fn a_claim_waits_for_a_replacement_in_flight_and_then_sees_the_committed_s
             if blocked {
                 break;
             }
-            assert!(!task.is_finished(), "claim이 교체를 기다리지 않고 끝났다");
+            assert!(
+                !task.is_finished(),
+                "claim finished before replacement committed"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("claim이 교체 뒤에서 기다려야 한다");
+    .expect("claim must wait behind replacement");
     tx.commit().await.unwrap();
     assert!(matches!(task.await.unwrap(), Err(Error::Stale)));
     assert_eq!(
@@ -122,7 +126,6 @@ async fn an_old_scheduler_cannot_accept_a_static_occurrence_or_advance_a_user_sc
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 정적 트리거 하나와 사용자 예약 하나
     db.publish_schedule(ScheduleSet {
         profile: profile_id(),
         revision: rev("r1"),
@@ -172,7 +175,6 @@ async fn an_old_scheduler_cannot_accept_a_static_occurrence_or_advance_a_user_sc
         bot_core::schedule::UserSchedules::advance(&old, advance).await,
         Err(Error::Stale)
     ));
-    // 확인할 예약을 읽는 것도 옛 집합에는 허락하지 않는다
     assert!(matches!(
         bot_core::schedule::UserSchedules::due(&old, None, 10).await,
         Err(Error::Stale)
@@ -228,10 +230,9 @@ async fn a_delegation_judged_under_a_replaced_revision_creates_no_child_and_keep
         parent: parent.attempt.clone(),
         step: "s1".into(),
         child: AgentId("main/research".into()),
-        instruction: "조사해".into(),
+        instruction: "investigate".into(),
         scopes: scopes(&["run"]),
     };
-    // 권한을 판정한 판본이 활성이 아니면(그 사이 교체됐다) 자식도 부모 대기도 없다
     assert!(matches!(
         DelegationStore::delegate(&db.store, command("r0")).await,
         Err(Error::Stale)
@@ -242,7 +243,6 @@ async fn a_delegation_judged_under_a_replaced_revision_creates_no_child_and_keep
         0
     );
     assert_eq!(state_of_run(&db, &parent.attempt.run).await, "leased");
-    // 옛 집합에 묶인 핸들도 못 한다
     let old = db.peer("old").await.for_activation(rev("set-1"));
     remap(&db, "set-1", "set-2").await;
     assert!(matches!(
@@ -254,7 +254,6 @@ async fn a_delegation_judged_under_a_replaced_revision_creates_no_child_and_keep
             .await,
         0
     );
-    // 맞는 판본이면 자식 생성과 부모 대기가 한 커밋이다
     let child = DelegationStore::delegate(&db.store, command("r1"))
         .await
         .unwrap();
@@ -285,7 +284,6 @@ async fn a_handle_pinned_to_an_old_set_reads_neither_the_context_nor_a_call() {
             .unwrap()
             .is_some()
     );
-    // 활성 집합이 바뀌면 옛 집합에 묶인 핸들은 맥락도 호출 기록도 읽지 못한다(새 집합에 묶은 핸들만 읽는다)
     remap(&db, "set-1", "set-2").await;
     assert!(matches!(
         current.context(run.attempt.clone()).await,

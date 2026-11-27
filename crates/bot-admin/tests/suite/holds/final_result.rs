@@ -12,9 +12,8 @@ async fn the_run_waits_for_a_whole_receipt_after_confirmed_steps() {
     )
     .await;
     assert_eq!(first.status, 200, "{}", first.body);
-    // 한 단계만 판정했으니 나머지 보류가 남고 run은 계속 기다린다.
     let h = get(&s, OPERATOR, "/v1/admin/holds").await.json();
-    let steps = h["items"][0]["steps"].as_array().expect("단계");
+    let steps = h["items"][0]["steps"].as_array().expect("steps");
     let states: Vec<(&str, &str)> = steps
         .iter()
         .filter_map(|x| Some((x["step"].as_str()?, x["state"].as_str()?)))
@@ -38,7 +37,6 @@ async fn the_run_waits_for_a_whole_receipt_after_confirmed_steps() {
         get(&s, OPERATOR, "/v1/admin/status").await.json()["profiles"]["personal"]["holds"],
         1
     );
-    // 같은 단계를 다시 판정하면 거절한다.
     assert_eq!(
         post(
             &s,
@@ -50,25 +48,25 @@ async fn the_run_waits_for_a_whole_receipt_after_confirmed_steps() {
         .status,
         409
     );
-    // 마지막 미결 단계 판정으로 호출 전체의 영수증을 받을 별도 발생이 열린다.
+    // Resolving the last open step opens a call-wide receipt hold because earlier steps were confirmed.
     let last = post(
         &s,
         OPERATOR,
         path,
-        r#"{"verdict":"not_executed","evidence":"수신처에 기록 없음","effect":"e-3","hold_id":"h-e-3"}"#,
+        r#"{"verdict":"not_executed","evidence":"no record at recipient","effect":"e-3","hold_id":"h-e-3"}"#,
     )
     .await;
     assert_eq!(last.status, 200);
     let held = get(&s, OPERATOR, "/v1/admin/holds").await.json();
     let hold = &held["items"][0];
-    let id = hold["hold_id"].as_str().expect("호출 전체 보류");
+    let id = hold["hold_id"].as_str().expect("call-wide hold_id");
     assert_ne!(id, "h-e-3");
     assert_eq!(hold["steps"][0]["receipt"], "file-17");
     assert_eq!(
         get(&s, OPERATOR, "/v1/admin/status").await.json()["profiles"]["personal"]["holds"],
         1
     );
-    let body = serde_json::json!({"verdict":"not_executed", "evidence":"없음", "hold_id":id});
+    let body = serde_json::json!({"verdict":"not_executed", "evidence":"none", "hold_id":id});
     assert_eq!(
         post(&s, OPERATOR, path, &body.to_string()).await.status,
         400
@@ -114,7 +112,7 @@ async fn a_final_receipt_for_a_cancelled_run_only_settles_its_call() {
     let held = get(&s, OPERATOR, "/v1/admin/holds").await.json();
     let id = held["items"][0]["hold_id"]
         .as_str()
-        .expect("호출 전체 보류");
+        .expect("call-wide hold_id");
     let body = serde_json::json!({"verdict":"confirmed","receipt":"whole","hold_id":id});
     assert_eq!(
         post(&s, OPERATOR, path, &body.to_string()).await.status,

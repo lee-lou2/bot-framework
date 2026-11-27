@@ -1,4 +1,4 @@
-//! 판정 커밋 후 HTTP 응답을 잃어도 첫 회신의 판정이 두 번째 보류를 풀 수 없다.
+//! Lost HTTP response after committing a hold verdict cannot resolve a subsequent hold on the same reply.
 
 use crate::support::{TestDb, admin::operator, done, leased_in, outbox, runs};
 use bot_admin::{AdminConfig, AdminDeps, StaticTokens, fake, router};
@@ -100,7 +100,7 @@ async fn losing_the_http_response_and_reholding_the_same_reply_does_not_reapply_
     let verdict = |id: &Value| json!({"hold_id":id,"verdict":"not_executed","evidence":"checked at destination"});
     let old_id = &first["hold_id"];
     assert!(old_id.is_string());
-    // 변경 전 검사는 통과시키고, 커밋 뒤 응답 직전의 검사만 실패시킨다.
+    // Allow the pre-commit check and fail only the post-commit pre-response check.
     count.store(2, Ordering::SeqCst);
     assert_eq!(
         post(verdict(old_id)).await.unwrap().status(),

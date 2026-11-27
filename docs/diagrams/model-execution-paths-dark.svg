@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 660" width="1120" height="660" role="img" aria-labelledby="t-pt-d d-pt-d">
-  <title id="t-pt-d">Bot Framework 모델 실행 2경로 비교</title>
-  <desc id="d-pt-d">기본 권장인 직접 API 경로(anthropic-api, openai-api)와 격리 파일 읽기가 필요할 때 쓰는 일회용 Apple container VM 경로(claude-cli)가 모두 비밀 노출을 막고 Broker::call 관문을 경유하는 비교 구조.</desc>
+  <title id="t-pt-d">Bot Framework Model Execution Paths Comparison</title>
+  <desc id="d-pt-d">Compares the recommended Direct API path (anthropic-api, openai-api) and the disposable Apple container VM path (claude-cli) for isolated file reads — both block secret exposure and route every tool call through Broker::call.</desc>
   <style>
     .bg { fill: #1c212c; }
     .frame { fill: #1c212c; stroke: #343d50; stroke-width: 1; }
@@ -78,15 +78,15 @@
     <rect x="0" y="76" width="1120" height="504" fill="url(#dots-pt-d)" opacity="0.6"/>
     <!-- Header -->
     <text x="24" y="28" class="h-eye">EXECUTION MODEL · SECURITY ISOLATION · TWO PATHS</text>
-    <text x="24" y="51" class="h-title">모델 실행 2경로 비교 (직접 API vs 일회용 VM)</text>
-    <text x="24" y="67" class="h-sub">모델은 어느 경로에서도 호스트 파일·셸이나 서비스 키에 닿지 못하며, 모든 도구 호출은 Broker::call을 경유</text>
+    <text x="24" y="51" class="h-title">Model Execution Paths: Direct API vs Disposable VM</text>
+    <text x="24" y="67" class="h-sub">Neither path exposes host files, shell, or service keys to models — every tool call passes through Broker::call</text>
     <line x1="0" y1="76" x2="1120" y2="76" class="hdr-rule"/>
 
     <g transform="translate(0,68)">
       <!-- ZONES -->
       <rect x="24" y="28" width="1072" height="196" rx="8" class="zone"/>
       <rect x="44" y="22" width="424" height="14" rx="2" class="lbl-bg"/>
-      <text x="52" y="32" class="zlbl">PATH A · DIRECT API (anthropic-api / openai-api · 기본 권장)</text>
+      <text x="52" y="32" class="zlbl">PATH A · DIRECT API (anthropic-api / openai-api · RECOMMENDED)</text>
 
       <rect x="24" y="256" width="1072" height="236" rx="8" class="zone"/>
       <rect x="44" y="250" width="448" height="14" rx="2" class="lbl-bg"/>
@@ -98,9 +98,9 @@
       <line x1="836" y1="128" x2="904" y2="128" class="edge" marker-end="url(#ar-m-pt-d)"/>
 
       <rect x="268" y="106" width="68" height="14" rx="2" class="lbl-bg"/>
-      <text x="302" y="116" text-anchor="middle" class="elbl-lnk">HTTPS + 키</text>
+      <text x="302" y="116" text-anchor="middle" class="elbl-lnk">HTTPS + key</text>
       <rect x="268" y="136" width="68" height="13" rx="2" class="lbl-bg"/>
-      <text x="302" y="146" text-anchor="middle" class="elbl">글 · 도구 계획</text>
+      <text x="302" y="146" text-anchor="middle" class="elbl">Text · Plan</text>
       <rect x="568" y="106" width="68" height="14" rx="2" class="lbl-bg"/>
       <text x="602" y="116" text-anchor="middle" class="elbl-acc">Broker::call</text>
       <rect x="844" y="106" width="52" height="14" rx="2" class="lbl-bg"/>
@@ -112,11 +112,11 @@
       <line x1="836" y1="352" x2="904" y2="352" class="edge" marker-end="url(#ar-m-pt-d)"/>
 
       <rect x="568" y="330" width="68" height="14" rx="2" class="lbl-bg"/>
-      <text x="602" y="340" text-anchor="middle" class="elbl-acc">릴레이 전용</text>
+      <text x="602" y="340" text-anchor="middle" class="elbl-acc">Relay only</text>
       <rect x="568" y="360" width="68" height="13" rx="2" class="lbl-bg"/>
-      <text x="602" y="370" text-anchor="middle" class="elbl">세션 토큰</text>
+      <text x="602" y="370" text-anchor="middle" class="elbl">Token only</text>
       <rect x="344" y="453" width="236" height="14" rx="2" class="lbl-bg"/>
-      <text x="462" y="463" text-anchor="middle" class="elbl-lnk">브로커 프록시만 공급자 키 주입 → 상류 HTTPS</text>
+      <text x="462" y="463" text-anchor="middle" class="elbl-lnk">Only broker proxy injects provider key → HTTPS</text>
       <rect x="844" y="330" width="52" height="14" rx="2" class="lbl-bg"/>
       <text x="870" y="340" text-anchor="middle" class="elbl">stdio/HTTP</text>
 
@@ -128,34 +128,34 @@
         <line x1="60" y1="124" x2="252" y2="124" class="div"/>
         <text x="60" y="142" class="mono">/v1/messages (Anthropic)</text>
         <text x="60" y="158" class="mono">/chat/completions (OpenAI)</text>
-        <text x="60" y="174" class="sub">HTTPS 강제 (loopback만 HTTP)</text>
+        <text x="60" y="174" class="sub">HTTPS required (loopback HTTP ok)</text>
       </g>
       <g id="pa-worker">
         <rect x="340" y="72" width="224" height="116" rx="6" class="node"/>
         <text x="352" y="92" class="eye">TRUSTED HOST · Linux / macOS</text>
-        <text x="352" y="114" class="ttl-sm">Worker (직접 API 실행기)</text>
+        <text x="352" y="114" class="ttl-sm">Worker (Direct API Runner)</text>
         <line x1="352" y1="124" x2="552" y2="124" class="div"/>
-        <text x="352" y="142" class="sub">VM 없이 대화만 전송 · 셸/파일 없음</text>
-        <text x="352" y="158" class="sub">전송 직전 키 주입 · 판본 2중 검증</text>
-        <text x="352" y="174" class="mono">응답 키 노출 → secret_in_response</text>
+        <text x="352" y="142" class="sub">No VM · Messages only · No shell/FS</text>
+        <text x="352" y="158" class="sub">Header key on send · 2x rev check</text>
+        <text x="352" y="174" class="mono">Key leak → secret_in_response</text>
       </g>
       <g id="pa-broker">
         <rect x="640" y="72" width="196" height="116" rx="6" class="node-focal"/>
         <text x="652" y="92" class="eye-acc">SINGLE GATE</text>
         <text x="652" y="114" class="ttl-acc">Broker</text>
         <line x1="652" y1="124" x2="824" y2="124" class="div-acc"/>
-        <text x="652" y="142" class="sub">계획 호출 인가 · 승인 · 감사</text>
-        <text x="652" y="158" class="sub">승인 대기 후 동일 계획 재개</text>
-        <text x="652" y="174" class="mono">호출 ID 멱등 · 원장 기록</text>
+        <text x="652" y="142" class="sub">Auth · Approvals · Audit</text>
+        <text x="652" y="158" class="sub">Resumes exact plan on approval</text>
+        <text x="652" y="174" class="mono">Idempotent ID · Call ledger</text>
       </g>
       <g id="pa-tools">
         <rect x="904" y="72" width="168" height="116" rx="6" class="node"/>
         <text x="916" y="92" class="eye">TOOLS</text>
-        <text x="916" y="114" class="ttl-sm">MCP · 내장 도구</text>
+        <text x="916" y="114" class="ttl-sm">MCP · Built-ins</text>
         <line x1="916" y1="124" x2="1060" y2="124" class="div"/>
-        <text x="916" y="142" class="sub">srt 샌드박스 · 원격 MCP</text>
+        <text x="916" y="142" class="sub">srt sandbox · Remote MCP</text>
         <text x="916" y="158" class="mono">memory · schedule</text>
-        <text x="916" y="174" class="mono">delegate (read 불가)</text>
+        <text x="916" y="174" class="mono">delegate (no read)</text>
       </g>
 
       <!-- PATH B NODES -->
@@ -164,58 +164,58 @@
         <text x="60" y="316" class="eye-lnk">UPSTREAM ENDPOINT</text>
         <text x="60" y="338" class="ttl-sm">Anthropic API</text>
         <line x1="60" y1="348" x2="252" y2="348" class="div"/>
-        <text x="60" y="366" class="sub">VM에서 직접 접근 불가</text>
-        <text x="60" y="382" class="mono">호스트 브로커 프록시만 연결</text>
-        <text x="60" y="398" class="mono">GuardedUpstream 판본 확인</text>
+        <text x="60" y="366" class="sub">Unreachable directly from VM</text>
+        <text x="60" y="382" class="mono">Broker proxy connects only</text>
+        <text x="60" y="398" class="mono">GuardedUpstream rev check</text>
       </g>
       <g id="pb-vm">
         <rect x="340" y="288" width="224" height="128" rx="6" class="node-dash"/>
         <text x="352" y="308" class="eye-acc">UNTRUSTED · DISPOSABLE VM</text>
         <text x="352" y="330" class="ttl-sm">Claude CLI in VM</text>
         <line x1="352" y1="340" x2="552" y2="340" class="div"/>
-        <text x="352" y="358" class="sub">실행마다 새 VM · 서비스 키 없음</text>
-        <text x="352" y="374" class="mono">bot-init 방화벽 + 권한 강등</text>
-        <text x="352" y="390" class="mono">읽기전용 /bot/AGENTS.md</text>
-        <text x="352" y="406" class="mono">격리 read + --strict-mcp-config</text>
+        <text x="352" y="358" class="sub">Fresh VM per run · Zero secrets</text>
+        <text x="352" y="374" class="mono">bot-init firewall + drop privs</text>
+        <text x="352" y="390" class="mono">Read-only /bot/AGENTS.md</text>
+        <text x="352" y="406" class="mono">Isolated read · strict MCP cfg</text>
       </g>
       <g id="pb-broker">
         <rect x="640" y="288" width="196" height="128" rx="6" class="node-focal"/>
         <text x="652" y="308" class="eye-acc">RELAY + PROXY + GATE</text>
         <text x="652" y="330" class="ttl-acc">Broker</text>
         <line x1="652" y1="340" x2="824" y2="340" class="div-acc"/>
-        <text x="652" y="358" class="sub">세션 토큰(claim) 검증</text>
-        <text x="652" y="376" class="mono">POST /v1/messages 대행</text>
+        <text x="652" y="358" class="sub">Verifies claim session token</text>
+        <text x="652" y="376" class="mono">POST /v1/messages proxy</text>
         <text x="652" y="394" class="mono">POST /mcp → Broker::call</text>
       </g>
       <g id="pb-tools">
         <rect x="904" y="296" width="168" height="112" rx="6" class="node"/>
         <text x="916" y="316" class="eye">TOOLS</text>
-        <text x="916" y="338" class="ttl-sm">MCP · 내장 도구</text>
+        <text x="916" y="338" class="ttl-sm">MCP · Built-ins</text>
         <line x1="916" y1="348" x2="1060" y2="348" class="div"/>
-        <text x="916" y="366" class="sub">srt 샌드박스 · 원격 MCP</text>
+        <text x="916" y="366" class="sub">srt sandbox · Remote MCP</text>
         <text x="916" y="382" class="mono">memory · schedule</text>
-        <text x="916" y="398" class="mono">delegate + 격리 read</text>
+        <text x="916" y="398" class="mono">delegate + isolated read</text>
       </g>
     </g>
 
     <!-- Footer Ledger -->
   <line x1="1" y1="580" x2="1119" y2="580" class="hdr-rule"/>
   <line x1="24" y1="596" x2="24" y2="644" class="bar"/>
-  <text x="34" y="606" class="fk">선택 기준</text>
-  <text x="34" y="625" class="fv">일반 대화·도구 호출은 직접 API 권장</text>
-  <text x="34" y="641" class="fv">작업 공간 파일 read 필요 시 VM 사용</text>
+  <text x="34" y="606" class="fk">WHEN TO CHOOSE</text>
+  <text x="34" y="625" class="fv">Use Direct API by default for chat &amp; tools</text>
+  <text x="34" y="641" class="fv">Use Disposable VM when workspace read is needed</text>
   <line x1="296" y1="596" x2="296" y2="644" class="bar-acc"/>
-  <text x="306" y="606" class="fk-acc">공통 브로커 관문</text>
-  <text x="306" y="625" class="fv">두 경로 모두 도구 인가·사람 승인·</text>
-  <text x="306" y="641" class="fv">효과 원장·감사는 Broker::call 공유</text>
+  <text x="306" y="606" class="fk-acc">SHARED BROKER GATE</text>
+  <text x="306" y="625" class="fv">Both paths share Broker::call for tool auth,</text>
+  <text x="306" y="641" class="fv">human approvals, effect ledger, and audit</text>
   <line x1="568" y1="596" x2="568" y2="644" class="bar"/>
-  <text x="578" y="606" class="fk">닻 VM (ANCHOR)</text>
-  <text x="578" y="625" class="fv">claude-cli에서 호스트 전용망 유지</text>
-  <text x="578" y="641" class="fv">신뢰 init에 릴레이 IP:Port만 전달</text>
+  <text x="578" y="606" class="fk">ANCHOR VM</text>
+  <text x="578" y="625" class="fv">Holds host-only network for claude-cli</text>
+  <text x="578" y="641" class="fv">Passes only relay IP:Port to trusted init</text>
   <line x1="840" y1="596" x2="840" y2="644" class="bar"/>
-  <text x="850" y="606" class="fk">구판 차단 (STALE)</text>
-  <text x="850" y="625" class="fv">활성 판본 변경 시 구판 워커는 키 읽기</text>
-  <text x="850" y="641" class="fv">및 전송을 즉시 중단하고 큐로 반환</text>
+  <text x="850" y="606" class="fk">STALE WORKER GUARD</text>
+  <text x="850" y="625" class="fv">On active-set change, stale workers abort</text>
+  <text x="850" y="641" class="fv">key reads and sends, releasing to queue</text>
   </g>
   <rect x="0.5" y="0.5" width="1119" height="659" rx="10" fill="none" stroke="#343d50" stroke-width="1"/>
 </svg>

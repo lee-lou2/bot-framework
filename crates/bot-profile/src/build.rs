@@ -1,5 +1,4 @@
-//! 프로필 하나의 파이프라인: 구조 → 파일 읽기 → 상속 조립 → 참조 검사 → 불변 판본.
-//! 단계마다 오류를 모으고, 오류가 있으면 다음 단계로 가지 않는다.
+//! Single-profile build pipeline from scanned file tree to immutable snapshot and bundle.
 use crate::{
     assemble, convert,
     issue::Issues,
@@ -15,13 +14,12 @@ use bot_core::profile::Snapshot;
 
 pub struct Output {
     pub snapshot: Snapshot,
-    /// 검증한 바이트 묶음(저장용). 해시가 `snapshot.revision`이다.
+    /// Validated canonical bundle bytes whose SHA-256 is `snapshot.revision`.
     pub bundle: Vec<u8>,
 }
 
-/// 새 프로필 폴더를 현행(`Strict`) 규칙으로 검증해 판본을 만든다.
-/// `SKILL.md` front matter를 쓰는 프로필은 `BOTPROFILE2`로 묶어 구판(`BOTPROFILE1`)과 판본을 가르고,
-/// front matter가 없는 프로필은 `BOTPROFILE1`을 유지해 기존 배포의 판본을 바꾸지 않는다.
+/// Validates a profile under strict rules; uses `BOTPROFILE2` when `SKILL.md` front matter is
+/// present and preserves `BOTPROFILE1` otherwise so existing deployments keep stable revisions.
 pub fn build(
     tree: &Tree,
     folder: Option<&str>,
@@ -31,7 +29,7 @@ pub fn build(
     build_inner(tree, folder, SkillMode::Strict, None, limits, issues)
 }
 
-/// 저장한 묶음 복원(`from_bundle`)이나 지정 판본 보충(`read_legacy_bundle`)용: 묶음 판본에 맞는 해석 규칙으로 검증한다.
+/// Validates a bundle tree using the skill rules matching its `BundleFormat`.
 pub fn build_for_bundle(
     format: BundleFormat,
     tree: &Tree,
@@ -82,7 +80,7 @@ fn build_inner(
     })
 }
 
-/// 지식·스킬·지침은 상속으로 에이전트마다 복사본이 생긴다. 파일 크기 한도를 지켜도 에이전트가 많으면 불어나므로 합을 따로 막는다.
+/// Caps total inherited bytes across agents and per-agent visible skill bytes.
 fn check_assembled(built: &Built, mode: SkillMode, limits: &Limits, issues: &mut Issues) {
     let total: u64 = built
         .agents
@@ -112,7 +110,7 @@ fn check_assembled(built: &Built, mode: SkillMode, limits: &Limits, issues: &mut
             "assembled-too-large",
             "",
             format!(
-                "상속을 적용하면 에이전트별 복사본의 합이 {total} 바이트라 한도({})를 넘어요. 지식·스킬을 필요한 에이전트 아래로 옮기세요",
+                "inherited agent copies total {total} bytes, exceeding the limit ({}); move knowledge or skills to narrower agents",
                 limits.max_assembled_bytes
             ),
         );
@@ -126,7 +124,7 @@ fn check_assembled(built: &Built, mode: SkillMode, limits: &Limits, issues: &mut
     for agent in built.agents.values() {
         let bytes = skill_bytes(agent);
         if bytes > limits.max_skill_bytes {
-            // 부모가 이미 같은 합계로 한도를 넘겼으면 자식에게 중복 보고하지 않는다
+            // Skip duplicate report when the parent already exceeds the limit with the same byte total.
             let inherited_same = agent
                 .parent
                 .as_ref()
@@ -139,7 +137,7 @@ fn check_assembled(built: &Built, mode: SkillMode, limits: &Limits, issues: &mut
                 "skill-too-large",
                 &layout::agent_dir(&agent.id.0),
                 format!(
-                    "에이전트 {}에게 보이는 스킬 본문 합계가 {bytes} 바이트라 한도({} 바이트)를 넘어요. SKILL.md를 줄이거나 필요한 하위 에이전트 아래로 옮기세요",
+                    "visible skill instructions for agent {} total {bytes} bytes, exceeding the limit ({} bytes); trim SKILL.md or move skills to a narrower child agent",
                     agent.id.0, limits.max_skill_bytes
                 ),
             );

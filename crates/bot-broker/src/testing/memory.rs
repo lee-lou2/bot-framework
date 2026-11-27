@@ -1,7 +1,4 @@
-//! `MemoryStore` 가짜(메모리). 실제 저장소가 지켜야 할 규칙을 그대로 적었다.
-//! - `preview`는 ID 한 건만 읽고(스캔 없음), 소유자 본인의 DM·CLI에서만 private 본문을 준다. private를 읽으면 요청 트리 플래그를 올린다.
-//! - `share`는 지금 본문으로 지문을 다시 계산해 호출에 묶인 지문과 같을 때만 승인 소비·가시성 변경·호출 완료를 한 번에 한다.
-//!   본문이 바뀌었으면 `Conflict`이고 승인은 소비되지 않는다.
+//! In-memory `MemoryStore` test double enforcing owner-only private preview and hash-checked sharing.
 
 use super::MemLedger;
 use crate::canon::sha256;
@@ -28,9 +25,9 @@ pub struct MemMemory {
     entries: Mutex<HashMap<MemoryId, Entry>>,
     previews: Mutex<Vec<MemoryId>>,
     shared: Mutex<Vec<MemoryId>>,
-    /// 다음 `preview`가 끝난 바로 뒤에 적용할 편집(읽은 뒤 공유 전에 본문이 바뀌는 경쟁).
+    /// Mutation applied right after the next `preview` to simulate concurrent edits.
     edit_after_preview: Mutex<Option<(MemoryId, String)>>,
-    /// 다음 `preview`가 읽기 전에 한 번 실행할 일(다른 프로세스가 그 사이에 끼어드는 경쟁).
+    /// Hook invoked right before the next `preview` reads state.
     before_preview: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
@@ -59,7 +56,6 @@ impl MemMemory {
         );
     }
 
-    /// 소유자가 카드를 본 뒤 본문을 고친 것처럼 바꾼다.
     pub fn edit(&self, id: &str, text: &str) {
         lock(&self.entries)
             .get_mut(&MemoryId(id.into()))
@@ -67,17 +63,15 @@ impl MemMemory {
             .text = text.into();
     }
 
-    /// 다음 `preview`가 읽기 전에 `hook`을 한 번 실행한다.
     pub fn before_next_preview(&self, hook: impl FnOnce() + Send + 'static) {
         *lock(&self.before_preview) = Some(Box::new(hook));
     }
 
-    /// 기억을 지운다.
     pub fn remove(&self, id: &str) {
         lock(&self.entries).remove(&MemoryId(id.into()));
     }
 
-    /// 다음 `preview`가 본문을 읽어 간 직후 본문을 바꾼다(그 읽기에는 옛 본문이 나간다).
+    /// Schedules a text edit immediately after the next `preview` returns the old text.
     pub fn edit_after_next_preview(&self, id: &str, text: &str) {
         *lock(&self.edit_after_preview) = Some((MemoryId(id.into()), text.into()));
     }
@@ -86,7 +80,6 @@ impl MemMemory {
         lock(&self.entries)[&MemoryId(id.into())].visibility
     }
 
-    /// `preview`가 읽은 ID들(한 건씩 읽었는지 본다).
     pub fn previews(&self) -> Vec<MemoryId> {
         lock(&self.previews).clone()
     }
@@ -145,7 +138,7 @@ impl MemoryStore for MemMemory {
 
     fn share(&self, start: StartCall, id: MemoryId) -> Reply<'_, MemoryId> {
         Box::pin(async move {
-            // 완료한 호출의 재시도는 가시성을 다시 바꾸지 않고 같은 기억이면 그대로 돌려준다(저장소와 같다).
+            // Retrying a completed share returns the same ID without mutating visibility again.
             if self.ledger.call_done(&start.attempt.run, &start.call) {
                 return Ok(id);
             }

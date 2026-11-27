@@ -1,5 +1,4 @@
-//! 응답을 엄격하게 읽는 규칙(검토에서 나온 것): 호출 인자는 있고 객체이며 모호하지 않아야 하고, 한 응답에서 같은 상류 호출 ID는 한 번뿐이며, Anthropic은 `tool_use` 종료일 때만 호출이고,
-//! 공급자 상태(호출 ID·서명)는 그것을 준 공급자에게만 되돌아간다. 어느 것이든 어기면 호출을 하나도 내지 않는다.
+//! Strict upstream response parsing tests: unambiguous object args, unique call IDs, stop reasons, and provider-bound state replay.
 
 use super::{done_call, exchange, request, settings, tool, user};
 use crate::model::api::{ApiEndpoint, ApiKind, wire};
@@ -15,17 +14,16 @@ fn failed(code: &'static str, transient: bool) -> ModelError {
 
 fn base() -> ModelRequest {
     request(
-        vec![user("오늘 일정 알려줘")],
+        vec![user("Show today's agenda")],
         vec![tool(
             "agenda.list",
-            "일정 목록을 조회한다",
+            "List agenda events",
             r#"{"type":"object"}"#,
         )],
         vec![],
     )
 }
 
-/// 이 요청에서 `agenda.list`가 모델에게 보이는 이름
 fn alias(kind: ApiKind) -> String {
     let built = kind.build(&settings(kind), &base()).unwrap();
     built
@@ -35,7 +33,6 @@ fn alias(kind: ApiKind) -> String {
         .to_owned()
 }
 
-/// 응답 본문 글을 그대로(중복 키처럼 값으로는 못 만드는 모양도) 읽는다.
 fn read(kind: ApiKind, raw: &str) -> Result<ModelStep, ModelError> {
     let req = base();
     let built = kind.build(&settings(kind), &req).unwrap();
@@ -57,7 +54,7 @@ fn anthropic(stop: &str, blocks: &str) -> String {
 fn call_count(step: Result<ModelStep, ModelError>) -> usize {
     match step {
         Ok(ModelStep::Calls { calls, .. }) => calls.len(),
-        other => panic!("호출이어야 해요: {other:?}"),
+        other => panic!("expected tool calls: {other:?}"),
     }
 }
 
@@ -65,7 +62,6 @@ fn call_count(step: Result<ModelStep, ModelError>) -> usize {
 fn a_tool_call_without_usable_arguments_runs_nothing() {
     let name = alias(ApiKind::OpenAi);
     let none = failed("invalid_tool_args", false);
-    // OpenAI 호환: 빈 글·공백·없음·null·객체 아님·중복 키(바깥·안쪽·객체 모양)
     for arguments in [
         r#""arguments":"","#,
         r#""arguments":"   ","#,
@@ -85,12 +81,11 @@ fn a_tool_call_without_usable_arguments_runs_nothing() {
             "openai {arguments}"
         );
     }
-    // Anthropic: `input` 없음·null·문자열·배열·중복 키
     let name = alias(ApiKind::Anthropic);
     for input in [
         "",
         r#","input":null"#,
-        r#","input":"문자열""#,
+        r#","input":"string""#,
         r#","input":[1]"#,
         r#","input":{"event":"a","event":"b"}"#,
         r#","input":{"o":{"k":1,"k":2}}"#,
@@ -105,7 +100,6 @@ fn a_tool_call_without_usable_arguments_runs_nothing() {
             "anthropic {input}"
         );
     }
-    // 대조: 빈 객체는 인자가 있는 호출이다
     let raw = openai(&format!(
         r#"{{"id":"c1","type":"function","function":{{"name":"{name}","arguments":"{{}}"}}}}"#
     ));
@@ -130,7 +124,6 @@ fn the_same_upstream_call_id_twice_in_one_response_runs_nothing() {
         read(ApiKind::OpenAi, &twice).unwrap_err(),
         failed("invalid_response", false)
     );
-    // 쓸 수 없는 모양(공백이 든 ID)이라도 겹치면 같다
     let spaced = openai(&format!("{},{}", item("a b"), item("a b")));
     assert_eq!(
         read(ApiKind::OpenAi, &spaced).unwrap_err(),
@@ -162,12 +155,11 @@ fn an_anthropic_answer_that_stopped_for_another_reason_cannot_carry_a_tool_use()
             "{stop}"
         );
     }
-    // 대조: `tool_use` 종료는 호출이고, 호출 없는 `end_turn`은 최종 글이다
     assert_eq!(
         call_count(read(ApiKind::Anthropic, &anthropic("tool_use", &block))),
         1
     );
-    let text = anthropic("end_turn", r#"{"type":"text","text":"끝"}"#);
+    let text = anthropic("end_turn", r#"{"type":"text","text":"done"}"#);
     assert!(matches!(
         read(ApiKind::Anthropic, &text),
         Ok(ModelStep::Final { .. })
@@ -185,9 +177,8 @@ fn the_providers_ids_and_signatures_are_resent_only_to_the_provider_that_issued_
         state: Some(state), ..
     }) = read(kind, &issued)
     else {
-        panic!("상류가 준 상태가 있어야 해요");
+        panic!("expected upstream provider state");
     };
-    // 이 상태를 단 지난 차례가 있는 다음 요청을 `to`의 설정으로 만든다
     let next = |to: &crate::model::api::ApiSettings| -> String {
         let past = exchange(
             "",
@@ -199,7 +190,7 @@ fn the_providers_ids_and_signatures_are_resent_only_to_the_provider_that_issued_
             )],
             Some(state.as_str()),
         );
-        let req = request(vec![user("계속해")], base().tools, vec![past]);
+        let req = request(vec![user("continue")], base().tools, vec![past]);
         String::from_utf8(kind.build(to, &req).unwrap().body).unwrap()
     };
     let same = next(&settings(kind));
@@ -214,18 +205,18 @@ fn the_providers_ids_and_signatures_are_resent_only_to_the_provider_that_issued_
     let mut other_secret = settings(kind);
     other_secret.secret = SecretName::parse("other-key");
     for (what, changed) in [
-        ("모델", other_model),
-        ("주소", other_endpoint),
-        ("자격 이름", other_secret),
+        ("model", other_model),
+        ("endpoint", other_endpoint),
+        ("secret", other_secret),
     ] {
         let body = next(&changed);
         assert!(
             !body.contains("call_up_1") && !body.contains("SIG-ONE"),
-            "{what}이 바뀐 공급자에게 옛 공급자의 ID·서명이 갔다: {body}"
+            "old provider ID/signature leaked after {what} changed: {body}"
         );
         assert!(
             body.contains("tool_call_id"),
-            "{what}: 결과는 여전히 호출과 이어져야 해요"
+            "{what}: tool results must still link to calls"
         );
     }
 }
@@ -240,14 +231,12 @@ fn the_output_limit_goes_out_under_the_field_name_the_operator_wrote() {
         let built = kind.build(&with, &base()).unwrap();
         serde_json::from_slice::<serde_json::Value>(&built.body).unwrap()
     };
-    // OpenAI 호환: 적힌 이름 그대로, 다른 이름은 보내지 않는다(새 OpenAI 모델은 `max_tokens`를 거절한다)
     let completion = body(ApiKind::OpenAi, LimitField::MaxCompletionTokens);
     assert_eq!(completion["max_completion_tokens"], 321);
     assert!(completion.get("max_tokens").is_none());
     let plain = body(ApiKind::OpenAi, LimitField::MaxTokens);
     assert_eq!(plain["max_tokens"], 321);
     assert!(plain.get("max_completion_tokens").is_none());
-    // Anthropic은 언제나 `max_tokens`다
     let anthropic = body(ApiKind::Anthropic, LimitField::MaxCompletionTokens);
     assert_eq!(anthropic["max_tokens"], 321);
     assert!(anthropic.get("max_completion_tokens").is_none());
@@ -283,23 +272,23 @@ fn anthropic_thinking_blocks_and_ids_replay_only_to_the_issuing_provider() {
     let issued = anthropic(
         "tool_use",
         &format!(
-            r#"{{"type":"thinking","thinking":"검토","signature":"SIG-A"}},{{"type":"redacted_thinking","data":"ENC-B"}},{{"type":"thinking","thinking":"서명없음"}},{{"type":"text","text":"확인할게요"}},{{"type":"tool_use","id":"toolu_up_1","name":"{name}","input":{{}}}}"#
+            r#"{{"type":"thinking","thinking":"review","signature":"SIG-A"}},{{"type":"redacted_thinking","data":"ENC-B"}},{{"type":"thinking","thinking":"unsigned"}},{{"type":"text","text":"Checking now"}},{{"type":"tool_use","id":"toolu_up_1","name":"{name}","input":{{}}}}"#
         ),
     );
     let Ok(ModelStep::Calls {
         state: Some(state), ..
     }) = read(kind, &issued)
     else {
-        panic!("Anthropic 사고 블록 상태가 있어야 해요");
+        panic!("expected Anthropic thinking block state");
     };
     assert!(
-        !state.contains("서명없음"),
-        "서명 없는 thinking 블록은 버린다"
+        !state.contains("unsigned"),
+        "unsigned thinking blocks must be dropped"
     );
 
     let next = |to: &crate::model::api::ApiSettings| -> serde_json::Value {
         let past = exchange(
-            "확인할게요",
+            "Checking now",
             vec![done_call(
                 "c1",
                 "agenda.list",
@@ -308,11 +297,10 @@ fn anthropic_thinking_blocks_and_ids_replay_only_to_the_issuing_provider() {
             )],
             Some(state.as_str()),
         );
-        let req = request(vec![user("계속해")], base().tools, vec![past]);
+        let req = request(vec![user("continue")], base().tools, vec![past]);
         serde_json::from_slice(&kind.build(to, &req).unwrap().body).unwrap()
     };
 
-    // 같은 공급자: thinking · redacted_thinking이 text · tool_use 앞에 원래 순서대로 붙고 상류 호출 ID도 유지된다
     let same = next(&settings(kind));
     let assistant = same["messages"][1]["content"].as_array().unwrap();
     assert_eq!(assistant[0]["type"], "thinking");
@@ -327,7 +315,6 @@ fn anthropic_thinking_blocks_and_ids_replay_only_to_the_issuing_provider() {
         "toolu_up_1"
     );
 
-    // 모델·주소·자격 이름이 바뀐 공급자: 옛 사고 블록·ID를 싣지 않고 로컬 ID(`t0c0`)로 폴백한다
     let mut other_model = settings(kind);
     other_model.model = "model-y".into();
     let mut other_endpoint = settings(kind);
@@ -335,22 +322,21 @@ fn anthropic_thinking_blocks_and_ids_replay_only_to_the_issuing_provider() {
     let mut other_secret = settings(kind);
     other_secret.secret = SecretName::parse("other-key");
     for (what, changed) in [
-        ("모델", other_model),
-        ("주소", other_endpoint),
-        ("자격 이름", other_secret),
+        ("model", other_model),
+        ("endpoint", other_endpoint),
+        ("secret", other_secret),
     ] {
         let body = next(&changed);
         let text = body.to_string();
         assert!(
             !text.contains("SIG-A") && !text.contains("ENC-B") && !text.contains("toolu_up_1"),
-            "{what}이 바뀐 공급자에게 옛 상태가 갔다: {text}"
+            "old state leaked after {what} changed: {text}"
         );
         assert_eq!(body["messages"][1]["content"][0]["type"], "text");
         assert_eq!(body["messages"][1]["content"][1]["id"], "t0c0");
         assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "t0c0");
     }
 
-    // 과대한 서명 블록은 호출을 하나도 부르지 않고 고정 코드로 거절한다
     let huge = "S".repeat(130 * 1024);
     let oversized = anthropic(
         "tool_use",

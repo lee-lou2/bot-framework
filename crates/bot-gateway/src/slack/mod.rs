@@ -1,12 +1,7 @@
-//! Slack 어댑터. 접수 순서는 다른 입구와 같다: 인증된 설치 확인 → 정규화 → `Ingress::admit` → ack.
+//! Slack Socket Mode gateway managing per-installation connections, reply delivery, and approval clicks.
 //!
-//! - 소켓 하나는 **인증된 설치 하나** — (프로필, 워크스페이스 별칭)의 자격으로 연다. 그 소켓으로 온 이벤트는 같은 프로필의
-//!   바인딩으로만 라우팅하고, 소켓 밖 프로필로 폴백하지 않는다. 같은 앱 토큰을 프로필 둘이 쓰면 이벤트가 나뉘어 한쪽이
-//!   놓치므로 기동을 거절한다(토큰 값이 같다는 이유로 권한을 합치지 않는다).
-//! - 회신은 outbox에서(`delivery::Deliverer` + `send::SlackSender`), 승인 버튼은 클릭한 Slack 사용자를 주체로
-//!   `Broker::decide`에 넘기고 원장 상태로 카드를 갱신한다.
-//! - 채널에서 시작한 예약의 승인 카드는 소유자의 1:1 DM으로 올린다(`cards::CardDeliverer`). 그 카드의 버튼은 영수증(DM 채널·메시지)과
-//!   대조해 이 카드의 것일 때만 결정한다.
+//! Each socket serves one authenticated `(profile, workspace)` installation with no cross-profile fallback; startup
+//! rejects two profiles sharing the same app token because Slack splits events across connections.
 pub mod api;
 pub mod blocks;
 pub mod cards;
@@ -57,11 +52,9 @@ pub struct SlackGateway {
     secrets: Arc<dyn SecretStore>,
     creds: Arc<Credentials>,
     api: SlackApi,
-    /// 봇이 참여한 스레드의 증거 저장소(없으면 `thread_reply`는 증거를 확인할 수 없어 어떤 답글도 받지 않는다)
+    /// Evidence store for `thread_reply`; when absent, no thread replies are admitted.
     threads: Option<Arc<dyn BotThreads>>,
-    /// 진행 상태(👀/✅ · `chat.startStream`)와 스레드 중단 제어기(생략하면 장식 호출 없음)
     ux: Option<Arc<ux::SlackUx>>,
-    /// `on_frame` 직접 호출용 종료 신호(`serve`가 끝나면 함께 취소된다)
     shutdown: CancellationToken,
 }
 
@@ -91,21 +84,19 @@ impl SlackGateway {
         }
     }
 
-    /// Slack `thread_reply`용 스레드 증거 저장소를 붙인다: 회신 발송 영수증과 인증된 자기 봇 글을 기록하고, 답글은 이 증거가 있는 스레드에서만 받는다.
     #[must_use]
     pub fn with_threads(mut self, threads: Arc<dyn BotThreads>) -> Self {
         self.threads = Some(threads);
         self
     }
 
-    /// Slack 진행 상태(👀/✅ · 스트림 상태 카드)와 스레드 중단(버튼·"중단해줘") 제어기를 붙인다.
+    /// Attaches Slack progress indicators (👀/✅, stream status cards) and thread stop controls (button / "stop").
     #[must_use]
     pub fn with_ux(mut self, runs: Arc<dyn RunStore>, admin: Arc<dyn RunAdmin>) -> Self {
         self.ux = Some(Arc::new(ux::SlackUx::new(self.creds.clone(), runs, admin)));
         self
     }
 
-    /// 시험 전용: 상태 감시 주기와 상한을 지정해 `SlackUx`를 붙인다.
     #[doc(hidden)]
     #[must_use]
     pub fn with_ux_timing(
@@ -122,7 +113,6 @@ impl SlackGateway {
         self
     }
 
-    /// 시험 전용: 봇 토큰을 보관소에서 다시 읽는 간격을 줄인다(교체한 토큰이 다음 발송에 확인되는지 보려고).
     #[doc(hidden)]
     #[must_use]
     pub fn with_token_ttl(mut self, ttl: Duration) -> Self {
@@ -137,7 +127,6 @@ impl SlackGateway {
         self
     }
 
-    /// 회신 발송기(같은 자격·같은 API 클라이언트를 쓴다)
     pub fn sender(&self) -> send::SlackSender {
         let sender = send::SlackSender::new(self.api.clone(), self.creds.clone());
         let sender = match &self.threads {
@@ -150,12 +139,10 @@ impl SlackGateway {
         }
     }
 
-    /// 소켓으로 받을 설치 목록을 만들고 모두 검사한다: 설정이 검증을 통과하는지, 자격을 읽을 수 있는지, 토큰이 설정한 워크스페이스의 것인지,
-    /// 같은 앱 토큰을 프로필 둘이 쓰지 않는지. 하나라도 어긋나면 Err(값은 싣지 않는다).
+    /// Validates host config, resolves credentials, verifies `team_id`, and rejects duplicate app tokens across profiles.
     pub async fn plan(&self) -> Result<Vec<Installation>, SlackError> {
         let host = self.ingress.host().clone();
-        // 이 계획은 모든 워크스페이스를 소켓으로 받는다고 본다. 그 보장은 설정 검증의 규칙(`receive: "http"`는 거절)이므로, 검증을 거치지 않은 설정이 들어와도
-        // 소켓으로 잘못 읽지 않고 자격을 읽거나 Slack을 부르기 전에 같은 규칙으로 멈춘다(건너뛰면 메시지와 승인 버튼이 사라진다). 규칙을 여기에 다시 쓰지 않는다.
+        // Enforce `HostConfig::validate` (rejecting unsupported receive modes) before reading credentials or calling Slack.
         host.validate()
             .map_err(|error| SlackError(error.to_string()))?;
         let routes = self
@@ -176,39 +163,38 @@ impl SlackGateway {
         let mut installs = Vec::new();
         let mut tokens: HashMap<(String, String), ProfileId> = HashMap::new();
         for (profile, alias) in wanted.into_keys() {
-            let who = format!("프로필 {} · 워크스페이스 {alias}", profile.0);
+            let who = format!("profile {} · workspace {alias}", profile.0);
             let Some(ws) = host.slack.workspaces.get(&alias) else {
-                return Err(SlackError(format!("{who}: 호스트에 등록되지 않았어요")));
+                return Err(SlackError(format!("{who}: not registered in host config")));
             };
             let Some(app) = self.creds.app_token(&profile, &alias).await else {
                 return Err(SlackError(format!(
-                    "{who}: 봇·앱 토큰을 읽지 못했어요(자격 이름만 확인하세요)"
+                    "{who}: failed to read bot/app token (check secret names)"
                 )));
             };
             if let Some(other) =
                 tokens.insert((alias.clone(), app.as_str().to_owned()), profile.clone())
             {
                 return Err(SlackError(format!(
-                    "{who}: 프로필 {} 과 같은 앱 토큰을 써요 — 이벤트가 나뉘어 한쪽이 놓치니 프로필마다 별도 Slack 앱을 쓰세요",
+                    "{who}: shares the same app token with profile {} — use a separate Slack app per profile so events are not split",
                     other.0
                 )));
             }
-            // 봇 토큰은 발송·카드 갱신이 쓰는 같은 확인 길(`check_bot`)로 읽고 등록한 팀의 것인지 확인한다
             let auth = match self.creds.check_bot(&profile, &alias).await {
                 BotCheck::Verified(_, auth) => auth,
                 BotCheck::Unreadable => {
                     return Err(SlackError(format!(
-                        "{who}: 봇·앱 토큰을 읽지 못했어요(자격 이름만 확인하세요)"
+                        "{who}: failed to read bot/app token (check secret names)"
                     )));
                 }
                 BotCheck::Unverified => {
                     return Err(SlackError(format!(
-                        "{who}: 봇 토큰으로 Slack에 인증하지 못했어요"
+                        "{who}: failed to authenticate bot token with Slack"
                     )));
                 }
                 BotCheck::WrongTeam => {
                     return Err(SlackError(format!(
-                        "{who}: 토큰이 설정한 워크스페이스의 것이 아니에요"
+                        "{who}: token does not belong to the configured workspace"
                     )));
                 }
             };
@@ -223,8 +209,7 @@ impl SlackGateway {
         Ok(installs)
     }
 
-    /// 설치마다 소켓을 열어 stop까지 받는다. 처음 계획이 검사를 통과하지 못하면 아무것도 열지 않고 Err.
-    /// 활성 프로필 집합이 바뀌면(핫 리로드) 새 설치는 열고 없어진 설치는 닫는다. 새 집합의 계획이 틀리면 이전 설치를 그대로 둔다.
+    /// Runs sockets until `stop`, reconciling installations on profile hot-reloads while preserving running ones on error.
     pub async fn serve(self: Arc<Self>, stop: CancellationToken) -> Result<(), SlackError> {
         let desired = self.plan().await?;
         let mut seen = self.ingress.routes().ok();
@@ -248,7 +233,7 @@ impl SlackGateway {
             match self.plan().await {
                 Ok(next) => self.reconcile(&mut running, next, &stop),
                 Err(error) => {
-                    tracing::error!(%error, "바뀐 프로필 집합의 Slack 설치를 만들지 못했어요 — 이전 설치를 계속 써요");
+                    tracing::error!(%error, "failed to plan Slack installations for updated profile set — keeping previous installations");
                 }
             }
         }
@@ -270,7 +255,6 @@ impl SlackGateway {
             .into_iter()
             .map(|install| ((install.profile.clone(), install.alias.clone()), install))
             .collect();
-        // 없어졌거나 바뀐 설치는 닫는다(끝난 소켓은 치운다)
         running.retain(|key, run| {
             let keep = wanted.get(key) == Some(&run.install);
             if !keep {
@@ -309,8 +293,7 @@ impl SlackGateway {
                 if let Err(socket::Fatal(reason)) =
                     socket::run(api, creds, install, handler, stop).await
                 {
-                    // 다시 시도해도 소용없는 오류다. 이 설치는 닫아 둔 채로 설정을 고칠 때까지 둔다.
-                    tracing::error!(%reason, "slack 소켓을 멈췄어요");
+                    tracing::error!(%reason, "stopped Slack socket");
                 }
             }
         });

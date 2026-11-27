@@ -28,7 +28,6 @@ async fn replaces_the_active_set_only_when_the_expectation_matches() {
         )
         .await
         .unwrap();
-    // 처음 게시가 아닌데 None을 기대하거나 다른 판본을 기대하면 거절
     assert!(matches!(
         db.store
             .replace(
@@ -78,9 +77,9 @@ async fn replaces_the_active_set_only_when_the_expectation_matches() {
         db.scalar::<i64>("select count(*) from bot_active_profiles")
             .await,
         1,
-        "빠진 프로필은 활성에서 사라진다"
+        "omitted profile is removed from active set"
     );
-    // 프로필마다 감사 체인에 남는다(빠진 프로필 포함)
+    // Every affected profile (including removed ones) gets an audit entry.
     assert_eq!(
         db.scalar::<i64>(
             "select count(*) from bot_audit where profile = 'work' and action = 'active.replace'"
@@ -127,7 +126,7 @@ async fn current_reports_the_last_published_set() {
     assert_eq!(
         db.store.current().await.unwrap(),
         None,
-        "첫 게시 전에는 없다"
+        "none before first publish"
     );
     db.store
         .replace(

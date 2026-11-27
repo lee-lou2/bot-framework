@@ -1,4 +1,4 @@
-//! 관리 조회 시험 도구(admin_views·admin_listing이 함께 쓴다).
+//! Shared admin-view test helpers (used by `admin_views` and `admin_listing`).
 #![allow(dead_code)]
 
 use super::{OWNER, TestDb};
@@ -21,7 +21,7 @@ pub fn owner() -> Viewer {
     }
 }
 
-/// 보류 목록에서 대상의 열린 발생 ID를 읽어 판정 대상을 만든다. 호출 단위는 `effect`가 None, 다단계는 단계 ID다.
+/// Looks up the open `HoldId` from `AdminRead::holds` (`effect: None` for call-level, `Some` for step-level).
 pub async fn hold_ref(
     db: &TestDb,
     kind: HoldKind,
@@ -35,7 +35,7 @@ pub async fn hold_ref(
     let hold = holds
         .iter()
         .find(|h| h.kind == kind && h.run == *run && h.call == *call)
-        .expect("보류 목록에 대상이 있다");
+        .expect("target must be in holds list");
     let hold_id = match effect {
         None => hold.hold_id.clone(),
         Some(e) => hold
@@ -44,7 +44,7 @@ pub async fn hold_ref(
             .find(|s| s.effect == *e)
             .and_then(|s| s.hold_id.clone()),
     }
-    .expect("판정할 수 있는 발생 ID가 있다");
+    .expect("resolvable hold_id must exist");
     HoldRef {
         hold_id,
         profile: hold.profile.clone(),
@@ -54,7 +54,7 @@ pub async fn hold_ref(
     }
 }
 
-/// 0011(보류 발생 ID)을 걷어 이전 판(0010)의 DB로 되돌린다. 구판 모양의 행을 만든 뒤 `store.migrate()`로 다시 올려 본다.
+/// Strips migrations 0011 and 0025 to simulate upgrading a pre-`bot_holds` database via `store.migrate()`.
 pub async fn rewind_holds(db: &TestDb) {
     sqlx::raw_sql(
         "drop trigger bot_effects_call_hold on bot_effects;

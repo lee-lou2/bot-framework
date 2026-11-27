@@ -12,7 +12,6 @@ use tokio::{
     net::TcpListener,
 };
 
-/// 연결마다 요청을 읽고 `reply`가 돌려준 바이트를 그대로 쓴다(빈 값이면 아무것도 쓰지 않고 닫는다). 받은 요청 글과 연결 수를 모은다.
 struct Server {
     addr: SocketAddr,
     seen: Arc<std::sync::Mutex<Vec<String>>>,
@@ -33,7 +32,6 @@ async fn serve(reply: impl Fn(usize) -> Vec<u8> + Send + Sync + 'static) -> Serv
             let n = count.fetch_add(1, Ordering::SeqCst);
             let mut raw = Vec::new();
             let mut buf = [0u8; 4096];
-            // 머리 끝(빈 줄)과 본문(Content-Length)까지 읽는다
             while let Ok(read) = socket.read(&mut buf).await {
                 if read == 0 {
                     break;
@@ -133,7 +131,6 @@ async fn a_request_goes_out_once_with_its_path_headers_and_body_and_the_answer_c
         "{text}"
     );
     assert!(text.ends_with(r#"{"model":"m"}"#), "{text}");
-    // 상류의 거절은 그대로 돌려준다(상태·본문)
     let server = serve(|_| {
         http(
             "429 Too Many Requests",
@@ -151,7 +148,6 @@ async fn a_request_goes_out_once_with_its_path_headers_and_body_and_the_answer_c
 
 #[tokio::test]
 async fn nothing_is_sent_twice_no_redirect_is_followed_and_a_lost_answer_is_unavailable() {
-    // 리다이렉트는 따라가지 않는다: 다른 곳으로 보내지 않고 그 응답을 그대로 돌려준다
     let server = serve(|_| {
         http(
             "302 Found",
@@ -166,7 +162,6 @@ async fn nothing_is_sent_twice_no_redirect_is_followed_and_a_lost_answer_is_unav
         .unwrap();
     assert_eq!(got.status, 302);
     assert_eq!(server.connections.load(Ordering::SeqCst), 1);
-    // 응답 없이 연결이 닫혀도 다시 보내지 않는다(요청은 정확히 한 번 나갔다)
     let server = serve(|_| Vec::new()).await;
     let error = upstream().send(request(&server, &[], "{}")).await.err();
     assert!(matches!(error, Some(Error::Unavailable)), "{error:?}");
@@ -174,9 +169,8 @@ async fn nothing_is_sent_twice_no_redirect_is_followed_and_a_lost_answer_is_unav
     assert_eq!(
         server.connections.load(Ordering::SeqCst),
         1,
-        "숨은 재전송이 없어요"
+        "must not perform hidden retries"
     );
-    // 연결할 수 없는 곳도 Unavailable
     let dead = serve(|_| Vec::new()).await;
     let address = dead.addr;
     drop(dead);
@@ -196,7 +190,6 @@ async fn nothing_is_sent_twice_no_redirect_is_followed_and_a_lost_answer_is_unav
 
 #[tokio::test]
 async fn a_stream_hands_chunks_over_as_they_arrive_and_an_oversize_plain_answer_is_refused() {
-    // 청크 전송 응답: 조각을 순서대로 내주고 끝나면 None
     let chunked = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n6\r\nevent1\r\n6\r\nevent2\r\n0\r\n\r\n".to_vec();
     let server = serve(move |_| chunked.clone()).await;
     let mut stream = upstream()
@@ -209,7 +202,6 @@ async fn a_stream_hands_chunks_over_as_they_arrive_and_an_oversize_plain_answer_
         all.extend(chunk);
     }
     assert_eq!(String::from_utf8(all).unwrap(), "event1event2");
-    // 한도(시험에서는 1024바이트)를 넘는 일반 응답은 받지 않는다
     let big = "x".repeat(2000);
     let server = serve(move |_| http("200 OK", "", &big)).await;
     let error = upstream().send(request(&server, &[], "{}")).await.err();
@@ -232,7 +224,7 @@ async fn bad_headers_never_reach_the_network_and_ipv6_hosts_are_bracketed() {
     assert_eq!(
         server.connections.load(Ordering::SeqCst),
         0,
-        "연결하지 않았어요"
+        "must not connect on invalid headers"
     );
     let https = HttpsUpstream::new().unwrap();
     let mut call = request(&server, &[], "{}");

@@ -1,24 +1,18 @@
-//! 엄격한 JSON 읽기. 중복 키·꼬리 글·과한 깊이를 거절한다.
-//! 승인한 바이트와 도구가 받는 바이트를 같게 하려면 읽는 쪽이 모호함을 남기지 않아야 한다
-//! (중복 키는 파서마다 첫 값·마지막 값으로 갈린다).
+//! Strict JSON parser rejecting duplicate keys, trailing data, non-finite numbers, and excessive nesting.
 
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use std::fmt;
 
-/// 중첩 깊이 상한.
 pub const MAX_DEPTH: usize = 32;
 
-/// 엄격한 JSON 읽기 실패 이유.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StrictError {
-    /// 문법 오류·뒤따르는 글·중첩 깊이 초과·비유한 수.
     Syntax,
-    /// 같은 객체 안에 같은 키가 두 번 이상 있다.
     DuplicateKey,
 }
 
-/// 문서 하나를 `max_depth` 깊이 한도 안에서 엄격하게 읽는다.
+/// Parses a single JSON document within `max_depth`. Rejects duplicate keys because parsers disagree on first-vs-last precedence, which would decouple approved bytes from tool input.
 pub fn parse_strict_with_depth(input: &str, max_depth: usize) -> Result<Value, StrictError> {
     let mut de = serde_json::Deserializer::from_str(input);
     let mut duplicate = false;
@@ -38,7 +32,6 @@ pub fn parse_strict_with_depth(input: &str, max_depth: usize) -> Result<Value, S
     Ok(value)
 }
 
-/// 문서 하나를 읽는다. 중복 키·꼬리 글·깊이 초과·비유한 수는 `None`이다.
 pub fn parse(text: &str) -> Option<Value> {
     parse_strict_with_depth(text, MAX_DEPTH).ok()
 }
@@ -145,7 +138,7 @@ mod tests {
         assert!(parse(r#"{"a":1,"a":2}"#).is_none());
         assert!(parse(r#"{"x":{"a":1,"a":1}}"#).is_none());
         assert!(parse(r#"[{"a":1,"b":1,"a":1}]"#).is_none());
-        // 이스케이프로 같아지는 키도 같은 키다
+        // Escaped keys that decode to the same name (`\u0061` == `a`) are also rejected.
         assert!(parse(r#"{"a":1,"\u0061":2}"#).is_none());
     }
 

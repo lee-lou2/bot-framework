@@ -1,4 +1,4 @@
-//! Slack 스레드 중단 처리(Agent 중단 버튼 · 멘션 중단 · 확인 버튼)와 반응/메시지 보조 호출.
+//! Slack thread stop handling (agent stop button, stop mentions, confirmation cards) and reaction/message helpers.
 use super::{
     ActiveRun, EYES, RunUxState, SlackUx,
     cards::{STOP_ACK, STOP_GONE, STOP_RESUMED, can_stop, stop_card_blocks},
@@ -20,18 +20,18 @@ use bot_core::{
 use serde_json::{Value, json};
 use std::sync::Mutex;
 
-/// 스레드 중단 멘션("중단해줘" 등) 처리 결과.
+/// Outcome of handling a stop mention in a thread.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StopMention {
-    /// 이 스레드에 진행 중인 작업이 없어 일반 메시지로 넘긴다.
+    /// No active run in this thread; fall through to normal message intake.
     Pass,
-    /// 중단 요청을 처리했거나 권한 없음·구판으로 무시 확정했다(ack 가능).
+    /// Stop was handled or definitively ignored (unauthorized or stale); safe to ack.
     Handled,
-    /// 일시 장애(`Unavailable`)로 취소를 확정하지 못해 ack하지 않고 재전달에 맡긴다.
+    /// Transient `Unavailable` error; do not ack so Slack redelivers.
     Retry,
 }
 
-/// 동시 클릭이 중복 `admin.cancel`을 보내지 못하게 막고, 취소·패닉 시에도 진행 중 표지를 해제하는 가드.
+/// Clears `stop_in_flight` on drop (including panic/cancellation) to serialize concurrent `admin.cancel` calls.
 struct InFlightGuard<'a>(&'a Mutex<RunUxState>);
 
 impl Drop for InFlightGuard<'_> {
@@ -44,8 +44,7 @@ impl Drop for InFlightGuard<'_> {
 }
 
 impl SlackUx {
-    /// Slack Agent 화면의 중단 버튼(`agent_session_stopped`): 확인 카드를 올린다.
-    /// 돌려주는 값은 «ack해도 되는가»다(`Unavailable`만 `false`).
+    /// Handles `agent_session_stopped` by posting a confirmation card; returns whether to ack (`false` only on `Unavailable`).
     pub async fn on_stop_requested(
         &self,
         ingress: &Ingress,
@@ -61,7 +60,7 @@ impl SlackUx {
         if active.info.profile != install.profile {
             return true;
         }
-        // 행위자 ID가 비었거나 모양이 틀리면 닫힌 쪽으로 무시한다(인가 생략 금지).
+        // Fail closed on missing or malformed actor ID (never bypass authorization).
         let Some(actor) = (!user.is_empty())
             .then(|| identity::slack(&install.alias, user))
             .flatten()
@@ -117,7 +116,7 @@ impl SlackUx {
         true
     }
 
-    /// 처리 중인 스레드에서 "중단해줘"/"멈춰" 멘션. 진행 중 작업이 있으면 가로채서 중단한다.
+    /// Intercepts a stop mention in a thread with an active run and cancels it directly.
     pub async fn on_stop_mention(
         &self,
         ingress: &Ingress,
@@ -155,8 +154,7 @@ impl SlackUx {
         }
     }
 
-    /// 중단 확인 카드의 [여기서 중단] / [계속 진행] 버튼 클릭.
-    /// 돌려주는 값은 «ack해도 되는가»다(`Unavailable`만 `false`).
+    /// Handles the confirmation card's Stop/Continue buttons; returns whether to ack (`false` only on `Unavailable`).
     pub async fn on_stop_button(
         &self,
         ingress: &Ingress,
@@ -228,8 +226,8 @@ impl SlackUx {
         }
     }
 
-    /// 저장소에 취소를 먼저 커밋한 뒤에만 확정 상태와 `STOP_ACK`를 반영한다.
-    /// `Err(Error::Unavailable)`이면 `false`를 돌려줘 Slack이 ack하지 않고 재전달하게 한다.
+    /// Commits cancellation in storage before marking confirmed and posting `STOP_ACK`.
+    /// Returns `false` on `Error::Unavailable` so Slack does not ack and redelivers.
     async fn confirm_stop(&self, active: &ActiveRun, actor: PrincipalId) -> bool {
         let snapshot = {
             let mut st = active.st.lock().unwrap_or_else(|e| e.into_inner());
@@ -265,11 +263,11 @@ impl SlackUx {
                 true
             }
             Err(Error::Unavailable) => {
-                tracing::warn!(run = %active.info.run.0, "Slack 중단 취소 요청 일시 실패");
+                tracing::warn!(run = %active.info.run.0, "transient failure cancelling Slack run");
                 false
             }
             Err(error) => {
-                tracing::warn!(?error, run = %active.info.run.0, "Slack 중단 취소 요청 실패");
+                tracing::warn!(?error, run = %active.info.run.0, "failed to cancel Slack run");
                 true
             }
         }
@@ -301,7 +299,7 @@ impl SlackUx {
             return;
         };
         let text = format!(
-            "중단은 요청한 본인(<@{}>)이나 관리자만 할 수 있어요.",
+            "Only the original requester (<@{}>) or an admin can stop this task.",
             active.info.user
         );
         let mut body = json!({"channel": active.info.channel, "user": user, "text": text});

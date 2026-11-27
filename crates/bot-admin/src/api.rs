@@ -1,5 +1,5 @@
-//! 관리 API(`/v1/admin/*`)의 입력 검증과 핸들러. 인증은 `auth::guard`가 앞서 끝냈고 `Viewer`가 요청에 실려 있다.
-//! 운영자 전용 조회·판정은 여기서 먼저 막고, 저장소도 `Viewer`로 한 번 더 한정한다. 판정의 감사는 저장소가 같은 커밋에 쓴다.
+//! Admin API (`/v1/admin/*`) input validation and handlers behind `auth::guard`.
+//! Operator-only reads and actions are checked here and enforced again in the store.
 
 use crate::{
     auth::Guard,
@@ -48,7 +48,7 @@ const TEXT_MAX: usize = 512;
 
 type Params = HashMap<String, String>;
 
-/// 쿼리 문자열을 엄격하게 읽는다: 허용한 키만, 중복 키 없음, 잘못된 퍼센트 부호 거절.
+/// Strictly parses query parameters: allowed keys only, no duplicates, valid percent-encoding.
 fn params(raw: Option<&str>, allowed: &[&str]) -> Result<Params, Fail> {
     let mut out = HashMap::new();
     for pair in raw.unwrap_or_default().split('&').filter(|p| !p.is_empty()) {
@@ -84,7 +84,6 @@ fn pct_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// 불투명 식별자: 1..=128자의 ASCII 영숫자와 `._:-`.
 fn token(s: &str) -> Option<&str> {
     let good = (1..=128).contains(&s.len())
         && s.bytes()
@@ -136,7 +135,6 @@ pub(crate) fn operator(v: &Viewer) -> Result<(), Fail> {
     if v.operator { Ok(()) } else { Err(DENIED) }
 }
 
-/// 요청 본문: 4 KiB 이하의 JSON 객체이고 허용한 키만 가진다.
 pub(crate) fn body(bytes: &Bytes, allowed: &[&str]) -> Result<Map<String, Value>, Fail> {
     if bytes.len() > BODY_MAX {
         return Err(INVALID);
@@ -147,7 +145,6 @@ pub(crate) fn body(bytes: &Bytes, allowed: &[&str]) -> Result<Map<String, Value>
     }
 }
 
-/// 한 줄 글: 앞뒤 공백을 걷고 1..=512자, 제어 문자 없음.
 fn text(v: Option<&Value>) -> Result<String, Fail> {
     let s = v.and_then(Value::as_str).map(str::trim).ok_or(INVALID)?;
     let good = !s.is_empty() && s.chars().count() <= TEXT_MAX && !s.chars().any(char::is_control);
@@ -220,8 +217,7 @@ pub(crate) async fn approvals(State(st): S, Extension(v): V, RawQuery(raw): RawQ
     ))
 }
 
-/// 이미 내려진 같은 판정인가: 같은 승인자가 같은 해시로 같은 판정을 다시 보냈다.
-/// 결정자 기록이 없거나(`None`) 다른 사람이면 같다고 보지 않는다.
+/// True only if the same approver already recorded the same verdict for the same digest.
 fn same_decision(view: &ApprovalView, who: &PrincipalId, allow: bool, seen: &str) -> bool {
     let was = match view.state {
         ApprovalState::Approved | ApprovalState::Consumed => true,
@@ -240,8 +236,6 @@ fn repeated(st: &St, view: &ApprovalView, viewer: &Viewer) -> Response {
     ok(&body, st.leak.as_ref())
 }
 
-/// 승인·거절. 화면이 본 인자 해시(`seen`)가 지금 값과 같아야 하고, 클릭한 사람이 지정된 승인자여야 한다.
-/// 실제 소비·세대·만료·정책 재판정은 브로커가 같은 커밋에서 한다.
 pub(crate) async fn decide(
     State(st): S,
     Extension(v): V,
@@ -257,11 +251,9 @@ pub(crate) async fn decide(
         return Err(INVALID);
     };
     let view = st.read.approval(&v, nonce.clone()).await?;
-    // 같은 승인자가 같은 내용을 같은 판정으로 다시 보내면 기존 결과를 돌려준다(브로커를 다시 부르지 않는다).
     if same_decision(&view, &v.principal, allow, seen) {
         return Ok(repeated(&st, &view, &v));
     }
-    // 반대 판정이나 무효화된 승인은 계속 거절한다.
     if view.state != ApprovalState::Pending {
         return Err(Fail(StatusCode::CONFLICT, "stale"));
     }
@@ -271,7 +263,7 @@ pub(crate) async fn decide(
     if view.approver != v.principal {
         return Err(DENIED);
     }
-    // 볼 수 없는 본문은 승인할 수 없다(거절은 허용). 브로커까지 가지 않는다.
+    // Block approval before reaching the broker when the card body is hidden or unverified; denial remains allowed.
     if allow && let Some(word) = json::approve_blocked(&view, &v) {
         return Err(Fail(StatusCode::FORBIDDEN, word));
     }
@@ -281,7 +273,7 @@ pub(crate) async fn decide(
         .await
     {
         Ok(()) => {}
-        // 같은 판정이 동시에 먼저 커밋됐을 수 있다: 원장을 다시 읽어 같은 결정자·해시·판정이면 기존 결과를 돌려준다.
+        // Re-read on concurrent commit so an identical racing decision returns an idempotent repeat.
         Err(e @ (Error::Stale | Error::Conflict)) => {
             return match st.read.approval(&v, nonce).await {
                 Ok(now) if same_decision(&now, &v.principal, allow, seen) => {
@@ -322,7 +314,6 @@ pub(crate) async fn holds(State(st): S, Extension(v): V, RawQuery(raw): RawQuery
     Ok(ok(&body, st.leak.as_ref()))
 }
 
-/// 보류 판정(운영자 전용). 수신처 영수증을 확인했거나(`confirmed`) 옛 도구 종료와 미실행 증거를 확인했다(`not_executed`).
 pub(crate) async fn resolve(
     State(st): S,
     Extension(v): V,
@@ -336,7 +327,7 @@ pub(crate) async fn resolve(
         &bytes,
         &["verdict", "receipt", "evidence", "effect", "hold_id"],
     )?;
-    // 보류 식별자는 필수다: 화면이 첫 확인에서 본 바로 그 보류에만 판정이 적용된다(같은 대상이 다시 보류돼도 새 보류에는 닿지 않는다).
+    // `hold_id` pins the decision to the exact hold occurrence viewed so a later re-hold is never affected.
     let hold_id = HoldId(identifier(
         b.get("hold_id").and_then(Value::as_str).ok_or(INVALID)?,
     )?);
@@ -369,7 +360,6 @@ pub(crate) async fn resolve(
         .act
         .resolve_hold(v.principal.clone(), hold, verdict)
         .await?;
-    // 같은 판정의 반복은 새로 적용되지 않았으므로 판정 스팬도 남기지 않는다(저장소도 감사를 더하지 않는다).
     let repeated = decision == HoldDecision::Repeated;
     if !repeated && let Ok(d) = st.read.detail(&v, profile.clone(), run.clone()).await {
         let at = Attempt {
@@ -397,7 +387,7 @@ pub(crate) async fn audit(State(st): S, Extension(v): V, RawQuery(raw): RawQuery
             .transpose()?,
         limit: limit(&p)?,
     };
-    // 한 건 더 달라고 해서 다음 쪽이 있는지 정확히 안다(저장소는 최대 201건까지 받는다: 마지막 쪽이 정확히 200건이어도 «더 보기»가 거짓으로 나오지 않는다).
+    // Request one extra row (up to 201) to detect a next page accurately even when limit is 200.
     let wanted = query.limit as usize;
     let query = AuditQuery {
         limit: query.limit.saturating_add(1).min(201),
@@ -446,7 +436,6 @@ pub(crate) async fn status(State(st): S, Extension(v): V) -> R {
     Ok(ok(&body, st.leak.as_ref()))
 }
 
-/// 구조 지도(운영자 전용): `?profile=`로 하나만, `?rev=`가 지금 구조와 같으면 카드는 생략한다.
 pub(crate) async fn map(State(st): S, Extension(v): V, RawQuery(raw): RawQuery) -> R {
     operator(&v)?;
     let p = params(raw.as_deref(), &["profile", "rev"])?;
@@ -489,12 +478,12 @@ mod tests {
     #[test]
     fn query_strings_are_read_strictly() {
         let allowed = ["profile", "limit"];
-        let p = params(Some("profile=alpha&limit=20"), &allowed).expect("정상");
+        let p = params(Some("profile=alpha&limit=20"), &allowed).expect("valid");
         assert_eq!(
             (p["profile"].as_str(), p["limit"].as_str()),
             ("alpha", "20")
         );
-        assert!(params(None, &allowed).expect("빈 값").is_empty());
+        assert!(params(None, &allowed).expect("empty").is_empty());
         for bad in [
             "other=1",
             "profile=a&profile=b",

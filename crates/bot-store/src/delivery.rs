@@ -1,10 +1,6 @@
-//! 명시 목적지(다른 수신자) 예약 발화의 회신: 최종 결과·답을 한 번 동결하는 초안(`draft`)과, 소유자가 승인한 초안만 목적지 outbox로 쌓고 run을 마치는 `enqueue`.
-//! - 초안은 run마다 하나(`bot_deliveries`)이고 목적지는 발화를 접수한 커밋에서 예약 정의로부터 고정한다(`user_due`).
-//! - 동결 입구에서 원문 답으로 승인 문서(`DeliveryDraft::approval_json`)를 만들 수 있는지 먼저 검사한다(중복 키가 JSONB로 사라지기 전). 답은 JSON으로 다시 쓰지
-//!   않은 원문(text)으로 저장하고, `begin`·승인 열기·`enqueue`가 저장된 바이트로 같은 문서와 SHA-256을 다시 계산한다.
-//! - 승인한 초안만 보낸다: 호출에 봉인된 지문·승인 소비·호스트 활성 집합·목적지 outbox·run 완료가 한 커밋이다.
-//!
-//! 잠금 순서: 활성 판본 → 루트 run(공유) → run → 호출 → 승인 → 초안 → 감사 head.
+//! Explicit-destination scheduled reply drafts (`draft`) and owner-approved outbox release (`enqueue`).
+//! Raw answer text is stored un-rewritten so `begin`, `approval_open`, and `enqueue` recompute the exact approval document and SHA-256.
+//! Lock order: active revision -> root run (FOR SHARE) -> run -> call -> approval -> draft -> audit head.
 
 use crate::{
     audit::{self, Entry, OwnedEntry},
@@ -25,10 +21,8 @@ use bot_core::{
 };
 use sqlx::{Row, postgres::PgRow};
 
-/// 한 발화의 답은 최대 이만큼이다(일반 회신과 같다).
 const MAX_ANSWERS: usize = 16;
 
-/// 저장된 열로 승인 문서의 입력을 되살린다(동결 전이면 `Invalid`).
 pub(crate) fn draft_of(row: &PgRow) -> R<DeliveryDraft> {
     Ok(DeliveryDraft {
         activation: Revision(
@@ -52,7 +46,7 @@ pub(crate) fn draft_of(row: &PgRow) -> R<DeliveryDraft> {
     })
 }
 
-/// 저장된 바이트에서 승인 지문을 다시 계산한다. 저장된 지문과 같아야 하고, 아니면 초안이 바뀐 것이다(`Conflict`).
+/// Recomputes the approval digest from stored draft bytes; returns `Conflict` on mismatch.
 fn recomputed(row: &PgRow) -> R<[u8; 32]> {
     let hash = draft_of(row)?.sha256()?;
     if row.get::<Option<Vec<u8>>, _>("sha256").as_deref() != Some(hash.as_slice()) {
@@ -61,7 +55,6 @@ fn recomputed(row: &PgRow) -> R<[u8; 32]> {
     Ok(hash)
 }
 
-/// 이 run의 동결한 초안 행(잠그지 않는다). 없으면 `None`이다.
 pub(crate) async fn peek(tx: &mut Tx<'_>, profile: &str, run: &str) -> R<Option<PgRow>> {
     Ok(sqlx::query(&format!(
         "select {} from bot_deliveries where profile = $1 and run = $2",
@@ -84,7 +77,7 @@ async fn lock(tx: &mut Tx<'_>, profile: &str, run: &str) -> R<Option<PgRow>> {
     .await?)
 }
 
-/// 지금 게시된 호스트 활성 집합의 판본을 `FOR SHARE`로 먼저 잠가 읽는다(잠금 순서: 활성 집합 → run → …). 게시 전이면 `None`.
+/// Locks `bot_active FOR SHARE` first (lock order: active set -> run) and returns the current set revision.
 async fn lock_activation(tx: &mut Tx<'_>) -> R<Option<String>> {
     let current: Option<String> =
         sqlx::query_scalar("select revision from bot_active where singleton for share")
@@ -93,13 +86,11 @@ async fn lock_activation(tx: &mut Tx<'_>) -> R<Option<String>> {
     Ok(current.filter(|r| !r.is_empty()))
 }
 
-/// 지금 게시된 호스트 활성 집합의 판본. 게시한 적이 없으면 `Stale`이다. `for share`로 읽어 집합 교체(`for update`)와 직렬화한다: 읽은 값은 이 커밋이 끝날 때까지
-/// 바뀌지 않는다(호출자는 대개 이미 같은 잠금을 쥐고 있다 — 잠금 순서가 활성 집합이 먼저다).
 async fn current_activation(tx: &mut Tx<'_>) -> R<String> {
     lock_activation(tx).await?.ok_or(Error::Stale.into())
 }
 
-/// `begin`이 DELIVER_TOOL 호출을 기록할 때 쓰는 확인: 동결한 초안이 있고 그 승인 지문과 같은 호출만 기록한다.
+/// Verifies a frozen draft exists and matches `args` before opening `DELIVER_TOOL`.
 pub(crate) async fn check_begin(
     tx: &mut Tx<'_>,
     profile: &str,
@@ -116,8 +107,7 @@ pub(crate) async fn check_begin(
     Ok(())
 }
 
-/// 승인을 열 때의 확인: 동결한 초안의 승인 문서가 카드에 그대로 보이고(보이는 것 = 보내는 것), 승인 지문이 같으며, 승인자는 예약을 만든 소유자 본인이고,
-/// 초안을 동결한 활성 집합이 지금도 현재 집합이다.
+/// Verifies the delivery card displays the exact frozen draft, matches the digest, names the owner, and still belongs to the active set.
 pub(crate) async fn check_open(
     tx: &mut Tx<'_>,
     approval: &bot_core::state::Approval,
@@ -148,23 +138,21 @@ pub(crate) async fn check_open(
     {
         return Err(Error::Conflict.into());
     }
-    // 초안을 동결한 호스트 활성 집합이 지금도 현재 집합이어야 카드를 연다(수신자 매핑이 달라졌을 수 있는 옛 집합의 초안은 카드로 보이지 않는다)
+    // Reject opening a card whose draft was frozen under a superseded active set.
     if current_activation(tx).await? != draft_of(&row)?.activation.0 {
         return Err(Error::Conflict.into());
     }
     Ok(())
 }
 
-/// 카드의 `전송 초안` 한 행(첫 줄 `전송 초안: `, 이어지는 줄은 공백 두 칸으로 시작)을 이어 붙인 문서. 정확히 하나가 아니면 `None`이다.
 pub(crate) fn shown_draft(card: &str) -> Option<String> {
     shown_row(card, bot_core::schedule::DELIVERY_CARD_LABEL)
 }
 
-/// 수신자를 지정한 예약 생성 카드인가: 카드의 `인자` 행(브로커가 봉인한 정규 인자 JSON)의 최상위에 `destination`이 있다. 카드는 브로커가 연 승인에 저장된 값이고
-/// 그 안의 지시문 같은 값은 JSON 문자열 안에 있으므로 최상위 키로 읽히지 않는다. 일반 생성(원래 대화)은 **올바른 객체에 `destination`이 없을 때만**이다:
-/// `인자` 행이 없거나 둘이거나 JSON 객체가 아니면 어느 쪽인지 알 수 없으므로 `Invalid`다(일반 생성으로 보지 않는다).
+/// Returns whether a schedule-creation card names an explicit `destination` key in its `LABEL_ARGS` JSON object.
+/// Rejects missing, duplicate, or non-object `LABEL_ARGS` lines with `Invalid` rather than defaulting to unrouted.
 pub(crate) fn create_names_destination(card: &str) -> R<bool> {
-    let args = shown_row(card, "인자").ok_or(Error::Invalid)?;
+    let args = shown_row(card, bot_core::cards::LABEL_ARGS).ok_or(Error::Invalid)?;
     let args: serde_json::Value = serde_json::from_str(&args).map_err(|_| Error::Invalid)?;
     Ok(args
         .as_object()
@@ -172,22 +160,17 @@ pub(crate) fn create_names_destination(card: &str) -> R<bool> {
         .contains_key("destination"))
 }
 
-/// 예약 생성 카드가 보인 `인자` 행의 원문(브로커가 봉인한 정규 인자 JSON 그대로)과 그 UTF-8 바이트의 SHA-256. 행이 정확히 하나가 아니면 `Invalid`다.
-/// 봉인(`ScheduleSpec::seal_create`)은 카드에 보일 문서와 지문을 한 값에서 만든다: 카드에 보인 것이 승인·호출 지문과 같은지 이 해시로 대조한다.
+/// Computes the SHA-256 of the card's `LABEL_ARGS` raw text to verify displayed args match the sealed digest.
 pub(crate) fn create_shown_args_sha256(card: &str) -> R<[u8; 32]> {
-    let shown = shown_row(card, "인자").ok_or(Error::Invalid)?;
+    let shown = shown_row(card, bot_core::cards::LABEL_ARGS).ok_or(Error::Invalid)?;
     Ok(crate::codec::sha256_text(&shown))
 }
 
-/// 카드의 `label` 한 행(첫 줄 `라벨: `, 이어지는 줄은 공백 두 칸으로 시작)을 이어 붙인 값. 정확히 하나가 아니면 `None`이다.
 fn shown_row(card: &str, label: &str) -> Option<String> {
     bot_core::cards::extract_line(card, label)
 }
 
-/// 목적지 대화로 회신 행을 쌓는다. 순번은 이 run의 기존 행 다음부터 잇는다(원래 대화로 간 승인 카드가 앞선 순번을 쓴다).
-/// 명시 목적지 등록부(`bot-gateway/src/schedule_routes.rs`)와 승인 카드(`approval_open.rs`)가 Slack으로 한정돼 있어
-/// 여기서는 `PushTransportId::SLACK`으로 고정한다. 다른 푸시 어댑터의 명시 목적지를 열려면 `bot_user_schedules`·`bot_deliveries`에
-/// 목적지 발송 키를 함께 저장하고 이 고정을 제거해야 한다.
+/// Enqueues one reply to the explicit destination; pinned to `PushTransportId::SLACK` while explicit routes are Slack-only.
 async fn push_to(tx: &mut Tx<'_>, row: &PgRow, principal: &str, body: &str) -> R<()> {
     let dest_kind: String = row.get("dest_kind");
     match kind_from(&dest_kind)? {
@@ -216,19 +199,19 @@ async fn push_to(tx: &mut Tx<'_>, row: &PgRow, principal: &str, body: &str) -> R
 }
 
 impl Store {
-    /// 최종 결과·답을 한 번 동결해 초안을 돌려준다. `None`이면 이 run은 초안이 필요 없다(일반 실행·원래 대화로 보내는 답·첨부 없는 조용한 성공).
-    /// `completion = None`은 재개 때 이미 동결한 초안만 읽는다. 동결한 초안의 활성 집합이 더는 현재가 아니면 보낼 수 없어 `Conflict`다.
+    /// Freezes the final answers into a draft once, or reloads an existing draft when `completion` is `None`.
     pub(crate) async fn delivery_draft(
         &self,
         at: &Attempt,
         completion: Option<Finish>,
     ) -> R<Option<DeliveryDraft>> {
         let mut tx = self.begin_authorized().await?;
-        // 잠금 순서: 활성 집합 → run → 초안 → 감사 head
+        // Lock order: active set -> run -> draft -> audit head.
         let current_set = lock_activation(&mut tx).await?;
         if parent_of(&mut tx, at).await?.is_some() {
             tx.rollback().await?;
-            return Ok(None); // 위임한 자식의 답은 부모만 보낸다
+            // Delegated children do not deliver directly.
+            return Ok(None);
         }
         let run = lock_leased(&mut tx, at).await?;
         let Some(row) = lock(&mut tx, &at.profile.0, &at.run.0).await? else {
@@ -237,7 +220,6 @@ impl Store {
         };
         match (row.get::<String, _>("state").as_str(), completion) {
             ("drafted", _) => {
-                // 한 번 동결한 초안은 바뀌지 않는다: 저장된 바이트로 다시 계산해 같은 초안을 돌려준다
                 recomputed(&row)?;
                 let draft = draft_of(&row)?;
                 let current = current_set.ok_or(Error::Stale)?;
@@ -252,7 +234,6 @@ impl Store {
                 if done.answers.len() > MAX_ANSWERS {
                     return invalid();
                 }
-                // 일반 답 규칙(길이·첨부 개수·크기·카드 금지)을 통과해야 하고, 원문으로 승인 문서를 만들 수 있어야 한다
                 let normalized = done
                     .answers
                     .iter()
@@ -264,7 +245,7 @@ impl Store {
                         .bind(&run.id)
                         .fetch_one(&mut *tx)
                         .await?;
-                // 조용한 예약: 성공 결과 전체가 `<조용히>`이고 첨부가 없으면 보낼 것이 없다(일반 완료가 답 없이 끝낸다)
+                // Suppress delivery when a quiet schedule succeeds with `<quiet>` and no attachments.
                 if quiet_completion(quiet, &final_text(&result))
                     && !normalized.iter().any(|a| has_attachments(a))
                 {
@@ -285,7 +266,8 @@ impl Store {
                 .fetch_optional(&mut *tx)
                 .await?;
                 if active.is_none() {
-                    return Err(Error::Denied.into()); // 비활성 프로필은 새 초안을 동결하지 못한다
+                    // Inactive profiles cannot freeze new drafts.
+                    return Err(Error::Denied.into());
                 }
                 let activation = current_set.ok_or(Error::Stale)?;
                 let draft = DeliveryDraft {
@@ -300,7 +282,7 @@ impl Store {
                     },
                     answers: done.answers,
                 };
-                let hash = draft.sha256()?; // 승인 문서를 만들 수 없으면 `Invalid`: 보내지 않는다
+                let hash = draft.sha256()?;
                 sqlx::query(
                     "update bot_deliveries set state = 'drafted', activation = $3, result = $4, answers = $5, sha256 = $6,
                             drafted_ms = bot_now_ms(), updated_ms = bot_now_ms()
@@ -327,9 +309,7 @@ impl Store {
         }
     }
 
-    /// 이미 커밋된 회신 등록의 영수증. 성공한 run의 마지막 claim에만 돌려준다: 한 시점(한 문장)에서 프로필·run·세대·claim_epoch와
-    /// 현재 활성 집합·등록 당시 집합을 대조한다. 아직 끝나지 않았거나 이 run에 회신이 없으면 `None`(일반 원장 펜스가 판정한다),
-    /// 자격 없는 시도(옛 세대·claim)나 바뀐 집합은 `Stale`이다. 초안 본문과 모델 결과는 읽지 않는다.
+    /// Returns the committed queued receipt for the final claim of a succeeded run without reading draft content.
     pub(crate) async fn delivery_receipt(&self, at: &Attempt) -> R<Option<JsonPayload>> {
         let row = sqlx::query(
             "select d.state, d.activation, r.state as run_state, r.generation, r.claim_epoch, c.state as call_state, c.result,
@@ -348,7 +328,6 @@ impl Store {
         let Some(row) = row else {
             return Ok(None);
         };
-        // 승인한 초안이 등록된 뒤의 성공한 run만 영수증이 있다(진행 중인 claim은 일반 펜스가 판정한다)
         if row.get::<String, _>("state") != "enqueued"
             || row.get::<String, _>("run_state") != "succeeded"
         {
@@ -372,11 +351,8 @@ impl Store {
         Ok(row.get::<Option<String>, _>("result").map(JsonPayload))
     }
 
-    /// 소유자가 승인한 동결 초안을 목적지 outbox로 쌓고 run을 마친다(승인 소비·호출 완료·감사와 한 커밋).
-    ///
-    /// `Stale`은 소유권 상실만이 아니다: 소비하려는 순간 승인이 만료됐거나 다른 카드로 대체돼도 `Stale`이다(커밋은 없다). 호출자는 같은 펜스(현재 claim·활성 집합)를
-    /// 고정 수신자 읽기(`ScheduledReplies::target`)로 확인해 가린다. 만료는 DB 시계로 판정하므로, 여기서 `Stale`이면 만료한 승인을 곧바로 닫아 둔다:
-    /// 같은 claim에서 다시 판정하는 쪽이 «만료»를 읽고 승인 만료로 끝낸다(호스트 시계와 어긋나 여전히 살아 있다고 보지 않게).
+    /// Atomically consumes owner approval, enqueues destination outbox rows, completes the call, and finishes the run.
+    /// On `Stale`, sweeps expired approvals so retries immediately observe DB-clock expiry.
     pub(crate) async fn delivery_enqueue(&self, s: StartCall) -> R<()> {
         match self.enqueue_once(s).await {
             Err(Fail::Core(Error::Stale)) => {
@@ -394,7 +370,6 @@ impl Store {
         }
         let at = &s.attempt;
         let mut tx = self.begin_authorized().await?;
-        // 호출에 봉인한 지문과 겨룰 값은 동결한 초안에서 다시 계산한다(활성 판본 잠금 안에서 읽는다: 초안은 동결 뒤 바뀌지 않는다)
         crate::active::guard_active(&mut tx, &at.profile.0, &s.checked_revision).await?;
         let seen = peek(&mut tx, &at.profile.0, &at.run.0)
             .await?
@@ -411,7 +386,7 @@ impl Store {
                 approval,
             } => (run, shared_flag, approval),
         };
-        // 다른 수신자로 나가는 회신은 승인한 호출만 보낸다
+        // Explicit-destination delivery requires owner approval.
         let approval = approval.ok_or(Error::Denied)?;
         let row = lock(&mut tx, &at.profile.0, &at.run.0)
             .await?
@@ -419,13 +394,13 @@ impl Store {
         if row.get::<String, _>("state") != "drafted" {
             return Err(Error::Conflict.into());
         }
-        // 저장된 바이트에서 승인 문서와 지문을 다시 계산한다
         if recomputed(&row)? != sealed {
             return Err(Error::Conflict.into());
         }
         let draft = draft_of(&row)?;
         if current_activation(&mut tx).await? != draft.activation.0 {
-            return Err(Error::Conflict.into()); // 수신자 매핑이 바뀐 집합: 이 초안은 보내지 않는다
+            // Active set changed since draft freeze; destination mapping may have drifted.
+            return Err(Error::Conflict.into());
         }
         let owner: String =
             sqlx::query_scalar("select principal from bot_runs where profile = $1 and id = $2")
@@ -439,12 +414,13 @@ impl Store {
                 .fetch_one(&mut *tx)
                 .await?;
         if stored_approver != owner {
-            return Err(Error::Denied.into()); // 승인자는 예약을 만든 소유자 본인이다
+            // Approver must be the schedule owner.
+            return Err(Error::Denied.into());
         }
         for answer in &draft.answers {
             push_to(&mut tx, &row, &owner, &replies::answer(answer)?).await?;
         }
-        // 등록 영수증은 이 커밋에서 한 번 만들고 호출의 결과로 남긴다(재호출은 원장 바이트를 그대로 돌려준다)
+        // Persist the receipt once as the call result so replays return identical bytes.
         let receipt = draft.queued_receipt().0;
         finish_call(&mut tx, &s, &receipt, Some(&approval)).await?;
         sqlx::query(

@@ -1,5 +1,4 @@
-//! Sentry Envelope v7 직렬화와 인증 헤더 생성(외부 Sentry SDK 의존 없음).
-//! Sentry·GlitchTip·Bugsink 모두 같은 Envelope 형식(`application/x-sentry-envelope`)을 받는다.
+//! Dependency-free Sentry Envelope v7 serializer and `X-Sentry-Auth` header builder.
 
 use super::IssueConfig;
 use crate::trace::Redactor;
@@ -20,7 +19,6 @@ fn cap(s: &str, limit: usize) -> String {
     }
 }
 
-/// UTC 나노초를 RFC 3339 문자열(`YYYY-MM-DDTHH:MM:SSZ`)로 바꾼다.
 pub(super) fn rfc3339_utc(nano: u64) -> String {
     use std::time::{Duration, UNIX_EPOCH};
     let at = UNIX_EPOCH
@@ -29,7 +27,7 @@ pub(super) fn rfc3339_utc(nano: u64) -> String {
     bot_core::schedule::utc::format_utc(at)
 }
 
-/// `X-Sentry-Auth` 헤더 값을 만든다(키가 있을 때만 호출한다). 키에 공백·쉼표·제어 문자가 섞이면 거절한다.
+/// Rejects whitespace, commas, non-ASCII, and control bytes to prevent header parameter injection.
 pub(super) fn auth_header(key: &str) -> Result<(String, String), &'static str> {
     let valid = !key.is_empty()
         && key.len() <= 256
@@ -48,7 +46,7 @@ pub(super) fn auth_header(key: &str) -> Result<(String, String), &'static str> {
     ))
 }
 
-/// 가림 처리를 거친 `IssueEvent`를 Sentry Envelope v7 본문(3줄 NDJSON)으로 인코딩한다.
+/// Encodes a redacted `IssueEvent` as a 3-line Sentry Envelope v7 NDJSON body.
 pub(super) fn encode_envelope(cfg: &IssueConfig, event: &IssueEvent, red: &Redactor) -> Vec<u8> {
     let event_id = crate::json::hex(&event.event_id);
     let sent_at = rfc3339_utc(event.timestamp_nano);
@@ -159,7 +157,7 @@ mod tests {
             "abc, sentry_secret=evil",
             "abc def",
             "abc\r\nX-Inject: 1",
-            "키",
+            "€",
         ] {
             assert_eq!(auth_header(bad), Err("secret"), "{bad:?}");
         }
@@ -181,7 +179,7 @@ mod tests {
         let ev = IssueEvent::new(
             IssueLevel::Error,
             "tool_failed",
-            "실패 super-secret-xyz 끝",
+            "failed super-secret-xyz end",
             "bot_broker::service",
         )
         .profile(ProfileId("personal".into()))

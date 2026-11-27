@@ -1,4 +1,4 @@
-//! 보류 판정은 발생 ID가 가리키는 정확한 대상에만 적용한다. 구판의 같은 호출 ID(도구·회신 발송)도 종류로 갈린다.
+//! Hold resolutions target the exact `HoldId` occurrence; legacy colliding tool/reply call IDs stay separated by kind.
 
 #[path = "hold_targets/final_result.rs"]
 mod final_result;
@@ -43,7 +43,7 @@ async fn a_legacy_tool_with_a_private_shaped_id_resolves_as_the_listed_tool() {
         })
         .await
         .unwrap();
-    // 예약 접두사를 도입하기 전에 저장된 호출을 복원한다(발생 ID가 없던 판에서 올라오는 상황).
+    // Simulate upgrading a pre-0011 DB containing a tool call ID with the reserved `private:` prefix.
     rewind_holds(&db).await;
     db.sql("update bot_calls set call = 'private:' || run")
         .await;
@@ -77,7 +77,6 @@ async fn a_receipt_is_applied_only_to_the_stored_target_of_that_hold_id() {
     let run = &run.attempt.run;
     let target = hold_ref(&db, HoldKind::Reply, run, &call(&reply), None).await;
 
-    // 발생 ID가 있어도 대상이 다르면(같은 순번을 가리켜도 저장된 호출 ID와 다르다) 아무것도 쓰지 않는다.
     let mut wrong = target.clone();
     wrong.call = call(&format!("{reply}0"));
     assert!(matches!(confirm(&db, wrong).await, Err(Error::Conflict)));
@@ -90,7 +89,7 @@ async fn a_receipt_is_applied_only_to_the_stored_target_of_that_hold_id() {
         0
     );
 
-    // 옛 데이터에서 도구와 회신 호출 ID가 겹치면 발생이 둘이다: 한쪽 판정은 다른 쪽을 건드리지 않는다.
+    // Colliding tool and reply call IDs produce distinct holds that resolve independently.
     db.sql("update bot_calls set state = 'held', call = (select call from bot_outbox)")
         .await;
     let tool_target = hold_ref(&db, HoldKind::Tool, run, &call(&reply), None).await;
@@ -103,7 +102,7 @@ async fn a_receipt_is_applied_only_to_the_stored_target_of_that_hold_id() {
     assert!(
         db.scalar::<bool>("select receipt is null from bot_calls")
             .await,
-        "회신 판정이 도구 호출에 영수증을 쓰면 안 된다"
+        "reply resolution must not write a receipt to bot_calls"
     );
     assert_eq!(
         db.scalar::<i64>(
@@ -111,7 +110,7 @@ async fn a_receipt_is_applied_only_to_the_stored_target_of_that_hold_id() {
         )
         .await,
         1,
-        "도구 발생은 계속 열려 있다"
+        "tool hold must remain open"
     );
     confirm(&db, tool_target).await.unwrap();
     assert_eq!(
@@ -138,7 +137,6 @@ async fn upgrading_a_db_with_both_kinds_held_under_one_call_id_opens_two_holds_t
         .await
         .unwrap();
     let reply = db.scalar::<String>("select call from bot_outbox").await;
-    // 구판 모양: 같은 호출 ID의 도구 호출과 회신 발송이 둘 다 보류이고 발생 ID는 없다
     rewind_holds(&db).await;
     db.sql("update bot_runs set state = 'waiting', wait_kind = 'hold', finished_ms = null")
         .await;
@@ -148,7 +146,7 @@ async fn upgrading_a_db_with_both_kinds_held_under_one_call_id_opens_two_holds_t
     db.store
         .migrate()
         .await
-        .expect("종류가 달라 충돌 없이 올라간다");
+        .expect("distinct kinds must migrate without conflict");
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_holds where closed_ms is null")
             .await,
@@ -167,7 +165,6 @@ async fn upgrading_a_db_with_both_kinds_held_under_one_call_id_opens_two_holds_t
         ]
     );
 
-    // 한쪽 상태가 바뀌어도 다른 종류의 발생은 닫히지 않는다
     db.sql("update bot_outbox set state = 'confirmed', receipt = 'late'")
         .await;
     assert_eq!(
@@ -216,7 +213,7 @@ async fn held_steps(db: &TestDb, upgrade: bool, pending: bool) -> Attempt {
         }
     }
     if upgrade {
-        // 0024 당시의 호출 트리거로 종결한다. 0025가 기존 고립 행을 실제로 보정해야 한다.
+        // Restore the pre-0025 call trigger so migration 0025 repairs existing orphaned rows.
         let sql = include_str!("../../migrations/0011_holds.sql");
         let func = sql
             .split("create function bot_calls_hold()")
@@ -266,7 +263,6 @@ async fn upgrading_terminal_runs_closes_old_tool_holds_without_opening_new_ones(
             return;
         };
         let at = held_steps(&db, true, true).await;
-        // 구판의 미실행 단계에는 보류 ID가 열려 있고, 호출 전체에는 보류 ID가 없다.
         db.sql("update bot_effects set resolution = 'not_executed' where state = 'held'")
             .await;
         let finished = db
@@ -337,7 +333,7 @@ async fn upgrading_retracts_a_legacy_whole_not_executed_mark_and_parks_the_run()
         return;
     };
     let at = held_steps(&db, true, true).await;
-    // 구판 관리 판정의 커밋 결과를 재현한다. 마지막 단계만 미실행이고 첫 단계에는 이미 영수증이 있다.
+    // Reproduce a legacy admin verdict that marked the whole call not_executed despite a confirmed first step.
     db.sql("update bot_holds set closed_ms=bot_now_ms(), operator='local:owner', verdict='not_executed', evidence_sha256=decode(repeat('00',32),'hex') where effect is not null").await;
     db.sql("update bot_effects set resolution='not_executed' where state='held'")
         .await;
@@ -387,7 +383,6 @@ async fn settling_the_last_started_step_opens_the_call_hold() {
         return;
     };
     let at = held_steps(&db, false, true).await;
-    // 구판과 섞인 보류에서 단계가 아직 started인 상태를 재현한다.
     db.sql("update bot_effects set state = 'started' where step = 'next'")
         .await;
     assert_eq!(
@@ -423,7 +418,7 @@ async fn cancelling_a_held_run_closes_its_tool_holds_and_keeps_receipts() {
                 at.profile.clone(),
                 at.run.clone(),
                 operator().principal,
-                "종료".into(),
+                "stop".into(),
             )
             .await
             .unwrap();
@@ -451,7 +446,7 @@ async fn a_legacy_admin_cannot_commit_a_whole_call_as_not_executed_after_a_confi
     };
     let at = held_steps(&db, false, true).await;
     let mut old = db.store.pool().begin().await.unwrap();
-    // 구판 관리자가 마지막 단계와 발생을 판정한 뒤 호출 전체까지 미실행으로 쓴다.
+    // Simulate a legacy admin trying to mark the whole call not_executed after resolving the last step.
     sqlx::query("update bot_holds set closed_ms=bot_now_ms() where effect is not null")
         .execute(&mut *old)
         .await
@@ -487,7 +482,7 @@ async fn a_legacy_admin_cannot_commit_a_whole_call_as_not_executed_after_a_confi
     )
     .await;
     let verdict = HoldVerdict::NotExecuted {
-        evidence: "수신처 기록 없음".into(),
+        evidence: "no record at destination".into(),
     };
     assert_eq!(
         db.store
@@ -525,7 +520,7 @@ async fn a_mixed_call_exposes_its_final_decision_only_after_its_last_pending_ste
     )
     .await;
     let verdict = HoldVerdict::NotExecuted {
-        evidence: "수신처에 다음 단계 기록 없음".into(),
+        evidence: "no record of next step at destination".into(),
     };
     assert_eq!(
         db.store

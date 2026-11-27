@@ -1,5 +1,4 @@
-//! 실제 브로커+실제 PG(고정 핸들)로 확인하는 수신자 지정 생성의 첫 카드 경합: 브로커가 **마지막으로** 등록부를 확인한 뒤 카드를 기록하기 전에 다른 프로세스의 집합 교체가
-//! 커밋되면, 카드를 기록하는 커밋이 활성 집합 잠금 아래에서 낡은 집합을 보고 거절한다(카드 0·예약 0). 교체가 없으면 같은 흐름이 카드를 연다.
+//! Schedule-create approval card activation-fence race against real broker and PostgreSQL.
 
 use crate::support::*;
 use bot_broker::{
@@ -21,9 +20,9 @@ use std::sync::{
 
 const OWNER: &str = "local:owner";
 const TOOL: &str = "schedule.create";
-const ARGS: &str = r##"{"at":"2030-01-01T12:00:00Z","instruction":"보고","destination":{"binding":"slack","conversation":{"kind":"channel","id":"#general","thread":"t1"}}}"##;
+const ARGS: &str = r##"{"at":"2030-01-01T12:00:00Z","instruction":"report","destination":{"binding":"slack","conversation":{"kind":"channel","id":"#general","thread":"t1"}}}"##;
 
-/// 한 곳의 등록부: `#general`을 정규 경로 `T1/C9`로 확정한다. `race_at`번째 확인에 답한 **직후** 집합을 교체한다(그 뒤 카드를 기록한다).
+/// Resolves `#general` to canonical `T1/C9`, swapping the active set right after the `race_at`-th lookup.
 struct RacingRoutes {
     asked: AtomicUsize,
     race_at: Option<usize>,
@@ -44,7 +43,7 @@ impl ScheduleRoutes for RacingRoutes {
         if Some(nth) == self.race_at
             && let Some(replace) = self.replace.lock().unwrap().as_ref()
         {
-            replace(); // 다른 프로세스가 새 집합을 게시했다(이 확인에는 이미 답했다)
+            replace();
         }
         Ok(answer)
     }
@@ -82,14 +81,13 @@ fn broker(db: &TestDb, routes: Arc<RacingRoutes>) -> BrokerService {
 
 async fn owner_attempt(db: &TestDb) -> Attempt {
     db.publish().await;
-    // 1:1 대화(Slack DM 같은 입구)에서 온 소유자: 수신자를 지정할 수 있는 입구다
     let mut command = accept_as(
         "personal",
         "morning",
         OWNER,
         ConversationKind::Direct,
         "owner",
-        "보고 예약",
+        "schedule report",
     );
     command.scopes = scopes(&["run", TOOL]);
     command.approver = Some(PrincipalId(OWNER.into()));
@@ -121,7 +119,7 @@ async fn a_replacement_between_the_last_registry_check_and_the_card_leaves_no_ca
     };
     let routes = Arc::new(RacingRoutes {
         asked: AtomicUsize::new(0),
-        // 1번째 확인은 호출을 읽을 때, 2번째가 카드를 열기 직전의 마지막 확인이다
+        // Lookup 1 occurs while reading the call; lookup 2 is the final check right before opening the card.
         race_at: Some(2),
         replace: Mutex::new(None),
     });
@@ -143,7 +141,11 @@ async fn a_replacement_between_the_last_registry_check_and_the_card_leaves_no_ca
     let result = service.call(request(&attempt)).await;
     assert!(matches!(result, Err(Error::Stale)), "{result:?}");
     assert_eq!(routes.asked.load(Ordering::SeqCst), 2);
-    assert_eq!(counts(&db).await, (0, 0), "카드 0·예약 0");
+    assert_eq!(
+        counts(&db).await,
+        (0, 0),
+        "expected no card and no schedule"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -160,11 +162,15 @@ async fn without_a_replacement_the_same_flow_opens_the_routed_card_for_the_canon
     let attempt = owner_attempt(&db).await;
     let result = service.call(request(&attempt)).await.unwrap();
     let CallResult::Awaiting(nonce) = result else {
-        panic!("카드가 열려야 한다: {result:?}")
+        panic!("expected approval card: {result:?}")
     };
-    assert_eq!(counts(&db).await, (1, 0), "카드 1·예약은 승인 전이라 0");
+    assert_eq!(
+        counts(&db).await,
+        (1, 0),
+        "expected 1 card and 0 schedules before approval"
+    );
     let stored = calls(&db).approval(nonce).await.unwrap();
-    // 카드는 모델이 쓴 이름이 아니라 등록부가 확정한 정규 경로를 보여 준다
+    // Card must show the canonical resolved route, not the model-supplied alias.
     assert!(stored.card.0.contains("T1/C9"), "{}", stored.card.0);
     assert!(!stored.card.0.contains("#general"), "{}", stored.card.0);
 }

@@ -1,262 +1,235 @@
-# 접수는 커밋 뒤 알리고, 결과를 모르는 외부 쓰기는 보류한다.
+# Reliability and Crash Recovery
 
-**접수 성공은 PostgreSQL 커밋 성공을 뜻한다.** 네트워크·프로세스 장애 뒤 실행 시도는 반복될 수 있다. DB 내부 상태는 고유 키와 트랜잭션으로 한 번 반영하고 외부 쓰기는 수신처가 증명할 수 있는 수준까지 복구한다.
+English | [한국어](ko/reliability.md)
 
-| 단위 | 유일 키와 원자 경계 |
+**Accepted means committed to PostgreSQL.** Execution attempts may repeat after network or process faults. Internal DB state applies once via unique keys and transactions; external writes recover only to what the receiver can prove.
+
+## Unique Keys and Atomic Boundaries
+
+| Unit | Unique key & atomic transaction boundary |
 |---|---|
-| 프로필 활성화 | 예상한 집합 판본이 현재 값일 때만 새 집합·기억 시드·정적 트리거의 구간 변경·감사를 함께 커밋한다. 하나라도 실패하면 전체를 되돌린다. 같은 집합으로 다시 시작하면 쓰기 없이 합류한다. |
-| 일반 접수(CLI·Slack·웹훅) | profile + binding + 발급자/주체 범위 + 안정적인 event/request ID. 입력 해시는 인증된 대화·첨부·본문을 포함하고 HTTP는 실제 메서드와 입구 아래 경로도 포함한다. 같은 키·같은 입력은 기존 실행으로 돌아간다. 메서드나 경로만 달라도 충돌이다. 접수·run·큐·감사 커밋 후 ACK. |
-| OpenAI 호환 요청 접수 | 프로필 + HTTP 입구 + 인증 주체 + `Idempotency-Key`(바인딩·모델이 달라도 하나). 키 예약·입구별 미완료 작업 수 한도·run·감사를 한 트랜잭션으로 커밋한다. 같은 키·같은 입력·같은 모델은 새 슬롯 없이 기존 실행으로 돌아가고, 입력이나 모델이 다르면 충돌이다. |
-| 예약 | profile + agent + trigger ID + 예정 UTC instant. 예약 변경 시 적용 시각으로 구간을 나눈다. DB 시각 기준 커서와 발생 행·큐를 한 커밋으로 전진한다. 리더 교체·다중 scheduler도 같은 키로 수렴한다. |
-| 위임 | 부모 run + 저장한 단계 ID. 자식 run과 부모 대기를 함께 커밋한다. 부모가 죽어도 같은 자식 결과를 사용한다. 모델 step·도구 호출·결과를 체크포인트에 기록해 재개한다. |
-| 답변 | run + 원래 목적지 + 답 순번. 결과와 outbox를 함께 커밋한다. 발송도 일반 효과와 같은 불명 처리·영수증 정책을 쓴다. |
+| Profile activation | Commits new active set, memory seeds, static trigger interval transitions, and audit together only when the expected active-set revision matches current. Any failure rolls back all; restarting with the identical set joins without writing. |
+| Standard intake (CLI, Slack, webhook) | `(profile, binding, issuer/principal scope, stable event/request ID)`. Input hash covers authenticated conversation, attachments, body, and (for HTTP) actual method and sub-path. Same key + input returns the existing run; differing method or path is a conflict. ACK only after intake + run + queue + audit commit. |
+| OpenAI-compatible intake | `(profile, HTTP entrance, authenticated principal, Idempotency-Key)` across bindings and models. Key reservation, per-entrance in-flight cap, run, and audit commit together. Same key + input + model returns the existing run without consuming a slot; differing input or model is a conflict. |
+| Schedules | `(profile, agent, trigger ID, scheduled UTC instant)`. Schedule edits split intervals at the effective timestamp. DB-clock cursor, occurrence row, and queue advance in one commit; leader failover and concurrent schedulers converge on the same key. |
+| Delegation | `(parent run, saved step ID)`. Child run and parent wait commit together; parent crash reuses the same child result. Model steps, tool calls, and results checkpoint for resume. |
+| Replies | `(run, origin destination, answer seq)`. Finish result and outbox commit together; delivery follows the same unknown-outcome hold and receipt policy as tool effects. |
 
-cron은 프로필 현지 시각을 해석한다. DST에서 없는 분은 건너뛰고 두 번 오는 분은 서로 다른 UTC 발생으로 둘 다 접수한다. 중단 중 발생은 오래된 순서로 크기가 제한된 배치로 따라잡는다. 발생 생략·합치기는 상태 확인용 beat에만 허용한다. beat는 pending 한 건과 처리 중 다시 들어온 신호를 구별해 마지막 갱신을 놓치지 않는다.
+**Cron, DST, and `beat` rules:**
+- Cron evaluates in profile local time: DST-skipped minutes are skipped; repeated fall-back minutes fire twice as distinct UTC instants.
+- Missed occurrences during downtime catch up oldest-first in bounded batches.
+- Skipping/coalescing is permitted only for status `beat` triggers, which distinguish one pending occurrence from a signal arriving mid-run so the latest update is never lost.
 
-## Worker 인계
+## Worker Handover
 
-워커는 잠기지 않은 일반 작업을 준비열 진입 시각, 재시도 예정 시각, 리스 만료 시각 순으로 한 줄에 놓고 가장 이른 작업부터 점유한다. 시각이 같으면 생성 시각과 run ID 순이다. 승인이 풀리거나 작업을 반납·재개하면 그때의 DB 시각부터 다시 기다리므로 이미 기다리던 작업이 앞선다. 명시한 미래 준비 시각은 유지한다. 같은 beat 키는 `leased` 상태인 선행 run이 소유하며, 리스 만료 시각이 지난 뒤에는 그 run부터 인계하거나 시도 한도에 따라 종결한다.
+### Queue Order, `0024`, and Corrupt Targets
 
-마이그레이션 `0024`는 구판 일반 ready 행의 비어 있는 준비 시각을 생성 시각으로 채우고 `bot_runs_eligible` 색인을 만든다. 기본값 변경이 잡는 `bot_runs` 잠금은 색인 생성과 커밋까지 이어져 읽기·쓰기가 대기한다. 큰 DB에서는 운영 자료 규모의 복제본에서 적용 시간을 재고 점검 창을 확보한다. 구판 워커가 모두 퇴역한 뒤 `bot_runs_leased`를 제거하는 별도 마이그레이션을 준비한다. `bot_runs_ready`는 관리 목록의 정렬과 새 색인 사용을 실행 계획으로 확인한 뒤 제거 여부를 정한다.
+- Unlocked normal runs queue in one line ordered by `ready_at`, retry time, or lease expiry (earliest first; ties break by `created_at`, then `run_id`). Unblocking approval, releasing, or resuming resets wait time to current DB time so earlier waiters stay ahead; explicit future ready times remain intact. One `beat` key belongs to its `leased` predecessor until lease expiry, after which that run is reclaimed or terminated per attempt limit.
+- **Migration `0024` (`crates/bot-store/migrations/0024_queue_order.sql`):** backfills null `ready_at` on legacy ready rows from `created_at` and creates `bot_runs_eligible`. Altering the column default holds a lock on `bot_runs` through index creation and commit (blocking reads/writes); benchmark on a production-sized clone and schedule a maintenance window for large databases. Drop `bot_runs_leased` in a separate migration after all legacy workers retire, and drop `bot_runs_ready` only after checking Admin list query plans against the new index.
+- **Unreadable targets:** if a candidate's stored target cannot decode, the store preserves the raw payload, dead-letters it as `invalid_target`, records child failure on any waiting parent (skipping the child if the parent is locked), and continues. Each claim inspects at most 8 candidates (remaining wait for the next claim); DB errors return transient failure. Operator resume requires a decodable target. Before rolling out a new target format, swap the active set or drain legacy workers first.
 
-점유 후보의 저장된 대상을 해독할 수 없으면 원문을 보존하고 `invalid_target`으로 dead letter에 격리한다. 기다리던 부모에는 자식의 실패를 기록하고 다음 후보를 처리한다. 부모가 잠겨 있으면 이번 점유에서 그 자식을 건너뛴다. 한 점유 요청에서 후보를 최대 8번 탐색하고, 남은 작업은 다음 요청에서 처리한다. DB 장애는 일시 오류로 반환한다. 운영자 재개는 저장한 대상을 해독할 수 있을 때 허용한다. 새 대상 형식을 쓰는 배포는 이를 읽을 수 있는 워커만 점유하도록 활성 집합을 교체하거나 구판 워커를 먼저 멈춘다.
+### CLI Waiting on Approvals or Children
 
-### CLI가 승인이나 자식을 기다릴 때
+1. The runtime assigns one session UUID per run. Before tool execution, it matches the complete model response tool list received by the host against the CLI session log and persists that turn to PostgreSQL (preserving all slots when a turn plans multiple tools; neither the first MCP request nor a single session line proves turn completion).
+2. Logical call identity is `(profile, run, saved assistant turn, tool slot)`. The host's `CallBook` checks wire `tool_use_id`, tool name, and canonical args hash against that slot. Redelivery at the same slot returns the same call; two distinct slots sending identical args to the same recipient are two distinct calls.
+3. On approval wait or direct child delegation, the parent drops its CLI connection and worker lease. Child results persist under `(parent run, call ID)`, so a single worker can execute children. Resuming workers check current permissions under a new claim and continue saved calls or read existing child results.
+4. The Claude adapter restores the session into a fresh claim workspace, links verified ledger results once per tool use as `tool_result`, and resumes with `--resume <UUID>`. Existing results are verified against the ledger; CLI abort errors are never adopted as completion, and unproven call-to-result links remain held.
 
-1. 런타임은 run에 세션 UUID를 하나 배정한다. 도구 실행 전 호스트가 받은 완전한 모델 응답의 도구 목록과 CLI 세션 기록을 대조하고, 그 차례를 PG에 저장한다. 한 차례에 도구가 둘이면 두 위치를 모두 보존한다. 첫 MCP 요청이나 세션 파일 한 줄만으로는 차례가 끝났다고 판단할 수 없다.
-2. 논리 호출은 프로필·run·저장한 assistant 차례·그 안의 도구 위치로 식별한다. 호스트의 `CallBook`은 전송 때의 `tool_use_id`, 도구 이름, 정규 인자 해시를 그 위치와 대조한다. 같은 위치의 재전달은 같은 호출로 돌아간다. 예를 들어 같은 수신자에게 같은 문구를 두 번 보내도록 계획한 서로 다른 위치는 두 호출이다.
-3. 승인 대기 또는 직계 자식 위임을 기록하면 부모는 CLI 연결과 worker 리스를 반납한다. 자식 결과는 부모 run과 호출 ID로 저장한다. 워커 하나만 있어도 자식을 실행할 수 있다. 재개한 워커는 새 claim에서 현재 권한을 확인하고 저장된 호출을 이어 가거나 기존 자식 결과를 읽는다.
-4. Claude 어댑터는 새 claim 전용 폴더에 같은 세션을 복원한다. 그 차례의 각 도구 사용에 원장에서 확인한 실제 결과를 `tool_result`로 한 번씩 연결한 뒤 `--resume <UUID>`로 이어 간다. 기존 결과도 원장과 대조한다. CLI가 중단 시 만든 오류를 완료 결과로 채택하지 않는다. 호출과 결과의 연결을 증명할 수 없으면 보류한다.
+Checkpoints hold only conversation records required for restore. Each claim gets a fresh relay token, MCP config, and workspace so stale processes cannot overwrite new session files; the runtime adapter owns the CLI session format.
 
-체크포인트에는 복원에 필요한 대화 레코드만 담는다. 각 claim은 새 릴레이 토큰·MCP 설정·작업 공간을 받는다. 옛 프로세스가 새 세션 파일을 덮어쓸 수 없다. 실제 CLI의 세션 형식은 런타임 어댑터가 소유한다.
+- **Response sealing:** the broker records complete tool-bearing responses to `cli-resp-<message.id>` (provider use IDs, full tool names, JSON args in order) before sending the final JSON/SSE event to the CLI. Truncated responses, missing message IDs, or duplicate use IDs cannot start tools; post-commit disconnect retries reuse the existing record when key and content match.
+- **Turn commit:** the runtime aggregates CLI records for the same message ID, verifies all use IDs, order, names, and args, and writes session records (`cli-rec-<seq>`), tool slots (`cli-use-<tool_use_id>`), and the turn group (`cli-group-<turn>`, where `turn` is the first assistant record number) in one transaction. The relay reads the use ID and group under the current claim; first-seen groups verify every slot (for example, MCP `agenda_delete` must match `mcp__relay__agenda_delete` plus canonical JSON args). Redelivery resolves to the same `CallId::cli(turn, slot)` (delegation uses this ID as well).
+- **Resume replay:** relay tools absent from the ledger re-check current permissions and approvals at their verified slot; completed calls reuse stored results (preserving MCP `content` and `isError`, wrapping plain JSON in one text block, and using fixed error words for rejection/expiry). Unverifiable VM built-in tool results are never substituted or marked succeeded by the host.
 
-브로커는 도구가 있는 응답을 끝까지 받으면 `cli-resp-<message.id>`에 제공자가 보낸 사용 ID·전체 도구 이름·JSON 인자를 순서대로 기록한다. 그 뒤 JSON 응답이나 SSE의 마지막 이벤트를 CLI에 전달한다. 도중에 끊긴 응답, 메시지 ID가 없는 응답, 사용 ID가 겹치는 응답으로는 도구를 시작할 수 없다. 커밋 뒤 연결이 끊겨도 같은 키·같은 내용의 재시도는 기존 기록을 사용한다.
+### Pre-Execution Refusal Sealing
 
-런타임은 같은 메시지 ID의 CLI 기록을 모아 모든 사용 ID·순서·이름·인자를 대조한 뒤 세션 레코드(`cli-rec-<seq>`), 도구 위치(`cli-use-<tool_use_id>`), 전체 목록(`cli-group-<turn>`)을 한 트랜잭션에 쓴다. `turn`은 첫 assistant 레코드 번호다. 중계는 현재 claim으로 해당 사용 ID와 그룹을 읽는다. 처음 보는 그룹은 각 사용 ID와 위치를 모두 대조한다. 예를 들어 MCP의 `agenda_delete`는 세션의 `mcp__relay__agenda_delete`와 정규 JSON 인자까지 일치해야 한다. 같은 사용 ID의 재전달은 같은 `CallId::cli(turn, slot)`으로 돌아간다. 위임 단계도 이 ID를 쓴다.
+Both the Claude CLI front and direct API worker seal confirmed pre-execution refusals at a verified planned slot under the current claim in `cli-refusal-<call_id>` and replay that exact word on resume: CLI attaches `isError: true`, Anthropic API attaches `is_error: true`, and OpenAI-compatible API places the word in the matching tool message.
 
-재개 때 원장에 없는 중계 도구는 검증된 그룹의 원래 위치에서 현재 권한·승인을 다시 확인한다. 이미 끝난 호출은 같은 결과를 사용한다. MCP 결과의 `content`와 `isError`를 보존하고, 일반 JSON 결과는 텍스트 블록 하나로 전달한다. 거절·만료는 고정된 오류 단어로 표시한다. VM 내장 도구의 결과를 확인할 수 없으면 호스트가 대신 실행하거나 성공을 기록할 수 없다.
+- The stepped API worker writes the turn's full plan to `turn-N` before calling tools. If an earlier call is refused and a later call awaits approval, the next worker replays sealed refusals without calling the broker and continues to the approval slot; once all calls complete, it writes bundled results to `end-N`. Incomplete-turn success receipts and existing child results are re-verified against current permissions on resume.
+- CLI serializes requests per slot so concurrent redeliveries cannot end one slot as both refused and executed. If the session is revoked while waiting on plan verification, slot lock, or seal read (even racing with completion), no execution, delegation, or seal starts and `stale` is returned. Sealed normal refusals consume zero run attempts; fixing credentials or routes lets a new model slot re-evaluate. Refusals before slot verification (invalid tool name, arg shape, `toolUseId`, plan mismatch, or unverified plan) return the word without sealing. Ledger entries already started, held, completed, or refused override seals; pre-start open records may be closed by a seal.
 
-### 거절 기록 계약
-
-Claude CLI 프런트와 API 직접 호출 워커는 검증된 계획 위치에서 실행 전 거절을 확정하면 현재 claim으로 `cli-refusal-<호출 ID>`에 아래 단어를 저장한다. 같은 위치를 이어서 처리할 때는 저장한 단어를 재생한다. CLI는 MCP 결과에 `isError: true`를, Anthropic API는 도구 결과에 `is_error: true`를 붙인다. OpenAI 호환 API는 해당 호출 ID의 도구 메시지에 단어를 담는다.
-
-단계형 워커는 도구를 부르기 전에 `turn-N`에 한 차례의 전체 계획을 기록한다. 앞선 호출이 거절되고 다음 호출에서 승인을 기다리면, 다음 워커가 같은 계획과 거절 표식을 읽는다. 표식을 읽은 호출은 브로커를 다시 부르지 않고 승인 위치까지 이어 간다. 모든 호출이 끝나면 `end-N`에 결과를 묶어 쓴다. 끝나지 않은 차례의 성공 영수증과 기존 자식 결과는 재개할 때 현재 권한으로 대조한다.
-
-CLI는 같은 호출 위치의 요청을 한 번에 하나씩 처리하므로 동시 재전달이 한 위치를 거절과 실행으로 둘 다 끝낼 수 없다. 계획 대조·위치 대기·표식 읽기를 기다리는 동안 세션이 회수되면(끝나는 순간과 겹쳐도) 그 뒤의 실행·위임·표식은 시작하지 않고 `stale`을 돌려준다. 표식을 저장한 정상 거절은 시도 횟수를 쓰지 않는다. 자격을 채우거나 목적지를 다시 등록한 뒤 모델이 새 위치에서 호출하면 그때 조건을 다시 확인한다. 호출 위치를 검증하기 전의 거절(도구 이름·인자 모양·`toolUseId`가 틀렸거나 계획과 어긋나거나 계획을 확인하지 못한 경우)은 봉인할 위치가 없어 단어만 돌려준다. 원장에 호출이 이미 시작·보류·완료·거절로 남았으면 표식이 아니라 원장을 따르고, 시작 전에 열려 있기만 한 기록은 표식으로 닫을 수 있다.
-
-| 실행 전 판정 | 표식에 저장하고 모델에 보여 주는 단어 |
+| Pre-execution verdict | Sealed word shown to model |
 |---|---|
-| 도구 없음, 입력 오류 | 각각 `unknown_tool`, `invalid` |
-| 권한·스코프 부족, 도구 자격 없음, 허용되지 않은 예약 목적지 | `denied` |
-| 호출 내용 충돌 | `conflict` |
-| Claude CLI 호출 조건의 판본 불일치 | `stale` |
-| 호출 속도·동시성 한도 도달 | `unavailable` |
+| Missing tool / invalid input | `unknown_tool` / `invalid` |
+| Missing permission or scope, missing tool credential, disallowed schedule destination | `denied` |
+| Call content conflict | `conflict` |
+| Revision mismatch on Claude CLI call | `stale` |
+| Rate or concurrency limit reached | `unavailable` |
 
-한도는 **그 호출의 결과와 함께** 한도가 거절했다고 확인된 호출만 확정한다(호출마다 따로인 표지라, 앞 요청이 남긴 거절이나 읽히지 않은 표시가 같은 위치의 다른 오류에 섞이지 않는다). 저장소 장애나 원장을 읽지 못해 나온 `unavailable`, claim을 잃어 표식을 쓸 수 없는 `stale`은 봉인하지 않는다.
+- Rate/concurrency limits seal only when confirmed rejected alongside that call's own result (per-call marker prevents prior rejections or unread flags from leaking onto another error at the same slot). Store outages/unreadable ledger (`unavailable`) and lost-claim `stale` are never sealed.
+- On broker `Stale`, the direct API worker checks its lease: if still valid, it re-evaluates the same call against the new revision; if lost, it steps aside.
+- When the store reports a missing schedule ID or invalid timing/timezone, the stepped worker returns that error to the model; refusal seals are written only when confirmed from ledger and pre-evaluation, while store `Unavailable` retries the turn.
+- If the ledger cannot be read or the seal cannot be written, the slot stays unsettled: stepped workers retry the turn (broker verdict audit and seal write are separate, so a fault between them may append another audit on re-evaluation); CLI returns `unavailable` and, if still unsettled on exit, retries as `session_unsaved` (consuming an attempt); lost-lease workers back off with `stale`; already-started or uncertain calls follow ledger recovery.
+- A corrupt seal blocks execution (`unavailable` on live CLI; `corrupt_checkpoint` on CLI restore and API worker). Malformed `delegate` args on the CLI front return `invalid` immediately; CLI resume validates stored args identically.
 
-API 직접 호출 워커는 브로커가 판본 불일치(`Stale`)를 돌려주면 리스를 확인한다. 리스가 유효하면 같은 호출을 새 판본에 대조하고, 리스를 잃었으면 물러난다.
+### Redeploy and Restoration Acceptance Criteria
 
-저장소가 예약 ID가 없거나 시각·시간대가 유효하지 않다고 답하면 단계형 워커는 그 호출의 오류를 모델에 돌려준다. 거절 표식은 원장과 사전 판정으로 확인할 수 있을 때만 남긴다. 저장소 연결 장애(`Unavailable`)는 차례를 다시 시도한다.
+Before opening roles on `--activate` or restart, a new process restores prior revisions from stored profile bundles and refuses startup if restoration fails. Real-PostgreSQL and multi-OS-process tests verify each case below, including the prepare-to-publish race (re-check rejects with `Stale`, verified alongside retry-decision tests) and two-host concurrent publication of the same set ([Revision restoration contract](profile-spec.md)).
 
-판정에 필요한 원장을 읽거나 표식을 저장할 수 없으면 해당 위치는 미확정으로 남는다. 단계형 워커는 그 차례를 다시 시도한다. 브로커의 최초 판정 감사와 거절 표식은 따로 저장하므로, 표식 저장 전에 장애가 나면 다시 판정하면서 감사가 추가될 수 있다. CLI에서는 저장소 장애가 `unavailable`로 돌아오며, 종료 시에도 결과가 없으면 `session_unsaved`로 재시도해 시도 횟수를 쓴다. 리스를 잃은 워커는 `stale`로 물러난다. 이미 시작했거나 실행 여부가 불명인 호출은 원장의 복구 절차를 따른다.
-
-원장에 시작이나 결론이 기록된 호출은 그 기록을 먼저 따른다. 표식을 사용해야 할 자리에서 값이 손상됐으면 실행을 막는다. 라이브 CLI에는 `unavailable`을 주고, CLI 복원과 API 워커는 `corrupt_checkpoint`로 마무리한다.
-
-CLI 프런트에서 `delegate`의 인자 형식이 틀리면 `invalid`를 바로 반환한다. CLI 재개는 저장된 인자를 검사해 같은 결과를 만든다.
-
-### 재배포 복원 수락 기준
-
-아래 표는 `--activate`나 재기동 뒤 충족하는 기준이다. 새 프로세스는 역할을 열기 전에 저장소의 번들로 옛 판본을 복원하고, 복원할 수 없으면 시작하지 않는다. 실제 PG와 여러 OS 프로세스 시험이 각 행을 확인한다. 준비 조회와 게시 사이에 옛 워커가 새 실행을 접수하는 경합은 저장소 시험(재확인이 `Stale`로 거절)과 재시도 결정 시험으로 확인한다. 이어서 다른 프로세스가 같은 집합을 먼저 게시하는 경합은 실제 PG에서 두 호스트의 준비·게시 순서를 이어 재현하는 시험이 확인한다. [판본 복원 계약](profile-spec.md#재배포-뒤-판본-복원-계약)
-
-| 재배포 전 상태 | `--activate` 뒤 기대 결과 |
+| Pre-redeploy state | Expected result after `--activate` |
 |---|---|
-| 도구 승인 대기 중. 지침만 바꾸고 승인 조건은 유지 | 기존 카드로 승인하면 같은 호출이 정확히 한 번 실행된다. |
-| 두 프로세스 사이에 정적 cron의 예정 시각이 지남 | 해당 시각의 구간 판본으로 한 번 발화하고, 여전히 허용된 도구는 성공한다. dead letter는 0건이다. |
-| 옛 판본의 도구를 새 판본에서 철회 | 직접 도구 실행은 `denied`, 옛 승인 버튼은 `stale`, 도구 실행은 0회다. 고정 판본에 애초에 없던 도구는 `unknown_tool`이다. |
-| 전송 카드 발급 뒤 목적지를 등록부에서 삭제 | `claude_route_gone`에서 발생은 `delivery_unrouted`로 끝난다. 원래 대화에 안내 한 건, 목적지 발송 0건이며, 옛 버튼을 다시 눌러도 결과는 같다. |
-| A는 유지하고 B는 제외. B에 번들이 없는 dead letter·미소진 구간이 남음 | A의 교체와 새 프로세스 합류가 성공한다. B의 번들 복원·모델 호출·도구 실행·승인 소비·발송은 0건이다. |
-| B를 같은 ID로 다시 등록하고 해당 구판 참조가 아직 필요함 | 원본이 없으면 게시 전에 실패하고 A의 활성 집합이 유지된다. 같은 ID·해시의 원본을 보충하면 복원할 수 있다. |
-| 구판 번들이 없는 A를 교체하며 준비 조회 뒤 옛 워커가 A의 구판 실행을 접수 | 게시 직전 재확인에서 그 구판이 필수가 된다. 보충 전에는 교체하지 않는다. 대조군으로 구판 참조가 끝까지 없으면 교체에 성공한다. |
-| 두 프로세스가 같은 새 집합을 올리고, 준비 뒤 옛 워커가 구판 실행을 접수한 다음 한쪽이 그 구판을 복원해 먼저 게시 | 나중 프로세스는 쓰기 충돌 뒤 합류하기 전에 그 구판을 복원하고서야 역할을 연다. 복원하지 못하면 시작하지 않는다. 게시가 보인 뒤 구판 실행의 새 접수는 `Stale`이다. 새로 고정된 참조가 없으면 다시 준비하지 않고 바로 합류한다. |
+| Tool awaiting approval; only instructions changed (approval rules unchanged) | Approving via the existing card executes the same call exactly once. |
+| Static `cron` scheduled time passed between processes | Fires once under that interval's revision; still-allowed tools succeed; 0 dead letters. |
+| Old revision's tool revoked in new revision | Direct tool call returns `denied`; old approval button returns `stale`; 0 tool executions. Tools absent from the pinned revision return `unknown_tool`. |
+| Destination removed from registry after delivery card issued | Verified by `claude_route_gone`: occurrence finishes as `delivery_unrouted` with 1 origin notice and 0 destination sends; re-clicking the old button yields the same result. |
+| Keep profile A, remove profile B (B still has unbundled dead letters / unconsumed intervals) | Swapping A and joining new processes succeed; 0 bundle restores, model calls, tool executions, approval consumptions, or sends for B. |
+| Re-register B with the same ID while an old revision reference is still needed | Fails before publish if source is missing, preserving A's active set; backfilling the matching ID + hash source enables restore. |
+| Swapping A (missing old bundle) while an old worker admits an old-revision run after prepare lookup | Pre-publish re-check requires that old revision and blocks swap until backfilled; control run with no old references succeeds. |
+| Two processes publish the same new set; an old worker admits an old run after prepare, and one process restores and publishes first | The second process sees a write conflict, restores that old revision before joining, and refuses startup if it cannot. Once published, new old-revision admissions return `Stale`. If no new pinned references appear, it joins directly without re-preparing. |
 
-보충 명령은 실제 PostgreSQL에서 같은 폴더를 두 번 넣어도 번들 한 건만 남아야 한다. 다른 유효한 폴더는 누락된 키를 채울 수 없고, 같은 키의 손상된 저장 바이트는 덮어쓰지 않는다. 어느 경우든 보충만으로 기존 활성 집합·실행 시도·대기 카드는 바뀌지 않는다. 구판(`BOTPROFILE1`) 바이너리가 저장한 번들은 새 `SKILL.md` front matter·64 KiB 규칙을 도입한 뒤에도 헤더 판본에 따라 원문 그대로 복원되며, `SKILL.md` front matter를 해석하는 신판 프로필은 `BOTPROFILE2` 판본으로 분리돼 구판과 신판이 같은 활성 집합에 조용히 합류하지 않는다.
+**Bundle backfill and format versions:**
+- Backfilling the same directory twice in PostgreSQL leaves one bundle. Another valid directory cannot satisfy a missing key, and corrupted stored bytes for the same key are never overwritten. Backfilling alone never mutates the active set, run attempts, or pending cards.
+- Legacy `BOTPROFILE1` bundles restore verbatim per header version even after `SKILL.md` front matter and 64 KiB rules; new profiles parsing `SKILL.md` front matter use `BOTPROFILE2`, preventing silent cross-version joins into the same active set.
 
-### 리스와 대기 상태
+### Leases, Waits, Cancellation, and Operator Run Control
 
-`ready → leased → succeeded | waiting | retry | dead`. 취소는 대상 하위 트리의 행을 부모부터 잠근다. 위임이 먼저 커밋되면 그 자식까지 같은 취소에 포함하고, 취소가 먼저 커밋되면 뒤의 위임을 거절한다. 실행 중인 run은 취소 요청을 기록하고 다음 외부 효과 전에 검사한다. 이미 시작한 효과는 결론까지 추적한다. 현재 소유자가 완료를 보고할 때 취소가 먼저 커밋됐으면, 같은 트랜잭션에서 취소로 종결하고 기다리는 부모를 깨운다. 새 결과·회신을 쓰지 않으며 워커는 취소를 보고한다. 사용량과 잘림 계량은 성공한 완료에 기록한다. 완료가 먼저 커밋됐으면 결과와 등록한 회신을 유지한다. claim은 짧은 트랜잭션에서 SKIP LOCKED, 만료 시각, 증가하는 세대를 기록한다. heartbeat·완료·자식 생성·도구 호출은 현재 소유자와 세대·만료를 대조한다. heartbeat도 실행 행의 잠금을 얻은 뒤 DB 시각으로 기한을 판정한다. 긴 외부 호출 동안 DB 잠금을 보유하지 않는다. 리스가 끝난 이전 worker의 보고가 새 worker를 덮을 수 없다.
+Lifecycle: `ready → leased → succeeded | waiting | retry | dead`.
 
-일시 오류는 제한된 지수 백오프·jitter, 영구 오류와 시도 한도 초과는 dead letter로 보낸다. 시도 횟수에는 실제로 소비한 마지막 일시 실패나 리스 만료까지 포함한다. 정상 완료·영구 오류·사용자 취소에는 횟수를 더하지 않는다. 승인 대기·효과 보류는 재시도 횟수를 소모하지 않는다. 승인 요청·자식 위임·효과 보류는 해당 상태 기록과 같은 커밋에서 run을 대기로 보내고 리스를 놓는다. 결정·대체·만료·자식 결과·운영자 판정은 대기 조건이 풀렸을 때 같은 세대로 깨운다. 정상 재개를 포함한 매 claim은 새 claim_epoch를 발급한다. 워커 작업은 현재 claim_epoch·세대·리스 만료를 함께 검사하며, 이미 반납한 토큰으로는 renew·checkpoint·finish·도구 호출을 할 수 없다. 리스 만료 인계는 세대도 올리고 옛 승인을 Superseded로 닫는다. 승인은 같은 프로필·run·세대에서 유지되므로 대기 후 새 claim으로 이어 쓸 수 있다. 소비할 때는 지정 승인자, 도구, 인자 지문, 유효 기간도 확인한다. 승인자 전용 맥락 조회는 실행 토큰을 반환하지 않는다. 실행 중 취소 확인은 Failure::Permanent("cancelled")로 전달하고, 저장소가 취소 요청을 확인해 Cancelled로 종결한다.
+- **Cancellation:** locks target subtree rows parent-first so committed delegations join the cancellation and post-cancel delegations are rejected. Running work records the cancel request and checks before its next external effect; already-started effects track to conclusion. If the current owner finishes after cancel committed, the transaction closes as `Cancelled` and wakes any waiting parent with no new answers or replies (usage and truncation record only on successful completion). If completion committed first, its result and replies stand. Mid-run cancel checks surface `Failure::Permanent("cancelled")`, which the store confirms and closes as `Cancelled`.
+- **Leases & epochs:** claims use short transactions (`SKIP LOCKED`, lease expiry, increasing `generation`). Heartbeat (checked against DB clock under row lock), completion, child creation, and tool calls verify owner, generation, and expiry without holding DB locks across external calls. Every claim (including normal resume) issues a fresh `claim_epoch`; released tokens cannot renew, checkpoint, finish, or invoke tools.
+- **Retries & waits:** transient errors use bounded exponential backoff + jitter; permanent errors and attempt exhaustion dead-letter. Attempt count increments on consumed transient failures and lease expirations, not on normal completion, permanent errors, user cancellation, approval waits, or effect holds. Approval requests, child delegations, and effect holds move the run to `waiting` and drop the lease atomically; decision, superseding, expiry, child result, or operator verdict wakes the run under the same generation. Lease-expiry reclaim bumps `generation` and marks old approvals `Superseded`. Approvals stay valid across claims within `(profile, run, generation)` and re-verify approver, tool, arg digest, and expiry on consumption. Approver-only context views never expose execution tokens.
+- **Operator resume & cancel:** submits observed `state`, `generation`, and `claim_epoch` for a normal root; the store verifies them under lock and checks for unsettled subtree holds. Resume applies only to dead-lettered runs (keeping logical run and effect keys while resetting attempts to `0`); cancel applies subtree cancellation to non-terminal roots. Successful commands commit transition + audit atomically: replaying the same command ID and inputs returns the prior success even if a later generation failed; same ID with different preconditions returns conflict; new ID with stale preconditions returns `stale`. Authenticated operator and fixed reason are audited; unsettled effects resolve in the hold-resolution UI ([Admin API](admin.md)).
+- **Checkpoint & finish errors:** stepped-model checkpoints exceeding `MAX_DOC_BYTES` (1 MiB) or returning `Invalid` terminate immediately as `invalid_checkpoint` (preserving already-committed per-call receipts within limit); `Unavailable` retries as `checkpoint_unavailable` reusing saved plan and receipts. Finish `Invalid` / `Conflict` terminate as `invalid_result` / `finish_conflict`; `Unavailable` retries as `finish_unavailable`.
 
-운영자는 화면에서 본 상태·세대·claim_epoch로 일반 루트의 재개·취소를 요청한다. 저장소는 run을 잠근 상태에서 조건을 대조하고 하위 트리의 미판정 보류를 확인한다. 재개는 dead letter에만 적용하며 같은 논리 run과 효과 키를 유지하고 시도 횟수를 0으로 돌린다. 취소는 종결되지 않은 루트와 하위 실행에 위의 취소 규칙을 적용한다.
+### Worker Shutdown and Lease Reclaim
 
-성공한 명령은 전이와 감사 한 건을 같은 커밋에 쓴다. 같은 명령 ID와 입력을 다시 보내면 뒤의 세대가 실패했어도 기존 성공을 반환한다. 같은 ID에 다른 조건을 보내면 충돌이고, 다른 ID에 낡은 조건을 보내면 `stale`이다. 인증된 운영자와 고정 사유를 감사에 기록한다. 미판정 효과는 보류 판정 화면에서 해결한다. [관리 API의 실행 재개와 취소](admin.md#실행-재개와-취소)
+1. On `SIGTERM`/`SIGINT`, `bot serve` stops claiming new runs and gives in-flight runs an **8 s grace window** with heartbeats active to finish or enter approval wait.
+2. After grace, it verifies model/tool process exit for that claim, revokes its session token, and calls `RunStore::release_for_shutdown` (default **10 s cleanup budget**). Shutdown also interrupts model VM startup: preflight skips launch, and an already-starting VM stops its client first and deletes the container repeatedly until confirmed absent (preventing late create calls from leaving `stopped` VMs behind). If exit cannot be confirmed, lease expiry hands the run to the next worker.
+3. `release_for_shutdown` checks non-expired lease, generation, `claim_epoch`, and cancel state under lock; returns the run to `ready` without spending an attempt (even when the active set is unchanged), bumps generation once, and supersedes old approvals in the same commit. Terminal runs and other owners are untouched; unknown-outcome `Started` writes follow hold/recovery.
+4. On `SIGKILL`, crash, or failed cleanup/release, the reclaiming worker compares the prior claim's recorded **host-wide active set** against the current active set inside the claim transaction. If both are known and differ, reclaim consumes **0 attempts** and records the new set; if identical or absent (legacy row), it consumes 1 attempt (`dead(lease_expired)` on the last attempt). Active-set lookup failure leaves state unchanged and retries. Cancel, generation bump, and approval superseding apply identically.
+5. **Audit outcomes:** graceful shutdown release logs `run.release` (`shutdown`); active-set replacement reclaim without attempt consumption logs `run.reclaim` (`set_replaced`).
 
-단계형 모델의 한 차례는 도구를 부르기 전에 호출 계획을, 호출이 끝나면 결과 묶음을 체크포인트에 쓴다. 저장소의 문서당 상한(`MAX_DOC_BYTES`, 1 MiB)을 넘는 등 저장소가 `Invalid`를 반환하면 `invalid_checkpoint`로 즉시 종결한다. 한도 안에서 이미 커밋된 개별 호출 영수증은 보존한다. `Unavailable`은 `checkpoint_unavailable`로 재시도하며, 저장된 계획과 영수증을 재사용한다. 완료 쓰기에서는 `Invalid`와 `Conflict`를 각각 `invalid_result`, `finish_conflict`로 종결하고 저장소 장애(`Unavailable`)를 `finish_unavailable`로 재시도한다.
+## Walkthrough — Worker Crash Mid-Event Deletion
 
-### 워커 종료와 리스 인계
+The broker pins the event ID and args, obtains approval, commits approval consumption + call start + audit, and launches the MCP server. When the server returns, the call and receipt complete atomically under the same call ID across restarts.
 
-운영 `bot serve`가 SIGTERM·SIGINT를 받으면 새 점유를 멈춘다. 진행 중인 작업에는 하트비트를 유지하며 정상 완료하거나 승인 대기로 넘어갈 시간 8초를 준다. 유예 뒤에도 실행 중이면 해당 claim의 모델·도구 프로세스 종료를 확인하고 그 세션 토큰을 회수한 뒤 `RunStore::release_for_shutdown`을 호출한다. 정리 기한은 기본 10초다. 종료 신호는 모델 VM을 띄우는 중(점검·VM 기동)에도 실행기를 끊는다: 점검 중이면 VM을 띄우지 않고, 이미 뜨는 중이면 클라이언트를 먼저 끝낸 뒤 컨테이너가 사라진 것이 한동안 이어질 때까지 지운다(늦게 도착한 «만들기» 요청이 만든 `stopped` VM도 남기지 않는다). 종료를 확인하지 못하면 리스 만료 뒤 다음 워커가 인계한다.
+- **Unknown external outcome:** if the process dies after launching the server with no result, actual transmission is unknown. Recover only via a receiver-guaranteed idempotency key or receipt lookup; if expired or unproven, stay `held`.
+- **Multi-write step ledger:** optional step receipts preserve confirmed steps (e.g., file upload) while adjudicating only the uncertain step (e.g., notification). If ≥1 step confirmed and the final tool response is lost, the entire call is held (same step key returns its prior receipt, but a restarted tool might pick a different step name for the same content). Once an operator confirms old-tool exit and receiver receipt for the whole call, the broker returns that receipt without re-running the tool ([Tool callbacks](plugins.md)).
+- **Gateway replies & resume preconditions:** replies use the same rules. Operators record verdicts with an external receipt or clear proof of non-execution. Before resuming the same call ID under current auth/approval, the host closes prior-generation IPC/egress and confirms the old tool process and children exited *and* receiver non-execution is proven; host disconnect or uncertain state stays `held`.
+- **Durability prerequisites:** requires PG durability, verified backups, and deduplication retention ≥ the support window. Zero intake loss across failover requires synchronous replication and fencing of the old primary. Lock outbound sends during backup restore and reconcile with receivers. Receivers lacking both receipts and idempotency keys cannot simultaneously guarantee automatic completion and zero duplicates.
 
-저장소는 만료 전 리스·세대·claim_epoch와 취소 여부를 잠금 안에서 확인한다. 현재 소유자가 반납하면 활성 집합이 그대로여도 `ready`로 돌리고 시도 횟수를 유지한다. 같은 커밋에서 세대를 한 번 올리고 옛 승인을 무효화한다. 다음 점유는 그 세대에서 새 claim_epoch를 받는다. 이미 끝난 run이나 다른 소유자의 작업은 건드리지 않는다. 결과가 불명인 Started 쓰기는 기존 보류·복구 절차를 따른다.
+## Hold Verdict Idempotency
 
-SIGKILL·크래시 또는 정리·반납 실패로 리스가 만료되면, 다음 워커는 점유 트랜잭션에서 직전 claim에 기록된 **호스트 전체 활성 집합**과 현재 집합을 대조한다. 둘 다 확인되고 값이 바뀌었으면 이번 인계는 시도를 쓰지 않고 새 집합을 기록한다. 같은 집합에서 또 만료되거나 구판 행에 기록이 없으면 한 번 차감한다. 마지막 시도였다면 `dead(lease_expired)`다. 활성 집합 조회가 실패하면 아무것도 바꾸지 않고 재시도한다. 취소, 세대 교체, 옛 승인 무효화는 두 경우에 똑같이 적용한다.
+The store assigns a `hold_id` to every hold occurrence: per call for replies, single tools, and sensitive DMs; per unsettled step for multi-step tools; and a separate call-level ID when all steps are settled yet the final tool result is unknown (legacy step-only holds without a call-level verdict target also appear here).
 
-감사 기록에서 정상 종료 반납은 `run.release`의 `shutdown`으로, 활성 집합 교체로 시도를 쓰지 않은 만료 인계는 `run.reclaim`의 `set_replaced`로 확인한다.
+The Admin UI submits the `hold_id` selected during initial inspection. The store checks target, occurrence, operator, verdict, and evidence digest and commits transition + audit atomically. Replaying the same verdict on an earlier `hold_id` (e.g., after a resend also enters hold under a new `hold_id`) returns the already-applied result without touching the second hold. Reusing an old `hold_id` with a different operator, target, verdict, or evidence returns conflict. Sensitive DM verdicts never persist raw evidence or receipts.
 
-## 예시 — 일정 삭제 도중 워커가 종료된 경우
+## Gateway Handover Contract
 
-브로커는 삭제할 일정 ID와 호출 인자를 고정하고 승인받는다. 승인 소비·호출 시작·감사를 같은 트랜잭션에 기록한 뒤 MCP 서버를 시작한다. 서버가 원격 삭제를 마치고 결과를 돌려주면 호출과 영수증을 함께 완료한다. 호출 ID는 재시작 후에도 같다.
+- **Active-set fencing:** active-set revisions include both profiles and effective gateway identity/entrance mappings (changing even a CLI OS user produces a new set). Intake, approval decisions, reply `begin`, and admin verdicts verify the active set under the same DB lock as activation swaps: once a swap commits, stale entrances fail with `Stale`, while receipts for already-started sends remain accepted.
+- **Status lookup:** keyed by `(profile, binding, authenticated principal, request)`. Redelivered identical input on the current entrance reuses the original run; new intake also checks target profile revision.
+- **Sensitive DMs & `private_pass: true`:**
+  - Acquires a lease in the dedicated private ledger, verifies tool, input HMAC, lease, and active revision immediately before call, records start once, discards raw tool output/errors, and keeps only completed/passed/denied/held status. Tools requiring approvals or step callbacks cannot be wired here.
+  - A valid empty PASS allowed by `private_pass: true` commits alongside private-ledger closure and audit. If the process crashes before standard intake, recovery requires redelivery of the identical event with unchanged revision, trigger, and per-profile digest secret: matching per-profile HMAC over those plus mapped args, body, attachments, and event ID reuses the completed call and admits under `<request_id>:pass`. Rolling back to a legacy gateway holds pre-intake `passed_v2` until the new gateway is restored and the event is redelivered; legacy completions without a pass record remain private-consumed.
+  - Pre-start failure or proven non-send + exit releases the lease and withholds ACK so redelivery resumes on a new claim; completion must match start; unconfirmed sends or expired leases become `Held` even without redelivery; hold verdicts store no raw receipts or notes.
+- **Reply outbox & transport scoping:**
+  - Replies use a separate send generation: `outbox.claim` → post-eligibility check → `begin` commit → single send. Pre-`begin` expiry reclaims; post-`begin` uncertainty holds; `settle` commits receipt + audit. Send key `(profile, run, seq)` persists across worker restarts without re-querying the worker effect ledger.
+  - CLI and HTTP deliver via authenticated status lookup (no pull outbox rows; live CLI connections read the same committed result). Push intake pins the host-selected adapter ID (`reply_transport`) on the run (inherited by redeliveries and delegations), and reply rows carry destination `transport`. PostgreSQL filters `outbox.claim` by adapter `transport` and optional `(profile, binding)` before returning bodies; DM vs channel selects posting method within that adapter. Earlier `pending`/`sending` replies on the same `run` block later sequences regardless of transport. Gateway verifies binding, principal, and destination permissions under the current revision and passes that revision to `begin` (`Stale` on mismatch).
+- **Migration `0026` (`crates/bot-store/migrations/0026_reply_transport.sql`) & empty `transport` rules:**
+  - **Rollout & locking:** adds columns to `bot_runs` and `bot_outbox`, backfills rows, and rebuilds `bot_outbox_pending` non-concurrently (`ACCESS EXCLUSIVE` / write lock — benchmark on a production-sized clone; stop legacy writers/claimers, settle in-flight sends, migrate, then resume with the new gateway).
+  - **Legacy backfill & audit queries:** official legacy Slack origin conversations and approved explicit destinations backfill to `slack`; rows lacking proof remain `transport = ''` (excluded from auto-claim). Inspect remaining rows and affected schedules with:
+    - `SELECT profile, run, seq, state, reason FROM bot_outbox WHERE transport = '' AND state IN ('pending', 'sending', 'held')`
+    - `SELECT s.profile, s.id, s.origin_run, s.origin_kind FROM bot_user_schedules s JOIN bot_runs r ON (r.profile, r.id) = (s.profile, s.origin_run) WHERE s.state = 'active' AND s.origin_kind IN ('direct', 'channel') AND r.reply_transport IS NULL`
+    Custom fork adapters must be backfilled separately. Legacy empty-transport holds (`owner_lost`, etc.) cannot resend until `bot_outbox.transport` is filled; active user schedules from null-transport runs resume firing on the next sweep once `bot_runs.reply_transport` is populated.
+  - **Missing-transport guard:** legacy/unmapped push runs (`reply_transport IS NULL`) emitting replies or schedule-close notices do not fail completion/closure; instead they immediately open the reply as `state = 'held'`, `reason = 'missing_transport'` in `bot_holds` + audit (`outbox.held`). Firing a new user schedule (`Fire`) from a push origin run with `reply_transport IS NULL` returns `Invalid`. `not_executed` resend on `transport = ''` returns `Conflict` — populate `bot_outbox.transport` before resolving as not executed, or inspect `bot_outbox.body`, deliver manually, and close as handled.
+  - **Explicit-destination scope:** origin-bound schedule replies and close notices inherit the creating run's `transport`; explicit destinations are currently fixed to Slack channels (`slack`).
+- **HTTP response mode:** initial intake persists method, path, and response mode; `/_requests/{id}` renders in the original mode. Response mode is excluded from the retry hash; legacy HTTP requests without stored mode render as `accepted`.
+- **Reply payload & card rules:**
+  - Reply body is a JSON object with ≥1 of `text` (≤12,000 chars), `attachments` (≤8 files, ≤8 MiB total decoded, each `{name, type, data}`), or `approval` (`nonce`, `title`, `lines` ≤20).
+  - On push conversations (`direct`/`channel`), line-leading `<attachment name="attachment.md">...</attachment>` blocks in root agent answers split into `text` plus following `text/plain` `attachments` replies in the same commit (recording `truncated` if char/byte/reply caps are exceeded).
+  - `approval` is permitted only on broker-created cards committed with the approval ledger (rejected in `Finish.answers`). Oversized approval cards that would truncate details are withheld and link to the authenticated approval detail view instead. Clicking an approval button runs `Broker::decide` then refreshes the card from ledger state (refresh failure never re-executes the decision).
+- **Send failures & retries:** after `begin`, pre-write connection failures or receiver-guaranteed non-execution rejections (rate limits, auth-layer bot token rejection while rotating cached tokens) settle as `NotSent`. Token rejection evicts the cached token so the next attempt reloads credentials (repeated rejections obey the retry limit). Hidden gateway/HTTP retries are disabled. The store commits retry scheduling + audit only from matching send generation `sending`; next claim waits `max(backoff, Retry-After)` under a new generation with the same `(call, seq)` and marks terminal failure for operators once exhausted. Response loss, timeout, or partial attachment upload after writing the request is `held`.
+- **Approvals, revocations, & revision fences:**
+  - Condition changes on click mark only the current call's nonce `Superseded` with audit + wake in one commit (re-clicking wakes nothing). Post-approval revocation and `start` serialize in one ledger: revoke first → `Revoked`; consume first → revoke returns `Conflict`.
+  - Schedules and delegated children resolve their current approver from the root's recorded agent and trigger ID (schedules sharing a service principal follow their own approvers); missing cron, changed principal, or non-human approver denies approval-gated calls.
+  - Broker passes `StartCall.checked_revision` (active profile revision); the store serializes profile swaps against call start (`Stale` without consuming approval if profile changed/deactivated first; otherwise consumes approval + starts + audits atomically). `Outbox::begin` enforces the same fence.
+  - `memory.share` approval hashes canonical JSON `{"id": ..., "sha256": ...}` (`sha256` = lowercase hex SHA-256 of preview body UTF-8 bytes). The store locks that row, verifies owner and current digest (`Conflict` without consuming approval if modified), then commits consumption + profile visibility + completion + audit together. Replaying a completed call never re-publishes later edits; legacy ID-only pending approvals need a new card.
+  - `finish` accepts only the current owner and generation. A new owner seeing an old generation's `Started` recovers only with receiver proof + confirmed old runner exit (otherwise `Held`, preserving original owner, generation, and effect receipts). Operator notes alone never prove non-execution; result blocking cannot overwrite an uncertain write as denied.
+  - Audit entries append to one host-wide chain in the same commit as every state change and are verified sequentially by operators.
 
-- 서버를 시작한 뒤 결과가 없으면 이전 시도의 실제 전송 여부는 불명이다. 수신처가 보장하는 동일 멱등 키 또는 해당 요청의 영수증 조회로만 복구한다. 키 유효기간이 지났거나 증거가 없으면 held에 둔다.
-- 여러 번 쓰는 작업은 선택적 단계 원장을 사용한다. 파일 업로드가 확인됐고 알림만 불명이면 원래 파일 영수증을 보존하고 알림만 따로 판정한다. 확정된 단계가 하나라도 있고 도구의 최종 응답을 잃었으면 호출 전체가 보류된다. 같은 단계 키는 이전 영수증을 돌려주지만 다시 시작한 도구가 다른 단계 이름으로 같은 내용을 보낼 수 있다. 운영자가 옛 도구 종료와 호출 전체의 수신처 영수증을 확인하면 브로커는 도구를 다시 실행하지 않고 그 영수증을 결과로 반환한다. [도구 콜백](plugins.md)
-- 게이트웨이 회신도 같은 발송 규칙을 따른다. 관리자는 외부 영수증 또는 명백한 미실행 증거와 판정을 기록한다. 재개 전 옛 세대의 IPC와 egress를 닫고 실행 감독자가 이전 도구 프로세스 및 자식 종료를 확인한다. 종료 후 수신처의 미실행 증거도 확인한 경우에만 현재 권한·승인으로 같은 호출 ID를 재개한다. 호스트 단절 등으로 종료나 원격 결과가 불명이면 held를 유지한다.
+### OpenAI-Compatible Intake and Lookup
 
-PG 내구성, 검증된 백업과 지원 기간 이상의 중복 제거 기록 보존이 전제다. 장애조치 후에도 접수 손실 0을 약속하려면 동기 복제와 이전 primary 차단이 필요하다. 백업 복원 시 발송을 잠그고 수신처와 대조한다. 영수증도 멱등 키도 없는 수신처는 자동 완료와 중복 없는 전송을 동시에 보장할 수 없다.
+`ApiRuns::accept` verifies the active set and checks for an existing intake. For a new key, it acquires the entrance lock, re-checks, verifies profile revision and active-run capacity, and commits intake, run, and audit atomically.
 
+- **Key:** `(profile, entrance, authenticated principal, Idempotency-Key)` across bindings and models. Matching key + input digest + model attaches to the existing run (in-flight or terminal) with 0 new slots, runs, or audits; differing input or model returns `Conflict` without writing.
+- **Capacity:** active runs are root runs in ready, leased, waiting (approval, child, hold), or retry (delegated children share the root's slot). New intakes per `(profile, entrance)` serialize via `pg_advisory_xact_lock` to enforce `max_active_runs` (`1`–`256`). Full returns `Capacity`, stale revision returns `Stale` (nothing written). Already-committed retries attach without waiting on the entrance lock.
+- **Uncertain commit:** if the commit reply is lost, the server re-queries by key; if still unknown, it returns HTTP 422 `request_outcome_unknown` with the applied idempotency key so the caller can retry with the same key and body. SQLSTATEs classified as definite rollback: integrity violations (`23xxx`), `40001`, `40002`, and `40P01`.
+- **Lookup:** matches all four tuple fields and returns pinned model, binding, agent, revision, input digest, and state: in progress (`"Request is still in progress. Query again with the same Idempotency-Key and request."`), awaiting approval (`"Awaiting approval. Query again with the same Idempotency-Key and request."` — only when an actionable human approval exists on the root or a waiting descendant, and for Slack cards only after a confirmed `posted` receipt), held, approval blocked (`no_approver`, `approver_revoked`, `route_changed`, `approval_dm_unavailable` — read strictly from stored verdicts), final text, failed, or cancelled.
+- **Usage & truncation:** final text is the worker's own run text; host-truncated (>12,000 chars) replies record `truncated` in the finish commit. Token usage is saved in the same commit only on the first claim, with no delegated child created, and when every model request reported tokens (`claude-cli`: all requests report positive input+output summing to the CLI total; direct API `anthropic-api`/`openai-api`: every turn's upstream response reports summable usage) — otherwise left empty, never zero-filled. Direct API output limits fail with `output_limit` without partial text or truncated tool calls; `claude-cli` continuations store the final text and report `length` only when host-truncated. JSON returns HTTP 422 `run_failed`; open SSE ends with a `run_failed` error event ([OpenAI-compatible API](gateway.md#openai-compatible-api)).
+- **Isolation:** standard webhook/CLI intake and status cannot read or adopt OpenAI-entrance intake rows; colliding `(profile, binding, principal, request_id)` never creates a new run.
 
-## 보류 판정 재전송
+### Completed Call Redelivery
 
-저장소는 보류가 발생할 때마다 `hold_id`를 부여한다. 회신·단일 도구·민감 DM은 호출에, 다단계 도구는 미결 단계마다 ID가 있다. 모든 단계의 실행 여부를 안 뒤에도 최종 결과가 불명이면 호출에 별도 ID가 생긴다. 구판에서 단계 영수증만 남고 판정 대상이 없었던 호출도 같은 목록에 나타난다. 관리 화면은 첫 확인에서 선택한 발생 ID를 판정 요청에 보낸다. 저장소는 대상·발생·운영자·판정·증거 지문을 확인하고 전이와 감사를 함께 커밋한다.
+After checking current permissions, the broker looks up completed calls via `CallLedger::lookup`: normal tools match name + canonical args hash; completed `memory.share` matches name + stored receipt memory ID (later edits/deletions keep the receipt intact, while pre-completion edits abort approval and sharing). Both initial and redelivered results verify PG's active profile revision and current claim via `active_revision(attempt)` immediately before returning; on swap, cancel, lease expiry, or lookup error, the result is withheld while the confirmed receipt stays in the ledger.
 
-예를 들어 첫 발송의 미실행 판정이 커밋된 뒤 응답이 끊기고, 재발송도 보류될 수 있다. 첫 ID로 같은 판정을 다시 보내면 이미 적용한 결과만 반환한다. 두 번째 발송은 새 ID로 판정할 때까지 보류된다. 다른 운영자·대상·판정·증거로 이전 ID를 사용하면 충돌이다. 민감 DM의 증거·영수증 원문은 판정 이력에 남기지 않는다.
+## Chat-Created Schedules
 
-## 게이트웨이 인계 계약
+User schedules persist separately from static profile triggers. The host pins the authenticated human, agent, origin binding/conversation/thread, permission ceiling, and `private` flag (delegations and scheduled runs never escalate to service-account or approver privileges). Each firing checks current member, agent, and binding and admits with `ceiling ∩ current permissions`; policy edits also apply immediately before tool calls and replies. Explicit destinations require approval on creation (recipient + instruction) and separate approval on delivery (recipient + rendered content). Private memory visibility and approval routing follow the origin conversation.
 
-활성 집합 판본에는 프로필과 게이트웨이의 실효 신원·입구 매핑이 함께 들어간다. 예를 들어 CLI 계정의 OS 사용자만 바뀌어도 새 집합이다. 접수·승인 결정·회신 시작·관리 판정은 판본 교체와 같은 DB 잠금 아래 집합을 확인한다. 교체가 먼저 커밋되면 옛 입구는 `Stale`로 닫힌다. 교체 전에 시작한 전송의 영수증은 계속 받는다.
+- **Commit & sweep:** create/cancel commit atomically with call completion. The scheduler evaluates one-shot and cron occurrences by DB clock, committing `(profile, schedule_id, scheduled_utc)` run, cursor, and next due time together (cancel-first prevents new occurrences; admit-first stays trackable; concurrent schedulers converge to one run). Late occurrences catch up with static-cron DST and batch rules. Profile reactivation never deletes user schedules.
+- **Limits & `<quiet>`:** max **32** active schedules per `(profile, owner)`; max **8 KiB** UTF-8 instruction; automatic wake depth caps at **8** (delegation cannot reset depth); tool follow-up wakes commit atomically with parent tool receipts (redelivery creates once). A `quiet: true` schedule succeeding with no attachments and final text equal to `<quiet>` records the result and suppresses reply (normal reports, approvals, failures, and holds follow normal paths).
+- **Creation seal & redelivery:** creation cards and PG verify SHA-256 of canonical JSON (JCS) from `ScheduleSpec::seal_create()` covering raw instruction, `quiet` (default `false`), explicit destination, one-shot UTC milliseconds matching stored precision (e.g., `.250000001Z` → `.250Z`), or 5-field cron + resolved IANA timezone (defaulting to the pinned profile revision's timezone). Redelivery checks completed receipts before future-time checks: legacy completed calls return their receipt on matching permissions and digest, while incomplete calls with a mismatched legacy card require fresh approval.
 
-상태 조회 키는 profile·binding·인증 principal·request다. 현재 입구로 재전달된 동일 입력은 최초 실행을 재사용한다. 신규 접수는 대상 프로필의 판본도 대조한다.
+### Delegation Results and Schedule Publication
 
-민감 DM은 전용 원장의 리스를 잡고, 도구 전송 직전에 지정 도구·입력 HMAC·현재 리스·활성 판본을 확인해 시작을 한 번 기록한다. 도구 결과·오류 원문은 버리고 완료·넘김·거절·보류 판정만 남긴다. 승인이나 단계별 효과 콜백이 필요한 도구는 이 경로에 연결하지 않는다.
+Worker and MCP relay share `delegation_scopes` to check direct lineage, requester role, and agent ceiling across both revisions (intersection with run scope must contain `run`). The store creates the child and moves the parent to `waiting` after verifying active revision and current claim. Returning child completion re-checks original child, instruction, and that every granted scope remains allowed.
 
-선택한 `private_pass: true` 선언이 허용한 유효한 빈 PASS는 전용 원장의 종결·감사와 함께 기록한다. 그 뒤 일반 접수 전에 프로세스가 중단되면 판본·선택 트리거·프로필의 지문 비밀을 유지한 상태에서 동일 이벤트가 재전달돼야 복구된다. 프로필별 HMAC으로 이 값들과 매핑 인자·본문·첨부·이벤트 식별을 대조하면 기존 도구 실행을 재사용하고 원래 요청 ID에 `:pass`를 붙여 접수한다. 구판 게이트웨이로 롤백한 동안 접수 전의 `passed_v2`는 신판을 복원한 뒤 동일 이벤트를 다시 받아야 이어진다. 넘김 기록이 없는 구판의 완료는 비공개 소비로 처리한다.
+Regardless of which role publishes, active set, memory seeds, and static trigger changes commit together (closing removed profiles' static schedules at one DB timestamp while preserving prior interval cursors). Joining processes never rewrite static schedules.
 
-시작 전 실패를 확인했거나 실행기가 미전송과 종료를 입증하면 리스를 반납한다. 게이트웨이는 ACK를 보류하고 동일 입력의 재전달이 새 claim으로 같은 호출을 이어 간다. 완료는 시작 기록과 일치해야 한다. 미확인 전송이나 만료된 리스는 재전달 없이도 원장에 Held로 기록한다. 보류를 판정할 때도 민감한 영수증이나 설명 원문을 저장하지 않는다.
+### Explicit-Destination Scheduled Replies
 
-회신에는 별도 발송 세대를 쓴다. 게이트웨이가 outbox.claim으로 회신을 잡고 게시 자격을 검사한 begin 커밋 뒤 한 번 발송한다. begin 전 리스 만료는 재점유, begin 후 불명은 보류한다. settle이 영수증과 감사를 함께 저장한다. 워커 종료 뒤에도 같은 발송 키(profile·run·seq)가 유지되고, 게이트웨이가 worker용 효과 원장을 다시 호출할 필요가 없다.
+`ScheduleRoutes::resolve` pins host-registry-verified Slack team and channel into `conversation.id`, preserving `team_id/channel_id` and thread from creation card through delivery outbox. Checked at fire (scheduler), approval open/consume (broker), and send (gateway); missing or rebound routes prevent new runs and drafts. Both creation and delivery cards verify the host active set used to resolve the target inside the card-creation transaction (a committed swap prevents opening stale-route cards).
 
-CLI·HTTP 결과는 인증된 상태 조회로 전달한다. 결과 커밋 때 pull용 outbox 행은 만들지 않으며 살아 있는 CLI 연결은 같은 커밋 결과를 읽는다. 푸시 접수는 호스트가 정한 발송 어댑터 식별자를 실행에 고정하고 같은 요청의 재전달과 위임이 그 책임을 이어받는다. 회신 행은 실제 목적지의 식별자를 갖는다. PostgreSQL은 발송자의 어댑터 식별자와 선택한 프로필·바인딩 범위로 본문을 건네기 전에 점유를 가른다. DM·채널은 해당 어댑터 안에서 게시 방법을 정한다. 선행 회신의 대기·발송 상태는 어댑터와 관계없이 같은 실행의 뒤 순번을 막는다. 게이트웨이는 현재 판본의 바인딩·주체·대상 권한을 확인하고 begin에 그 판본을 넘긴다. 저장소는 활성 판본과 달라졌으면 Stale로 거절한다.
+- **Draft sealing:** the worker freezes resolved destination and final answers once; the creator must hold `schedule.create` at request time and currently. Explicit-destination sends always require owner approval (noting private-memory taint on the card if present), showing binding, conversation kind, recipient ID, thread, and all answers in send order. `DeliveryDraft::approval_json()` encodes `activation`, `target` (`null` thread if absent), and `answers` (`text/plain` attachments only with name, type, and full UTF-8 text — e.g., `data: "aGk="` renders as `text: "hi"`; unreadable or oversized bundles are rejected whole).
+- **Approval & enqueue:** the card's **`Delivery draft`** line carries this full JSON; `DeliveryDraft::sha256()` hashes those UTF-8 bytes. Worker-only tool `schedule.deliver` uses revision `builtin-1` and per-run call ID `schedule-deliver`. PG verifies active set and stored draft digest against the approval and commits consumption, destination outbox enqueue, and run completion atomically (0 sends on body change, rejection, expiry, or route drift). `DeliveryDraft::queued_receipt()` returns queued count (e.g. `{"queued":2}`, attachments included); on lost reply, the latest claim reads the original receipt bytes under the same active set while the gateway tracks actual delivery separately.
 
-`0026` 이행과 발송 키가 빈 회신의 처리는 아래 규칙을 따른다.
-
-- **적용 절차와 잠금**: `0026`은 `bot_runs`·`bot_outbox`에 열을 더하고 기존 행을 채운 뒤 `bot_outbox_pending` 인덱스를 동시 옵션 없이 다시 만든다. 대용량 DB에서는 이 구간 동안 `ACCESS EXCLUSIVE` 및 쓰기 잠금이 유지되므로 운영 규모 사본에서 소요 시간을 먼저 측정한다. 적용 전에 구판 쓰기·점유를 중단하고 이미 시작한 발송의 정산을 마친 뒤, 이행이 끝나면 새 게이트웨이로 발송을 재개한다.
-- **기존 자료 승계와 점검**: 공식 구판의 Slack 원래 대화와 승인된 명시 목적지만 `slack`으로 승계한다. 증거가 모자란 회신은 `bot_outbox.transport = ''`로 남아 자동 점유에서 제외되므로 이행 뒤 `SELECT profile, run, seq, state, reason FROM bot_outbox WHERE transport = '' AND state IN ('pending', 'sending', 'held')`로 남은 행을 확인한다. 개조판의 추가 발송 경로는 기존 자료로 확인한 뒤 별도로 매핑한다. 발송 키가 빈 구판 보류(`owner_lost` 등)도 `bot_outbox.transport`를 채우기 전에는 다시 보낼 수 없다. 발송 키가 없는 실행에서 만들어진 활성 사용자 예약은 `SELECT s.profile, s.id, s.origin_run, s.origin_kind FROM bot_user_schedules s JOIN bot_runs r ON (r.profile, r.id) = (s.profile, s.origin_run) WHERE s.state = 'active' AND s.origin_kind IN ('direct', 'channel') AND r.reply_transport IS NULL`로 찾고, 해당 `bot_runs.reply_transport`를 채우면 다음 점검 주기에 다시 발화한다.
-- **누락 키 보호**: 구판·미매핑 푸시 실행(`reply_transport IS NULL`)이 회신이나 예약 종료 안내를 남길 때는 실행 완료·예약 종료를 실패시키지 않고 회신을 `state = 'held'`, `reason = 'missing_transport'`로 즉시 열어 보류 목록(`bot_holds`)과 감사(`outbox.held`)에 남긴다. 같은 조건의 푸시 원천 실행에서 새 사용자 예약 발화(`Fire`)를 일으키는 것은 `Invalid`로 거절한다. `transport = ''`인 보류 회신은 `not_executed` 재전송을 `Conflict`로 거절하므로, DB에서 해당 회신 행의 `bot_outbox.transport`를 채운 뒤 «미실행»으로 판정해 다시 보내거나 `bot_outbox.body`를 확인해 직접 전달한 뒤 «처리됨»으로 닫는다.
-- **명시 목적지 범위**: 원래 대화로 가는 예약 답과 종료 안내는 예약을 만든 실행의 키를 쓰고, 명시 목적지는 현재 지원하는 Slack 채널 경로(`slack`)에 고정한다.
-
-HTTP는 최초 접수에 메서드·경로·응답 방식을 함께 저장한다. `/_requests/{id}`는 최초 방식으로 렌더링한다. 응답 방식은 재시도 해시에서 제외하고, 방식 기록이 없는 이전 HTTP 요청은 accepted 형식으로 조회한다.
-
-회신 본문은 text(최대 12,000자), attachments(최대 8개, 디코딩 합계 8 MiB, 각 name/type/data), approval(nonce/title/lines 최대 20줄) 중 하나 이상인 JSON 객체다. 푸시 대화(direct·channel)의 루트 에이전트 답에 줄 맨 앞 `<첨부 이름="…">…</첨부>` 블록이 있으면 워커가 본문(`text`)과 뒤따르는 `text/plain` 첨부 회신(`attachments`)으로 분리해 같은 커밋에 쌓고, 문자·바이트·회신 수 상한을 넘으면 `truncated`로 기록한다. approval은 브로커가 승인 원장과 같은 커밋에 생성한 카드만 허용한다. 일반 Finish.answers의 해당 필드는 거절한다. 상세 내용을 잘라야 하는 승인 카드는 발송하지 않고 인증된 상세 승인 화면으로 연결한다. 승인 버튼 클릭은 Broker::decide 뒤 원장 상태로 카드를 갱신한다. 카드 갱신 실패가 결정을 재실행하지 않는다.
-
-begin 뒤에도 이번 요청을 쓰기 전의 연결 실패나 수신처가 미실행을 보장하는 거절(속도 제한, 그리고 인증 단계에서 걸러진 봇 토큰 자체의 거절 — 토큰을 바꾸는 동안 이 프로세스가 기억한 옛 토큰이 받는다)은 NotSent로 정산한다. 토큰 거절은 기억한 토큰을 버려 다음 시도가 자격을 다시 읽고 확인한 새 토큰으로 보내게 하고, 같은 거절이 계속되면 위 재시도 한도를 따른다. 게이트웨이와 HTTP 클라이언트의 숨은 재전송은 끈다. 저장소는 같은 발송 세대의 sending에서만 재시도 예약과 감사를 함께 커밋한다. 다음 claim은 백오프와 Retry-After 중 더 긴 시간 이후 새 세대로 잡고 같은 call·seq를 사용한다. 재시도 한도에 도달하면 운영자에게 최종 실패를 표시한다. 요청을 쓴 뒤 응답 유실·시간 초과·일부 첨부 전송은 held다.
-
-승인 클릭에서 조건 변경을 확인하면 현재 호출의 nonce만 Superseded로 닫고 감사와 대기 해제를 함께 커밋한다. 같은 옛 버튼을 다시 눌러도 추가 실행을 깨우지 않는다. 승인 후 실행 전 철회와 start는 한 원장에서 직렬화한다. 먼저 철회하면 Revoked, 먼저 소비하면 철회는 Conflict다.
-
-예약과 위임받은 자식은 루트에 기록한 에이전트와 트리거 ID로 현재 승인자를 찾는다. 같은 서비스 주체를 쓰는 예약도 각각 자기 승인자를 따른다. 해당 cron이 사라지거나 주체가 바뀌거나 현재 승인자가 사람 멤버로 확인되지 않으면 승인이 필요한 호출을 거절한다.
-
-브로커는 권한을 검사한 활성 프로필 전체의 판본을 `StartCall.checked_revision`에 넣는다. 저장소는 프로필 교체와 호출 시작을 직렬화한다. 해당 프로필이 먼저 변경되거나 비활성화되면 `Stale`을 반환하고 승인은 소비하지 않는다. 호출이 먼저면 승인 소비·시작·감사를 한 번에 커밋한다. 회신 발송의 `Outbox::begin`도 같은 판본 검사를 쓴다.
-
-기억 공유 승인은 `{"id": …, "sha256": …}`의 정규 JSON을 SHA-256으로 해시한다. `sha256`은 미리보기 본문 UTF-8 바이트의 SHA-256을 소문자 16진수로 쓴 값이다. 저장소는 ID로 기억 한 건을 잠그고 소유자와 현재 지문을 대조한다. 본문이 바뀌면 승인을 소비하지 않고 `Conflict`를 반환한다. 일치하면 승인 소비·프로필 공개·호출 완료·감사를 함께 커밋한다. 같은 완료 호출을 다시 보내도 나중에 수정한 기억은 다시 공개되지 않는다. ID만 승인했던 미결 요청에는 새 카드가 필요하다.
-
-finish는 현재 세대·소유자만 쓸 수 있다. 옛 세대의 Started를 발견한 현재 소유자는 수신처 증거와 원래 실행기 종료를 확인해 복구한다. 확인할 수 없으면 Held다. 저장소는 보류 뒤에도 원래 owner·세대·효과 영수증을 보존한다. 단순 관리자 메모만으로 미실행을 확정하지 않는다. 결과 차단은 실제 전송이 불명인 쓰기를 최종 거절로 덮을 수 없다.
-
-감사 항목은 호스트 전체의 단일 체인에 상태 전이와 같은 커밋으로 추가한다. 운영자만 전체 체인을 순서대로 검증한다.
-
-### OpenAI 호환 요청의 접수와 재조회
-
-`ApiRuns::accept`는 활성 집합을 대조하고 기존 접수를 찾는다. 새 키면 입구 잠금을 얻은 뒤 같은 키를 다시 찾는다. 여전히 새 요청이면 프로필 판본과 실행 한도를 확인하고 접수 행·실행·감사를 한 번에 커밋한다.
-
-- **키.** (프로필, 입구, 인증 주체, 키)다. 바인딩·모델이 달라도 같은 키의 뜻은 하나다. 같은 키·같은 입력 지문·같은 모델이면 진행 중이든 끝났든 같은 run에 연결하고 새 슬롯·새 실행·새 감사를 만들지 않는다. 입력이나 모델이 다르면 `Conflict`이고 아무것도 남기지 않는다.
-- **한도.** 미완료 작업은 루트 run 중 준비·점유·대기(승인·자식·보류)·재시도 상태다(위임 자식은 루트와 한 작업이다). 같은 프로필·입구의 새 접수는 PostgreSQL 트랜잭션 잠금(`pg_advisory_xact_lock`)으로 직렬화해 `max_active_runs`(1~256)를 지킨다. 꽉 찼으면 `Capacity`, 활성 판본이 달라졌으면 `Stale`이며 둘 다 아무것도 남기지 않는다. 이미 커밋된 요청은 입구 잠금을 기다리지 않고 기존 실행에 연결된다.
-- **커밋 불명.** 커밋 응답을 잃으면 서버는 같은 키로 접수 기록을 확인한다. 여전히 확인할 수 없으면 HTTP 422 `request_outcome_unknown`과 적용된 멱등 키를 반환한다. 호출자는 같은 키와 본문으로 재조회할 수 있다. 저장소가 커밋 오류를 확정 롤백으로 분류하는 SQLSTATE는 무결성 위반(23xxx)과 `40001`·`40002`·`40P01`이다.
-- **조회.** `lookup`은 (프로필, 입구, 주체, 키)가 모두 맞는 접수만 돌려준다. 접수 때 고정한 모델·바인딩·에이전트·판본·입력 지문과 상태를 읽는다. 상태는 진행 중, 승인 대기(사람이 지금 결정할 수 있는 승인이 루트 또는 대기 중인 위임 자손에 있을 때만이고 Slack 카드는 게시 영수증이 확정된 뒤부터), 보류, 승인 막힘(`no_approver`·`approver_revoked`·`route_changed`·`approval_dm_unavailable`, 저장된 판정만 읽는다), 최종 글, 실패, 취소다.
-- **계량.** 최종 글은 worker가 저장한 본인 실행의 텍스트다. 호스트 상한(12,000자)에 잘린 답은 완료 커밋에 `truncated`로 함께 저장한다. 사용량은 첫 claim이고 실제로 자식을 만든 위임이 없을 때 모든 모델 요청이 토큰을 보고한 경우에만 같은 커밋에 저장한다(`claude-cli`는 모든 요청이 입력·출력을 양수로 보고하고 요청별 합이 CLI 총합과 같을 때, API 직접 호출(`anthropic-api`·`openai-api`)은 각 차례의 상류 응답이 모두 사용량을 보고해 합산할 수 있을 때). 한 요청이라도 보고가 없거나 끊겼거나 합이 어긋나면, 또 이어 받은 세션·다시 집은 실행·자식을 만든 위임이라 전체 합을 알 수 없으면 비워 둔다(0으로 채우지 않는다). API 직접 호출에서 출력 한도에 걸리면 부분 글·잘린 호출을 쓰지 않고 `output_limit`으로 실패하며, `claude-cli`가 출력 한도에서 이어 쓰기에 성공하면 마지막 글을 저장하고 호스트가 잘랐을 때만 `length`다. JSON 응답은 422 `run_failed`이고, 이미 열린 SSE에서는 `run_failed` 오류 이벤트로 끝난다. [HTTP 응답과 스트리밍](gateway.md#대기와-스트리밍)
-- **분리.** 일반 접수·상태 조회(webhook·CLI)는 이 입구의 접수 행을 읽거나 이어받지 못한다. 일반 접수가 같은 프로필·바인딩·주체·요청 ID의 OpenAI 접수 행과 충돌하면 새 실행을 만들지 않는다.
-
-### 완료 호출의 재전달
-
-브로커는 현재 권한을 확인한 뒤 `CallLedger::lookup`으로 해당 run의 호출을 읽을 수 있다. 일반 도구는 이름과 정규 인자 해시가 일치해야 기존 결과를 반환한다. `memory.share`의 승인 해시에는 승인 당시 본문이 들어가므로, 완료된 경우에는 이름과 저장한 영수증의 기억 ID를 대조한다. 같은 기억의 본문이 나중에 편집되거나 삭제돼도 영수증은 그대로다. 완료 전 편집은 승인과 공유를 중단한다.
-
-첫 결과와 재전달 결과 모두 반환 직전에 `active_revision(attempt)`로 PG의 활성 프로필 판본과 현재 claim을 함께 확인한다. 교체·취소·리스 만료·조회 실패 시 결과는 보내지 않고 확정된 영수증은 원장에 보존한다.
-
-## 대화에서 만든 예약
-
-사용자가 만든 예약은 프로필의 정적 트리거와 별도로 보존한다. 호스트는 현재 실행에서 인증된 사람·에이전트·원래 바인딩/대화/스레드·권한 상한·private 표지를 고정한다. 위임이나 예약 실행도 서비스 계정 또는 승인자의 권한으로 승격하지 않는다. 예약 시각마다 현재 멤버·에이전트·바인딩을 대조하고 당시 상한과 현재 권한의 교집합으로 접수한다. 변경된 정책은 실제 도구 호출과 회신 직전에도 적용한다. 다른 수신자를 지정하면 생성 시 수신자·지시문 승인이 필요하고, 실제 발송에는 수신자와 완성된 내용에 대한 별도 승인이 필요하다. 개인 기억의 가시성과 승인 경로는 원래 대화를 따른다.
-
-예약 생성·취소와 호출 완료를 같은 커밋에 기록한다. 스케줄러는 DB 시각으로 한 번 예약 또는 cron 발생을 계산한다. 각 (프로필, 예약 ID, 예정 UTC 시각)의 run·커서·다음 시각을 한 커밋에 쓴다. 취소가 먼저면 새 발생이 없고, 접수가 먼저면 이미 생긴 run을 추적할 수 있다. 두 스케줄러가 같은 건을 접수해도 run은 하나다. 지연된 발생은 정적 cron과 같은 DST 규칙과 배치 크기로 따라잡는다. 프로필 재활성화는 사용자 예약을 지우지 않는다.
-
-한 소유자는 프로필마다 활성 예약 32개까지 가질 수 있다. 지시문은 UTF-8 8 KiB까지다. 자동 실행의 예약 자손은 8단계에서 멈추며 위임으로 깊이를 초기화할 수 없다. 도구의 후속 예약은 부모 도구의 성공 영수증과 한 커밋이며 같은 논리 호출을 재전달해도 한 번만 생긴다. `quiet: true`인 예약이 첨부 없이 성공하고 최종 답 전체가 `<조용히>`이면 결과만 기록하고 회신은 보내지 않는다. 정상 보고·승인·실패·보류는 기존 경로로 처리한다.
-
-예약 생성 카드와 PG는 `ScheduleSpec::seal_create()`가 만든 정규 JSON(JCS)의 SHA-256을 대조한다. 지시문 원문·`quiet`(기본 `false`)·명시 목적지를 포함한다. 한 번 예약은 저장 시각과 같은 UTC 밀리초로 표시한다. 예를 들어 `.250000001Z`는 `.250Z`다. 반복 예약은 표준 다섯 칸 cron과 확정한 IANA 시간대 이름을 담는다. 시간대를 생략하면 요청이 고정한 프로필 판본의 시간대를 쓴다.
-
-재전달은 미래 시각 검사 전에 완료 영수증을 조회한다. 구판에서 끝난 호출도 현재 권한과 당시 입력 지문이 일치하면 기존 영수증을 반환한다. 미완료 호출의 구판 카드가 새 지문과 다르면 새 요청으로 승인을 받는다.
-
-### 위임 결과와 예약 게시
-
-워커와 MCP 중계는 같은 `delegation_scopes`로 두 판본의 직계 관계·요청자 역할·에이전트 상한을 검사한다. 실행 범위와의 교집합에 `run`이 있어야 한다. 저장소는 판정한 활성 판본과 현재 claim을 확인한 트랜잭션에서 자식을 만들고 부모를 대기로 옮긴다. 완료 결과를 돌려줄 때도 원래 자식·지시가 같아야 하며 그 자식에게 부여했던 모든 스코프가 여전히 허용돼야 한다.
-
-어느 역할이 게시하든 활성 집합·기억 시드·정적 트리거 변경을 한 커밋에 반영한다. DB 시각 하나를 경계로 삭제된 프로필의 정적 예약도 닫고 이전 구간의 커서를 보존한다. 활성 집합에 합류하는 프로세스는 정적 예약을 다시 쓰지 않는다.
-
-### 다른 수신자에게 보낼 예약 답
-
-`ScheduleRoutes::resolve`는 같은 프로필의 호스트 등록부에서 확인한 Slack 팀과 채널을 `conversation.id`에 고정한다. 생성 카드부터 발송 대기열까지 같은 `팀ID/채널ID`와 스레드를 보존한다. 스케줄러는 발화할 때, 브로커는 발송 승인을 열고 소비할 때 현재 등록부를 대조한다. 수신자가 빠지거나 바인딩이 다른 팀·채널을 가리키면 새 실행을 만들지 않고 이미 만든 초안도 보내지 않는다. 게이트웨이도 실제 발송 직전에 같은 경로인지 확인한다.
-
-명시 목적지 생성 카드와 발송 카드 모두, 수신자를 확인한 호스트 활성 집합을 카드 기록과 같은 트랜잭션에서 대조해야 한다. 집합 교체가 먼저 커밋되면 옛 경로의 카드는 열지 않는다.
-
-워커는 같은 프로필에서 확인한 목적지와 최종 답을 한 번 동결한다. 예약을 만든 사람에게 요청 당시와 현재 모두 `schedule.create` 권한이 있어야 한다. 다른 수신자로 보내는 전송은 항상 본인의 승인을 받으며, 개인 기억을 읽은 실행은 카드에 그 사유도 표시한다. 소유자가 보는 전송 카드에는 실제 바인딩·대화 종류·수신 ID·스레드와 모든 답을 발송 순서대로 표시한다.
-
-`DeliveryDraft::approval_json()`은 활성 집합 판본(`activation`), 수신 경로(`target`), 답 목록(`answers`)을 정규 JSON으로 만든다. 스레드가 없으면 `null`이다. 첨부는 `text/plain`만 지원하며 이름·종류·UTF-8 원문 전체를 담는다. 예를 들어 첨부의 `data: "aGk="`는 카드에서 `text: "hi"`로 보인다. 형식을 읽을 수 없거나 카드에 전부 담을 수 없으면 묶음 전체를 거절한다.
-
-승인 카드의 **전송 초안** 한 행은 이 JSON 전체다. `DeliveryDraft::sha256()`은 표시한 UTF-8 바이트의 SHA-256이다. 워커 전용 도구 `schedule.deliver`의 판본은 `builtin-1`, 호출 ID는 run당 하나인 `schedule-deliver`다. PG는 현재 활성 집합과 보관한 초안의 지문을 승인과 대조하고, 승인 소비·목적지 outbox 등록·run 완료를 한 커밋에 기록한다. 본문 변경·거절·만료·수신 경로 변경 시 발송은 0건이다.
-
-`DeliveryDraft::queued_receipt()`은 대기열에 등록한 답 수를 반환한다. 예를 들어 답 두 건의 영수증은 `{"queued":2}`다. 첨부는 해당 답에 포함된다. 응답이 유실되면 마지막 claim은 같은 활성 집합에서 처음 저장한 영수증 바이트를 그대로 읽는다. 게이트웨이는 실제 발송 확인을 따로 기록한다.
-
-| 목적지 outbox 등록 전 판정 | 이번 발생의 결과 |
+| Pre-enqueue verdict | Occurrence outcome |
 |---|---|
-| 소유자가 전송을 거절하거나 소비 전 승인을 철회함 | `delivery_rejected`. 목적지가 사라졌거나 등록부 조회가 실패해도 이미 기록된 본인 결정을 우선한다. 원래 대화 안내는 0건이다. |
-| 현재 등록부가 수신자를 거절하거나 바인딩이 다른 팀·채널로 바뀜 | `delivery_unrouted`. 목적지 발송 없이 이번 발생을 정상 완료하고 원래 대화에 “예약 수신 경로가 바뀌어 이번 답은 보내지 않았습니다.”를 한 번만 남긴다. |
-| 등록부를 일시적으로 확인할 수 없음 | 같은 발생을 재시도한다. 승인과 초안은 유지되고 목적지 발송과 미발송 안내는 모두 0건이다. |
+| Owner rejects or revokes before consumption | `delivery_rejected` (recorded owner decision wins even if target vanished or registry lookup fails; 0 origin notices). |
+| Current registry rejects target or binding points to another team/channel | `delivery_unrouted` (completes occurrence with 0 destination sends; posts once to origin conversation: `"Scheduled delivery route changed; this reply was not sent."`). |
+| Registry temporarily unavailable | Retries same occurrence (preserves approval and draft; 0 sends, 0 notices). |
 
-미발송을 종결할 때 저장소는 현재 claim 또는 해당 승인 카드·소유자를 확인하고, 같은 트랜잭션에서 소유자가 남긴 결정을 다시 읽어 최종 사유와 영수증을 기록한다. 재전달에는 이미 기록한 영수증을 반환한다. 대기열 등록과 경합하면 먼저 커밋한 결과 하나만 남는다. 원래 대화 안내에는 초안이나 목적지를 담지 않는다. 경로가 돌아와도 끝난 발생은 다시 보내지 않는다. 반복 예약은 다음 발화 시 등록부를 다시 확인해 경로가 여전히 없으면 닫는다.
+Unsent settlement verifies the current claim or approval card + owner, re-reads any owner decision in the same transaction, and commits final reason + receipt (redelivery returns the committed receipt; races with enqueue keep the first commit). Origin notices never include the draft or destination; restoring a route never resends a settled occurrence, and recurring schedules re-check on the next firing.
 
-### Slack 소유자에게 승인 카드를 전달할 때
+### Owner-DM Approval Card Delivery (Slack)
 
-Slack 채널에서 시작한 예약은 목적지를 등록할 때와 완성된 답을 보낼 때 각각 소유자의 1:1 DM에서 승인한다. 게이트웨이와 저장소는 같은 Slack 설치에서 카드 게시를 확인한 뒤 버튼을 활성화한다. 원래 채널·스레드에는 안내만 남고, 승인 뒤에는 등록된 목적지로 답을 보낸다. 로컬 운영자 토큰에는 Slack 소유자의 승인 권한이 없다.
+Channel-origin schedules approve destination creation and rendered replies via the owner's 1:1 DM. Gateway and store enable buttons only after confirming card posting on the same Slack installation; the origin channel/thread gets a short notice only. Local operator tokens carry no Slack-owner approval authority.
 
-1. **준비.** 저장소가 승인 식별자(`nonce`)와 카드 원문·해시, 소유자, 원래 프로필·바인딩·Slack 설치를 묶어 전달 작업 하나를 기록한다. 이 단계의 카드는 승인 목록에서 누르거나 API·버튼으로 결정할 수 없다. 게이트웨이는 DB 트랜잭션 밖에서 같은 설치로 소유자 한 명의 DM을 열고 전체 카드를 게시한다. DM 주소는 인증된 요청자와 지정 승인자가 같은 Slack 사용자인지 확인한 뒤 정한다. 채널의 스레드 번호는 DM에 복사하지 않는다.
-2. **게시 확인.** Slack이 확인한 정확한 DM 채널과 메시지 `ts`를 영수증으로 사용한다. 저장소는 영수증·현재 활성 집합·세대·카드 유효기간을 다시 대조한다. 유효하면 한 커밋에서 승인 카드를 열고 원래 채널·스레드에 보낼 **“DM으로 승인 요청을 보냈어요”** 한 줄만 등록한다. 공개 안내에는 초안·수신자·해시·버튼·승인 식별자가 없다. 확정 응답을 잃으면 같은 식별자로 기록을 다시 읽는다.
-3. **클릭.** Socket Mode의 인증된 수신 세션을 확인하고, 서명 방식의 입구에서는 기존 요청 서명과 시각을 검증한다. 브로커는 지정 승인자·인자·현재 정책을 다시 확인한다. 저장된 설치·팀·DM·메시지 `ts`·`nonce`와 클릭자가 일치하고 아직 유효한 카드만 결정할 수 있다. 원래 채널 바인딩만 있고 일반 DM 입력을 닫아 둔 설치에서도 이 버튼은 동작해야 한다. 메시지를 복사한 곳에서 누르거나 영수증 확정 전에 누른 버튼은 승인을 소비하지 않는다.
-4. **전달 실패.** 소유자 DM을 열 수 없거나 전체 카드를 게시할 수 없으면 `approval_dm_unavailable`로 해당 요청을 닫는다. 게시 도중 연결이 끊기거나 재기동되어 게시 결과를 확인할 수 없는 경우에도 버튼은 비활성으로 남고 카드를 자동 재게시하지 않는다. 저장소는 같은 커밋에서 대기를 풀고 결과와 감사를 한 번만 기록한다. 저장소 장애로 정산 응답만 잃은 경우에는 기존 커밋을 조회하고 같은 전달 건의 정산을 재시도한다. 생성 승인이었다면 예약이 생기지 않는다. 전송 승인이었다면 이번 발생만 미발송으로 완료하고 `{"status":"approval_dm_unavailable"}`를 저장한다. 반복 예약은 다음 발생을 유지한다. 두 경우 모두 성공 안내와 목적지 발송은 0건이고, 원래 채널·스레드에는 요청이 닫혔다는 안내 한 줄만 같은 커밋에서 남는다. 카드를 올릴 수 없다고 확정했으면 «승인 요청을 DM으로 보낼 수 없어 이번 요청을 닫았어요.», 올라갔는지 알 수 없으면 «승인 요청이 DM으로 전달됐는지 확인하지 못해 이번 요청을 닫았어요.»이며 초안·수신자·해시·승인 식별자는 넣지 않는다. 같은 정산을 다시 받아도 안내는 한 번이다. 알 수 없는 쪽에서 카드가 실제로 올라가 있었더라도 그 버튼은 결정되지 않고 «이미 닫힌 요청» 안내만 보인다.
+1. **Prepare:** store records one delivery job binding `nonce`, raw card + hash, owner, and origin profile/binding/installation (card is not clickable or decidable yet). Outside the DB transaction, the gateway confirms authenticated requester == designated approver Slack user, opens a 1:1 DM on that installation, and posts the full card (channel thread `ts` is not copied to DM).
+2. **Post confirmation:** Slack's confirmed DM channel + message `ts` form the receipt. The store re-verifies receipt, active set, generation, and expiry, then atomically opens the card and enqueues one origin channel/thread line: `"Approval request sent via DM"` (no draft, recipient, hash, buttons, or approval ID). Lost commit responses re-read by `nonce`.
+3. **Click:** verifies authenticated Socket Mode session (or request signature + timestamp on signed entrances). The broker re-checks approver, args, and current policy; only a click matching stored installation, team, DM, `ts`, `nonce`, and clicker on a live card can decide (must work even when only the channel binding is active and general DM ingress is disabled). Copied messages or pre-receipt clicks never consume approval.
+4. **Delivery failure:** inability to open the DM or post the full card closes the request as `approval_dm_unavailable`; mid-post disconnects or restarts (uncertain outcome) keep buttons disabled and never auto-repost. The store atomically wakes the run and commits result + audit once (lost settlement responses query the existing commit and retry settling the same job). Creation approvals create no schedule; delivery approvals complete that occurrence unsent with `{"status":"approval_dm_unavailable"}` (recurring schedules retain future occurrences). Both emit 0 success notices and 0 destination sends, posting one fixed origin channel/thread line in the same commit:
+   - Confirmed undeliverable: `"Approval request could not be sent via DM; request closed."`
+   - Uncertain post outcome: `"Could not confirm approval DM delivery; request closed."`
+   Neither carries draft, recipient, hash, or approval ID, and replay emits the notice once. If a card actually posted in the uncertain case, clicking it cannot decide and shows `"This request is already closed."`
 
-저장소의 전달 작업은 점유 후 90초 안에 시작하지 않으면 다른 전달자가 다시 점유하고, 시작한 뒤 120초 안에 정산이 없으면 게시 여부 불명으로 닫는다. 일시 실패(미전송이 확정된 연결 실패·속도 제한·봇 토큰 거절)는 수신처가 준 대기 시간(없으면 5초) 뒤 다시 점유하며 여섯 번째 점유에서도 올리지 못하면 DM 경로가 없는 것으로 닫는다. 카드가 만료·결정·무효가 됐거나 올리는 사이 활성 집합이 바뀌면 카드를 열지 않고 공개 안내도 남기지 않는다(이미 다른 사유로 끝난 요청이다). 닫을 때 승인은 시스템 거절로 남고(소유자의 결정이 아니다) 감사는 `approval.dm_unavailable` 한 건이다.
+- **Timeouts & retries:** claimed jobs unstarted after **90 s** reclaim; `sending` jobs unsettled after **120 s** close as uncertain. Confirmed transient failures (pre-send connect error, rate limit, bot token rejection) wait `max(Retry-After, 5 s)` and close as `approval_dm_unavailable` if the **6th** claim still fails. If the card expired, decided, invalidated, or the active set swapped mid-flight, it stays closed with no public notice. System closures record system rejection (not owner decision) and one `approval.dm_unavailable` audit.
+- **Attempt fencing:** `begin`, `settle`, and `block` match `(nonce, attempt)` against the locked job row so stale retries cannot disturb active sends; cleanup verifies attempt, state, and deadline under lock; human clicks still use `nonce` + post receipt (applies when all participating gateways enforce attempt matching). Already-opened cards and destination revocations still follow `delivery_rejected` / `delivery_unrouted`, and DM confirmation still requires a separate valid delivery approval before enqueueing to the destination outbox.
 
-발송 작업의 `begin`·`settle`·`block`은 승인 nonce와 점유 시도 번호를 잠근 작업 행과 대조한다. 뒤늦게 온 옛 시도의 미전송 정산이나 경로 판정은 현재 발송에 영향을 주지 않는다. 청소도 잠금 뒤 시도·상태·기한을 확인한다. 사람의 승인 버튼은 기존 nonce와 게시 영수증을 계속 쓴다. 이 보장은 발송에 참여하는 모든 게이트웨이가 시도 번호를 대조하는 판본일 때 적용된다.
+### OpenAI-Compatible General Tool Approvals
 
-이미 열린 카드의 소유자 결정과 실제 예약 목적지 철회에는 각각 기존 `delivery_rejected`와 `delivery_unrouted` 규칙을 적용한다. DM 게시 확인 후에도 목적지 outbox 등록에는 별도의 유효한 발송 승인이 필요하다.
+Approvals for intake-backed API roots (and delegated descendants) open under the host active-set lock: the broker's checked set must still be current at commit, or neither local card nor Slack delivery job is created (`Stale`); unpinned handles are rejected. The requester must match the intake-authenticated principal, and Slack DM cards require the delivery installation (`team`) recorded on the intake row (never broker-supplied).
 
-### OpenAI 호환 요청의 일반 도구 승인
+The delivery job pins origin binding, requester, revision, and `team` (HTTP origins queue no channel notice). Missing or mismatched receipt `team` yields no receipt, decision target, or awaiting-approval state and closes as `route_changed` (even the designated user's click cannot consume it). Gateways detecting route drift before posting call `block` with `no_approver`, `approver_revoked`, or `route_changed` (returned verbatim on lookup); late verdicts never close an already-open card.
 
-접수 원장이 보증한 API 루트(위임 자식이면 그 루트)의 승인은 모두 호스트 활성 집합 잠금 아래에서 연다. 브로커가 승인 경로를 확인한 집합이 같은 커밋에서도 현재 집합이어야 하고, 교체가 먼저 커밋됐으면 로컬 카드도 Slack 전달 작업도 만들지 않는다(`Stale`). 집합을 고정하지 않은 핸들은 거절한다. 요청자는 접수 행이 인증한 주체와 같아야 하고, Slack DM 카드에는 접수 때 확인한 전달 설치(team)가 있어야 한다. 브로커가 싣는 값이 아니라 접수 행이 근거다. 전달 작업은 원래 요청의 바인딩·요청자·판본·team을 고정해 두며, HTTP 출처에는 원래 채널이 없어 공개 안내를 쌓지 않는다. 게시 영수증의 team이 고정한 값과 다르거나 고정한 값이 없으면 영수증·결정 대상·«승인 대기»가 없고 작업은 `route_changed`로 닫힌다(지정된 사람의 클릭도 승인을 소비하지 않는다). 올리기 전에 승인 경로가 어긋난 것을 알게 된 게이트웨이는 `block`으로 작업과 승인을 닫고(`no_approver`·`approver_revoked`·`route_changed`) 조회는 그 낱말을 그대로 읽는다. 열린 카드를 늦은 판정으로 닫지 않는다.
+### User Schedule Closure Reasons and Sweep
 
-### 사용자 예약의 종료 사유
+The scheduler freezes sweep upper bound `end` on the first page and paginates (`after < pos <= end`). `end` is a key bound rather than a row snapshot: newly due rows past `end` wait for the next sweep, while rows between cursor and `end` may appear in the current sweep. Corrupt rows (unparseable cron or destination kind) count toward page size and are returned separately with ID, cursor, next-check time, and close reason (`due` is read-only).
 
-스케줄러는 첫 페이지에서 이번 조회의 끝을 고정하고 다음 페이지를 이어 읽는다. 끝은 키 상한일 뿐 행의 스냅숏이 아니다. 읽는 동안 새로 확인 대상이 된 예약은 끝보다 뒤에 놓이면 다음 바퀴에, 이어 읽을 자리와 끝 사이에 놓이면 이번 바퀴에도 보일 수 있다. 저장된 값(cron 또는 목적지 종류)을 읽을 수 없는 행도 페이지 크기에 포함하며, 저장소는 해당 ID·커서·다음 확인 시각·닫을 사유를 정상 예약과 구분해 반환한다. 이 조회는 읽기만 한다.
+- Corrupt rows are closed individually with the store's reason (`invalid_timing` or `invalid_destination`, using read cursor + current revision if active, or `profile_inactive` if inactive), interleaved in store order `(at, profile, id)` so later corrupt locks never delay earlier valid schedules. Store outages are never treated as corruption.
+- Each schedule gets at most one turn per sweep: recurring schedules whose next due time still falls inside the sweep wait for the next sweep, while a per-sweep "more due" flag carries across pages so the next sweep starts immediately without sleeping the default interval. Mid-page store errors skip only already-processed IDs and retry the failed and remaining schedules; sweep completion clears the seen set.
+- Closure commits one `schedule.close` audit atomically; stale cursors return `Stale` (no audit or notice); replaying the same closure preserves the initial reason.
 
-스케줄러는 손상된 행만 저장소가 알려 준 사유(`invalid_timing` 또는 `invalid_destination`)로 닫는다. 활성 프로필이면 읽은 커서와 현재 판본으로 닫고, 프로필이 활성이 아니면 `profile_inactive`로 닫는다. 같은 페이지의 정상 예약은 그대로 처리하고, 정상 행과 손상 행이 섞인 페이지는 저장소가 읽은 순서(다음 확인 시각, 프로필, ID) 그대로 처리한다. 뒤에 온 손상 행의 잠금을 기다리느라 앞의 정상 예약이 밀리지 않는다. 저장소 장애는 손상으로 다루지 않는다.
-
-한 바퀴 안에서는 예약마다 한 번씩만 차례를 준다. 발화로 다음 시각이 앞으로 움직인 반복 예약이 같은 바퀴의 뒤쪽 페이지에 다시 나타나도 건너뛰고, 남은 발생은 다음 바퀴에서 오래된 순서로 이어 간다. 발화하고도 확인할 발생이 남은 예약이 있었으면 «남음»을 바퀴 안에서 바로 쌓아 두었다가 바퀴가 끝나는 점검에서 한 번 전해, 기본 간격을 쉬지 않고 다음 바퀴를 시작한다. 쪽을 넘어도 이 표시는 사라지지 않는다. 저장소 오류로 페이지 중간에서 멈추면 처리를 마친 예약만 이번 바퀴에서 제외하고, 실패한 예약과 뒤의 예약은 다시 시도한다. 바퀴가 끝나면 이 기록을 비워 다음 바퀴에는 모든 예약이 다시 차례를 얻는다.
-
-저장소는 예약을 닫은 커밋에서 `schedule.close` 감사 한 건을 기록한다. 활성 예약의 커서가 이미 바뀌었으면 옛 종료 요청은 `Stale`로 끝나고 감사나 안내를 남기지 않는다. 같은 종료를 재전송해도 처음 기록한 사유가 유지된다.
-
-| 사유 | 조건 |
+| Reason | Condition |
 |---|---|
-| `profile_inactive` | 저장소가 해당 프로필의 비활성을 확인했다. |
-| `member_revoked` | 소유자가 현재 프로필의 멤버에서 빠졌다. |
-| `binding_revoked` | 원래 대화의 바인딩이 철회됐다. |
-| `agent_revoked` | 실행할 에이전트가 사라졌다. |
-| `permission_revoked` | 현재 권한과 생성 당시 상한의 교집합에 `run`이 없다. |
-| `invalid_timing` | 저장된 cron 또는 시간대를 해석할 수 없다. |
-| `invalid_destination` | 저장된 명시 목적지의 종류를 해석할 수 없다. 원래 대화 안내는 없다. |
-| `finished` | 다음 발생이 없다. 마지막 발생이 있으면 그 run을 접수하는 커밋에서 예약을 닫는다. run은 이후에 실행될 수 있다. |
-| `unrouted` | 현재 등록부에서 명시 목적지가 사라졌거나 다른 실제 수신자로 바뀌었다. |
+| `profile_inactive` | Store confirmed the profile is inactive. |
+| `member_revoked` | Owner is no longer a member of the current profile. |
+| `binding_revoked` | Origin conversation binding was revoked. |
+| `agent_revoked` | Target agent was removed. |
+| `permission_revoked` | `ceiling ∩ current permissions` no longer contains `run`. |
+| `invalid_timing` | Stored cron expression or timezone cannot be parsed. |
+| `invalid_destination` | Stored explicit destination kind cannot be parsed (no origin notice). |
+| `finished` | No further occurrences (closes in the same commit that admits the final occurrence's run). |
+| `unrouted` | Explicit destination vanished from the host registry or maps to a different target. |
 
-`unrouted`로 닫을 때만 원래 대화에 “예약 메시지의 목적지가 등록부에 없어 예약을 멈췄어요”를 남긴다. 종료·사유 감사·안내 한 건은 한 커밋이다. 같은 커서를 두 스케줄러가 처리하거나 응답이 유실돼도 안내는 한 번이다. 등록부를 일시적으로 읽지 못하면 커서를 유지하고 다시 확인한다.
+Only `unrouted` posts to the origin conversation: `"Scheduled message destination is no longer registered; schedule stopped."` Closure, audit, and single notice commit together (deduplicated across competing schedulers and lost replies); transient registry outages keep the cursor and retry.

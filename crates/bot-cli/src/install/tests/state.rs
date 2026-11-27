@@ -1,4 +1,3 @@
-//! 서버가 요구하는 상태(`state`): 기본 `ephemeral`은 판본이 그대로이고 `required`는 다른 설치 판본으로 자동 결합된다.
 use super::*;
 use bot_core::install::ServerState;
 
@@ -40,7 +39,7 @@ fn the_state_key_is_ephemeral_by_default_and_only_accepts_the_two_words() {
         let message = parsed(bad.clone()).unwrap_err();
         assert!(
             message.contains("servers.agenda.state") && message.contains("required"),
-            "{bad} → {message}"
+            "{bad} -> {message}"
         );
     }
 }
@@ -50,7 +49,6 @@ fn a_required_state_is_a_different_install_revision_and_ephemeral_keeps_the_old_
     let dir = tempfile::tempdir().unwrap();
     let spec = package(&dir.path().join("src"));
     let ephemeral = revision_of_spec(&spec);
-    // 명시한 ephemeral은 기본과 같은 판본이다(기존 판본이 바뀌지 않는다)
     assert_eq!(
         revision_of_spec(&with_state(&spec, ServerState::Ephemeral)),
         ephemeral
@@ -59,7 +57,6 @@ fn a_required_state_is_a_different_install_revision_and_ephemeral_keeps_the_old_
     let required = revision_of_spec(&required_spec);
     assert_ne!(required, ephemeral);
 
-    // 설치본도 판본마다 따로 만들어지고, 설치한 서버가 자기 상태 요구를 안다
     let base = dir.path().join("installs");
     let plain = install(&specs(spec.clone()), &base, uid()).unwrap();
     let stateful = install(&specs(required_spec.clone()), &base, uid()).unwrap();
@@ -79,10 +76,8 @@ fn a_required_state_is_a_different_install_revision_and_ephemeral_keeps_the_old_
 
 #[test]
 fn a_changed_state_changes_the_activation_authority_without_touching_anything_else() {
-    // 판본이 권한 지문에 들어가므로 상태 요구가 바뀌면 활성화 사건이 된다
     let dir = tempfile::tempdir().unwrap();
     let spec = package(&dir.path().join("src"));
-    // 권한 지문은 호스트 등록부가 아는 서버 별칭의 설치 판본을 묶는다
     let mut catalog = bot_profile::HostCatalog::default();
     catalog.servers.insert("agenda".to_owned());
     let fingerprint = |state| {

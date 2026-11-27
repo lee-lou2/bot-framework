@@ -1,5 +1,4 @@
-//! 가짜 Slack 서버(시험용): Web API(axum)와 Socket Mode 웹소켓. 받은 호출을 기록하고, 메서드별로 응답을 바꿔 끼울 수 있다.
-//! 실제 Slack에는 접속하지 않는다.
+//! Local fake Slack Web API and Socket Mode server for integration tests.
 use axum::{
     Router,
     body::Bytes,
@@ -22,25 +21,21 @@ use tokio::{net::TcpListener, sync::mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
-/// 기록된 Web API 호출 하나. 본문은 JSON이면 그대로, 폼이면 키-값 객체다. `reply`는 가짜 서버가 돌려준 JSON 응답이다(JSON이 아닌 응답은 `Null`).
 #[derive(Clone, Debug)]
 pub struct Call {
     pub method: String,
     pub token: String,
     pub body: Value,
     pub reply: Value,
-    /// 가짜 서버가 돌려준 HTTP 상태
     pub status: u16,
 }
 
 impl Call {
-    /// 성공(2xx이고 `ok: true`)으로 응답한 호출인가. 거절·오류 응답이나 JSON이 아닌 응답은 아니다.
     pub fn succeeded(&self) -> bool {
         (200..300).contains(&self.status) && self.reply["ok"] == true
     }
 
-    /// 운영 발송기가 이 `chat.postMessage` 호출을 «올라갔다»로 확정할 만한가: 정상 HTTP·`ok: true`·응답 채널이 요청 채널과 같음·유효한 `ts`·잘림 경고 없음.
-    /// 확정하면 `(채널, ts)`다. 승인 버튼을 찾는 도우미가 거절·어긋난·불명 응답의 카드를 고르지 않게 한다.
+    /// Returns confirmed `(channel, ts)` using the same post-confirmation rule as production delivery.
     pub fn posted(&self) -> Option<(String, String)> {
         if self.method != "chat.postMessage" || !self.succeeded() {
             return None;
@@ -49,7 +44,6 @@ impl Call {
     }
 }
 
-/// 메서드의 다음 응답을 이 값으로 바꾼다(한 번 쓰고 사라진다).
 pub enum Scripted {
     Json(Value),
     Raw {
@@ -57,7 +51,6 @@ pub enum Scripted {
         retry_after: Option<u64>,
         body: String,
     },
-    /// `delay`만큼 뜸을 들인 뒤 이 JSON으로 답한다(시간 초과 시험).
     Delayed {
         delay: std::time::Duration,
         body: Value,
@@ -72,7 +65,6 @@ enum Push {
 struct Shared {
     calls: Mutex<Vec<Call>>,
     scripts: Mutex<HashMap<String, VecDeque<Scripted>>>,
-    /// 거절하는 토큰 → 돌려줄 오류 코드(`invalid_auth` 등). 어떤 메서드든 이 토큰으로 오면 실행하지 않고 거절한다.
     revoked: Mutex<HashMap<String, String>>,
     uploads: Mutex<Vec<Vec<u8>>>,
     acks: Mutex<Vec<String>>,
@@ -81,7 +73,6 @@ struct Shared {
     hello_app: Mutex<Option<String>>,
     team: Mutex<String>,
     bot_user: Mutex<String>,
-    /// 사용자 ID → `users.info`의 `user` 객체에 덧씌울 필드(시험이 «봇이다»·«비활성이다»를 정한다)
     users: Mutex<HashMap<String, Value>>,
     counter: AtomicU64,
     base: Mutex<String>,
@@ -149,7 +140,6 @@ async fn api(
         .unwrap_or_default()
         .to_owned();
     let parsed = parse_body(&headers, &body);
-    // 거절된 토큰은 실제 Slack처럼 인증 단계에서 막는다(대본·기본 응답까지 가지 않는다)
     let refused = shared.revoked.lock().unwrap().get(&token).cloned();
     let scripted = match refused {
         Some(error) => Some(Scripted::Json(json!({"ok": false, "error": error}))),
@@ -160,7 +150,6 @@ async fn api(
             .get_mut(&method)
             .and_then(VecDeque::pop_front),
     };
-    // 응답을 먼저 정하고 기록한다(기록에 응답이 함께 남는다). 기록은 응답을 내보내기 전에 끝난다.
     let (response, reply, status) = match scripted {
         Some(Scripted::Json(value)) => (axum::Json(value.clone()).into_response(), value, 200),
         Some(Scripted::Delayed { delay, body }) => {
@@ -204,8 +193,7 @@ fn default_reply(shared: &Shared, method: &str, request: &Value) -> Value {
         }
         "auth.test" => json!({"ok": true, "user_id": shared.bot_user.lock().unwrap().clone(),
             "team_id": shared.team.lock().unwrap().clone()}),
-        // 실제 Slack처럼 게시된 채널을 되돌려 준다(영수증은 응답이 말한 곳으로 확인한다)
-        // 사용자 `U1`의 1:1 DM은 `D1`이다(시험이 쓰는 대응: 첫 글자만 `D`로 바꾼다)
+        // Maps user `U...` to deterministic DM channel `D...` for tests.
         "conversations.open" => match request["users"].as_str().filter(|users| users.len() > 1) {
             Some(users) => json!({"ok": true, "channel": {"id": format!("D{}", &users[1..])}}),
             None => json!({"ok": false, "error": "users_list_not_supplied"}),
@@ -214,7 +202,6 @@ fn default_reply(shared: &Shared, method: &str, request: &Value) -> Value {
             json!({"ok": true, "channel": request["channel"],
             "ts": format!("1700000000.{n:06}")})
         }
-        // 기본은 활성 사람 계정이다. 시험이 `set_user`로 필드를 덧씌운다(봇·비활성·모양이 이상한 응답)
         "users.info" => {
             let id = request["user"].as_str().unwrap_or_default();
             let mut user = json!({"id": id, "team_id": shared.team.lock().unwrap().clone(),
@@ -226,7 +213,6 @@ fn default_reply(shared: &Shared, method: &str, request: &Value) -> Value {
             }
             json!({"ok": true, "user": user})
         }
-        // 업로드 완료는 올라간 파일들을 되돌려 준다
         "files.completeUploadExternal" => {
             let files: Vec<Value> = request["files"]
                 .as_str()
@@ -353,7 +339,6 @@ impl FakeSlack {
         self.shared.calls.lock().unwrap().clone()
     }
 
-    /// 이 메서드의 다음 응답을 바꿔 끼운다(여러 번 부르면 차례로 쓴다).
     pub fn script(&self, method: &str, reply: Scripted) {
         self.shared
             .scripts
@@ -364,7 +349,6 @@ impl FakeSlack {
             .push_back(reply);
     }
 
-    /// 이 토큰으로 오는 모든 호출을 `error`(예: `invalid_auth`·`token_revoked`·`token_expired`)로 거절한다 — 보관소에서 토큰을 바꿨는데 옛 토큰이 아직 쓰이는 상황.
     pub fn revoke(&self, token: &str, error: &str) {
         self.shared
             .revoked
@@ -389,7 +373,6 @@ impl FakeSlack {
         *self.shared.hello_app.lock().unwrap() = app.map(str::to_owned);
     }
 
-    /// 이 사용자의 `users.info` 응답에 덧씌울 필드를 정한다(다시 부르면 바꾼다). 예: `{"is_bot": true}`·`{"deleted": true}`.
     pub fn set_user(&self, id: &str, fields: Value) {
         self.shared
             .users
@@ -403,7 +386,6 @@ impl FakeSlack {
         *self.shared.bot_user.lock().unwrap() = bot_user.to_owned();
     }
 
-    /// 조건이 참이 될 때까지(최대 5초) 기다린다.
     pub async fn until(&self, mut condition: impl FnMut(&Self) -> bool) -> bool {
         for _ in 0..500 {
             if condition(self) {
@@ -414,21 +396,17 @@ impl FakeSlack {
         condition(self)
     }
 
-    /// 소켓이 연결될 때까지 기다린다.
     pub async fn connected(&self) -> bool {
         self.until(|s| s.shared.connection.lock().unwrap().is_some())
             .await
     }
 
-    /// 연결된 소켓으로 프레임을 보낸다.
     pub async fn push(&self, frame: Value) {
-        assert!(self.connected().await, "소켓이 연결되지 않았어요");
+        assert!(self.connected().await, "socket did not connect");
         let sender = self.shared.connection.lock().unwrap().clone().unwrap();
-        // 연결이 이미 닫혔으면 프레임은 사라진다(시험이 그 결과를 본다)
         let _ = sender.send(Push::Frame(frame.to_string()));
     }
 
-    /// 서버 쪽에서 연결을 닫는다(재접속 시험).
     pub fn drop_connection(&self) {
         if let Some(sender) = self.shared.connection.lock().unwrap().take() {
             let _ = sender.send(Push::Close);
@@ -436,7 +414,6 @@ impl FakeSlack {
     }
 }
 
-/// `events_api` 프레임(채널 멘션)
 pub fn mention_frame(
     envelope: &str,
     team: &str,
@@ -450,7 +427,6 @@ pub fn mention_frame(
         "event": {"type": "app_mention", "user": user, "text": text, "ts": ts, "channel": channel}}})
 }
 
-/// `events_api` 프레임(DM)
 pub fn dm_frame(
     envelope: &str,
     team: &str,
@@ -464,7 +440,6 @@ pub fn dm_frame(
         "event": {"type": "message", "channel_type": "im", "user": user, "text": text, "ts": ts, "channel": channel}}})
 }
 
-/// `interactive` 프레임(버튼 클릭)
 pub fn button_frame(
     envelope: &str,
     team: &str,
@@ -479,7 +454,6 @@ pub fn button_frame(
         "message": {"ts": message_ts}, "actions": [{"action_id": action, "value": value}]}})
 }
 
-/// `events_api` 프레임(채널 글: `message.channels`). `thread_ts`가 있으면 스레드 안의 글이다.
 pub fn post_frame(
     envelope: &str,
     (team, channel): (&str, &str),
@@ -497,7 +471,6 @@ pub fn post_frame(
         "team_id": team, "event_id": format!("Ev-{envelope}"), "event": event}})
 }
 
-/// `events_api` 프레임(채널 글에 단 반응: `reaction_added`)
 pub fn reaction_frame(
     envelope: &str,
     (team, channel): (&str, &str),

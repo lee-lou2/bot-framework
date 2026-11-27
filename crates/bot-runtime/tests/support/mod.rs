@@ -1,6 +1,5 @@
-//! 통합 시험 도구: 실제 PG 저장소(시험 전용 스키마)와 실제 BrokerService(가짜 실행기) 위에서 워커·스케줄러를 돌린다.
-//! DB는 팀 시험 서버(`BOT_TEST_DATABASE_URL`)만 쓰고, 없으면 시험을 건너뛴다(`BOT_TEST_REQUIRE_DB=1`이면 실패).
-//! 시험마다 `runtime_pg_<pid>_<번호>` 스키마를 만들고 끝나면(패닉 포함) 자기 것만 지운다.
+//! Shared PostgreSQL + BrokerService integration test harness for `bot-runtime`.
+//! Isolates each test in its own `runtime_pg_<pid>_<n>` schema and drops it on `Drop`.
 #![allow(dead_code)]
 
 pub mod api;
@@ -40,7 +39,7 @@ use std::{
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
 pub const OWNER: &str = "local:owner";
-pub const EVENTS: &str = r#"{"events":[{"id":"e1","title":"산책"}]}"#;
+pub const EVENTS: &str = r#"{"events":[{"id":"e1","title":"Walk"}]}"#;
 
 pub struct Pg {
     pub store: Arc<Store>,
@@ -104,7 +103,6 @@ impl Pg {
         Some(Pg { store, schema, url })
     }
 
-    /// 같은 스키마를 다른 소유자 이름으로 여는 저장소(두 번째 워커·스케줄러).
     pub async fn peer(&self, worker: &str) -> Arc<Store> {
         connect(&self.url, &self.schema, worker).await
     }
@@ -131,8 +129,6 @@ impl Pg {
         .await
     }
 
-    /// run의 상태가 `expected`인지 확인한다. 다르면 그 시점의 run 행(대기 종류·시도·세대·claim·리스·현재 시각)을 메시지에 담아 원인을 가린다
-    /// (일시적인 어긋남이 한 번 나도 어느 경로였는지 남도록).
     pub async fn assert_state(&self, run: &RunId, expected: &str) {
         let row: (String, Option<String>, i32, i64, i64, Option<i64>, i64) = sqlx::query_as(&format!(
             "select state, wait_kind, attempts, generation, claim_epoch, lease_until_ms, bot_now_ms() from bot_runs where id = '{}'",
@@ -150,7 +146,7 @@ impl Pg {
 }
 
 impl Drop for Pg {
-    /// 이 시험의 연결만 끊고 자기 스키마를 지운다. 풀을 닫지 않는다(같은 런타임을 막지 않으려고).
+    /// Terminates this test's schema connections and drops the schema on a dedicated thread to avoid blocking the runtime.
     fn drop(&mut self) {
         let (url, schema) = (self.url.clone(), self.schema.clone());
         let cleanup = std::thread::spawn(move || {
@@ -179,18 +175,16 @@ fn set(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// 시험용 프로필 판본 r1: 에이전트 main(스킬 agenda: list·delete, 알림 notify.send)과 자식 main/research, 소유자와 서비스 주체.
 pub fn profile() -> Arc<Snapshot> {
     profile_at("r1", false)
 }
 
-/// 같은 프로필의 다음 판본 r2: r1에 도구 `agenda.extra`가 더해졌다(r1에 고정된 실행에는 없는 도구다).
+/// Revision r2 adds `agenda.extra`, absent from runs pinned to r1.
 pub fn profile_next() -> Arc<Snapshot> {
     profile_at("r2", true)
 }
 
 fn profile_at(revision: &str, extra: bool) -> Arc<Snapshot> {
-    // 일정 이동 도구는 고정된 입력 스키마가 있다: 이벤트 ID 하나(소문자·숫자·`-`)만, 다른 필드는 받지 않는다
     let mut moved = tool(Risk::Read, &["calendar.read"]);
     moved.input = JsonPayload(
         r#"{"type":"object","required":["event"],"properties":{"event":{"type":"string","pattern":"^[a-z0-9-]+$"}},"additionalProperties":false}"#.into(),
@@ -225,17 +219,14 @@ pub struct World {
     pub spans: Arc<RecordingTracer>,
 }
 
-/// PG·활성 집합(personal=r1)·브로커를 갖춘 세계. DB가 없으면 `None`(시험 건너뜀).
 pub async fn world() -> Option<World> {
     world_with(Arc::new(FakeSealer)).await
 }
 
-/// `world`와 같되 인자 봉인기를 고른다(실제 스키마 검증을 보려면 `JcsSealer`).
 pub async fn world_with(sealer: Arc<dyn bot_broker::ports::Sealer>) -> Option<World> {
     world_with_routes(sealer, None).await
 }
 
-/// 명시 목적지 예약을 쓰는 호스트는 운영 조립과 같이 같은 활성 집합에 고정한 저장소와 등록부를 준다.
 pub async fn world_with_routes(
     sealer: Arc<dyn bot_broker::ports::Sealer>,
     routes: Option<Arc<dyn bot_core::schedule::ScheduleRoutes>>,
@@ -294,7 +285,7 @@ pub fn config() -> WorkerConfig {
         concurrency: 2,
         poll: Duration::from_millis(10),
         heartbeat: Duration::from_millis(40),
-        // 다른 시험·빌드가 같은 DB와 CPU를 쓰는 동안에도 하트비트 몇 번 늦었다고 리스를 잃은 것으로 보지 않는다
+        // Tolerate brief CPU/DB contention across parallel tests without losing leases.
         heartbeat_misses: 12,
         grace: Duration::from_secs(1),
         ..WorkerConfig::default()
@@ -302,7 +293,6 @@ pub fn config() -> WorkerConfig {
 }
 
 impl World {
-    /// 지정한 저장소 핸들(워커 이름)과 모델 구성으로 워커를 만든다.
     pub fn worker(&self, store: &Arc<Store>, models: Arc<dyn Models>, cfg: WorkerConfig) -> Worker {
         Worker::new(
             Deps {
@@ -321,21 +311,19 @@ impl World {
         )
     }
 
-    /// CLI 대화로 접수한다(요청자 소유자·승인자 소유자·대상 main).
     pub async fn accept(&self, request: &str, text: &str) -> RunId {
         self.pg
             .store
             .accept(command(request, text))
             .await
-            .expect("접수")
+            .expect("accept")
     }
 
-    /// Slack DM(push) 대화로 접수한다(바인딩 `desk`·발송자 키 `slack`).
     pub async fn accept_slack_dm(&self, request: &str, text: &str) -> RunId {
         let mut cmd = command(request, text);
         cmd.reply_transport = Some(PushTransportId::SLACK);
         cmd.event.conversation.kind = ConversationKind::Direct;
-        self.pg.store.accept(cmd).await.expect("접수")
+        self.pg.store.accept(cmd).await.expect("accept")
     }
 
     pub async fn status(&self, request: &str) -> bot_core::intake::RequestState {
@@ -344,7 +332,7 @@ impl World {
             .status(key(request))
             .await
             .unwrap()
-            .expect("접수한 요청")
+            .expect("accepted request")
     }
 }
 
@@ -384,7 +372,6 @@ pub fn command(request: &str, text: &str) -> Accept {
     }
 }
 
-/// 조건이 될 때까지 기다린다(최대 10초).
 pub async fn until(what: &str, mut ready: impl AsyncFnMut() -> bool) {
     let started = std::time::Instant::now();
     while !ready().await {

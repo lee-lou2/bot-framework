@@ -25,7 +25,7 @@ async fn redelivery_keeps_the_original_transport() {
     );
     let ctx = runs(&db).claim().await.unwrap().unwrap();
     assert_eq!(first, ctx.attempt.run);
-    runs(&db).finish(ctx.attempt, done("답")).await.unwrap();
+    runs(&db).finish(ctx.attempt, done("reply")).await.unwrap();
     assert!(
         ob(&db)
             .claim(&DeliveryScope::all(other), 1)
@@ -70,7 +70,6 @@ async fn a_later_reply_cannot_pass_an_earlier_reply_owned_by_another_transport()
         return;
     };
     two_replies(&db).await;
-    // 같은 실행에서 먼저 원래 대화로, 나중에 별도 목적지로 보내는 순서다.
     db.sql("update bot_outbox set transport = 'test-push' where seq = 1")
         .await;
     let other = DeliveryScope::all(PushTransportId::new("test-push").unwrap());
@@ -122,7 +121,7 @@ async fn upgrade_preserves_all_legacy_delivery_states_and_isolates_unclassified_
     sqlx::query(
         "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, body,
             state, generation, attempts, not_before_ms, lease_until_ms, receipt, reason)
-         select 'personal', $1, n, 'legacy:' || n, 'desk', 'slack:home/U1', 'direct', 'D1', '{\"text\":\"원문\"}',
+         select 'personal', $1, n, 'legacy:' || n, 'desk', 'slack:home/U1', 'direct', 'D1', '{\"text\":\"original\"}',
                 state, n + 7, n, 12, case when state = 'sending' then 1900000000000 end,
                 case when state = 'confirmed' then 'kept-receipt' end,
                 case when state = 'held' then 'owner_lost' end
@@ -160,7 +159,7 @@ async fn upgrade_preserves_all_legacy_delivery_states_and_isolates_unclassified_
         (item.key.run, item.key.generation),
         (slack.clone(), Generation(9))
     );
-    assert_eq!(item.body.0, r#"{"text":"원문"}"#);
+    assert_eq!(item.body.0, r#"{"text":"original"}"#);
     assert!(ob(&db).claim(&SLACK, 10).await.unwrap().is_empty());
     assert_eq!(runs(&db).accept(original).await.unwrap(), slack);
     assert!(matches!(PushTransportId::new(""), Err(Error::Invalid)));
@@ -184,7 +183,7 @@ async fn channel_child(db: &TestDb, transport: PushTransportId) -> RunContext {
             parent,
             step: "child".into(),
             child: AgentId("main/child".into()),
-            instruction: "확인".into(),
+            instruction: "check".into(),
             scopes: scopes(&["run"]),
             checked_revision: rev("r1"),
         })
@@ -284,7 +283,7 @@ async fn missing_transport_reply_is_held_with_open_hold_and_does_not_block_later
     let run = runs(&db).accept(req).await.unwrap();
     let ctx = runs(&db).claim().await.unwrap().unwrap();
     assert_eq!(ctx.attempt.run, run);
-    // 구판 미매핑 푸시 실행(reply_transport IS NULL)을 재현한다.
+    // Reproduce a legacy push run with `reply_transport IS NULL`.
     sqlx::query(
         "update bot_runs set reply_transport = null where profile = 'personal' and id = $1",
     )
@@ -293,9 +292,9 @@ async fn missing_transport_reply_is_held_with_open_hold_and_does_not_block_later
     .await
     .unwrap();
 
-    // 실행 완료가 실패해 큐가 멈추지 않고, 회신은 pending 대신 즉시 held로 열린다.
+    // Run completion succeeds and records the reply directly as `held` instead of failing the queue.
     assert_eq!(
-        runs(&db).finish(ctx.attempt, done("답")).await.unwrap(),
+        runs(&db).finish(ctx.attempt, done("reply")).await.unwrap(),
         Completion::Succeeded
     );
     assert_eq!(state_of_run(&db, &run).await, "succeeded");
@@ -316,7 +315,6 @@ async fn missing_transport_reply_is_held_with_open_hold_and_does_not_block_later
     );
     assert!(ob(&db).claim(&SLACK, 10).await.unwrap().is_empty());
 
-    // 운영자 보류 목록에 열린 hold_id와 함께 보이고 감사 로그도 남는다.
     let holds = AdminRead::holds(
         &db.store,
         &crate::support::admin::operator(),
@@ -337,10 +335,10 @@ async fn missing_transport_reply_is_held_with_open_hold_and_does_not_block_later
         1
     );
 
-    // 같은 run의 뒤 순번 정상 회신(seq = 1)을 앞선 held 행이 HOL-블록하지 않는다.
+    // An earlier `held` row must not head-of-line block a later valid reply (`seq = 1`) for the same run.
     sqlx::query(
         "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, body, transport)
-         values ('personal', $1, 1, 'reply:' || $1 || ':1', 'desk', 'slack:home/U1', 'direct', 'D1', '{\"text\":\"뒤\"}', 'slack')",
+         values ('personal', $1, 1, 'reply:' || $1 || ':1', 'desk', 'slack:home/U1', 'direct', 'D1', '{\"text\":\"later\"}', 'slack')",
     )
     .bind(&run.0)
     .execute(db.store.pool())
@@ -376,7 +374,7 @@ async fn resolve_reply_refuses_not_executed_for_empty_transport_but_allows_confi
     .execute(db.store.pool())
     .await
     .unwrap();
-    runs(&db).finish(ctx.attempt, done("답")).await.unwrap();
+    runs(&db).finish(ctx.attempt, done("reply")).await.unwrap();
 
     let view = AdminRead::holds(
         &db.store,
@@ -391,17 +389,17 @@ async fn resolve_reply_refuses_not_executed_for_empty_transport_but_allows_confi
         run: view.run.clone(),
         call: view.call,
         effect: None,
-        hold_id: view.hold_id.expect("열린 보류 ID"),
+        hold_id: view.hold_id.expect("open hold ID"),
     };
     let actor = PrincipalId("local:operator".into());
-    // transport = ''인 회신을 NotExecuted로 pending 되돌리려는 시도는 거절하고 보류를 유지한다.
+    // Re-queueing an empty-transport reply via `NotExecuted` is refused to avoid an unsendable row.
     assert!(matches!(
         AdminAct::resolve_hold(
             &db.store,
             actor.clone(),
             hold.clone(),
             HoldVerdict::NotExecuted {
-                evidence: "미발송 확인".into(),
+                evidence: "confirmed unsent".into(),
             },
         )
         .await,
@@ -418,7 +416,6 @@ async fn resolve_reply_refuses_not_executed_for_empty_transport_but_allows_confi
             .await,
         0
     );
-    // 수동 확인(Confirmed)은 정상적으로 닫는다.
     assert_eq!(
         AdminAct::resolve_hold(
             &db.store,

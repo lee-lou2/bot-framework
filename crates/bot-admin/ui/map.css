@@ -1,4 +1,4 @@
-/* 구조 지도: 캔버스(카메라), 에이전트 카드·칩, 위임 선, 떠 있는 도구 줄·독·상세 패널. 움직임은 transform·opacity만. */
+/* Structure map styles: canvas, cards, chips, edges, toolbar, dock, and detail panel. */
 .view-map { position: relative; flex: 1; min-height: 0; padding: var(--s3); }
 .viewport { position: absolute; inset: var(--s3); overflow: hidden; overflow: clip; border: 1px solid var(--line); border-radius: var(--r-lg); background-color: var(--canvas); background-image: radial-gradient(var(--dot) 1px, transparent 1.3px); background-size: 24px 24px; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
 .viewport.dragging { cursor: grabbing; }
@@ -51,7 +51,6 @@ span.plabel-btn { cursor: default; }
 .chip.is-selected .ic { color: var(--accent); }
 .chip.is-dim { opacity: 0.38; }
 
-/* 떠 있는 도구 줄: 검색·범례(= 필터)·전체 보기 */
 .mapbar { position: absolute; z-index: 5; left: var(--s5); right: var(--s5); top: var(--s5); display: flex; align-items: center; flex-wrap: wrap; gap: var(--s3); pointer-events: none; }
 .mapbar > * { pointer-events: auto; }
 .search { position: relative; display: flex; align-items: center; width: 240px; height: 36px; border: 1px solid var(--line); border-radius: 10px; background: var(--glass); backdrop-filter: blur(12px); box-shadow: var(--shadow-1); transition: border-color 150ms var(--ease), box-shadow 150ms var(--ease); }
@@ -73,7 +72,6 @@ span.plabel-btn { cursor: default; }
 .maphint { position: absolute; z-index: 4; left: var(--s5); bottom: var(--s5); max-width: 360px; color: var(--ink-3); font-size: 12px; line-height: 1.5; pointer-events: none; transition: opacity 400ms var(--ease); }
 .maphint.gone { opacity: 0; }
 
-/* 독(공통 자원)과 펼침 목록 */
 .dock { position: absolute; z-index: 6; left: 50%; bottom: var(--s5); display: flex; gap: 4px; padding: 5px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--glass); backdrop-filter: blur(14px); box-shadow: var(--shadow-2); transform: translateX(calc(-50% - var(--inset, 0px) / 2)); transition: transform 300ms var(--ease); }
 .dock:empty { display: none; }
 .dk { display: inline-flex; align-items: center; gap: var(--s2); height: 36px; padding: 0 var(--s4); border: 0; border-radius: 10px; background: none; color: var(--ink); font-size: 13px; font-weight: 500; transition: background-color 150ms var(--ease), color 150ms var(--ease), transform 80ms var(--ease); }
@@ -97,7 +95,6 @@ span.plabel-btn { cursor: default; }
 .zoom button + button { border-top: 1px solid var(--line); }
 .zoom button:active { transform: scale(0.92); }
 
-/* 상세 패널: 오른쪽에서 미끄러져 들어온다(열림이 닫힘보다 길다) */
 .panel { position: absolute; z-index: 7; top: var(--s5); right: var(--s5); bottom: var(--s5); width: 380px; overflow: auto; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--shadow-2); opacity: 0; visibility: hidden; transform: translateX(16px); transition: transform 200ms ease-in, opacity 150ms ease-in, visibility 0s linear 200ms; }
 .panel.open { opacity: 1; visibility: visible; transform: none; transition: transform 320ms var(--ease), opacity 250ms var(--ease), visibility 0s; }
 .pn { padding: 20px 20px 24px; animation: fade-in 160ms ease-out both; }
@@ -174,7 +171,7 @@ span.lk { color: var(--ink-2); background: var(--surface-2); border-color: trans
 
 .search, .legend, .dock, .zoom { -webkit-backdrop-filter: blur(12px); }
 
-/* «필요» 선: 노드를 고른 동안만 독의 공통 자원과 이어진다(화면 좌표 겹침 층) */
+/* Overlay lines connecting the selected node to shared resources in the dock. */
 .needs { position: absolute; left: 0; top: 0; z-index: 6; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 .need { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 5 5; opacity: 0.8; }
 .need-dot { fill: var(--accent); }

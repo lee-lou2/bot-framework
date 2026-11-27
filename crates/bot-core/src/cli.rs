@@ -1,5 +1,4 @@
-//! Claude CLI가 한 모델 응답에서 낸 도구 호출의 **위치**(체크포인트 키)와 실행 전 확정 거절(`CliRefusal`) 계약. 런타임이 기록하고 MCP 중계(브로커 프런트)가 확인한다.
-//! 이름의 `cli`는 Claude CLI다. CLI 입구(`bot_gateway::cli`)나 `bot` 바이너리(`bot-cli` 크레이트)가 아니다.
+//! Claude CLI (not gateway/`bot-cli`) tool-call checkpoint positions and pre-execution refusal (`CliRefusal`) contract.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -8,9 +7,8 @@ pub const USE_PREFIX: &str = "cli-use-";
 pub const RECORD_PREFIX: &str = "cli-rec-";
 pub const RESPONSE_PREFIX: &str = "cli-resp-";
 
-/// 검증된 모델 호출 위치에서 실행 전에 내린 최종 거절. 현재 claim으로 먼저 저장한 뒤
-/// 모델에 같은 단어를 오류로 돌려준다. 같은 위치는 재전달·재개 때 이 결과를 재생한다.
-/// 판정이나 기록에 실패했거나 실행 여부가 불명인 호출에는 이 표식을 쓸 수 없다.
+/// Deterministic pre-execution refusal recorded under the current claim before returning the fixed error word to the model.
+/// Replayed at the same slot on retry/resume; never recorded when verdict/recording failed or execution status is unknown.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", try_from = "String")]
 pub enum CliRefusal {
@@ -18,20 +16,19 @@ pub enum CliRefusal {
     Invalid,
     Denied,
     Conflict,
-    /// 유효한 claim에서 호출 조건이 낡았다고 판정한 경우. claim을 잃으면 기록할 수 없다.
+    /// Stale precondition judged under a valid claim; cannot be recorded once the claim is lost.
     Stale,
-    /// 호출 한도에 걸렸을 때의 기존 모델 응답. 저장소 장애에는 표식이 생기지 않는다.
+    /// Wire-encoded as `"unavailable"`; never recorded for store outages.
     #[serde(rename = "unavailable")]
     RateLimited,
 }
 
 impl CliRefusal {
-    /// CLI와 API 워커가 같은 형식으로 읽는 확정 거절 표식. 기존 키는 저장된 세션과 호환된다.
+    /// Shared refusal checkpoint key format for CLI and API workers (wire-compatible with stored sessions).
     pub fn key(call: &crate::id::CallId) -> String {
         format!("cli-refusal-{}", call.0)
     }
 
-    /// 현재 claim의 체크포인트에 모델이 받을 거절 하나만 저장한다.
     pub fn step(self, call: &crate::id::CallId) -> crate::command::Step {
         crate::command::Step {
             key: Self::key(call),
@@ -39,12 +36,12 @@ impl CliRefusal {
         }
     }
 
-    /// 이미 시작했거나 결론이 있는 호출은 원장을 따른다.
+    /// Calls already started or settled follow the ledger instead of replaying a refusal.
     pub fn can_replay(record: Option<&crate::ledger::CallRecord>) -> bool {
         record.is_none_or(|row| matches!(row.phase, crate::ledger::CallPhase::Open { .. }))
     }
 
-    /// 저장한 표식의 단어를 읽는다. 손상된 값으로 같은 위치의 실행을 허용할 수 없다.
+    /// Corrupt refusal payloads must fail closed rather than allowing execution at the same slot.
     pub fn decode(body: &crate::command::JsonPayload) -> Result<Self, serde_json::Error> {
         serde_json::from_str(&body.0)
     }
@@ -82,13 +79,12 @@ impl TryFrom<String> for CliRefusal {
     }
 }
 
-/// 라이브 MCP 응답과 복원한 세션의 같은 도구 결과.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub content: Vec<Value>,
     #[serde(rename = "isError", default)]
     pub is_error: bool,
-    // structuredContent 등 도구 실행기가 검사한 MCP 필드를 라이브 응답에 보존한다.
+    // Preserve runner-validated MCP fields such as structuredContent on live responses.
     #[serde(flatten)]
     extra: serde_json::Map<String, Value>,
 }
@@ -103,12 +99,11 @@ impl ToolOutput {
         Self::text(payload, false)
     }
 
-    /// 모델에 보일 고정 오류 단어. 원문 오류나 승인 nonce는 전달하지 않는다.
+    /// Fixed error word shown to the model; never leaks raw errors or approval nonces.
     pub fn notice(word: &'static str) -> Self {
         Self::text(word, true)
     }
 
-    /// 자식 에이전트가 돌려준 값은 위임의 성공 결과 한 건이다.
     pub fn child_result(value: &Value) -> Self {
         match value {
             Value::String(text) => Self::text(text, false),
@@ -137,7 +132,7 @@ pub fn error_word(error: &crate::port::Error) -> &'static str {
     }
 }
 
-/// 제공자가 완료한 응답에서 읽은 도구 사용 목록. 순서는 원래 응답의 블록 순서다.
+/// Completed provider response tool uses in original block order.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliResponse {
@@ -149,13 +144,12 @@ pub struct CliResponse {
 #[serde(deny_unknown_fields)]
 pub struct CliResponseUse {
     pub id: String,
-    /// 제공자가 본 전체 도구 이름. 예: mcp__relay__agenda_list.
+    /// Full provider-visible tool name, e.g. `mcp__relay__agenda_list`.
     pub name: String,
     pub input: Value,
 }
 
 impl CliResponse {
-    /// 체크포인트 키로 쓸 수 있는 ID와 서로 다른 도구 사용을 가진 완전한 목록인지 검사한다.
     pub fn is_valid(&self) -> bool {
         fn valid_id(id: &str) -> bool {
             (1..=64).contains(&id.len())
@@ -172,22 +166,22 @@ impl CliResponse {
     }
 }
 
-/// 같은 provider 응답의 모든 도구 사용 ID를 보낸 순서대로 보존한다.
+/// Tool-use IDs from one provider response in emission order.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliGroup {
-    /// 이 응답의 첫 assistant 레코드 번호. run 안에서 고정된다.
+    /// First assistant record sequence number of this response, fixed within the run.
     pub seq: u64,
     pub uses: Vec<String>,
 }
 
-/// CLI 세션의 한 도구 사용과 저장된 차례의 위치를 연결한다.
+/// Maps a CLI session tool use to its persisted turn slot.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliUse {
-    /// 이 도구가 담긴 세션 레코드의 번호.
+    /// Session record sequence number containing this tool use.
     pub seq: u64,
-    /// CliGroup.seq, 같은 응답의 모든 사용에 공통이다.
+    /// Matches `CliGroup.seq` across all uses in the same response.
     pub turn: u64,
     pub pos: u32,
     pub name: String,

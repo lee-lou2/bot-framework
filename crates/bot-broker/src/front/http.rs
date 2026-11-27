@@ -1,4 +1,4 @@
-//! 아주 작은 HTTP/1.1 읽기·쓰기. 요청 한 건당 연결 하나이고 상한을 모두 건다.
+//! Minimal bounded HTTP/1.1 request reader and response writer (one request per connection).
 
 use std::time::Duration;
 use tokio::{
@@ -11,9 +11,9 @@ const MAX_HEAD: usize = 16 * 1024;
 
 pub struct Request {
     pub method: String,
-    /// 쿼리를 뺀 경로.
+    /// Path without query or fragment.
     pub path: String,
-    /// 소문자 이름.
+    /// Lowercase header names.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
@@ -27,7 +27,6 @@ impl Request {
     }
 }
 
-/// 읽기 실패에 돌려줄 상태.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
     Bad,
@@ -177,7 +176,7 @@ pub async fn read_request(
     Ok(request)
 }
 
-/// 청크 본문. 확장·트레일러는 받지 않는다.
+/// Decodes chunked transfer bodies; chunk extensions and trailers are rejected.
 async fn read_chunked(
     stream: &mut TcpStream,
     mut buf: Vec<u8>,
@@ -186,7 +185,6 @@ async fn read_chunked(
     let mut body = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        // 크기 줄
         let line_end = loop {
             if let Some(at) = buf.windows(2).position(|w| w == b"\r\n") {
                 break at;
@@ -206,7 +204,6 @@ async fn read_chunked(
         let size = usize::from_str_radix(size_text, 16).map_err(|_| Status::Bad)?;
         buf.drain(..line_end + 2);
         if size == 0 {
-            // 마지막 빈 줄
             while buf.len() < 2 {
                 match stream.read(&mut chunk).await {
                     Ok(0) | Err(_) => return Err(Status::Bad),
@@ -292,7 +289,7 @@ pub async fn write_response(
     let _ = stream.shutdown().await;
 }
 
-/// 상대가 연결을 닫을 때까지 기다린다(읽은 바이트는 버린다). 스트림 도중 클라이언트가 떠났는지 알아챈다.
+/// Drains the stream until EOF to detect client disconnect during streaming.
 pub async fn closed(stream: &mut (impl AsyncRead + Unpin)) {
     let mut sink = [0u8; 256];
     loop {
@@ -352,7 +349,7 @@ mod tests {
         ] {
             assert_eq!(feed(raw, 1024).await.err(), Some(Status::TooLarge));
         }
-        // 선행 `+`가 붙은 청크 크기는 16진수 규격이 아니다
+        // Leading '+' is invalid in hex chunk sizes.
         let plus = b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n+1\r\na\r\n0\r\n\r\n";
         assert_eq!(feed(plus, 1024).await.err(), Some(Status::Bad));
     }

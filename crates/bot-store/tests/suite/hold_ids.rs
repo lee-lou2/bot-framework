@@ -1,4 +1,4 @@
-//! 보류 발생 ID: 보류로 들어갈 때마다 새 ID, 같은 보류를 유지하는 동안은 같은 ID, 판정은 ID·대상·운영자·증거 지문으로 한 번만 커밋한다.
+//! Hold occurrence IDs: fresh ID per hold entry, stable while held, and idempotent resolution by `(id, target, operator, evidence hash)`.
 
 use crate::support::{admin::*, *};
 use bot_core::{
@@ -36,7 +36,6 @@ async fn audits(db: &TestDb) -> i64 {
         .await
 }
 
-/// 단일 쓰기 호출(c1)을 시작해 보류로 넘긴다.
 async fn hold_c1(db: &TestDb, at: &Attempt) {
     calls(db).start(start_call(at, "c1", None)).await.unwrap();
     calls(db)
@@ -67,11 +66,11 @@ async fn a_hold_gets_an_id_on_entry_and_keeps_it_while_it_lasts() {
     let id = first[0]
         .hold_id
         .clone()
-        .expect("단계 없는 보류는 호출이 ID를 가진다");
+        .expect("single-step held call must have a hold ID");
     assert_eq!(
         second[0].hold_id,
         Some(id),
-        "다시 읽어도 같은 보류는 같은 ID다"
+        "same hold must keep the same ID across reads"
     );
     assert_eq!(db.scalar::<i64>("select count(*) from bot_holds").await, 1);
 }
@@ -100,7 +99,6 @@ async fn each_judgeable_step_has_its_own_id_and_the_whole_call_has_none() {
             .unwrap();
         steps.push(permit.status.effect);
     }
-    // 첫 단계는 영수증을 받아 확정, 둘째는 결과 불명으로 남은 채 호출이 보류된다
     effects(&db)
         .record(
             run.attempt.clone(),
@@ -127,17 +125,20 @@ async fn each_judgeable_step_has_its_own_id_and_the_whole_call_has_none() {
         .await
         .unwrap();
     assert_eq!(holds.len(), 1);
-    assert_eq!(holds[0].hold_id, None, "묶음 호출 보류에는 ID가 없다");
+    assert_eq!(
+        holds[0].hold_id, None,
+        "multi-step call has no call-level hold ID"
+    );
     let by_effect = |id: &EffectId| holds[0].steps.iter().find(|s| s.effect == *id).unwrap();
     assert_eq!(
         by_effect(&steps[0]).hold_id,
         None,
-        "확정된 단계는 판정 대상이 아니다"
+        "confirmed step is not judgeable"
     );
     let judgeable = by_effect(&steps[1])
         .hold_id
         .clone()
-        .expect("보류 단계는 자기 ID를 가진다");
+        .expect("held step must have its own hold ID");
     let detail = AdminRead::detail(
         &db.store,
         &operator(),
@@ -154,13 +155,13 @@ async fn each_judgeable_step_has_its_own_id_and_the_whole_call_has_none() {
     assert_eq!(
         in_detail.hold_id,
         Some(judgeable),
-        "run 상세도 같은 ID를 싣는다"
+        "run detail must carry the same hold ID"
     );
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_holds where effect is null")
             .await,
         0,
-        "단계가 있는 호출은 호출 단위 발생을 만들지 않는다"
+        "multi-step call must not create a call-level hold row"
     );
 }
 
@@ -174,11 +175,10 @@ async fn a_decision_commits_once_and_repeats_write_nothing() {
     hold_c1(&db, &run.attempt).await;
     let target = hold_ref(&db, HoldKind::Tool, &run.attempt.run, &call("c1"), None).await;
 
-    // 모르는 ID는 Missing, 다른 run·호출을 가리키면 Conflict, 아무것도 쓰지 않는다
     let mut unknown = target.clone();
     unknown.hold_id = HoldId("hold-none".into());
     assert!(matches!(
-        resolve(&db, unknown, not_executed("없음")).await,
+        resolve(&db, unknown, not_executed("missing")).await,
         Err(Error::Missing)
     ));
     for tweak in [
@@ -190,14 +190,14 @@ async fn a_decision_commits_once_and_repeats_write_nothing() {
         let mut wrong = target.clone();
         tweak(&mut wrong);
         assert!(matches!(
-            resolve(&db, wrong, not_executed("없음")).await,
+            resolve(&db, wrong, not_executed("missing")).await,
             Err(Error::Conflict)
         ));
     }
     assert_eq!(audits(&db).await, 0);
 
     assert_eq!(
-        resolve(&db, target.clone(), not_executed("수신처에 없음"))
+        resolve(&db, target.clone(), not_executed("not at recipient"))
             .await
             .unwrap(),
         HoldDecision::Applied
@@ -215,23 +215,23 @@ async fn a_decision_commits_once_and_repeats_write_nothing() {
         (ADMIN, "not_executed", 32)
     );
     assert_eq!(
-        db.scalar::<i64>("select count(*) from bot_holds t where t::text like '%수신처에 없음%' ")
-            .await,
+        db.scalar::<i64>(
+            "select count(*) from bot_holds t where t::text like '%not at recipient%' "
+        )
+        .await,
         0,
-        "증거 원문은 저장하지 않는다"
+        "raw evidence text must not be stored"
     );
 
-    // 같은 운영자·같은 판정·같은 증거: Repeated, 감사·상태 변화 없음
     assert_eq!(
-        resolve(&db, target.clone(), not_executed("수신처에 없음"))
+        resolve(&db, target.clone(), not_executed("not at recipient"))
             .await
             .unwrap(),
         HoldDecision::Repeated
     );
     assert_eq!(audits(&db).await, 1);
-    // 값·운영자가 다르면 Conflict
     assert!(matches!(
-        resolve(&db, target.clone(), not_executed("다른 증거")).await,
+        resolve(&db, target.clone(), not_executed("other evidence")).await,
         Err(Error::Conflict)
     ));
     assert!(matches!(
@@ -250,7 +250,7 @@ async fn a_decision_commits_once_and_repeats_write_nothing() {
             &db.store,
             PrincipalId("local:other".into()),
             target,
-            not_executed("수신처에 없음")
+            not_executed("not at recipient")
         )
         .await,
         Err(Error::Conflict)
@@ -267,11 +267,10 @@ async fn an_old_id_only_repeats_after_the_same_target_is_held_again() {
     begin_call(&db, &run.attempt, "c1").await;
     hold_c1(&db, &run.attempt).await;
     let h1 = hold_ref(&db, HoldKind::Tool, &run.attempt.run, &call("c1"), None).await;
-    resolve(&db, h1.clone(), not_executed("수신처에 없음"))
+    resolve(&db, h1.clone(), not_executed("not at recipient"))
         .await
         .unwrap();
 
-    // 새 claim이 같은 호출 ID를 이어서 다시 보내다 또 보류된다
     let second = runs(&db).claim().await.unwrap().unwrap();
     calls(&db)
         .finish(FinishCall {
@@ -283,11 +282,14 @@ async fn an_old_id_only_repeats_after_the_same_target_is_held_again() {
         .unwrap();
     hold_c1(&db, &second.attempt).await;
     let h2 = hold_ref(&db, HoldKind::Tool, &second.attempt.run, &call("c1"), None).await;
-    assert_ne!(h1.hold_id, h2.hold_id, "새 보류 진입은 새 ID다");
+    assert_ne!(
+        h1.hold_id, h2.hold_id,
+        "re-entering hold must allocate a new ID"
+    );
 
-    // H1을 다시 보내도 Repeated이고 H2는 건드리지 않는다
+    // Replaying H1 returns Repeated without affecting H2.
     assert_eq!(
-        resolve(&db, h1, not_executed("수신처에 없음"))
+        resolve(&db, h1, not_executed("not at recipient"))
             .await
             .unwrap(),
         HoldDecision::Repeated
@@ -299,7 +301,6 @@ async fn an_old_id_only_repeats_after_the_same_target_is_held_again() {
         .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].hold_id, Some(h2.hold_id.clone()));
-    // H2의 새 판정만 두 번째 전이다
     assert_eq!(
         resolve(
             &db,
@@ -326,7 +327,7 @@ async fn a_reply_hold_closed_by_a_late_receipt_cannot_be_judged_afterwards() {
             run.attempt.clone(),
             Finish {
                 result: JsonPayload("{}".into()),
-                answers: vec![JsonPayload(r#"{"text":"첫째"}"#.into())],
+                answers: vec![JsonPayload(r#"{"text":"first"}"#.into())],
             },
         )
         .await
@@ -343,7 +344,7 @@ async fn a_reply_hold_closed_by_a_late_receipt_cannot_be_judged_afterwards() {
         .unwrap();
     db.sql("update bot_outbox set lease_until_ms = bot_now_ms() - 1")
         .await;
-    // 리스를 잃은 전송은 다음 claim 때 보류가 된다
+    // Next claim sweeps the expired in-flight send into held state.
     (&db.store as &dyn bot_core::intake::Outbox)
         .claim(&slack, 1)
         .await
@@ -365,7 +366,7 @@ async fn a_reply_hold_closed_by_a_late_receipt_cannot_be_judged_afterwards() {
             .await
             .unwrap()
             .is_empty(),
-        "늦게 온 영수증으로 보류가 풀렸다"
+        "late receipt must clear the hold"
     );
     assert!(matches!(
         resolve(
@@ -386,7 +387,6 @@ async fn upgrading_gives_every_unresolved_old_hold_an_id_and_skips_judged_ones()
     let Some(db) = TestDb::new().await else {
         return;
     };
-    // 구판에서 보류가 된 것들: 단일 쓰기(c1), 이미 판정한 단일 쓰기(c2), 다단계(c3: 한 단계는 미실행으로 판정), 회신 발송, 민감 DM
     let run = leased(&db, "legacy").await;
     for id in ["c1", "c2", "c3"] {
         begin_call(&db, &run.attempt, id).await;
@@ -422,7 +422,7 @@ async fn upgrading_gives_every_unresolved_old_hold_an_id_and_skips_judged_ones()
             reply_run.attempt.clone(),
             Finish {
                 result: JsonPayload("{}".into()),
-                answers: vec![JsonPayload(r#"{"text":"첫째"}"#.into())],
+                answers: vec![JsonPayload(r#"{"text":"first"}"#.into())],
             },
         )
         .await
@@ -448,7 +448,7 @@ async fn upgrading_gives_every_unresolved_old_hold_an_id_and_skips_judged_ones()
     db.store
         .migrate()
         .await
-        .expect("0011이 제자리에서 올라간다");
+        .expect("0011 migration should apply cleanly");
 
     let found: Vec<(String, String, Option<String>)> =
         sqlx::query_as("select kind, call, effect from bot_holds where closed_ms is null order by kind, call, effect")
@@ -468,9 +468,8 @@ async fn upgrading_gives_every_unresolved_old_hold_an_id_and_skips_judged_ones()
             ("tool".into(), "c1".into(), None),
             ("tool".into(), "c3".into(), Some(steps[1].0.clone())),
         ],
-        "판정하지 않은 호출·단계·회신·민감 DM만, 단계 있는 호출은 호출 단위 발생 없이"
+        "only unresolved holds should be backfilled, without call-level rows for multi-step calls"
     );
-    // 이어서 운영자 목록이 같은 대상에 ID를 싣는다
     let listed = AdminRead::holds(&db.store, &operator(), None)
         .await
         .unwrap();
@@ -496,7 +495,7 @@ async fn a_listing_never_mixes_one_holds_reason_with_the_next_holds_id() {
             run.attempt.clone(),
             Finish {
                 result: JsonPayload("{}".into()),
-                answers: vec![JsonPayload(r#"{"text":"첫째"}"#.into())],
+                answers: vec![JsonPayload(r#"{"text":"first"}"#.into())],
             },
         )
         .await
@@ -504,7 +503,7 @@ async fn a_listing_never_mixes_one_holds_reason_with_the_next_holds_id() {
     db.sql("create table probe_holds (id text primary key, reason text not null)")
         .await;
 
-    // 같은 회신을 사유가 다른 보류로 계속 다시 들여보낸다(들어갈 때마다 발생 ID가 바뀐다). 사유와 ID는 한 트랜잭션에서 짝으로 남긴다
+    // Repeatedly cycle the same reply into new holds with distinct reasons and record `(id, reason)` atomically.
     let pool = db.store.pool().clone();
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = done.clone();
@@ -541,7 +540,7 @@ async fn a_listing_never_mixes_one_holds_reason_with_the_next_holds_id() {
             if hold.kind != HoldKind::Reply {
                 continue;
             }
-            let id = hold.hold_id.expect("열린 회신 보류는 발생 ID를 갖는다");
+            let id = hold.hold_id.expect("open reply hold must have a hold ID");
             let paired: String = sqlx::query_scalar("select reason from probe_holds where id = $1")
                 .bind(&id.0)
                 .fetch_one(db.store.pool())
@@ -549,11 +548,11 @@ async fn a_listing_never_mixes_one_holds_reason_with_the_next_holds_id() {
                 .unwrap();
             assert_eq!(
                 hold.reason, paired,
-                "한 카드에 다른 보류의 사유와 ID가 섞였다"
+                "hold listing mixed reason from one hold with ID from another"
             );
             checked += 1;
         }
     }
     writer.await.unwrap();
-    assert!(checked > 0, "경합 중에 목록을 한 번도 읽지 못했다");
+    assert!(checked > 0, "expected at least one concurrent read");
 }

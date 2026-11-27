@@ -1,10 +1,9 @@
-//! `container run` 인자 조립: 보안 플래그·진입·릴레이 고정·거절·이름 모양·이미지 고정(순수 함수).
+//! Pure `container run` argument assembly, security flag, relay pinning, and validation tests.
 
 use super::*;
 
 #[test]
 fn every_variable_that_carries_the_session_token_is_treated_as_a_secret() {
-    // 세션 토큰은 `-e 이름`(값 없이)으로만 가고 값은 클라이언트 프로세스 환경으로 간다: 모델 요청이 싣는 이름 둘 모두 비밀로 본다
     for name in ["ANTHROPIC_API_KEY", "RELAY_TOKEN"] {
         assert!(crate::model::container::args::secret_like(name), "{name}");
     }
@@ -22,7 +21,6 @@ fn the_command_line_is_locked_down_and_the_secret_stays_out_of_it() {
             .position(|x| x == flag)
             .unwrap_or_else(|| panic!("{flag}: {a:?}"))
     };
-    // 고정 보안 플래그와 호스트 전용 망·자원 한도·소유 라벨·이름·작업 폴더
     assert_eq!(a[0], "run");
     for flag in ["--rm", "--read-only", "--init", "--no-dns"] {
         at(flag);
@@ -36,7 +34,7 @@ fn the_command_line_is_locked_down_and_the_secret_stays_out_of_it() {
     );
     assert!(
         !a.contains(&"--cap-add".to_owned()),
-        "방화벽 진입이 없으면 더하는 권한도 없다"
+        "unfirewalled config must not add capabilities"
     );
     assert_eq!(a[at("--network") + 1], "botvm-net");
     assert_eq!(
@@ -57,8 +55,7 @@ fn the_command_line_is_locked_down_and_the_secret_stays_out_of_it() {
     assert_eq!(command.name, a[at("--name") + 1]);
     assert!(is_ours("botvm", &command.name) && command.name.ends_with("-7"));
     assert_eq!(command.name, name_of("botvm", &owner, "inc1", 7));
-    at("-i"); // 표준입력으로 요청을 준다
-    // 마운트: 입력은 읽기 전용, scratch만 쓰기
+    at("-i");
     let mounts: Vec<&String> = a
         .iter()
         .zip(a.iter().skip(1))
@@ -71,7 +68,6 @@ fn the_command_line_is_locked_down_and_the_secret_stays_out_of_it() {
         mounts[1].ends_with("target=/work") && !mounts[1].contains("readonly"),
         "{mounts:?}"
     );
-    // 비밀은 이름만 명령줄에 있고 값은 클라이언트 환경으로만 간다. 릴레이는 호스트가 연 주소로 고정이다
     assert!(a.windows(2).any(|w| w == ["-e", "ANTHROPIC_AUTH_TOKEN"]));
     assert!(a.windows(2).any(|w| w == ["-e", "HOME=/work/home"]));
     for pair in [
@@ -96,7 +92,6 @@ fn the_command_line_is_locked_down_and_the_secret_stays_out_of_it() {
             "sess-token-secret-1".to_owned()
         )]
     );
-    // 고정한 이미지(다이제스트) 뒤에 프로그램과 인자들이 끝까지 온다
     let tail: Vec<&str> = a[a.len() - 5..].iter().map(String::as_str).collect();
     assert_eq!(tail, [PINNED, "claude", "-p", "--model", "m"]);
     assert_eq!(ContainerSandbox::owner_of(&spec.attempt), owner);
@@ -111,7 +106,6 @@ fn with_the_trusted_entry_the_model_gets_only_the_minimum_caps_and_the_anchor_a_
         .unwrap()
         .args;
     let at = |flag: &str| model.iter().position(|x| x == flag).unwrap();
-    // 모든 capability를 버린 뒤 init이 시작할 때 필요한 것만 더한다. 이미지의 고정 ENTRYPOINT를 쓰므로 진입을 덮지 않는다
     assert!(at("--cap-drop") < at("--cap-add"));
     let caps: Vec<&str> = model
         .windows(2)
@@ -120,7 +114,6 @@ fn with_the_trusted_entry_the_model_gets_only_the_minimum_caps_and_the_anchor_a_
         .collect();
     assert_eq!(caps, ["NET_ADMIN", "SETPCAP"]);
     assert!(!model.contains(&"--entrypoint".to_owned()) && !model.contains(&"--user".to_owned()));
-    // 이미지의 init은 `claude <인자…>`를 받는다(고정 Claude를 exec한다): 프로그램은 `claude`뿐이고 다른 이름은 시작하지 않는다
     let tail: Vec<&str> = model[model.len() - 5..]
         .iter()
         .map(String::as_str)
@@ -135,7 +128,6 @@ fn with_the_trusted_entry_the_model_gets_only_the_minimum_caps_and_the_anchor_a_
             "{other}"
         );
     }
-    // 닻: 별도 대기 진입·비root·capability 0·URL·마운트·입력 없음
     let anchor = build_anchor(&config, &plan(None)).unwrap().args;
     let at = |flag: &str| anchor.iter().position(|x| x == flag).unwrap();
     assert_eq!(anchor[at("--entrypoint") + 1], "/usr/local/bin/bot-wait");
@@ -147,7 +139,6 @@ fn with_the_trusted_entry_the_model_gets_only_the_minimum_caps_and_the_anchor_a_
     assert_eq!(anchor.last().unwrap(), PINNED);
     let label = format!("{OWNER_LABEL}={}", label_value(&anchor_owner(&config)));
     assert!(anchor.contains(&label), "{anchor:?}");
-    // 방화벽 진입 없는(시험) 구성의 닻은 이미지의 `sleep`이다
     let plain = build_anchor(&fake.config(), &plan(None)).unwrap().args;
     assert_eq!(plain[plain.len() - 3..], [PINNED, "sleep", "2147483647"]);
 }
@@ -163,7 +154,6 @@ fn the_relay_address_is_fixed_by_the_host_and_the_spec_cannot_change_it() {
             .collect();
         build(&fake.config(), &spec, &plan(Some(relay())))
     };
-    // 같은 주소(끝의 `/`는 같게 본다)는 한 번만 들어가고, 없으면 호스트가 넣는다
     for env in [
         vec![("ANTHROPIC_BASE_URL", "http://192.168.99.1:8787")],
         vec![("ANTHROPIC_BASE_URL", "http://192.168.99.1:8787/")],
@@ -176,7 +166,6 @@ fn the_relay_address_is_fixed_by_the_host_and_the_spec_cannot_change_it() {
             .collect();
         assert_eq!(urls, ["ANTHROPIC_BASE_URL=http://192.168.99.1:8787"]);
     }
-    // 다른 주소·호스트 전용 이름은 거절한다
     for env in [
         vec![("ANTHROPIC_BASE_URL", "http://192.168.99.1:9999")],
         vec![("ANTHROPIC_BASE_URL", "http://10.0.0.1:8787")],
@@ -186,7 +175,6 @@ fn the_relay_address_is_fixed_by_the_host_and_the_spec_cannot_change_it() {
     ] {
         assert_eq!(with(env.clone()).unwrap_err(), Refused("relay"), "{env:?}");
     }
-    // 릴레이가 없거나(열기 전) 포트가 0이거나 IPv6면 띄우지 않는다
     for bad in [
         None,
         Some("192.168.99.1:0".parse().unwrap()),
@@ -229,7 +217,6 @@ fn unsafe_specs_and_configs_are_refused_before_any_command_runs() {
         &|s, _| s.readonly_mounts[0].host = comma.clone(),
         "mount_path",
     );
-    // 링크로 루트 밖을 가리켜도 풀어서 거절한다
     let link = fake.root.join("link");
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     check(
@@ -256,7 +243,6 @@ fn unsafe_specs_and_configs_are_refused_before_any_command_runs() {
     check(&|_, c| c.image = "alpine 3".into(), "image");
     check(&|_, c| c.network = "net;rm".into(), "config");
     check(&|_, c| c.instance = "a/b".into(), "config");
-    // 진입 설정: 닻은 비root, 권한 이름은 대문자 낱말, `ALL`은 안 된다
     for entry in [
         Entry {
             anchor: "bot-wait".into(),
@@ -286,7 +272,6 @@ fn unsafe_specs_and_configs_are_refused_before_any_command_runs() {
     ] {
         check(&|_, c| c.entry = Some(entry.clone()), "entry");
     }
-    // 플래그처럼 보이는 값도 인자 자리에서는 값일 뿐이다(`-e` 뒤에 한 덩이로 간다)
     let mut spec = fake.spec();
     spec.env.push(("FLAGLIKE".into(), "--privileged".into()));
     let ok = build(&fake.config(), &spec, &plan(Some(relay()))).unwrap();
@@ -299,7 +284,6 @@ fn unsafe_specs_and_configs_are_refused_before_any_command_runs() {
 
 #[test]
 fn only_exact_names_are_ours_and_images_are_pinned_by_digest() {
-    // 접두사끼리 포함 관계여도 다른 어댑터의 이름은 걸리지 않는다
     for (prefix, id, ours) in [
         ("botvm", "botvm-0123456789ab-3", true),
         ("botvm", "botvm-secondary-0123456789ab-3", false),

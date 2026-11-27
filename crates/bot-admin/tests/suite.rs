@@ -1,4 +1,4 @@
-//! `bot-admin` 통합 시험 진입점(단일 바이너리).
+//! Single-binary integration test entrypoint for `bot-admin`.
 
 mod support;
 

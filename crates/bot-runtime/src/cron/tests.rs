@@ -1,4 +1,4 @@
-//! cron 해석과 발생 계산 시험. 독립 기준(UTC 분을 하나씩 현지 시각으로 바꿔 맞는지 보는 전수 탐색)과도 무작위로 대조한다.
+//! Cron parsing and occurrence calculation tests, including randomized comparison against a brute-force reference.
 
 use super::*;
 use std::time::Duration;
@@ -10,7 +10,6 @@ fn at(rfc3339: &str) -> SystemTime {
     DateTime::parse_from_rfc3339(rfc3339).unwrap().into()
 }
 
-/// 현지 시각과 오프셋: `2026-11-01 01:30 -04:00`
 fn show(tz: Tz, t: SystemTime) -> String {
     DateTime::<Utc>::from(t)
         .with_timezone(&tz)
@@ -29,7 +28,7 @@ fn occ(expr: &str, tz: Tz, after: &str, until: &str, limit: usize) -> Vec<String
 fn next(expr: &str, tz: Tz, after: &str) -> String {
     let cron = Cron::parse(expr).unwrap_or_else(|e| panic!("{expr}: {e}"));
     cron.next_after(tz, at(after))
-        .map_or_else(|| "없음".into(), |t| show(tz, t))
+        .map_or_else(|| "none".into(), |t| show(tz, t))
 }
 
 #[test]
@@ -49,19 +48,19 @@ fn daily_in_seoul_runs_at_midnight_utc_and_respects_the_window_edges() {
             "2026-11-05 09:00 +09:00"
         ]
     );
-    // after는 제외, until은 포함: 정확히 00:00Z(= 09:00 KST)인 경계
+    // Window is half-open: (after, until].
     let edge = |after: &str, until: &str| occ("0 9 * * *", SEOUL, after, until, 10).len();
     assert_eq!(
         edge("2026-11-03T00:00:00Z", "2026-11-04T00:00:00Z"),
         1,
-        "앞 경계 제외·뒤 경계 포함"
+        "start edge excluded, end edge included"
     );
     assert_eq!(edge("2026-11-02T23:59:59.999Z", "2026-11-03T00:00:00Z"), 1);
     assert_eq!(edge("2026-11-03T00:00:00Z", "2026-11-03T23:59:59Z"), 0);
     assert_eq!(
         next("0 9 * * *", SEOUL, "2026-11-03T00:00:00Z"),
         "2026-11-04 09:00 +09:00",
-        "딱 그 시각이면 다음 날"
+        "exact match advances to the next day"
     );
     assert_eq!(
         next("0 9 * * *", SEOUL, "2026-11-03T00:00:30Z"),
@@ -81,7 +80,6 @@ fn utc_profile_and_other_whole_zones_follow_their_own_wall_clock() {
         ),
         ["2026-11-04 18:30 +00:00"]
     );
-    // 네팔(+05:45)처럼 15분 단위 오프셋도 현지 벽시계 그대로
     assert_eq!(
         occ(
             "0 9 * * *",
@@ -108,7 +106,7 @@ fn steps_ranges_and_lists() {
     assert_eq!(
         next("0 9-17/4 * * *", utc, "2026-11-03T10:00:00Z"),
         "2026-11-03 13:00 +00:00",
-        "9,13,17시"
+        "hours 9, 13, 17"
     );
     assert_eq!(
         next("0 9-17/4 * * *", utc, "2026-11-03T17:00:00Z"),
@@ -121,7 +119,7 @@ fn steps_ranges_and_lists() {
     assert_eq!(
         next("10/20 * * * *", utc, "2026-11-03T10:31:00Z"),
         "2026-11-03 10:50 +00:00",
-        "10부터 끝까지 20씩: 10,30,50"
+        "10..=59 by 20: 10, 30, 50"
     );
     assert_eq!(
         next("0 0,12 * * *", utc, "2026-11-03T12:00:00Z"),
@@ -132,7 +130,7 @@ fn steps_ranges_and_lists() {
 #[test]
 fn weekdays_and_names() {
     let utc = chrono_tz::UTC;
-    // 2026-11-06은 금요일, 11-09는 월요일
+    // 2026-11-06 is Friday; 2026-11-09 is Monday.
     assert_eq!(
         next("30 18 * * 1-5", utc, "2026-11-06T19:00:00Z"),
         "2026-11-09 18:30 +00:00"
@@ -152,12 +150,12 @@ fn weekdays_and_names() {
     assert_eq!(
         next("0 10 * * 7", utc, "2026-11-03T00:00:00Z"),
         "2026-11-08 10:00 +00:00",
-        "7도 일요일"
+        "7 also means Sunday"
     );
     assert_eq!(
         next("0 10 * * 5-7", utc, "2026-11-07T11:00:00Z"),
         "2026-11-08 10:00 +00:00",
-        "금~일"
+        "Fri..Sun"
     );
     assert_eq!(
         next("0 9 1 JAN *", utc, "2026-11-03T00:00:00Z"),
@@ -169,7 +167,7 @@ fn weekdays_and_names() {
     );
     assert!(
         Cron::parse("0 9 * DEC-FEB *").is_err(),
-        "돌아가는 범위는 받지 않아요"
+        "wraparound ranges must be rejected"
     );
 }
 
@@ -183,7 +181,7 @@ fn month_ends_leap_days_and_year_rollover() {
     assert_eq!(
         next("0 0 31 * *", utc, "2026-11-03T00:00:00Z"),
         "2026-12-31 00:00 +00:00",
-        "11월은 31일이 없다"
+        "November has no 31st"
     );
     assert_eq!(
         next("0 0 31 * *", utc, "2026-12-31T00:00:00Z"),
@@ -192,7 +190,7 @@ fn month_ends_leap_days_and_year_rollover() {
     assert_eq!(
         next("0 0 29 2 *", utc, "2026-03-01T00:00:00Z"),
         "2028-02-29 00:00 +00:00",
-        "윤일은 다음 윤년에"
+        "leap day advances to next leap year"
     );
     assert_eq!(
         next("59 23 31 12 *", utc, "2026-12-31T23:59:00Z"),
@@ -202,7 +200,6 @@ fn month_ends_leap_days_and_year_rollover() {
         next("@yearly", utc, "2026-11-03T00:00:00Z"),
         "2027-01-01 00:00 +00:00"
     );
-    // 31일이 있는 달만: 1월 31일 다음은 3월 31일
     let months = occ(
         "0 12 31 * *",
         utc,
@@ -215,7 +212,7 @@ fn month_ends_leap_days_and_year_rollover() {
         (months[0].as_str(), months[1].as_str()),
         ("2026-01-31 12:00 +00:00", "2026-03-31 12:00 +00:00")
     );
-    // 2100년은 윤년이 아니다: 2096-02-29 다음 윤일은 2104-02-29
+    // 2100 is not a leap year.
     assert_eq!(
         next("0 0 29 2 *", utc, "2096-03-01T00:00:00Z"),
         "2104-02-29 00:00 +00:00"
@@ -227,7 +224,11 @@ fn month_ends_leap_days_and_year_rollover() {
         "2100-12-31T00:00:00Z",
         100,
     );
-    assert_eq!(leap.len(), 18, "2028..2096 사이 18번(2100은 평년)");
+    assert_eq!(
+        leap.len(),
+        18,
+        "18 leap days in 2028..2096 (2100 is common)"
+    );
     assert_eq!(
         (leap[0].as_str(), leap[17].as_str()),
         ("2028-02-29 00:00 +00:00", "2096-02-29 00:00 +00:00")
@@ -237,7 +238,7 @@ fn month_ends_leap_days_and_year_rollover() {
 #[test]
 fn day_of_month_and_weekday_are_or_unless_one_starts_with_a_star() {
     let utc = chrono_tz::UTC;
-    // 13일이거나 금요일 (둘 다 정했으니 OR) — 11-06이 금요일
+    // Both constrained -> OR (13th or Friday; 2026-11-06 is Friday).
     assert_eq!(
         next("0 0 13 * 5", utc, "2026-11-03T00:00:00Z"),
         "2026-11-06 00:00 +00:00"
@@ -246,7 +247,7 @@ fn day_of_month_and_weekday_are_or_unless_one_starts_with_a_star() {
         next("0 0 13 * 5", utc, "2026-11-06T00:00:00Z"),
         "2026-11-13 00:00 +00:00"
     );
-    // `*/2`는 `*`로 시작하므로 AND: 홀수 날이면서 월요일 → 11-09
+    // `*/2` starts with `*` -> AND (odd day and Monday -> 2026-11-09).
     assert_eq!(
         next("0 0 */2 * 1", utc, "2026-11-03T00:00:00Z"),
         "2026-11-09 00:00 +00:00"
@@ -262,7 +263,7 @@ fn day_of_month_and_weekday_are_or_unless_one_starts_with_a_star() {
     assert_eq!(
         next("0 0 ? * 1", utc, "2026-11-03T00:00:00Z"),
         "2026-11-09 00:00 +00:00",
-        "? 는 * 와 같다"
+        "? acts like *"
     );
 }
 
@@ -282,7 +283,7 @@ fn macros_expand_to_five_fields() {
     assert_eq!(
         Cron::parse("  0   9\t* * *  ").unwrap().as_str(),
         "0 9 * * *",
-        "공백은 하나로 정리한다"
+        "whitespace is collapsed"
     );
     assert_eq!(
         next("@hourly", chrono_tz::UTC, "2026-11-03T10:00:00Z"),
@@ -320,13 +321,15 @@ fn invalid_expressions_say_what_is_wrong() {
         "0 0 * JANUARY *",
         "99999999999 * * * *",
     ] {
-        assert!(Cron::parse(bad).is_err(), "받으면 안 돼요: '{bad}'");
+        assert!(Cron::parse(bad).is_err(), "should be rejected: '{bad}'");
     }
     let e = Cron::parse("0 0 9 * * *").unwrap_err();
-    assert!(e.contains("다섯 칸") && e.contains("초 칸"), "{e}");
+    assert!(e.contains("5 fields") && e.contains("no seconds"), "{e}");
     assert!(
-        Cron::parse("60 * * * *").unwrap_err().contains("분 칸"),
-        "어느 칸이 틀렸는지 알려 준다"
+        Cron::parse("60 * * * *")
+            .unwrap_err()
+            .contains("minute field"),
+        "error should name the invalid field"
     );
 }
 
@@ -335,14 +338,14 @@ fn dates_that_never_happen_have_no_occurrence() {
     let utc = chrono_tz::UTC;
     assert_eq!(
         next("0 0 31 2 *", utc, "2026-01-01T00:00:00Z"),
-        "없음",
-        "2월 31일"
+        "none",
+        "Feb 31"
     );
-    assert_eq!(next("0 0 30 2 *", utc, "2026-01-01T00:00:00Z"), "없음");
+    assert_eq!(next("0 0 30 2 *", utc, "2026-01-01T00:00:00Z"), "none");
     assert_eq!(
         next("0 0 31 4,6,9,11 *", utc, "2026-01-01T00:00:00Z"),
-        "없음",
-        "30일까지인 달만 고르면 없다"
+        "none",
+        "30-day months only"
     );
     let never = Cron::parse("0 0 31 2 *").unwrap();
     assert!(
@@ -370,25 +373,25 @@ fn limit_order_and_empty_windows() {
     assert_eq!(
         show(chrono_tz::UTC, ten[0]),
         "2026-11-03 10:01 +00:00",
-        "after는 제외"
+        "after is excluded"
     );
     assert_eq!(
         every_minute.occurrences(chrono_tz::UTC, a, u, 1000).len(),
         120,
-        "until은 포함"
+        "until is included"
     );
     assert!(every_minute.occurrences(chrono_tz::UTC, a, u, 0).is_empty());
     assert!(
         every_minute
             .occurrences(chrono_tz::UTC, u, a, 10)
             .is_empty(),
-        "거꾸로 된 창"
+        "reversed window"
     );
     assert!(
         every_minute
             .occurrences(chrono_tz::UTC, a, a, 10)
             .is_empty(),
-        "빈 창"
+        "empty window"
     );
 }
 
@@ -426,11 +429,10 @@ mod reference;
 #[test]
 fn last_in_finds_the_latest_occurrence_even_after_an_enormous_backlog() {
     let every_minute = Cron::parse("* * * * *").unwrap();
-    // 150일 치(216,000분)가 밀렸다: 오래된 순으로 세는 방식은 한도(10만)에서 멈춰 최신보다 한참 이른 것을 고른다
+    // 150 days (216,000 minutes) exceeds MAX_LIMIT (100,000), so forward enumeration would truncate early.
     let (after, until) = (at("2026-01-01T00:00:00Z"), at("2026-05-31T12:34:30Z"));
     let last = every_minute.last_in(chrono_tz::UTC, after, until).unwrap();
     assert_eq!(show(chrono_tz::UTC, last), "2026-05-31 12:34 +00:00");
-    // 구간 끝 시각 자체가 발생이면 포함한다(앞은 제외)
     let exact = every_minute
         .last_in(chrono_tz::UTC, after, at("2026-05-31T12:34:00Z"))
         .unwrap();
@@ -447,7 +449,6 @@ fn last_in_finds_the_latest_occurrence_even_after_an_enormous_backlog() {
 
 #[test]
 fn last_in_walks_back_across_empty_stretches_and_dst() {
-    // 한 달에 한 번뿐인 표현식: 뒤쪽 창이 비어도 앞으로 거슬러 찾는다
     let monthly = Cron::parse("0 9 15 * *").unwrap();
     let last = monthly
         .last_in(
@@ -457,7 +458,6 @@ fn last_in_walks_back_across_empty_stretches_and_dst() {
         )
         .unwrap();
     assert_eq!(show(SEOUL, last), "2026-11-15 09:00 +09:00");
-    // 이 구간에는 발생이 없다
     assert_eq!(
         monthly.last_in(
             SEOUL,
@@ -466,7 +466,7 @@ fn last_in_walks_back_across_empty_stretches_and_dst() {
         ),
         None
     );
-    // 가을 되돌림: 두 번 오는 01:30 중 늦은 것(UTC 오름차순의 마지막)
+    // Fall-back DST fold: pick the later of the two 01:30 occurrences (last in UTC order).
     let fold = Cron::parse("30 1 * * *").unwrap();
     let last = fold
         .last_in(

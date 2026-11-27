@@ -1,10 +1,10 @@
-//! DST 시험: 봄에 시계가 건너뛴 구간의 분은 빠지고, 가을에 되돌아간 구간의 분은 UTC 발생 둘로 나온다.
+//! DST tests for cron occurrence calculation (spring gaps skipped, fall folds emit both UTC instants).
 
 use super::*;
 
 #[test]
 fn spring_gap_in_new_york_skips_the_missing_minutes() {
-    // 2026-03-08 02:00 EST → 03:00 EDT: 02:xx는 그날 현지 시각에 없다
+    // 2026-03-08 02:00 EST -> 03:00 EDT: 02:xx does not exist locally.
     assert_eq!(
         occ(
             "30 2 * * *",
@@ -18,7 +18,7 @@ fn spring_gap_in_new_york_skips_the_missing_minutes() {
             "2026-03-09 02:30 -04:00",
             "2026-03-10 02:30 -04:00"
         ],
-        "3월 8일 02:30은 건너뛴다(다른 날로 밀리지도 않는다)"
+        "2026-03-08 02:30 must be skipped without shifting"
     );
     assert_eq!(
         occ(
@@ -35,7 +35,6 @@ fn spring_gap_in_new_york_skips_the_missing_minutes() {
             "2026-03-08 03:30 -04:00"
         ]
     );
-    // 건너뛴 구간 바깥의 분은 그대로 한 번씩
     assert_eq!(
         occ(
             "0 3 * * *",
@@ -54,7 +53,7 @@ fn spring_gap_in_new_york_skips_the_missing_minutes() {
 
 #[test]
 fn fall_fold_in_new_york_yields_both_utc_occurrences() {
-    // 2026-11-01 02:00 EDT → 01:00 EST: 01:xx가 두 번 온다
+    // 2026-11-01 02:00 EDT -> 01:00 EST: 01:xx occurs twice.
     assert_eq!(
         occ(
             "30 1 * * *",
@@ -79,9 +78,8 @@ fn fall_fold_in_new_york_yields_both_utc_occurrences() {
     assert_eq!(
         both,
         [at("2026-11-01T05:30:00Z"), at("2026-11-01T06:30:00Z")],
-        "서로 다른 UTC 발생 둘"
+        "two distinct UTC occurrences"
     );
-    // 30분 간격: 00:00부터 03:30까지 현지 시각으로는 8개지만 01시대가 두 번이라 UTC 발생은 10개, 모두 오름차순
     let all = Cron::parse("*/30 0-3 * * *").unwrap().occurrences(
         NEW_YORK,
         at("2026-11-01T03:59:59Z"),
@@ -96,7 +94,7 @@ fn fall_fold_in_new_york_yields_both_utc_occurrences() {
 
 #[test]
 fn half_hour_zone_lord_howe_folds_and_skips_thirty_minutes() {
-    // 2026-04-05 02:00 +11:00 → 01:30 +10:30: 01:30~01:59가 두 번
+    // 2026-04-05 02:00 +11:00 -> 01:30 +10:30: 01:30..01:59 occurs twice.
     assert_eq!(
         occ(
             "45 1 * * *",
@@ -112,7 +110,7 @@ fn half_hour_zone_lord_howe_folds_and_skips_thirty_minutes() {
             "2026-04-06 01:45 +10:30"
         ]
     );
-    // 2026-10-04 02:00 +10:30 → 02:30 +11:00: 02:00~02:29가 없다
+    // 2026-10-04 02:00 +10:30 -> 02:30 +11:00: 02:00..02:29 does not exist.
     assert_eq!(
         occ(
             "15 2 * * *",
@@ -136,13 +134,13 @@ fn half_hour_zone_lord_howe_folds_and_skips_thirty_minutes() {
             10
         ),
         ["2026-10-04 02:45 +11:00", "2026-10-05 02:45 +11:00"],
-        "건너뛴 구간 밖의 분은 그대로 온다"
+        "minutes outside the skipped gap still occur"
     );
 }
 
 #[test]
 fn a_fold_that_crosses_midnight_is_found_on_both_passes() {
-    // 베이루트: 2026-10-25 00:00 EEST → 10-24 23:00 EET. 10-24 23:00~23:59가 두 번
+    // Beirut: 2026-10-25 00:00 EEST -> 10-24 23:00 EET (10-24 23:xx occurs twice).
     assert_eq!(
         occ(
             "30 23 * * *",
@@ -157,8 +155,8 @@ fn a_fold_that_crosses_midnight_is_found_on_both_passes() {
 
 #[test]
 fn a_fold_at_00_01_interleaves_local_dates_in_utc_order() {
-    // 뉴펀들랜드의 옛 규칙(2007~2010년): 2010-11-07 00:01 NDT(-2:30) → 11-06 23:01 NST(-3:30).
-    // 11-06 23:01~23:59와 11-07 00:00이 둘 다 두 번이라 현지 날짜 순서와 UTC 순서가 엇갈린다. 발생은 UTC 순서로 나와야 한다.
+    // Historical St. John's rule (2007-2010): 2010-11-07 00:01 NDT -> 11-06 23:01 NST,
+    // interleaving local dates relative to UTC order.
     assert_eq!(
         occ(
             "0,30 23,0 * * *",

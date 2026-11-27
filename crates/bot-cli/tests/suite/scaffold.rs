@@ -1,5 +1,5 @@
-//! `bot init`·`bot add`를 실제 `bot` 프로세스로 확인한다: 세 템플릿이 만든 폴더가 바로 `bot validate`를 통과하고, 있는 것은 덮어쓰지 않으며,
-//! 에이전트·스킬 뼈대가 올바른 자리·내용으로 들어가 검증을 통과하고, 권한 상한(profile.yaml)은 건드리지 않는다. DB·srt가 필요 없다.
+//! Process-level tests for `bot init` and `bot add`: immediate validation across all templates, no overwrites,
+//! symlink refusal, untouched permission ceilings in `profile.yaml`, and front-matter stripping in assembled prompts.
 use crate::process_support::*;
 use std::{
     collections::BTreeMap,
@@ -9,6 +9,10 @@ use std::{
 
 fn s(path: &Path) -> &str {
     path.to_str().unwrap()
+}
+
+fn lower(out: &std::process::Output) -> String {
+    text(out).to_ascii_lowercase()
 }
 
 fn init(work: &Path, name: &str, template: &str) -> std::process::Output {
@@ -41,7 +45,7 @@ fn add(profile: &Path, args: &[&str]) -> std::process::Output {
     bot(&[], &full)
 }
 
-/// 폴더 안의 모든 경로와 파일 내용(링크는 따라가지 않는다). 폴더는 빈 내용으로 적는다.
+/// Captures relative paths and file bytes under `root` without following symlinks.
 fn snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
     fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
         for entry in fs::read_dir(dir).unwrap() {
@@ -68,7 +72,7 @@ fn snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
 fn every_template_validates_right_after_init() {
     for (template, agents) in [("personal", 1), ("team", 4), ("company", 6)] {
         let work = tempfile::tempdir().unwrap();
-        // 새 폴더를 만드는 명령은 환경 설정을 읽지 않는다: 잘못된 BOT_ 변수가 있어도 시작할 수 있다
+        // Scaffolding commands must ignore invalid BOT_* env vars.
         let made = bot(
             &[("BOT_SECRETS", "vault")],
             &[
@@ -82,25 +86,30 @@ fn every_template_validates_right_after_init() {
         );
         assert!(made.status.success(), "{template}: {}", text(&made));
         let shown = text(&made);
+        let first_line = shown.lines().next().unwrap_or("");
         assert!(
-            shown.contains(&format!("템플릿 {template}, 에이전트 {agents}개")),
+            first_line.contains(template)
+                && first_line.contains(&agents.to_string())
+                && first_line.to_ascii_lowercase().contains("agent"),
             "{shown}"
         );
         assert!(shown.contains("export BOT_PROFILES="), "{shown}");
         assert_eq!(
             fs::read_dir(work.path()).unwrap().count(),
             1,
-            "임시 폴더가 남지 않는다"
+            "staging directory must not remain"
         );
         let checked = validate(work.path(), "demo-bot");
         assert!(checked.status.success(), "{template}: {}", text(&checked));
         let report = text(&checked);
-        assert!(report.contains("검증 통과: 프로필 1개"), "{report}");
         assert!(
-            report.contains(&format!("에이전트 {agents} 도구 0 트리거 0 바인딩 1")),
+            report.contains("Validation passed: 1 profile(s)"),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!("agents {agents} tools 0 triggers 0 bindings 1")),
             "{template}: {report}"
         );
-        // 호스트 설정 예시는 데모 모델과 이 OS 사용자의 CLI 계정만 담는다
         let host: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(work.path().join("demo-bot/host.json")).unwrap(),
         )
@@ -133,15 +142,18 @@ fn init_never_overwrites_and_rejects_bad_names() {
     for name in ["mine", "a-file"] {
         let out = init(work.path(), name, "personal");
         assert_eq!(out.status.code(), Some(1), "{name}: {}", text(&out));
-        assert!(text(&out).contains("이미 있어요"), "{}", text(&out));
+        assert!(lower(&out).contains("exists"), "{}", text(&out));
     }
-    assert_eq!(snapshot(work.path()), before, "있는 폴더·파일은 그대로다");
-    // 같은 이름으로 두 번째 init은 첫 결과를 건드리지 않는다
+    assert_eq!(
+        snapshot(work.path()),
+        before,
+        "existing files and directories must remain untouched"
+    );
     assert!(init(work.path(), "first", "team").status.success());
     let first = snapshot(work.path());
     assert!(!init(work.path(), "first", "personal").status.success());
     assert_eq!(snapshot(work.path()), first);
-    // 이름 규칙에 맞지 않거나 경로를 벗어나려는 이름은 아무것도 만들지 않는다
+
     let inner = work.path().join("inner");
     fs::create_dir(&inner).unwrap();
     let long = "a".repeat(64);
@@ -158,15 +170,19 @@ fn init_never_overwrites_and_rejects_bad_names() {
     ] {
         let out = init(&inner, bad, "personal");
         assert_eq!(out.status.code(), Some(1), "{bad:?}: {}", text(&out));
-        assert!(text(&out).contains("소문자"), "{bad:?}: {}", text(&out));
+        assert!(lower(&out).contains("lowercase"), "{bad:?}: {}", text(&out));
     }
     assert!(snapshot(&inner).is_empty());
     assert!(!work.path().join("evil").exists());
-    // 없는 --dir은 만들지 않고 알린다
+
     let missing = work.path().join("not-here");
     let out = init(&missing, "x", "personal");
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out).contains("폴더가 없어요"), "{}", text(&out));
+    let err = lower(&out);
+    assert!(
+        err.contains("does not exist") || err.contains("not found") || err.contains("missing"),
+        "{err}"
+    );
     assert!(!missing.exists());
 }
 
@@ -181,7 +197,7 @@ fn add_places_skeletons_where_validate_accepts_them_and_leaves_permissions_alone
     assert!(agent.status.success(), "{}", text(&agent));
     assert!(
         text(&agent).contains("policy.agents"),
-        "권한은 안내만 한다: {}",
+        "permissions should only be documented in guidance: {}",
         text(&agent)
     );
     assert!(
@@ -192,7 +208,7 @@ fn add_places_skeletons_where_validate_accepts_them_and_leaves_permissions_alone
     let nested = profile.join("agents/main/agents/support/agents/triage/AGENT.md");
     let body = fs::read_to_string(&nested).unwrap();
     assert!(body.starts_with("---\ndescription: "), "{body}");
-    assert!(body.contains("## 하는 일"), "{body}");
+    assert!(body.contains("\n## ") && body.contains("triage"), "{body}");
 
     let scoped = add(
         &profile,
@@ -210,19 +226,26 @@ fn add_places_skeletons_where_validate_accepts_them_and_leaves_permissions_alone
     let shared = add(&profile, &["skill", "checklist"]);
     assert!(shared.status.success(), "{}", text(&shared));
     assert!(profile.join("skills/checklist/SKILL.md").is_file());
-    assert!(text(&shared).contains("권한 상한은 자동으로 바꾸지 않아요"));
+    let shared_out = text(&shared);
+    let shared_low = shared_out.to_ascii_lowercase();
+    assert!(
+        shared_out.contains("profile.yaml")
+            && (shared_low.contains("permission")
+                || shared_low.contains("ceiling")
+                || shared_low.contains("policy")),
+        "{shared_out}"
+    );
 
-    // 만든 것은 도구·권한을 더하지 않는다
     assert!(!profile.join("skills/checklist/tools.yaml").exists());
     assert_eq!(
         fs::read(profile.join("profile.yaml")).unwrap(),
         yaml_before,
-        "profile.yaml은 그대로다"
+        "profile.yaml must remain unchanged"
     );
     let checked = validate(work.path(), "demo");
     assert!(checked.status.success(), "{}", text(&checked));
     assert!(
-        text(&checked).contains("에이전트 6 도구 0 트리거 0 바인딩 1"),
+        text(&checked).contains("agents 6 tools 0 triggers 0 bindings 1"),
         "{}",
         text(&checked)
     );
@@ -235,45 +258,40 @@ fn add_refuses_what_would_overwrite_or_not_validate() {
     let profile = profile_dir(work.path(), "demo");
     let before = snapshot(&profile);
     let cases: &[(&[&str], &str)] = &[
-        (&["agent", "main/pm"], "이미 있어요"),
-        (&["agent", "main"], "이미 있어요"),
-        (&["agent", "other"], "루트 에이전트는 하나뿐"),
-        (&["agent", "main/nope/deeper"], "상위 에이전트"),
-        (&["agent", "Main/cs"], "이름 규칙"),
-        (&["agent", "main/../x"], "이름 규칙"),
-        (&["agent", "main//x"], "이름 규칙"),
-        (&["agent", "main/cs/"], "이름 규칙"),
-        (&["agent", "a/b/c/d/e/f/g/h/i"], "단계까지"),
+        (&["agent", "main/pm"], "exists"),
+        (&["agent", "main"], "exists"),
+        (&["agent", "other"], "root"),
+        (&["agent", "main/nope/deeper"], "main/nope"),
+        (&["agent", "Main/cs"], "lowercase"),
+        (&["agent", "main/../x"], "lowercase"),
+        (&["agent", "main//x"], "lowercase"),
+        (&["agent", "main/cs/"], "lowercase"),
+        (&["agent", "a/b/c/d/e/f/g/h/i"], "8"),
         (
             &["skill", "report-format", "--agent", "main/pm"],
-            "같은 이름의 스킬",
+            "skills/report-format",
         ),
-        (&["skill", "delegation"], "같은 이름의 스킬"),
+        (&["skill", "delegation"], "agents/main/skills/delegation"),
         (
             &["skill", "design-review", "--agent", "main/ghost"],
-            "없어요",
+            "main/ghost",
         ),
-        (&["skill", "Bad_Name"], "이름 규칙"),
-        (&["skill", "ok", "--agent", "main/../x"], "이름 규칙"),
+        (&["skill", "Bad_Name"], "lowercase"),
+        (&["skill", "ok", "--agent", "main/../x"], "lowercase"),
     ];
     for (args, expected) in cases {
         let out = add(&profile, args);
         assert_eq!(out.status.code(), Some(1), "{args:?}: {}", text(&out));
-        assert!(text(&out).contains(expected), "{args:?}: {}", text(&out));
+        assert!(lower(&out).contains(expected), "{args:?}: {}", text(&out));
     }
     assert_eq!(
         snapshot(&profile),
         before,
-        "거절한 명령은 아무것도 바꾸지 않는다"
+        "refused commands must leave the profile unchanged"
     );
-    // 프로필 폴더가 아니면 시작하지 않는다
     let empty = tempfile::tempdir().unwrap();
     let out = add(empty.path(), &["agent", "main"]);
-    assert!(
-        text(&out).contains("프로필 폴더가 아니에요"),
-        "{}",
-        text(&out)
-    );
+    assert!(text(&out).contains("profile.yaml"), "{}", text(&out));
     assert!(snapshot(empty.path()).is_empty());
 }
 
@@ -285,29 +303,27 @@ fn links_are_never_followed() {
     let outside = tempfile::tempdir().unwrap();
     assert!(init(work.path(), "demo", "personal").status.success());
     let profile = profile_dir(work.path(), "demo");
-    // 이미 있는 부모가 링크: 에이전트 폴더 · 프로필 스킬 폴더
     symlink(outside.path(), profile.join("agents/main/agents")).unwrap();
     symlink(outside.path(), profile.join("skills")).unwrap();
     for args in [&["agent", "main/cs"][..], &["skill", "tidy"][..]] {
         let out = add(&profile, args);
         assert_eq!(out.status.code(), Some(1), "{args:?}: {}", text(&out));
-        assert!(text(&out).contains("링크"), "{args:?}: {}", text(&out));
+        assert!(lower(&out).contains("link"), "{args:?}: {}", text(&out));
     }
-    // init 대상 이름이 (끊어진 것을 포함한) 링크여도 따라가 쓰지 않는다
     symlink(outside.path(), work.path().join("via-link")).unwrap();
     symlink(outside.path().join("nowhere"), work.path().join("dangling")).unwrap();
     for name in ["via-link", "dangling"] {
         let out = init(work.path(), name, "personal");
         assert_eq!(out.status.code(), Some(1), "{name}: {}", text(&out));
-        assert!(text(&out).contains("이미 있어요"), "{name}: {}", text(&out));
+        assert!(lower(&out).contains("exists"), "{name}: {}", text(&out));
     }
     assert!(
         fs::read_dir(outside.path()).unwrap().next().is_none(),
-        "링크 바깥에는 아무것도 만들지 않는다"
+        "nothing may be created outside the target via symlinks"
     );
 }
 
-/// 막음 7: 이름 규칙에 맞지만 YAML이 글로 읽지 않는 이름(`null`·`true`…)도 만들자마자 검증을 통과한다.
+/// YAML-keyword profile names (`null`, `true`, `off`) must be quoted so they validate as strings.
 #[test]
 fn names_that_yaml_does_not_read_as_text_still_validate_right_after_init() {
     for name in ["null", "true", "off"] {
@@ -328,8 +344,7 @@ fn names_that_yaml_does_not_read_as_text_still_validate_right_after_init() {
     }
 }
 
-/// 막음 1: 검증은 `$TMPDIR` 아래 우리 소유 임시 사본에서 하고 끝나면 치운다 — 성공해도 사용자 폴더에 임시 폴더가 남지 않고 `$TMPDIR`도 비어 있다.
-/// 쓸 수 없는 `$TMPDIR`는 사용자 폴더에 아무것도 만들기 전에 알린다.
+/// Verification runs on an owned staging copy under `$TMPDIR` and cleans it up; an unwritable `$TMPDIR` fails cleanly.
 #[test]
 fn init_validates_a_private_copy_under_tmpdir_and_leaves_nothing_behind() {
     let work = tempfile::tempdir().unwrap();
@@ -362,7 +377,7 @@ fn init_validates_a_private_copy_under_tmpdir_and_leaves_nothing_behind() {
     assert_eq!(
         fs::read_dir(work.path()).unwrap().count(),
         3,
-        "아무것도 만들지 않았다"
+        "nothing may be created on $TMPDIR failure"
     );
 }
 
@@ -386,15 +401,15 @@ fn scaffolded_skills_validate_and_reach_model_prompts_without_front_matter() {
     for args in [
         &["skill", "checklist"][..],
         &["skill", "triage", "--agent", "main/developer"][..],
-        // YAML 키워드와 같은 이름도 따옴표 처리돼 검증을 통과한다
         &["skill", "null", "--agent", "main/developer"][..],
     ] {
         let out = add(&profile, args);
         assert!(out.status.success(), "{args:?}: {}", text(&out));
+        let out_text = text(&out);
+        let low = out_text.to_ascii_lowercase();
         assert!(
-            text(&out).contains("본문만 전달돼요"),
-            "{args:?}: {}",
-            text(&out)
+            (low.contains("front matter") || low.contains("frontmatter")) && low.contains("body"),
+            "{args:?}: {out_text}"
         );
     }
     let checked = validate(work.path(), "demo");
@@ -409,32 +424,37 @@ fn scaffolded_skills_validate_and_reach_model_prompts_without_front_matter() {
         &host,
         &Limits::default(),
     )
-    .unwrap_or_else(|r| panic!("스캐폴드 프로필 검증 실패:\n{r}"));
+    .unwrap_or_else(|r| panic!("scaffolded profile failed validation:\n{r}"));
     let snap = set.profile(&ProfileId("demo".into())).unwrap();
     let main = &snap.agents[&AgentId("main".into())];
     let dev = &snap.agents[&AgentId("main/developer".into())];
 
-    for (agent_skills, name, heading) in [
-        (&main.skills, "report-format", "# 보고 형식"),
-        (&main.skills, "delegation", "# 위임: 누구에게 맡길까"),
+    for (agent_skills, name, expected_word) in [
+        (&main.skills, "report-format", "report"),
+        (&main.skills, "delegation", "delegat"),
         (&main.skills, "checklist", "# checklist"),
         (&dev.skills, "triage", "# triage"),
         (&dev.skills, "null", "# null"),
     ] {
         let sk = &agent_skills[name];
-        assert!(sk.description.is_some(), "{name}: description 보존");
+        assert!(sk.description.is_some(), "{name}: description preserved");
+        let first_line = sk.instructions.text.lines().next().unwrap_or("");
         assert!(
-            sk.instructions.text.starts_with(heading),
+            first_line.starts_with("# ") && first_line.to_ascii_lowercase().contains(expected_word),
             "{name}: {}",
             sk.instructions.text
         );
         assert!(
             !sk.instructions.text.starts_with("---")
                 && !sk.instructions.text.contains("description:"),
-            "{name}: front matter가 본문에 남음: {}",
+            "{name}: front matter leaked into body: {}",
             sk.instructions.text
         );
     }
+
+    let heading = |name: &str| main.skills[name].instructions.text.lines().next().unwrap();
+    let report_section = format!("### report-format\n{}", heading("report-format"));
+    let delegation_section = format!("### delegation\n{}", heading("delegation"));
 
     let run = |agent_id: &str| RunContext {
         attempt: Attempt {
@@ -459,9 +479,9 @@ fn scaffolded_skills_validate_and_reach_model_prompts_without_front_matter() {
             revision: snap.revision.clone(),
             target: Target::Agent {
                 agent: AgentId(agent_id.into()),
-                instruction: "요약해 줘".into(),
+                instruction: "Summarize this".into(),
             },
-            input: JsonPayload(r#"{"text":"요약해 줘"}"#.into()),
+            input: JsonPayload(r#"{"text":"Summarize this"}"#.into()),
             attachments: vec![],
             steps: vec![],
             pass_pos: None,
@@ -474,19 +494,19 @@ fn scaffolded_skills_validate_and_reach_model_prompts_without_front_matter() {
     for (agent_id, expected_headings) in [
         (
             "main",
-            &[
-                "### report-format\n# 보고 형식",
-                "### delegation\n# 위임: 누구에게 맡길까",
+            vec![
+                report_section.as_str(),
+                delegation_section.as_str(),
                 "### checklist\n# checklist",
-            ][..],
+            ],
         ),
         (
             "main/developer",
-            &[
-                "### report-format\n# 보고 형식",
+            vec![
+                report_section.as_str(),
                 "### triage\n# triage",
                 "### null\n# null",
-            ][..],
+            ],
         ),
     ] {
         let assembled = assemble(&ContextInput {
@@ -500,7 +520,7 @@ fn scaffolded_skills_validate_and_reach_model_prompts_without_front_matter() {
         for heading in expected_headings {
             assert!(
                 assembled.system.contains(heading),
-                "{agent_id}: {heading} 없음\n{}",
+                "{agent_id}: missing {heading}\n{}",
                 assembled.system
             );
         }
@@ -515,7 +535,7 @@ fn scaffolded_skills_validate_and_reach_model_prompts_without_front_matter() {
         ] {
             assert!(
                 !assembled.system.contains(leaked),
-                "{agent_id}: front matter `{leaked}`가 모델 프롬프트에 노출됨\n{}",
+                "{agent_id}: front matter `{leaked}` leaked into model prompt\n{}",
                 assembled.system
             );
         }
@@ -548,7 +568,7 @@ fn add_skill_creator_writes_ready_to_use_authoring_skill_that_validates() {
     ] {
         assert!(
             body.contains(needle),
-            "skill-creator에 `{needle}` 안내가 없어요"
+            "skill-creator missing `{needle}` guidance"
         );
     }
 

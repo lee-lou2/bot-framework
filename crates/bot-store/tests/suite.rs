@@ -1,4 +1,4 @@
-//! `bot-store` 통합 시험 진입점(단일 바이너리).
+//! Integration test entry point for `bot-store` (single binary).
 
 mod support;
 

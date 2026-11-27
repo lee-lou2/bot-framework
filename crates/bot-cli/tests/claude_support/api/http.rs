@@ -1,11 +1,10 @@
-//! 제품 입구에 SDK 없이 직접 보내는 최소 HTTP/1.1 클라이언트(키를 바꾸고 지우는 시험용): 응답을 끝까지 읽는 것과, 보내기만 하고 끊는 것.
+//! Minimal blocking HTTP/1.1 test client for direct gateway requests without an SDK.
 use std::{
     io::{Read, Write},
     net::TcpStream,
     time::Duration,
 };
 
-/// (상태, 응답 머리 줄들, 본문)
 pub struct Reply {
     pub status: u16,
     pub headers: Vec<String>,
@@ -39,7 +38,7 @@ fn message(
     format!("{head}\r\n{body}")
 }
 
-/// 요청을 보내고 응답을 끝까지 읽는다(블로킹: `spawn_blocking`에서 부른다).
+/// Blocking request helper; invoke from `spawn_blocking`.
 pub fn call(
     origin: &str,
     method: &str,
@@ -48,7 +47,7 @@ pub fn call(
     body: Option<&str>,
     extra: &[(&str, &str)],
 ) -> Reply {
-    let mut stream = TcpStream::connect(origin).expect("입구에 접속");
+    let mut stream = TcpStream::connect(origin).expect("connect to entrance");
     stream
         .set_read_timeout(Some(Duration::from_secs(90)))
         .unwrap();
@@ -72,9 +71,9 @@ pub fn call(
     }
 }
 
-/// 요청을 보내고 응답을 기다리지 않고 끊는다(접수만 시키고 클라이언트가 사라지는 경우).
+/// Sends a POST request and disconnects without reading the response (simulates client drop after intake).
 pub fn send_and_hang_up(origin: &str, path: &str, key: &str, body: &str, extra: &[(&str, &str)]) {
-    let mut stream = TcpStream::connect(origin).expect("입구에 접속");
+    let mut stream = TcpStream::connect(origin).expect("connect to entrance");
     stream
         .write_all(message("POST", path, key, Some(body), extra).as_bytes())
         .unwrap();

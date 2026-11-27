@@ -1,10 +1,7 @@
-//! 실제 srt로 도구 서버 샌드박스의 격리 보장을 증명하는 카나리. 가짜 어댑터 시험과 별개다.
+//! Canary integration tests verifying real `srt` sandbox isolation (Seatbelt on macOS, bubblewrap on Linux).
 //!
-//! 실행: `BOT_SRT_BIN=<srt 경로> BOT_SRT_CANARY=required cargo test -p bot-broker --features testing --test srt_canary -- --test-threads=1`
-//! - `BOT_SRT_CANARY=required`이면 srt가 없거나 판본이 다를 때 시험이 실패한다(CI의 필수 모드).
-//! - 설정하지 않으면 srt가 없을 때 건너뛴다(개발 PC).
-//!
-//! macOS는 Seatbelt, Linux는 bubblewrap으로 같은 시험이 돌아야 한다.
+//! Run: `BOT_SRT_BIN=<srt path> BOT_SRT_CANARY=required cargo test -p bot-broker --features testing --test srt_canary -- --test-threads=1`
+//! Set `BOT_SRT_CANARY=required` in CI to fail when `srt` is absent or mismatched; omit to skip locally.
 
 #![cfg(all(unix, feature = "testing"))]
 
@@ -34,7 +31,6 @@ fn required() -> bool {
     std::env::var("BOT_SRT_CANARY").is_ok_and(|v| v == "required")
 }
 
-/// srt가 쓸 수 있으면 어댑터를 연다. 없으면 필수 모드는 실패, 아니면 `None`(건너뜀).
 async fn canary(command: &str) -> Option<Canary> {
     let dir = tempfile::tempdir().unwrap();
     let binary = std::env::var_os("BOT_SRT_BIN")
@@ -63,10 +59,12 @@ async fn canary(command: &str) -> Option<Canary> {
     match SrtSandbox::open(cfg, Arc::new(OsEntropy)).await {
         Ok(sandbox) => Some(Canary { sandbox, dir }),
         Err(_) if required() => {
-            panic!("필수 모드: srt {PINNED_VERSION}를 쓸 수 없다(BOT_SRT_BIN 확인)")
+            panic!("required mode: srt {PINNED_VERSION} is unavailable (check BOT_SRT_BIN)")
         }
         Err(_) => {
-            eprintln!("srt가 없어 건너뛴다(BOT_SRT_CANARY=required로 실패시킬 수 있다)");
+            eprintln!(
+                "skipping srt canary because srt is unavailable (set BOT_SRT_CANARY=required to fail)"
+            );
             None
         }
     }
@@ -99,7 +97,6 @@ fn spec(
     }
 }
 
-/// 자식이 한 줄을 쓸 때까지 읽는다.
 async fn line(pipe: &mut Pipe) -> String {
     let mut text = String::new();
     timeout(
@@ -107,7 +104,7 @@ async fn line(pipe: &mut Pipe) -> String {
         BufReader::new(&mut pipe.read).read_line(&mut text),
     )
     .await
-    .expect("자식이 답하지 않았다")
+    .expect("child did not reply in time")
     .unwrap();
     text.trim().to_owned()
 }
@@ -117,7 +114,7 @@ async fn run_and_read(c: &Canary, spec: SandboxSpec) -> (Process, String) {
         .sandbox
         .spawn(spec)
         .await
-        .expect("srt 샌드박스를 띄우지 못했다");
+        .expect("failed to spawn srt sandbox");
     let first = line(&mut process.stdio).await;
     (process, first)
 }
@@ -126,7 +123,7 @@ async fn end(process: Process) {
     Box::new(process.handle)
         .terminate()
         .await
-        .expect("프로세스 그룹이 끝났음을 확인하지 못했다");
+        .expect("failed to confirm process group termination");
 }
 
 fn exists(path: &Path) -> bool {
@@ -151,20 +148,19 @@ async fn the_tool_sees_only_declared_secrets_and_no_host_environment() {
     ] {
         assert!(
             !seen.contains(host_only),
-            "호스트 환경 {host_only}이 샌드박스로 새었다: {seen}"
+            "host env {host_only} leaked into sandbox: {seen}"
         );
     }
-    // 우리가 준 것(선언한 자격 + 작업 폴더 경로)과 srt가 더하는 자기 프록시 주소 말고는 없다. 우리 프록시 자격은 따로 열지 않았으니 없다.
     assert!(
         !seen.contains("canary-pass") && !seen.contains("bot:"),
-        "브로커 프록시 자격이 새었다: {seen}"
+        "broker proxy credentials leaked: {seen}"
     );
     let names: Vec<&str> = seen
         .split(';')
         .filter_map(|kv| kv.split_once('=').map(|(k, _)| k))
         .collect();
     for ours in ["TOKEN", "PATH"] {
-        assert!(names.contains(&ours), "{ours}가 없다: {names:?}");
+        assert!(names.contains(&ours), "missing {ours}: {names:?}");
     }
     end(process).await;
 }
@@ -176,13 +172,12 @@ async fn without_a_declared_host_the_tool_cannot_reach_a_listening_host_service(
     let port = listener.local_addr().unwrap().port().to_string();
     let (process, answer) =
         run_and_read(&c, spec("r1.1.c2", &[("CANARY_PORT", &port)], None)).await;
-    assert_eq!(answer, "BLOCKED", "허용한 호스트가 없으면 네트워크는 0이다");
+    assert_eq!(answer, "BLOCKED", "network must be blocked without egress");
     end(process).await;
 }
 
 #[tokio::test]
 async fn a_declared_host_goes_through_our_proxy_and_everything_else_is_refused() {
-    // curl이 srt의 프록시(허용 도메인 = 선언한 호스트)를 거쳐 우리 프록시(주소 검사)까지 가는지 본다
     let Some(c) = canary("for h in allowed.test evil.test; do curl -sS -o /dev/null --max-time 10 https://$h/ >/dev/null 2>&1; echo \"$h $?\"; done | tr '\\n' ';'; echo; exec cat").await else { return };
     let resolver: Arc<dyn Resolver> = Arc::new(FakeResolver::new(&[
         ("allowed.test", &["93.184.216.34"]),
@@ -221,7 +216,6 @@ async fn a_declared_host_goes_through_our_proxy_and_everything_else_is_refused()
         report.contains("allowed.test ") && report.contains("evil.test "),
         "{report}"
     );
-    // 선언한 호스트만 우리 프록시까지 왔고(주소는 검사한 공개 주소에 고정), 선언하지 않은 호스트는 접속 시도조차 없다
     assert_eq!(
         connector.addrs(),
         vec!["93.184.216.34:443".parse().unwrap()],
@@ -251,7 +245,7 @@ async fn reads_of_host_secrets_and_other_runs_are_refused_and_the_install_dir_is
     let (process, answer) = run_and_read(&c, spec("r1.1.c4", &env, None)).await;
     assert_eq!(
         answer, "blocked blocked read",
-        "호스트 홈·다른 run 읽기 0, 서버 설치 폴더는 읽기 가능"
+        "host home and other runs must be unreadable while install dir stays readable"
     );
     end(process).await;
 }
@@ -269,7 +263,10 @@ async fn writes_are_confined_to_the_runs_own_work_dir() {
         ),
     )
     .await;
-    assert_eq!(answer, "own-ok outside-blocked", "쓰기는 run 작업 폴더만");
+    assert_eq!(
+        answer, "own-ok outside-blocked",
+        "writes must be confined to the run work dir"
+    );
     assert!(!exists(&outside));
     end(process).await;
 }
@@ -280,7 +277,7 @@ async fn terminating_ends_the_whole_process_tree() {
         return;
     };
     let (process, pid) = run_and_read(&c, spec("r1.1.c6", &[], None)).await;
-    let pid: u32 = pid.parse().expect("자식이 띄운 백그라운드 pid");
+    let pid: u32 = pid.parse().expect("background child pid");
     end(process).await;
     let alive = std::process::Command::new("/bin/kill")
         .args(["-s", "0", &pid.to_string()])
@@ -288,7 +285,7 @@ async fn terminating_ends_the_whole_process_tree() {
         .status()
         .unwrap()
         .success();
-    assert!(!alive, "샌드박스 안에서 띄운 프로세스도 함께 끝나야 한다");
+    assert!(!alive, "background child process must also terminate");
 }
 
 #[tokio::test]
@@ -310,7 +307,6 @@ async fn a_tool_server_can_speak_stdio_through_the_sandbox() {
 
 #[tokio::test]
 async fn the_shared_srt_tmp_dir_is_closed_in_both_directions() {
-    // srt는 /tmp/claude를 모든 실행이 공유하는 쓰기 가능한 곳으로 둔다. 우리는 쓰기도 읽기도 막는다.
     let shared = std::path::PathBuf::from("/tmp/claude");
     std::fs::create_dir_all(&shared).unwrap();
     let id = std::process::id();
@@ -332,11 +328,11 @@ async fn the_shared_srt_tmp_dir_is_closed_in_both_directions() {
     let (process, answer) = run_and_read(&c, spec("r1.1.c8", &[], None)).await;
     assert_eq!(
         answer, "write-blocked read-blocked",
-        "/tmp/claude 쓰기·읽기 모두 막혀야 한다"
+        "/tmp/claude must block both writes and reads"
     );
     assert!(
         !probe.exists(),
-        "샌드박스가 공유 임시 폴더에 파일을 만들었다"
+        "sandbox must not create files in shared tmp dir"
     );
     end(process).await;
     let _ = std::fs::remove_file(&seed);
@@ -371,12 +367,11 @@ async fn names_that_could_steer_the_launcher_are_refused_and_secrets_still_arriv
     .await;
     assert_eq!(
         got, "carried-secret-value",
-        "운반 변수로 실려 선언한 이름으로 도착한다"
+        "carrier variable must arrive under its declared name"
     );
     end(process).await;
 }
 
-/// 전용 주소로 온 프레임을 기록하고 고정 응답을 돌려주는 처리기.
 struct Recorder(std::sync::Mutex<Vec<String>>);
 
 impl bot_broker::proxy::LocalService for Recorder {
@@ -393,7 +388,6 @@ impl bot_broker::proxy::LocalService for Recorder {
 
 #[tokio::test]
 async fn a_tool_in_srt_reports_steps_through_the_proxys_local_address_without_any_other_network() {
-    // curl이 srt의 프록시를 거쳐 우리 프록시의 전용 주소로 단계 원장 프레임을 보내고 응답을 받는다
     let Some(c) = canary("curl -sS --max-time 15 -X POST \"$BOT_EFFECT_URL\" -d '{\"v\":1,\"id\":\"1\",\"method\":\"effect.request\",\"step\":\"upload\",\"args\":{}}' 2>&1; echo; curl -sS --max-time 8 -o /dev/null -w 'outside=%{http_code}' https://outside.test/ 2>&1 | tail -c 120; echo; exec cat").await else { return };
     let recorder = Arc::new(Recorder(Default::default()));
     let mut cfg = bot_broker::proxy::ProxyConfig::new(
@@ -427,24 +421,27 @@ async fn a_tool_in_srt_reports_steps_through_the_proxys_local_address_without_an
         .sandbox
         .spawn(spec)
         .await
-        .expect("srt 샌드박스를 띄우지 못했다");
+        .expect("failed to spawn srt sandbox");
     let first = line(&mut process.stdio).await;
     let second = line(&mut process.stdio).await;
     assert!(
         first.contains(r#""state":"started""#) && first.contains(r#""send":true"#),
-        "전용 주소 응답이 도구에 닿았다: {first:?}"
+        "local effect response must reach tool: {first:?}"
     );
     assert_eq!(
         recorder.0.lock().unwrap().len(),
         1,
-        "프레임은 처리기에 한 번 닿았다"
+        "handler must receive frame once"
     );
     assert!(recorder.0.lock().unwrap()[0].contains("effect.request"));
     assert!(
         !second.contains("outside=200"),
-        "선언하지 않은 호스트는 열리지 않는다: {second:?}"
+        "undeclared host must remain blocked: {second:?}"
     );
-    assert!(connector.addrs().is_empty(), "바깥으로 나간 접속은 없다");
+    assert!(
+        connector.addrs().is_empty(),
+        "no external connections allowed"
+    );
     end(process).await;
     proxy.stop().await;
 }

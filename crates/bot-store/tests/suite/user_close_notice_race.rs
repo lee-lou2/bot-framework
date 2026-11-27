@@ -1,5 +1,4 @@
-//! 닫기 안내와 같은 run의 일반 회신이 동시에 원래 대화 outbox에 들어와도 순번이 겹치지 않는다: 두 쓰기 경로가 같은 run 잠금 아래에서 순번을 정한다.
-//! 닫는 쪽은 예약 행이 아니라 run 행을 먼저 기다린다(run → 예약 순서): 그 사이 같은 run을 잠근 취소 호출이 예약 행을 잠글 수 있고 서로 기다리지 않는다.
+//! Concurrent schedule close notice and regular reply serialize on the run lock (`run -> schedule` order) without sequence collisions or deadlocks.
 
 use crate::support::{schedule::*, *};
 use bot_core::{
@@ -31,7 +30,7 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
         ))
         .await;
 
-    // 일반 회신을 쓰는 쪽이 run을 잠갔고 아직 커밋하지 않았다
+    // Hold the run lock as an in-flight regular reply writer.
     let mut other = db.raw().await;
     sqlx::query("begin").execute(&mut other).await.unwrap();
     sqlx::query(&format!(
@@ -41,7 +40,6 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
     .await
     .unwrap();
 
-    // 그 사이 닫는 쪽이 들어온다
     let closer = db.peer("closer").await;
     let (closing_id, schedule_id) = (id.clone(), id.0.clone());
     let task = tokio::spawn(async move {
@@ -55,7 +53,6 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
             })
             .await
     });
-    // 닫는 쪽이 run 잠금을 기다리는 중임을 확인한다(기다리지 않고 지나갔다면 이 시험은 아무것도 보지 못한다)
     let mut waiting = false;
     for _ in 0..100 {
         let n = db
@@ -72,10 +69,10 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
     }
     assert!(
         waiting,
-        "닫는 쪽은 같은 run의 일반 회신이 끝나기를 기다려야 한다"
+        "closer must wait for concurrent reply holding the run lock"
     );
 
-    // 기다리는 닫는 쪽이 예약 행을 쥐고 있지 않다: 같은 run을 잠근 취소 호출이 예약 행을 잠그러 가도 교착하지 않는다
+    // Closer must acquire run before schedule so a run-holding cancel can lock the schedule without deadlock.
     sqlx::query("set local lock_timeout = '3s'")
         .execute(&mut other)
         .await
@@ -85,11 +82,10 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
     ))
     .fetch_all(&mut other)
     .await
-    .expect("닫는 쪽이 예약 행을 쥔 채 run을 기다린다");
-    // 일반 회신: 다음 순번에 쓰고 커밋한다
+    .expect("closer must not hold schedule lock while waiting on run");
     sqlx::query(&format!(
         "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, body, transport)
-         select 'personal', '{run}', n.seq, 'reply:{run}:' || n.seq::text, 'desk', '{OWNER}', 'direct', 'c1', '{{\"text\":\"답\"}}', 'fixture-push'
+         select 'personal', '{run}', n.seq, 'reply:{run}:' || n.seq::text, 'desk', '{OWNER}', 'direct', 'c1', '{{\"text\":\"reply\"}}', 'fixture-push'
          from (select coalesce(max(seq) + 1, 0) as seq from bot_outbox where run = '{run}') n"
     ))
     .execute(&mut other)
@@ -97,9 +93,8 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
     .unwrap();
     sqlx::query("commit").execute(&mut other).await.unwrap();
 
-    // 닫는 쪽은 처음부터 성공한다(재시도 없이): 안내는 일반 회신 다음 순번이다
     let closed = task.await.unwrap();
-    assert!(closed.expect("첫 시도에 닫힌다").is_none());
+    assert!(closed.expect("close should succeed on first try").is_none());
     let seqs: Vec<i32> = sqlx::query_scalar(&format!(
         "select seq from bot_outbox where run = '{run}' order by seq"
     ))
@@ -107,14 +102,17 @@ async fn a_close_notice_takes_the_next_sequence_after_a_concurrent_reply_and_nev
     .await
     .unwrap();
     let expected: Vec<i32> = (0..i32::try_from(rows_before).unwrap() + 2).collect();
-    assert_eq!(seqs, expected, "순번이 이어지고 겹치지 않는다");
+    assert_eq!(seqs, expected, "outbox sequences must be contiguous");
     let (last, transport): (String, String) = sqlx::query_as(&format!(
         "select body, transport from bot_outbox where run = '{run}' order by seq desc limit 1"
     ))
     .fetch_one(db.store.pool())
     .await
     .unwrap();
-    assert!(last.contains("멈췄어요"), "{last}");
+    assert!(
+        last.contains(CloseReason::Unrouted.notice().unwrap()),
+        "{last}"
+    );
     assert_eq!(transport, "fixture-push");
     assert_eq!(column::<String>(&db, &id, "state").await, "closed");
 }

@@ -51,7 +51,6 @@ fn basic(user: &str, pass: &str) -> String {
     )
 }
 
-/// 요청을 보내고 상태 줄(`HTTP/1.1 200 ...`)과 연결을 돌려준다.
 async fn request(addr: SocketAddr, raw: &str) -> (String, TcpStream) {
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream.write_all(raw.as_bytes()).await.unwrap();
@@ -176,7 +175,6 @@ async fn anything_not_declared_exactly_is_forbidden_before_resolution() {
     }
     assert!(r.resolver.calls().is_empty() && r.connector.addrs().is_empty());
     assert_eq!(r.proxy.stats().denied_policy, 7);
-    // 대소문자와 끝의 점은 같은 호스트로 본다
     let (status, _) = request(
         r.proxy.addr(),
         &connect_request("API.example.:443", Some(&auth)),
@@ -207,7 +205,7 @@ async fn a_name_resolving_to_a_non_public_address_is_refused_even_when_declared(
     }
     assert!(
         r.connector.addrs().is_empty(),
-        "비공개 주소로는 연결을 열지 않는다"
+        "must not connect to non-public addresses"
     );
     assert_eq!(r.proxy.stats().denied_address, dns.len() as u64);
 }
@@ -257,7 +255,7 @@ async fn only_connect_is_served_and_malformed_heads_are_rejected() {
     .await;
     assert!(
         status.contains("405"),
-        "평문 프록시는 열지 않는다: {status}"
+        "plain HTTP proxying must be rejected: {status}"
     );
     for raw in [
         "garbage\r\n\r\n".to_owned(),
@@ -298,9 +296,9 @@ async fn stopping_the_proxy_cuts_open_tunnels_and_closes_the_port() {
     let closed = timeout(Duration::from_secs(5), tunnel.read_to_end(&mut rest)).await;
     assert!(
         matches!(closed, Ok(Ok(_)) | Ok(Err(_))),
-        "열린 터널이 끊겨야 한다"
+        "open tunnel must close"
     );
-    assert!(TcpStream::connect(addr).await.is_err(), "포트도 닫힌다");
+    assert!(TcpStream::connect(addr).await.is_err(), "port must close");
 }
 
 #[test]

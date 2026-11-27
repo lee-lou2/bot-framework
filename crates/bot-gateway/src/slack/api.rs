@@ -1,6 +1,4 @@
-//! Slack Web API 호출. 쓰기 호출은 결과를 넷으로 나눠 돌려준다 — 실행 확정(`Ok`), 거절 확정(`Error`), 실행 전 실패
-//! (`BeforeWrite`·`RateLimited`·`TokenRejected`), 불명(`Unknown`). 숨은 재전송은 없다: 연결을 재사용하지 않고(끊긴 연결로 보냈다가 몰래
-//! 다시 보내는 일이 없게) 429도 기다렸다 다시 보내지 않고 호출한 쪽에 알린다.
+//! Slack Web API HTTP client with single-attempt delivery classification and no hidden retries.
 use reqwest::Client;
 use serde_json::Value;
 use std::time::Duration;
@@ -15,17 +13,14 @@ const DEFAULT_RETRY: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Raw {
     Ok(Value),
-    /// Slack가 이유를 밝히며 거절했다(`ok:false`). 요청은 실행되지 않았다. 코드는 `[a-z0-9_]`만 남긴다.
+    /// Confirmed refusal (`ok: false`) with error code restricted to `[a-z0-9_]`.
     Error(String),
-    /// 이번 요청의 바이트를 쓰기 전에 연결이 실패했다.
+    /// Connect failure before any request bytes were written.
     BeforeWrite,
-    /// Slack가 속도 제한으로 거절했다(HTTP 429, 실행 전). 기다릴 시간이 하한이다.
     RateLimited(Duration),
-    /// Slack가 봇 토큰 자체를 거절했다(`invalid_auth`·`token_revoked`·`token_expired`). 인증은 요청을 실행하기 전에 걸러지므로 아무것도 실행되지 않았다.
-    /// 토큰을 바꾸는 동안에는 보관소의 새 값이 아직 반영되지 않은 옛 토큰이 이 거절을 받으니 영구 거절이 아니다 — 호출한 쪽은 미실행으로 다루고,
-    /// 기억한 토큰은 `Credentials::call`이 버려 다음 시도가 자격을 다시 읽게 한다.
+    /// Pre-execution auth rejection (`invalid_auth`, `token_revoked`, `token_expired`); transient during rotation.
     TokenRejected,
-    /// 시간 초과·5xx·읽을 수 없는 응답 — 실행됐는지 알 수 없다.
+    /// Timeout, 5xx, or unreadable body — execution outcome is unknown.
     Unknown,
 }
 
@@ -53,7 +48,7 @@ fn sanitize(code: &str) -> String {
     }
 }
 
-/// 응답 한 건을 읽는다(순수). 2xx의 `ok`만 Slack의 답으로 인정한다 — 중간 프록시의 5xx는 본문이 그럴듯해도 불명이다.
+/// Only 2xx JSON responses with a boolean `ok` count as Slack responses; 5xx proxy bodies stay `Unknown`.
 pub fn classify(status: u16, retry_after: Option<&str>, body: &[u8]) -> Raw {
     let wait = || {
         retry_after
@@ -83,18 +78,16 @@ pub fn classify(status: u16, retry_after: Option<&str>, body: &[u8]) -> Raw {
 }
 
 impl SlackApi {
-    /// `base`는 시험용 가짜 서버 주소. 생략하면 `https://slack.com/api/`.
     pub fn new(base: Option<&str>) -> Self {
         let http = Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
-            // 연결 재사용을 끈다: 닫힌 유휴 연결로 보냈다가 클라이언트가 몰래 다시 보내는 일을 막는다
+            // Disable connection pooling and transport-level retries so writes never silently retransmit.
             .pool_max_idle_per_host(0)
-            // 클라이언트 기본 재시도(프로토콜 수준 NACK 재전송)도 끈다 — 다시 보낼지는 정산 결과(NotSent)가 정한다
             .retry(reqwest::retry::never())
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("HTTP 클라이언트 초기화 실패(CA 인증서가 있는지 확인)");
+            .expect("failed to initialize HTTP client (check CA certificates)");
         let mut base = base.unwrap_or(DEFAULT_BASE).to_owned();
         if !base.ends_with('/') {
             base.push('/');
@@ -114,7 +107,7 @@ impl SlackApi {
         self.finish(request.send().await).await
     }
 
-    /// 파일 바이트를 올릴 주소로 한 번 보낸다. 주소 자체가 열쇠라 토큰을 붙이지 않고 오류에도 싣지 않는다.
+    /// Uploads raw bytes to Slack's pre-signed URL without attaching a Bearer token or logging the URL.
     pub async fn put_bytes(&self, url: &str, bytes: Vec<u8>) -> Raw {
         let sent = self
             .http
@@ -152,7 +145,6 @@ impl SlackApi {
         }
     }
 
-    /// Socket Mode 웹소켓 주소(앱 토큰)
     pub async fn open_socket(&self, app_token: &str) -> Option<String> {
         match self
             .call("apps.connections.open", app_token, Body::Form(vec![]))
@@ -163,7 +155,6 @@ impl SlackApi {
         }
     }
 
-    /// 봇 토큰이 속한 사용자·팀·앱. 소켓의 앱과 맞는지 확인하는 데 쓴다.
     pub async fn auth_test(&self, bot_token: &str) -> Option<AuthInfo> {
         match self.call("auth.test", bot_token, Body::Form(vec![])).await {
             Raw::Ok(value) => Some(AuthInfo {
@@ -199,11 +190,9 @@ mod tests {
             raw(200, None, r#"{"ok":false,"error":"channel_not_found"}"#),
             Raw::Error("channel_not_found".into())
         );
-        // 5xx는 본문이 그럴듯해도 불명이다(중간 프록시가 덮었을 수 있다)
         assert_eq!(raw(502, None, r#"{"ok":true}"#), Raw::Unknown);
         assert_eq!(raw(500, None, ""), Raw::Unknown);
         assert_eq!(raw(302, None, ""), Raw::Unknown);
-        // 읽을 수 없는 본문·ok 없음·이유 없는 거절
         for body in [
             "",
             "not json",
@@ -239,7 +228,6 @@ mod tests {
 
     #[test]
     fn a_rejected_bot_token_is_not_an_ordinary_refusal() {
-        // 토큰 자체를 거절한 코드는 미실행의 일시 실패다(교체 중인 옛 토큰이 받는다). 다른 인증 계열·권한 거절은 보통 거절로 남는다
         for code in ["invalid_auth", "token_revoked", "token_expired"] {
             let body = format!(r#"{{"ok":false,"error":"{code}"}}"#);
             assert_eq!(raw(200, None, &body), Raw::TokenRejected, "{code}");
@@ -254,7 +242,6 @@ mod tests {
             let body = format!(r#"{{"ok":false,"error":"{code}"}}"#);
             assert_eq!(raw(200, None, &body), Raw::Error(code.into()), "{code}");
         }
-        // 2xx의 `ok:false`만 Slack의 답이다: 중간 프록시가 낸 4xx·5xx는 본문이 그럴듯해도 불명이다
         for status in [401, 403, 500, 502] {
             assert_eq!(
                 raw(status, None, r#"{"ok":false,"error":"invalid_auth"}"#),

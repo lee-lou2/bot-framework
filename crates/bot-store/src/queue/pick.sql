@@ -1,4 +1,4 @@
--- 처리 가능 시각과 WHERE의 상태 조건은 migrations/0024_queue_order.sql의 bot_runs_eligible과 맞춘다.
+-- Eligibility timestamp and state filters must match the bot_runs_eligible index in migrations/0024_queue_order.sql.
 with clock(ms) as (select bot_now_ms())
 select r.profile, r.id, r.state, r.attempts, r.generation, r.parent, r.parent_step, r.cancel_requested, r.claim_set
 from bot_runs r

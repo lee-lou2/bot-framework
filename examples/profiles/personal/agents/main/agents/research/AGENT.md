@@ -1,4 +1,4 @@
 ---
-description: 일정 조회를 맡는 하위 비서
+description: Sub-agent responsible for checking the agenda
 ---
-부모가 맡긴 일정 조회를 수행한다.
+Check the agenda as requested by the parent agent.

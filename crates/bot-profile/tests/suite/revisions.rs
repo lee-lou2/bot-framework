@@ -1,4 +1,4 @@
-//! 판본: 바이트·정책·도구 선언에 따른 판본, 번들 복원과 변조 거절, 입력 검증, 실효 등급.
+//! Revision, bundle tamper-resistance, tool input validation, effective risk class, and reserved tool ID tests.
 
 use crate::support::{TOOLS_PATH, agent, base, codes, edit, ok, raw_bundle, snapshot};
 use bot_core::{
@@ -15,17 +15,17 @@ fn revisions_follow_bytes_policy_and_declarations() {
     assert_eq!(
         (&a.revision, &a.policy_revision),
         (&b.revision, &b.policy_revision),
-        "같은 바이트는 같은 판본"
+        "identical bytes produce identical revisions"
     );
 
-    let knowledge = snapshot(&edit(base(), "knowledge/guide.md", "안내", "안내 2"));
+    let knowledge = snapshot(&edit(base(), "knowledge/guide.md", "Guide", "Guide 2"));
     assert_ne!(
         knowledge.revision, a.revision,
-        "파일 한 바이트도 판본이 바뀐다"
+        "any byte change changes bundle revision"
     );
     assert_eq!(
         knowledge.policy_revision, a.policy_revision,
-        "지식은 정책 판본과 무관"
+        "knowledge changes do not affect policy revision"
     );
 
     let approve = snapshot(&edit(
@@ -58,7 +58,7 @@ fn revisions_follow_bytes_policy_and_declarations() {
     };
     assert_ne!(
         approver.policy_revision, a.policy_revision,
-        "승인자 매핑도 정책 판본에 묶인다"
+        "trigger approver mapping binds into policy revision"
     );
 
     let tool = |s: &Snapshot, name: &str| {
@@ -77,7 +77,7 @@ fn revisions_follow_bytes_policy_and_declarations() {
     assert_eq!(
         tool(&scopes, "list").revision,
         tool(&a, "list").revision,
-        "다른 도구의 판본은 그대로"
+        "unrelated tool revision stays unchanged"
     );
     let server = {
         let mut host_files = edit(
@@ -97,7 +97,7 @@ fn revisions_follow_bytes_policy_and_declarations() {
     assert_ne!(
         tool(&server, "list").revision,
         tool(&a, "list").revision,
-        "서버 별칭이 도구 판본에 들어간다"
+        "server alias binds into tool revision"
     );
 }
 
@@ -111,10 +111,7 @@ fn bundle_rebuilds_the_same_snapshot_and_rejects_tampering() {
     let limits = Limits::default();
     let again = from_bundle(&bundle, &id, &original.revision, &limits).unwrap();
     assert_eq!(format!("{again:?}"), format!("{:?}", **original));
-    assert!(
-        again.agents.values().all(|a| a.builtin.is_empty()),
-        "builtin이 없던 번들은 빈 집합"
-    );
+    assert!(again.agents.values().all(|a| a.builtin.is_empty()));
 
     let wrong_revision = bot_core::id::Revision("0".repeat(64));
     let codes = |r: Result<Snapshot, Vec<bot_profile::Issue>>| {
@@ -135,7 +132,7 @@ fn bundle_rebuilds_the_same_snapshot_and_rejects_tampering() {
         codes(from_bundle(&bundle, &other, &original.revision, &limits))
             .contains(&"profile-id-mismatch")
     );
-    // 기록한 판본과 해시가 다르면 구조를 읽기 전에 거절한다
+    // Hash check precedes bundle structure decoding.
     assert_eq!(
         codes(from_bundle(b"garbage", &id, &original.revision, &limits)),
         ["revision-mismatch"]
@@ -145,7 +142,6 @@ fn bundle_rebuilds_the_same_snapshot_and_rejects_tampering() {
         codes(from_bundle(half, &id, &original.revision, &limits)),
         ["revision-mismatch"]
     );
-    // 해시가 맞아도 구조가 틀린 묶음은 거절한다
     for broken in [&b"garbage"[..], half] {
         let own = bot_profile::revision_of(broken);
         assert_eq!(
@@ -157,7 +153,6 @@ fn bundle_rebuilds_the_same_snapshot_and_rejects_tampering() {
 
 #[test]
 fn bundle_restore_does_not_need_the_host_registry() {
-    // 활성화 뒤 서버가 철회돼도 옛 판본의 구조는 다시 만들 수 있다(현재 권한 검사는 호출 때 따로 한다)
     let set = ok(&base());
     let id = ProfileId("personal".into());
     let snap = set.profile(&id).unwrap();
@@ -201,7 +196,7 @@ fn input_validator_checks_declared_tool_input() {
     }
     let find = &snap.agents[&agent("main")].skills["agenda"].tools[&ToolId("agenda.find".into())];
     assert!(
-        v.validate(&find.input, &args(r#"{"query":"산책"}"#))
+        v.validate(&find.input, &args(r#"{"query":"walk"}"#))
             .is_ok()
     );
     assert!(
@@ -224,7 +219,7 @@ fn explicit_destination_raises_the_effective_class() {
             base(),
             "agents/main/skills/mail/SKILL.md",
             "",
-            "메일 안내\n",
+            "Mail guide\n",
         ),
         "agents/main/skills/mail/tools.yaml",
         "",
@@ -236,16 +231,15 @@ fn explicit_destination_raises_the_effective_class() {
     assert_eq!(
         class("send"),
         bot_core::state::Risk::Irreversible,
-        "다른 사람에게 보내는 도구"
+        "explicit external recipient escalates risk class"
     );
     assert_eq!(
         class("reply"),
         bot_core::state::Risk::Write,
-        "원래 대화에 답하는 도구는 선언 그대로"
+        "reply destination keeps declared risk class"
     );
 }
 
-/// 스킬 `skill`에 도구 하나(`tool`, write 등급)만 선언한 파일 지도
 fn with_tool(skill: &str, tool: &str) -> crate::support::Files {
     let tools = format!(
         "version: 1\nserver: demo-notes\ntools:\n  - id: {tool}\n    class: write\n    scopes: [calendar.read]\n    input: {{type: object, properties: {{}}, additionalProperties: false}}\n"
@@ -254,7 +248,7 @@ fn with_tool(skill: &str, tool: &str) -> crate::support::Files {
         base(),
         &format!("agents/main/skills/{skill}/SKILL.md"),
         "",
-        "스킬 안내\n",
+        "Skill guide\n",
     );
     edit(
         files,
@@ -266,12 +260,10 @@ fn with_tool(skill: &str, tool: &str) -> crate::support::Files {
 
 #[test]
 fn only_the_builtin_tool_ids_are_reserved_for_new_and_restored_profiles() {
-    // 새 프로필: 정확한 전체 ID `memory.share`만 거절하고 나머지는 허용
     assert_eq!(codes(&with_tool("memory", "share")), ["reserved-tool"]);
     ok(&with_tool("memory", "recall"));
     ok(&with_tool("mail", "share"));
     ok(&with_tool("memory-notes", "share"));
-    // 대화 중 예약·후속 확인·자동 회신 승인의 내장 도구: schedule.create·list·cancel·deliver만 예약한다
     for tool in ["create", "list", "cancel", "deliver"] {
         assert_eq!(
             codes(&with_tool("schedule", tool)),
@@ -285,7 +277,6 @@ fn only_the_builtin_tool_ids_are_reserved_for_new_and_restored_profiles() {
     ok(&with_tool("calendar", "create"));
     ok(&with_tool("schedule-notes", "create"));
 
-    // 복원한 프로필: 같은 검증이 돈다(해시가 맞는 묶음이어도 거절)
     let (id, limits) = (ProfileId("personal".into()), Limits::default());
     let restore = |files: &crate::support::Files| {
         let bundle = raw_bundle(files);

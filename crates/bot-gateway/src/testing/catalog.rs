@@ -1,4 +1,4 @@
-//! 활성 프로필 집합을 시험이 통째로 바꾸고 지난 판본을 복원해 주는 `ProfileCatalog`. `catalog()`로 합성 집합을 만든다.
+//! Mutable `ProfileCatalog` test double supporting hot swaps, mid-request flips, and revision history lookup.
 use bot_core::{
     id::{ProfileId, Revision},
     profile::{ProfileCatalog, Snapshot},
@@ -16,14 +16,10 @@ pub fn catalog(
 
 type ActiveSet = Arc<BTreeMap<ProfileId, Arc<Snapshot>>>;
 
-/// 활성 집합을 시험이 통째로 바꿀 수 있는 ProfileCatalog
 pub struct TestCatalog {
     active: Mutex<Arc<BTreeMap<ProfileId, Arc<Snapshot>>>>,
-    /// `active()`를 n번 부른 뒤 이 집합으로 바꾼다(요청 처리 도중 교체 흉내)
     flip: Mutex<Option<(usize, ActiveSet)>>,
-    /// 지난 판본(고정한 판본을 `lookup`으로 복원하는 시험용)
     history: Mutex<Vec<Arc<Snapshot>>>,
-    /// 참이면 `lookup`이 활성이거나 기억한 판본만 돌려준다(아니면 판본과 무관하게 활성 스냅숏을 돌려준다)
     strict: Mutex<bool>,
 }
 
@@ -37,22 +33,18 @@ impl TestCatalog {
         })
     }
 
-    /// 지난 판본을 기억해 `lookup(프로필, 판본)`이 그 판본을 돌려주게 한다.
     pub fn remember(&self, snapshots: impl IntoIterator<Item = Arc<Snapshot>>) {
         self.history.lock().unwrap().extend(snapshots);
     }
 
-    /// 판본을 복원하지 못하는 저장소를 흉내 낸다(활성이거나 기억한 판본만 복원된다).
     pub fn strict(&self, strict: bool) {
         *self.strict.lock().unwrap() = strict;
     }
 
-    /// `active()`가 `calls`번 불린 다음부터 이 집합이 활성이 된다.
     pub fn flip_after(&self, calls: usize, snapshots: impl IntoIterator<Item = Arc<Snapshot>>) {
         *self.flip.lock().unwrap() = Some((calls, catalog(snapshots)));
     }
 
-    /// 새 집합으로 한 번에 교체한다.
     pub fn replace(&self, snapshots: impl IntoIterator<Item = Arc<Snapshot>>) {
         *self.active.lock().unwrap() = catalog(snapshots);
     }

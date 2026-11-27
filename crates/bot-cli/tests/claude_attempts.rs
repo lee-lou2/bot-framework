@@ -1,8 +1,8 @@
-//! 호출 원장에 남지 않는 CLI 거절(예: CLI 대화가 명시 목적지를 준 `schedule.create`)도 «모델에 돌려준 단어»를 그 호출 자리의 **표식**(`cli-refusal-<자리>`)으로 먼저
-//! 기록한 뒤 돌려준다. 그래서 첫 시도가 `session_unsaved`로 물러나지 않고 시도를 쓰지 않는다: 저장소의 시도 한도가 1이어도 run이 정상으로 끝나고, 같은 슬롯의
-//! 표식은 하나, 모델 요청은 필요한 두 번(도구 호출 → 거절 단어를 본 마무리)뿐이며 예약·승인 카드·호출 행은 0이다(총괄 결정 «모든 CLI 거절은 표식 먼저»).
+//! CLI refusals that never enter the call ledger (e.g. `schedule.create` with an explicit
+//! destination from a CLI conversation) persist a refusal marker (`cli-refusal-<slot>`) before
+//! returning the refusal token to the model, avoiding `session_unsaved` and consuming 0 attempts.
 //!
-//! 실행: `BOT_CLAUDE_CANARY=required BOT_TEST_DATABASE_URL=… cargo test -p bot-cli --test claude_attempts` (claude CLI가 없으면 건너뛴다)
+//! Run: `BOT_CLAUDE_CANARY=required BOT_TEST_DATABASE_URL=... cargo test -p bot-cli --test claude_attempts`
 mod claude_support;
 mod process_support;
 
@@ -30,7 +30,7 @@ policy:
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_call_refused_before_it_is_recorded_does_not_spend_an_attempt() {
     let Some(schema) = Schema::create() else {
-        eprintln!("BOT_TEST_DATABASE_URL이 없어 건너뜀");
+        eprintln!("skipped: BOT_TEST_DATABASE_URL not set");
         return;
     };
     let Some(claude) = claude_bin() else {
@@ -48,7 +48,7 @@ async fn a_call_refused_before_it_is_recorded_does_not_spend_an_attempt() {
         },
     )
     .await;
-    // CLI 대화는 원래 대화에만 답한다: 목적지를 주면 호출을 기록하기 전에 거절된다(`destination_unsupported`)
+    // CLI conversations only reply in place; explicit destinations fail pre-ledger (`destination_unsupported`).
     let destination =
         serde_json::json!({"binding": "desk", "conversation": {"kind": "channel", "id": "C1"}});
     rig.script(tool_turn(
@@ -57,24 +57,22 @@ async fn a_call_refused_before_it_is_recorded_does_not_spend_an_attempt() {
         "mcp__relay__schedule_create",
         &create_with(destination, &in_secs(3600)),
     ));
-    rig.script(final_turn("msg_a2", "그 목적지는 쓸 수 없대요"));
-    let chat = rig.chat("a1", "팀 채널에 알려 줘").await;
+    rig.script(final_turn("msg_a2", "That destination is not supported"));
+    let chat = rig.chat("a1", "Notify the team channel").await;
     let rows = rig.query(
         "select string_agg(state || ':' || attempts || ':' || coalesce(error, ''), ' / ') from {s}.bot_runs",
     );
     assert!(chat.status.success(), "{} / runs: {rows}", said(&chat));
-    // 시도 한도 1에서도 run이 정상으로 끝나고 시도를 쓰지 않았다
     assert_eq!(
         rig.query("select count(*) from {s}.bot_runs where state = 'succeeded'"),
         "1",
-        "시도 한도 1에서도 run이 정상으로 끝나야 해요: {rows}"
+        "run must succeed even with max_attempts = 1: {rows}"
     );
     assert_eq!(
         rig.query("select attempts from {s}.bot_runs"),
         "0",
-        "거절이 시도를 쓰지 않아요: {rows}"
+        "pre-ledger refusal must not consume an attempt: {rows}"
     );
-    // 같은 슬롯의 표식이 하나이고 모델에는 `denied`가 돌아갔다
     assert_eq!(
         rig.query("select count(*) from {s}.bot_steps where key like 'cli-refusal-%'"),
         "1"
@@ -87,9 +85,8 @@ async fn a_call_refused_before_it_is_recorded_does_not_spend_an_attempt() {
         tool_result(&rig.upstream, "toolu_a1").as_deref(),
         Some("denied")
     );
-    // 불필요한 모델 요청이 없다(도구 호출 한 번과 거절을 본 마무리 한 번)
+    // Exactly two model requests: tool call turn + final turn after seeing the refusal.
     assert_eq!(rig.upstream.requests().len(), 2, "{rows}");
-    // 예약·승인 카드·호출 행은 만들어지지 않았다
     for table in ["bot_user_schedules", "bot_approvals", "bot_calls"] {
         assert_eq!(
             rig.query(&format!("select count(*) from {{s}}.{table}")),

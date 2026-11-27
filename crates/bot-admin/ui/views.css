@@ -1,4 +1,4 @@
-/* 구조 밖의 보기(실행·승인·권한·감사·상태) 공통: 페이지 틀, 구역 제목, 표, 빈 상태, 지표 띠, 이름표. 움직임은 transform·opacity만. */
+/* Shared page styles for non-map views (runs, approvals, access, audit, status). */
 .page { display: block; }
 .wrap { width: 100%; max-width: 1200px; margin: 0 auto; padding: var(--s6) var(--s5) 80px; }
 .ph { display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--s3) var(--s4); margin-bottom: var(--s5); }
@@ -27,7 +27,6 @@ time.ago { white-space: nowrap; }
 .more { display: flex; justify-content: center; margin-top: var(--s4); }
 .more .btn { min-width: 160px; }
 
-/* 표 */
 .tbl { width: fit-content; min-width: min(100%, 560px); max-width: 100%; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); overflow: clip; }
 .tbl table { width: 100%; border-collapse: collapse; }
 .tbl th { position: sticky; top: var(--top-h); z-index: 2; padding: 10px var(--s4); border-bottom: 1px solid var(--line); background: var(--surface-2); color: var(--ink-3); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; text-align: left; white-space: nowrap; }
@@ -40,7 +39,7 @@ time.ago { white-space: nowrap; }
 .tbl tr.grp + tr td { border-top: 0; }
 .grp em { margin-left: var(--s2); color: var(--ink-3); font-size: 12px; font-style: normal; font-weight: 500; }
 .tbl td code { color: var(--ink-2); white-space: nowrap; }
-/* 이름 열 폭을 맞춘 표들: 같은 화면의 표끼리 둘째 열 시작선이 어긋나지 않게 한다. */
+/* Align first-column widths across stacked tables on the same page. */
 .tbl.t-id th:first-child, .tbl.t-id td:first-child { min-width: 176px; }
 .tbl td:first-child { font-weight: 500; }
 .tbl tr.is-held td { background: var(--warn-wash); }
@@ -68,7 +67,6 @@ time.ago { white-space: nowrap; }
 .empty-t { color: var(--ink-2); font-weight: 500; }
 .empty-h { margin-top: 2px; color: var(--ink-3); font-size: 13px; }
 
-/* 지표 띠: 큰 숫자 하나 + 작은 숫자들(같은 크기 카드를 늘어놓지 않는다). 칸 사이 가는 선은 칸마다 안쪽 선으로 그린다. */
 .strip { display: grid; grid-template-columns: minmax(150px, 220px) 1fr; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); overflow: clip; }
 .hero { display: grid; align-content: center; justify-items: start; gap: 6px; padding: 20px var(--s5); border: 0; background: none; text-align: left; box-shadow: inset -1px 0 0 var(--line); transition: background-color 150ms var(--ease), transform 80ms var(--ease); }
 .hero b { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; }

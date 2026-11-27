@@ -1,4 +1,5 @@
-//! 호스트 설정 `servers`의 원격(Streamable HTTP) 항목: 읽는 모양, 거절하는 주소·모양, 서버 판본.
+//! Tests for remote Streamable HTTP server entries in host `servers` config.
+
 use super::*;
 
 fn one(entry: Value) -> Result<Servers, String> {
@@ -31,13 +32,11 @@ fn a_remote_entry_is_read_with_an_optional_bearer_beside_the_local_ones() {
         docs.bearer.as_ref().map(SecretName::as_str),
         Some("docs-token")
     );
-    // auth를 생략할 수 있고 기본 포트는 443이다
     let open = one(json!({"transport": "http", "url": "https://mcp.example/api"})).unwrap();
     assert!(open.remote["docs"].bearer.is_none());
     assert_eq!(open.remote["docs"].target_text(), "mcp.example:443");
-    // 평문 http는 루프백 IP 리터럴만
+    // Plaintext HTTP is allowed only for loopback IP literals.
     assert!(one(json!({"transport": "http", "url": "http://127.0.0.1:9000/mcp"})).is_ok());
-    // 로컬 항목과 섞어도 각자 읽히고, `transport: "stdio"`는 생략과 같다
     let mixed = parse_all(&json!({
         "agenda": {"root": "/opt/bot/servers/agenda", "command": ["bin/server"]},
         "legacy": {"transport": "stdio", "root": "/opt/bot/servers/legacy", "command": ["bin/server"]},
@@ -93,7 +92,6 @@ fn the_revision_binds_the_address_and_the_bearer_name() {
     let first = revision(base.clone());
     assert_eq!(first.0.len(), 64);
     assert_eq!(revision(base.clone()), first);
-    // 기본 포트를 적어도 같은 대상이다
     let explicit = json!({"transport": "http", "url": "https://mcp.example:443/api",
                           "auth": bearer("docs-token")});
     assert_eq!(revision(explicit), first);

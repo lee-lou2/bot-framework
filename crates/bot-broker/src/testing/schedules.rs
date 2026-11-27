@@ -1,7 +1,4 @@
-//! `UserSchedules` 가짜(메모리). 실제 저장소가 지켜야 할 규칙을 그대로 적었다.
-//! - 생성·취소는 승인 소비·호출 완료를 한 번에 한다(`MemLedger::complete_builtin`). 소유자(요청자)별 활성 예약은 32개까지다.
-//! - 목록은 현재 claim과 활성 판본을 확인하고 본인 활성 예약만 ID 순서로 준다.
-//! - `finish_with_wake`는 `Started` 호출의 결과와 (run, call)에 유일한 후속 예약을 한 번에 저장한다. 같은 호출의 재전달은 같은 예약이다.
+//! In-memory `UserSchedules` double enforcing per-owner caps, atomic completion, and wake idempotency.
 
 use super::MemLedger;
 use bot_core::{
@@ -27,11 +24,8 @@ struct Entry {
     timing: Timing,
     instruction: String,
     quiet: bool,
-    /// 이 예약을 만든 호출(후속 예약은 부모 도구 호출).
     origin: (RunId, CallId),
-    /// 후속 확인이면 true.
     wake: bool,
-    /// 명시 목적지(다른 수신자). 없으면 원래 대화다.
     destination: Option<DeliveryTarget>,
 }
 
@@ -39,17 +33,13 @@ pub struct MemSchedules {
     ledger: Arc<MemLedger>,
     entries: Mutex<Vec<Entry>>,
     next: Mutex<u64>,
-    /// `finish_with_wake`가 이 오류로 실패한다(저장소 장애).
     wake_failure: Mutex<Option<Error>>,
-    /// 켜면 `finish_with_wake`가 커밋한 뒤 응답을 잃는다(`Unavailable`).
     lose_wake_response: Mutex<bool>,
-    /// `list`가 이 오류로 실패한다(저장소 장애).
     list_failure: Mutex<Option<Error>>,
 }
 
 use super::lock;
 
-/// 저장소가 받는 시간대 이름(시험용: 진짜 IANA 검증은 저장소가 한다).
 fn known_timezone(name: &str) -> bool {
     matches!(
         name,
@@ -69,27 +59,22 @@ impl MemSchedules {
         }
     }
 
-    /// 이후 `list`가 이 오류로 실패한다(`None`이면 다시 정상).
     pub fn fail_list_with(&self, error: Option<Error>) {
         *lock(&self.list_failure) = error;
     }
 
-    /// 이후 `finish_with_wake`가 이 오류로 실패한다(`None`이면 다시 정상).
     pub fn fail_wake_with(&self, error: Option<Error>) {
         *lock(&self.wake_failure) = error;
     }
 
-    /// 켜면 `finish_with_wake`가 커밋한 뒤 응답을 잃는다.
     pub fn lose_wake_response(&self, lose: bool) {
         *lock(&self.lose_wake_response) = lose;
     }
 
-    /// 지금 활성인 예약 수(전체).
     pub fn count(&self) -> usize {
         lock(&self.entries).len()
     }
 
-    /// 후속 확인으로 생긴 예약 `(지시문, 시각, quiet)`.
     pub fn wakes(&self) -> Vec<(String, SystemTime, bool)> {
         lock(&self.entries)
             .iter()
@@ -101,7 +86,6 @@ impl MemSchedules {
             .collect()
     }
 
-    /// 저장된 예약 한 건의 `(지시문, 시간 설정, quiet)`.
     pub fn get(&self, id: &str) -> Option<(String, Timing, bool)> {
         lock(&self.entries)
             .iter()
@@ -109,7 +93,6 @@ impl MemSchedules {
             .map(|e| (e.instruction.clone(), e.timing.clone(), e.quiet))
     }
 
-    /// 저장된 예약의 명시 목적지(원래 대화면 `None`).
     pub fn destination(&self, id: &str) -> Option<DeliveryTarget> {
         lock(&self.entries)
             .iter()
@@ -117,7 +100,6 @@ impl MemSchedules {
             .and_then(|e| e.destination.clone())
     }
 
-    /// 한 소유자의 활성 예약을 채워 한도를 시험한다.
     pub fn fill(&self, profile: &str, owner: &str, n: usize) {
         for _ in 0..n {
             let id = self.fresh_id();
@@ -170,7 +152,6 @@ impl UserSchedules for MemSchedules {
             let owner = self.ledger.principal_of(&start.attempt)?;
             let profile = start.attempt.profile.clone();
             let origin = (start.attempt.run.clone(), start.call.clone());
-            // 같은 호출의 재전달은 같은 예약이다.
             if let Some(existing) = lock(&self.entries)
                 .iter()
                 .find(|e| e.origin == origin && !e.wake)
@@ -236,7 +217,6 @@ impl UserSchedules for MemSchedules {
                 .iter()
                 .any(|e| e.id == id && e.profile == profile && e.owner == owner);
             if !found {
-                // 이미 이 호출이 취소를 끝냈다면(재전달) 같은 결과다. 아니면 본인 예약이 아니다.
                 let result = format!("{{\"schedule\":\"{}\"}}", id.0);
                 return match self
                     .ledger
@@ -278,7 +258,6 @@ impl UserSchedules for MemSchedules {
             let owner = self.ledger.principal_of(&attempt)?;
             let profile = attempt.profile.clone();
             let origin = (attempt.run.clone(), call.clone());
-            // 같은 호출을 다시 끝내려 하면(재전달) 이미 만든 후속 예약이다.
             if let Some(existing) = lock(&self.entries)
                 .iter()
                 .find(|e| e.origin == origin && e.wake)
@@ -303,7 +282,7 @@ impl UserSchedules for MemSchedules {
                 destination: None,
             });
             if *lock(&self.lose_wake_response) {
-                return Err(Error::Unavailable); // 커밋했지만 응답을 잃었다
+                return Err(Error::Unavailable);
             }
             Ok(id)
         })

@@ -1,5 +1,5 @@
-//! 진짜 Apple `container` 카나리 공통 도구: CLI·서비스·로컬 이미지 확인, 시험 전용 이름의 망·인스턴스, 정리, 모델 명세.
-//! 만들고 지우는 것은 이 시험의 `botvm-c<pid>*` 컨테이너와 `botvm-canary-<pid>*` 망뿐이다(다른 프로젝트 것은 건드리지 않는다).
+//! Shared Apple `container` canary harness: environment probing, per-test isolated names/networks, cleanup, and VM specs.
+//! Only touches `botvm-c<pid>*` containers and `botvm-canary-<pid>*` networks created by this test.
 #![allow(dead_code)]
 
 #[allow(unused_imports)]
@@ -45,8 +45,7 @@ pub fn ok(program: &Path, args: &[&str]) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// 이 기계에서 도는 실제 VM 시험(다른 역할의 실행 포함)은 한 번에 하나만 돈다: 서로의 VM 시작·망을 흔들어 시험이 가끔 실패하는 일을 막는다.
-/// 같은 프로세스 안에서는 시험들이 차례로 돌고, 다른 프로세스와는 기계 전체 잠금 파일로 겹치지 않는다(이 시험 파일이 도는 동안 쥐고, 끝나면 운영체제가 놓는다).
+/// Serializes real VM canary tests across threads and processes via a host lock file to avoid vmnet interference.
 pub async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
     static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     static MACHINE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
@@ -63,19 +62,17 @@ fn machine_lock() -> std::fs::File {
         .create(true)
         .append(true)
         .open("/tmp/bot-vm-canary.lock")
-        .expect("VM 시험 잠금 파일");
-    // 다른 시험이 15분 넘게 쥐고 있으면(멈춘 것) 기다리지 않고 진행한다
+        .expect("VM canary lock file");
     for _ in 0..4500 {
         if rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok() {
             return file;
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    eprintln!("warning: 다른 VM 시험이 잠금을 오래 쥐고 있어 잠금 없이 진행한다");
+    eprintln!("warning: another VM test held the lock too long; proceeding unlocked");
     file
 }
 
-/// 쓸 수 있는 환경이면 `container` 경로. 아니면 건너뛴다(`BOT_CONTAINER_CANARY=required`이면 실패한다).
 pub fn available() -> Option<PathBuf> {
     let required = std::env::var("BOT_CONTAINER_CANARY").as_deref() == Ok("required");
     let program = container_bin()
@@ -83,15 +80,14 @@ pub fn available() -> Option<PathBuf> {
     if program.is_none() {
         assert!(
             !required,
-            "BOT_CONTAINER_CANARY=required: container CLI·서비스·로컬 {IMAGE} 이미지가 필요하다"
+            "BOT_CONTAINER_CANARY=required: container CLI, service, and local {IMAGE} image are required"
         );
         eprintln!("skipped: container CLI, its service or the local {IMAGE} image is unavailable");
     }
     program
 }
 
-/// 운영 모델 이미지(신뢰 init 포함)의 정확한 참조: `BOT_MODEL_IMAGE=이름@sha256:…`(`images/model/build.sh`가 알려 준다). 없으면 건너뛴다.
-/// `BOT_CONTAINER_CANARY=required`이면 실패한다. 이미지는 내려받지 않고 로컬에 있어야 한다.
+/// Resolves `BOT_MODEL_IMAGE=<name@sha256:...>` (built locally via `images/model/build.sh`); skips unless `BOT_CONTAINER_CANARY=required`.
 pub fn model_image(program: &Path) -> Option<String> {
     let required = std::env::var("BOT_CONTAINER_CANARY").as_deref() == Ok("required");
     let image = std::env::var("BOT_MODEL_IMAGE")
@@ -100,14 +96,13 @@ pub fn model_image(program: &Path) -> Option<String> {
     if image.is_none() {
         assert!(
             !required,
-            "BOT_CONTAINER_CANARY=required: BOT_MODEL_IMAGE=<이름@sha256:…> 로컬 이미지가 필요하다(images/model/build.sh)"
+            "BOT_CONTAINER_CANARY=required: local BOT_MODEL_IMAGE=<name@sha256:...> image is required (images/model/build.sh)"
         );
-        eprintln!("skipped: BOT_MODEL_IMAGE (a local name@sha256:… model image) is not set");
+        eprintln!("skipped: BOT_MODEL_IMAGE (a local name@sha256:... model image) is not set");
     }
     image
 }
 
-/// 실행 중인 컨테이너 한 개의 IPv4(망에 붙은 첫 주소).
 pub fn ip_of(program: &Path, id: &str) -> Option<String> {
     let output = Command::new(program)
         .args(["ls", "--format", "json"])
@@ -122,7 +117,6 @@ pub fn ip_of(program: &Path, id: &str) -> Option<String> {
     })
 }
 
-/// 시험 하나의 시험 전용 이름·폴더와 정리. 패닉해도 이 시험의 컨테이너(접두사)와 망만 지운다.
 pub struct Env {
     pub program: PathBuf,
     pub network: String,
@@ -137,7 +131,7 @@ impl Env {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("input")).unwrap();
         std::fs::create_dir_all(root.join("work")).unwrap();
-        std::fs::write(root.join("input/in.txt"), "읽기 전용 입력").unwrap();
+        std::fs::write(root.join("input/in.txt"), "read-only input").unwrap();
         Self {
             program,
             network: format!("botvm-canary-{pid}-{tag}"),
@@ -146,7 +140,7 @@ impl Env {
         }
     }
 
-    /// 이 시험의 호스트 전용 망 부분망: 같은 기계에서 도는 다른 망(다른 시험·다른 프로젝트)과 겹치지 않게 `container`의 자동 배정 범위 밖(192.168.200~249)에서 고른다.
+    /// Picks a subnet in `192.168.200..249.0/24` outside `container`'s default auto-allocation range.
     pub fn subnet(&self) -> String {
         let seed = self.network.bytes().fold(std::process::id(), |h, b| {
             h.wrapping_mul(31).wrapping_add(u32::from(b))
@@ -154,7 +148,6 @@ impl Env {
         format!("192.168.{}.0/24", 200 + seed % 50)
     }
 
-    /// 방화벽 진입 없이(이 이미지에는 init이 없다) 시작하는 설정.
     pub fn config(&self) -> ContainerConfig {
         let mut config = ContainerConfig::new(IMAGE, &self.network, &self.root)
             .named(&self.instance)
@@ -166,7 +159,6 @@ impl Env {
         config.unfirewalled()
     }
 
-    /// 이미지의 신뢰 init을 쓰는(운영 모양) 설정: 방화벽을 걸고 비root로 고정 `claude`를 띄운다.
     pub fn firewalled(&self, image: &str) -> ContainerConfig {
         let mut config = ContainerConfig::new(image, &self.network, &self.root)
             .named(&self.instance)
@@ -179,12 +171,10 @@ impl Env {
         config
     }
 
-    /// 이 시험의 접두사로 보이는 컨테이너 ID들.
     pub fn ids(&self) -> Vec<String> {
         ls_ids(&self.program, &format!("{}-", self.instance))
     }
 
-    /// 조건이 될 때까지(최대 `secs`초) 기다린다.
     pub async fn until(&self, secs: u64, what: &str, mut done: impl FnMut(&Env) -> bool) {
         for _ in 0..secs * 10 {
             if done(self) {
@@ -215,7 +205,6 @@ impl Drop for Env {
             ok(&self.program, &["delete", "--force", id]);
         }
         ok(&self.program, &["network", "delete", &self.network]);
-        // 시험이 만든 입력·쓰기 폴더와 잠금 파일도 치운다(모든 VM이 사라진 뒤다)
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -236,7 +225,6 @@ pub fn ls_ids(program: &Path, prefix: &str) -> Vec<String> {
         .collect()
 }
 
-/// 모델 VM 명세: 입력 폴더는 읽기 전용(/bot), scratch는 쓰기(/work).
 pub fn spec(root: &Path, run: &str, script: &str, env: Vec<(String, String)>) -> ModelSpec {
     ModelSpec {
         attempt: Attempt {
@@ -267,14 +255,13 @@ pub async fn lines(process: &mut Box<dyn ModelProcess>) -> Vec<String> {
     let mut out = Vec::new();
     while let Some(line) = tokio::time::timeout(Duration::from_secs(90), process.next_line())
         .await
-        .expect("VM 출력이 멈췄다")
+        .expect("VM output stalled")
     {
         out.push(line);
     }
     out
 }
 
-/// 게이트웨이(호스트)의 TCP 서비스 하나: 받은 연결마다 한 줄을 읽어 채널로 보낸다. 포트를 돌려준다.
 pub fn service(
     bind: std::net::SocketAddr,
 ) -> (
@@ -282,7 +269,7 @@ pub fn service(
     std::sync::mpsc::Receiver<String>,
     std::net::TcpListener,
 ) {
-    let listener = std::net::TcpListener::bind(bind).expect("호스트 바인드");
+    let listener = std::net::TcpListener::bind(bind).expect("host bind");
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = std::sync::mpsc::channel();
     let accepting = listener.try_clone().unwrap();
@@ -290,7 +277,7 @@ pub fn service(
         while let Ok((mut stream, _)) = accepting.accept() {
             let mut buf = [0u8; 128];
             let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
-            // 어댑터가 릴레이를 확인하려고 연결만 하고 끊은 것은 알리지 않는다
+            // Ignore zero-byte readiness probes from the adapter.
             if n > 0 {
                 let _ = tx.send(String::from_utf8_lossy(&buf[..n]).trim().to_owned());
             }
@@ -299,7 +286,6 @@ pub fn service(
     (port, rx, listener)
 }
 
-/// 이 시험의 닻 VM ID(소유 라벨이 `anchor.<인스턴스>…`이고 실제로 돌고 있는 것). 띄우는 중인 VM은 죽일 수 없으므로 돌고 있는 것만 본다.
 pub fn anchor_id(program: &Path, instance: &str) -> Option<String> {
     let output = Command::new(program)
         .args(["ls", "--all", "--format", "json"])
@@ -315,7 +301,6 @@ pub fn anchor_id(program: &Path, instance: &str) -> Option<String> {
     })
 }
 
-/// 닻이 돌고 있을 때까지(최대 60초) 기다려 그 ID를 돌려준다.
 pub async fn running_anchor(program: &Path, instance: &str) -> String {
     for _ in 0..600 {
         if let Some(id) = anchor_id(program, instance) {
@@ -323,10 +308,10 @@ pub async fn running_anchor(program: &Path, instance: &str) -> String {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("닻이 돌고 있어야 한다");
+    panic!("anchor must be running");
 }
 
-/// VM이 뜨는 동안에는 목록에 `stopped`로 보이는 순간이 있어 `kill`이 거절될 수 있다: 될 때까지(최대 20초) 다시 한다.
+/// Retries `kill` because a newly spawned VM can briefly appear `stopped` before accepting signals.
 pub async fn kill_eventually(program: &Path, id: &str) -> bool {
     for _ in 0..200 {
         if ok(program, &["kill", id]) {
@@ -337,7 +322,7 @@ pub async fn kill_eventually(program: &Path, id: &str) -> bool {
     false
 }
 
-/// 가끔 실패하게 만든 `container`: 깃발 파일이 있으면 닻 VM을 띄우는 `run`만 거절하고 나머지는 진짜 CLI로 넘긴다(다시 띄우지 못하는 상황).
+/// Wraps `container` so anchor `run` commands fail while `flag` exists.
 pub fn blockable(env: &Env) -> (PathBuf, PathBuf) {
     let flag = env.root.join("block-anchor");
     let wrapper = env.root.join("container-wrapper");

@@ -1,4 +1,4 @@
-"""총 대기 기한(서버 `wait_ms`, 이 시험은 짧게 둔 입구에서 돈다): 기한이 끝나면 200 안내, 같은 키·같은 요청으로 다시 조회하면 새 작업 없이 최종 답, 접수 뒤 연결이 끊겨도 작업은 이어진다."""
+"""Wait deadline tests (tight profile): 200 progress notice on timeout, same-key replay after completion, disconnect survival, and concurrent dedup."""
 import json
 import socket
 import time
@@ -13,7 +13,6 @@ BODY = chat_body()
 
 
 def start_and_hang_up(key, *, stream, after):
-    """요청을 보낸 뒤 응답을 기다리지 않고(스트림이면 첫 바이트를 받고) 연결을 끊는다."""
     url = urllib.parse.urlsplit(BASE)
     payload = json.dumps(chat_body(stream=True) if stream else BODY).encode()
     head = (f"POST {url.path}/chat/completions HTTP/1.1\r\nHost: {url.hostname}\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\n"
@@ -22,7 +21,7 @@ def start_and_hang_up(key, *, stream, after):
         sock.sendall(head + payload)
         if stream:
             sock.settimeout(10)
-            assert sock.recv(4096), "스트림이 시작되지 않았다"
+            assert sock.recv(4096), "stream did not start"
         time.sleep(after)
 
 
@@ -43,21 +42,21 @@ class Wait(Wired):
             began = time.monotonic()
             first = send()
             took = time.monotonic() - began
-            self.assertLess(took, WAIT_MS / 1000 + 1.5, "기한을 넘겨 붙잡지 않는다")
+            self.assertLess(took, WAIT_MS / 1000 + 1.5, "must return within wait deadline")
             data = first.http_response.json()
             SCHEMA.check("CreateChatCompletionResponse", data)
             message = data["choices"][0]["message"]["content"]
             self.assertTrue(message.startswith(NOTICE_PREFIX) and NOTICE_RETRY in message, message)
             self.assertEqual((first.http_response.status_code, data["choices"][0]["finish_reason"], first.headers["idempotency-key"]), (200, "stop", key))
-            self.assertNotIn("usage", data, "안내에는 사용량이 없다")
-            self.assertEqual(stats()["active"], 1, "작업은 계속 돈다")
+            self.assertNotIn("usage", data, "progress notice must omit usage")
+            self.assertEqual(stats()["active"], 1, "run must keep executing after deadline")
             settle()
             second = send().http_response.json()
             third = send().http_response.json()
         self.assertEqual((second["choices"][0]["message"]["content"], second["usage"]["total_tokens"]), (ANSWER, 13))
-        self.assertEqual(second, third, "끝난 뒤에는 같은 응답을 다시 준다")
-        self.assertEqual(second["id"], data["id"], "id·created·model은 같은 실행에서 고정")
-        self.assertEqual((d.runs, d.model_calls), (1, 1), "다시 조회는 새 작업이 아니다")
+        self.assertEqual(second, third, "completed run must replay identically")
+        self.assertEqual(second["id"], data["id"], "id/created/model must stay fixed for the same run")
+        self.assertEqual((d.runs, d.model_calls), (1, 1), "re-querying must not start a new run")
 
     def test_the_stream_gets_the_same_notice_as_content_and_the_answer_comes_back_with_the_key(self):
         script(text=ANSWER, delay_ms=SLOW_MS)

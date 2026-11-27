@@ -1,5 +1,4 @@
-//! 외부 접수와 요청 상태 조회. 접수 성공은 커밋 성공이다.
-//! 키: (profile, binding, principal, request). 같은 키·같은 입력 해시는 기존 run, 다른 해시는 충돌.
+//! External request intake and status lookup; acceptance is durable only after commit.
 
 use crate::{
     audit::{self, OwnedEntry},
@@ -17,9 +16,8 @@ use bot_core::{
 use serde_json::{Value, json};
 use sqlx::Row;
 
-/// 입력 해시: 외부에서 온 것(대화·첨부·본문)만 담는다. 공백·키 순서가 달라도 같은 값이다.
-/// 대상(`Accept.target`)은 접수 시점의 라우팅 결과라서 넣지 않는다: 프로필 판본이 바뀐 뒤 같은 외부 요청이 다시 와도
-/// 충돌이 아니라 **최초 접수의 실행 계획**(저장된 run)으로 수렴해야 한다.
+/// Hashes only external inputs (conversation, attachments, canonical body, and HTTP route).
+/// Excludes `Accept.target` so redeliveries after a profile revision change converge on the original run instead of conflicting.
 fn input_digest(a: &Accept, body: &Value) -> R<[u8; 32]> {
     let c = &a.event.conversation;
     let mut doc = json!({
@@ -27,14 +25,13 @@ fn input_digest(a: &Accept, body: &Value) -> R<[u8; 32]> {
         "attachments": a.event.attachments,
         "body": body,
     });
-    // HTTP 입구는 메서드·경로까지 같은 요청이다(다른 어댑터의 해시 바이트는 그대로다)
+    // HTTP requests include method and path without altering non-HTTP digest bytes.
     if let Some(route) = &a.event.http {
         doc["http"] = json!({"method": route.method, "path": route.path});
     }
     Ok(sha256_text(&doc.to_string()))
 }
 
-/// 대문자 메서드와 `/`로 시작하는 경로(쿼리·제어 문자 없음)만 받는다.
 fn route_ok(method: &str, path: &str) -> bool {
     !method.is_empty()
         && method.len() <= 16
@@ -52,7 +49,6 @@ fn response_str(mode: ResponseMode) -> &'static str {
     }
 }
 
-/// 검증을 마친 접수 명령의 정규화한 조각들.
 pub(crate) struct Checked {
     pub agent: AgentId,
     pub scopes: Vec<String>,
@@ -61,7 +57,6 @@ pub(crate) struct Checked {
     pub digest: [u8; 32],
 }
 
-/// 접수 명령을 검증하고 정규화한다(식별자·첨부·본문·대상). 접수와 예약 발생이 같이 쓴다.
 pub(crate) fn check(a: &Accept) -> R<Checked> {
     let e = &a.event;
     let agent = agent_of(&a.target).clone();
@@ -77,7 +72,7 @@ pub(crate) fn check(a: &Accept) -> R<Checked> {
     if e.conversation.thread.as_deref().is_some_and(|t| !id_ok(t)) {
         return invalid();
     }
-    // HTTP 대화는 인증된 HTTP 어댑터의 경로 정보와 함께만 온다(그 반대도 같다)
+    // HTTP conversations must carry a validated route, and vice versa.
     if (e.conversation.kind == ConversationKind::Http) != e.http.is_some()
         || e.http
             .as_ref()
@@ -110,7 +105,6 @@ fn push_conversation(kind: &ConversationKind) -> bool {
     }
 }
 
-/// run 한 줄을 넣는다. 호출자가 트랜잭션을 쥐고 있다.
 pub(crate) async fn insert_run(
     tx: &mut Tx<'_>,
     a: &Accept,
@@ -151,8 +145,7 @@ pub(crate) async fn insert_run(
 }
 
 impl Store {
-    /// 같은 키·같은 입력 해시는 최초 run을 돌려주며 내용이 바뀌면 `Conflict`다.
-    /// 새 접수에는 어댑터가 넘긴 후보 사슬·커서와 인증된 원천을 같은 커밋에 남긴다.
+    /// Deduplicates by `(profile, binding, principal, request)`: matching digest returns the original run; mismatch returns `Conflict`.
     pub(crate) async fn accept_run_with(&self, a: Accept, extras: AcceptExtras) -> R<RunId> {
         if (push_conversation(&a.event.conversation.kind) && a.reply_transport.is_none())
             || (extras.source.is_some() && a.reply_transport != Some(PushTransportId::SLACK))
@@ -163,14 +156,14 @@ impl Store {
         let c = check(&a)?;
         let e = &a.event;
         let profile = &e.profile.0;
-        // 어댑터가 인증한 Slack 이벤트는 그 식별로도 한 건이다(바인딩·프로필이 바뀐 뒤의 재전달이 두 번째 실행을 만들지 못한다)
+        // Deduplicate verified Slack events across binding/profile reassignments.
         let slack_key = extras
             .source
             .as_ref()
             .map(crate::slack_events::key_of)
             .transpose()?;
         let mut tx = self.begin_authorized().await?;
-        // 이 열이 생기기 전(구판)에 받은 같은 글의 접수 행이 있으면 그 행을 채택해 그 run으로 수렴한다(접수 0)
+        // Adopt legacy pre-`slack_key` rows so redeliveries converge on the original run.
         if let (Some(source), Some(key)) = (&extras.source, &slack_key)
             && let Some(run) = crate::slack_events::adopt_legacy(&mut tx, source, key).await?
         {
@@ -180,7 +173,7 @@ impl Store {
         let run: String = sqlx::query_scalar("select gen_random_uuid()::text")
             .fetch_one(&mut *tx)
             .await?;
-        // 응답 방식은 최초 접수에서 정해 저장하고 중복 해시에는 넣지 않는다
+        // Persist response mode on first accept without including it in the dedup digest.
         let fresh = sqlx::query(
             "insert into bot_requests (profile, binding, principal, request, input_sha256, run,
                                        http_method, http_path, http_response, slack_key)
@@ -201,7 +194,7 @@ impl Store {
         .rows_affected()
             == 1;
         if !fresh {
-            // 같은 Slack 이벤트면 어떤 바인딩·프로필로 다시 와도 첫 접수의 run으로 수렴한다(입력 해시와 상관없이 같은 이벤트다)
+            // Converge matching Slack events onto the original run regardless of input hash.
             if let Some(key) = &slack_key
                 && let Some(row) = sqlx::query("select run from bot_requests where slack_key = $1")
                     .bind(key)
@@ -224,14 +217,14 @@ impl Store {
             let stored: Vec<u8> = row.get("input_sha256");
             let api: Option<String> = row.get("api_endpoint");
             tx.rollback().await?;
-            // 키로 이어지는 입구(OpenAI 호환)의 접수 행은 일반 접수가 읽거나 이어받지 못한다: 같은 키는 충돌이다(재배포로 입구 종류가 바뀌어도 옛 작업은 새지 않는다)
+            // Never let regular intake read or adopt OpenAI-compatible API request rows.
             return if api.is_none() && stored.as_slice() == c.digest.as_slice() {
                 Ok(RunId(row.get("run")))
             } else {
                 Err(Error::Conflict.into())
             };
         }
-        // 새 외부 요청만 활성 판본과 대조한다(중복 재전달은 위에서 기존 run으로 끝났다). 어긋나면 접수 행도 남지 않는다
+        // Validate active revision only for fresh requests; duplicates already returned above.
         crate::active::guard_active(&mut tx, profile, &a.revision).await?;
         let origin = RunOrigin::from_ingress(&e.conversation.kind, &e.principal);
         insert_run(&mut tx, &a, &c, &run, origin, None, None).await?;
@@ -256,7 +249,6 @@ impl Store {
         Ok(RunId(run))
     }
 
-    /// 접수 키로 run 상태를 조회한다. 같은 키의 재조회는 새 효과를 만들지 않는다.
     pub(crate) async fn status_of(&self, key: &RequestKey) -> R<Option<RequestState>> {
         let mut tx = self.begin_authorized().await?;
         let row = sqlx::query(
@@ -288,7 +280,7 @@ impl Store {
                     ResponseMode::Accepted
                 },
             }),
-            _ => None, // HTTP 입구가 아니다
+            _ => None,
         };
         Ok(Some(RequestState {
             run: RunId(row.get("id")),
@@ -298,7 +290,7 @@ impl Store {
         }))
     }
 
-    /// run 트리의 진행 요약(Slack 상태 카드·중단 확인용). 본문·인자 없이 상태·하위 에이전트·도구명만 읽는다.
+    /// Summarizes run-tree progress for Slack status cards without reading payloads or args.
     pub(crate) async fn progress_of(
         &self,
         profile: &ProfileId,
@@ -332,7 +324,6 @@ impl Store {
         let mut waiting_approval =
             root.get::<Option<String>, _>("wait_kind").as_deref() == Some("approval");
         if !terminal {
-            // 가장 깊은 활성 자식 에이전트(같은 깊이면 가장 최근에 갱신된 자식)
             for r in &rows {
                 if text(r, "id") == run.0 {
                     continue;

@@ -352,8 +352,8 @@ class Gate(unittest.TestCase):
             target = ROOT / "crates" / package / "tests" / f"{name}.rs"
             real = ignored_count(target)
             if real != allowed:
-                wrong[f"{package} {name}"] = f"소스의 #[ignore] {real}건, 목록 ignored={allowed}"
-        self.assertEqual(wrong, {}, "목록의 ignored=N은 소스의 #[ignore] 수와 같아야 한다(돌지 않은 시험은 통과가 아니다)")
+                wrong[f"{package} {name}"] = f"source has {real} #[ignore], list allows ignored={allowed}"
+        self.assertEqual(wrong, {}, "list ignored=N must match source #[ignore] count (ignored tests do not run)")
 
     def test_the_one_known_ignored_test_is_the_ci_only_demo(self):
         self.assertEqual({k: v for k, v in ignore_budget(SCRIPT.read_text(encoding="utf-8")).items() if v}, {("bot-cli", "split_roles"): 1})
@@ -363,8 +363,8 @@ class Gate(unittest.TestCase):
         self.assertEqual(
             found,
             {},
-            "다음 시험 파일은 도구가 없으면 «건너뛰고 통과»할 수 있는데 scripts/release-check.sh의 INTEGRATION_TESTS에 없다 "
-            "(그러면 관문이 돌았는지 알 수 없다). 목록에 `패키지 시험파일` 줄을 더한다.",
+            "These test files can skip when a tool is missing, but are not in INTEGRATION_TESTS in scripts/release-check.sh "
+            "(otherwise the gate cannot tell whether they ran). Add a `<package> <test_file>` entry.",
         )
 
     def test_the_real_tree_has_the_files_the_check_was_written_for(self):

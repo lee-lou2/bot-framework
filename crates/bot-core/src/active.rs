@@ -1,6 +1,4 @@
-//! 이 프로세스가 쓰는 프로필 집합이 저장소가 게시한 활성 집합과 같은지 확인하는 계약과 기본 구현.
-//!
-//! 구판 프로세스는 새 접수·결과 반환·모델/도구 호출을 열지 않고 `Stale`로 닫아 새 판본의 프로세스가 이어 받게 한다.
+//! Checks whether this process's profile set matches the store's active revision.
 
 use crate::{
     id::Revision,
@@ -10,12 +8,10 @@ use crate::{
 use std::sync::{Arc, RwLock};
 
 pub trait ActiveCheck: Send + Sync {
-    /// 이 프로세스의 집합이 저장소의 활성 집합과 같으면 Ok, 다르거나 아직 게시되지 않았으면 `Stale`,
-    /// 저장소를 읽지 못하면 `Unavailable`.
+    /// Returns `Stale` on mismatch or before publication so outdated processes stop opening new work; `Unavailable` on store error.
     fn verify(&self) -> Reply<'_, ()>;
 }
 
-/// 이 프로세스가 쓰는 프로필 집합의 판본을 저장소의 활성 판본과 견준다.
 pub struct ActiveSet {
     store: Arc<dyn ActiveRevisions>,
     expected: Arc<RwLock<Revision>>,
@@ -26,7 +22,7 @@ impl ActiveSet {
         Self::live(store, Arc::new(RwLock::new(expected)))
     }
 
-    /// 실행 중 스킬·MCP 즉시 활성화로 갱신되는 공유 활성 집합 판본을 본다.
+    /// Tracks a shared revision updated in place by live skill/MCP activation.
     pub fn live(store: Arc<dyn ActiveRevisions>, expected: Arc<RwLock<Revision>>) -> Self {
         Self { store, expected }
     }
@@ -133,11 +129,9 @@ mod tests {
         let check = ActiveSet::live(store.clone(), shared.clone());
         assert!(poll_now(check.verify()).is_ok());
 
-        // 저장소만 바뀌면 구판(`Stale`)이다
         *store.0.lock().unwrap() = Some(Revision("r2".into()));
         assert!(matches!(poll_now(check.verify()), Err(Error::Stale)));
 
-        // 같은 프로세스의 즉시 활성화가 공유 판본을 갱신하면 다시 일치한다
         *shared.write().unwrap() = Revision("r2".into());
         assert!(poll_now(check.verify()).is_ok());
     }

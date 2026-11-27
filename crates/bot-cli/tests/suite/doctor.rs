@@ -1,5 +1,4 @@
-//! `bot doctor`를 실제 `bot` 프로세스로 확인한다: 영역별 한국어 요약, 기본은 네트워크에 접속하지 않음(연결 시도가 없음을 열린 포트로 확인),
-//! 자격은 이름만 보이고 값·접속 주소는 어디에도 나오지 않음, 없는 DB·깨진 호스트 설정은 종료 코드 1과 안내. 시험 DB가 필요 없다.
+//! Process-level tests for `bot doctor`: offline checks, no secret/URL leaks, exit code 1 on failure, and parity with runtime rules.
 use crate::process_support::*;
 use std::{fs, net::TcpListener, path::PathBuf};
 
@@ -11,7 +10,6 @@ struct Work {
 }
 
 impl Work {
-    /// `bot init`으로 만든 작업 폴더(프로필 `demo`)
     fn new(template: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let made = bot(
@@ -57,7 +55,7 @@ impl Work {
 #[test]
 fn a_healthy_setup_passes_without_touching_the_network_and_marks_the_connection_unchecked() {
     let work = Work::new("team");
-    // 아무도 받지 않는 주소가 아니라, 연결이 오면 알 수 있는 열린 포트에 DB 주소를 둔다
+    // Open a real listener so any unexpected network attempt shows up as an accepted connection.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!(
         "postgres://user:{PASSWORD}@127.0.0.1:{}/db",
@@ -67,15 +65,15 @@ fn a_healthy_setup_passes_without_touching_the_network_and_marks_the_connection_
     let shown = text(&out);
     assert!(out.status.success(), "{shown}");
     for line in [
-        "[통과] 호스트 설정",
-        "[통과] 모델 제공자",
-        "[통과] 도구 서버",
-        "[통과] 프로필 — 1개 검증을 통과했어요",
-        "[통과] 입구",
-        "[통과] 자격 — 필요한 자격이 없어요",
-        "[통과] 데이터베이스 — 주소가 설정돼 있어요",
-        "[미검사] 데이터베이스 연결",
-        "요약: 통과 7 · 주의 0 · 실패 0 · 미검사 1",
+        "[PASS] Host config",
+        "[PASS] Model providers",
+        "[PASS] Tool servers",
+        "[PASS] Profiles — 1 profile(s) passed validation",
+        "[PASS] Entrances",
+        "[PASS] Secrets — no secrets required",
+        "[PASS] Database — URL configured",
+        "[SKIP] Database connection",
+        "Summary: 7 pass · 0 warn · 0 fail · 1 skipped",
     ] {
         assert!(shown.contains(line), "{line}\n{shown}");
     }
@@ -83,12 +81,11 @@ fn a_healthy_setup_passes_without_touching_the_network_and_marks_the_connection_
     assert_eq!(
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock,
-        "기본 점검은 접속하지 않는다"
+        "default doctor check must not open network connections"
     );
     for hidden in [PASSWORD, "127.0.0.1"] {
-        assert!(!shown.contains(hidden), "주소는 출력하지 않는다: {shown}");
+        assert!(!shown.contains(hidden), "must not print address: {shown}");
     }
-    // 같은 입력은 같은 출력이다
     assert_eq!(
         text(&work.doctor(&[("BOT_DATABASE_URL", url.as_str())], &[])),
         shown
@@ -102,26 +99,28 @@ fn a_missing_database_is_a_failure_with_guidance_and_the_rest_is_still_reported(
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("[실패] 데이터베이스 — BOT_DATABASE_URL이 없어요"),
+        stdout.contains("[FAIL] Database — BOT_DATABASE_URL is not set"),
         "{stdout}"
     );
-    assert!(stdout.contains("[통과] 프로필"), "{stdout}");
+    assert!(stdout.contains("[PASS] Profiles"), "{stdout}");
     assert!(
-        stdout.contains("[미검사] 데이터베이스 연결 — 주소가 없어"),
+        stdout.contains("[SKIP] Database connection — skipped because URL is missing"),
         "{stdout}"
     );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("bot: 점검에서 실패한 항목이 1개예요"));
-    // 형식이 틀린 주소도 값을 보여 주지 않고 실패한다
+    assert!(String::from_utf8_lossy(&out.stderr).contains("bot: 1 check(s) failed"));
     let bad = format!("mysql://u:{PASSWORD}@h/db");
     let out = work.doctor(&[("BOT_DATABASE_URL", bad.as_str())], &[]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(text(&out).contains("형식이 맞지 않아요") && !text(&out).contains(PASSWORD));
+    assert!(
+        text(&out).contains("BOT_DATABASE_URL has invalid format")
+            && !text(&out).contains(PASSWORD)
+    );
 }
 
 #[test]
 fn check_db_reports_a_failed_connection_without_printing_the_address() {
     let work = Work::new("personal");
-    // 받자마자 끊는 서버: 접속 거부와 달리 연결 라이브러리가 다시 시도하지 않아 바로 실패한다
+    // Accept-then-drop fails immediately instead of retrying ECONNREFUSED.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || listener.incoming().for_each(drop));
@@ -130,7 +129,7 @@ fn check_db_reports_a_failed_connection_without_printing_the_address() {
     let shown = text(&out);
     assert_eq!(out.status.code(), Some(1), "{shown}");
     assert!(
-        shown.contains("[실패] 데이터베이스 연결 — 연결하지 못했어요"),
+        shown.contains("[FAIL] Database connection — failed to connect"),
         "{shown}"
     );
     for hidden in [PASSWORD, "127.0.0.1"] {
@@ -145,23 +144,26 @@ fn a_broken_host_file_fails_with_guidance_and_skips_what_depends_on_it() {
     let out = work.doctor(&[("BOT_DATABASE_URL", "postgres://u@localhost/db")], &[]);
     let shown = text(&out);
     assert_eq!(out.status.code(), Some(1), "{shown}");
-    assert!(shown.contains("[실패] 호스트 설정"), "{shown}");
-    assert!(shown.contains("JSON 객체여야 해요"), "{shown}");
+    assert!(shown.contains("[FAIL] Host config"), "{shown}");
     assert!(
-        shown.contains("[미검사] 프로필 — 호스트 설정이 올바르지 않아"),
+        shown.to_ascii_lowercase().contains("json object"),
         "{shown}"
     );
-    assert!(shown.contains("[미검사] 자격"), "{shown}");
-    // 없는 파일·알 수 없는 키도 같다. --host가 BOT_HOST_CONFIG보다 앞선다
+    assert!(
+        shown.contains("[SKIP] Profiles — skipped because host config is invalid"),
+        "{shown}"
+    );
+    assert!(shown.contains("[SKIP] Secrets"), "{shown}");
+    // `--host` takes precedence over `BOT_HOST_CONFIG`.
     let gone = work.dir.path().join("gone.json");
     let out = work.doctor(&[], &["--host", gone.to_str().unwrap()]);
-    assert!(
-        text(&out).contains("호스트 설정 파일을 읽지 못했어요"),
-        "{}",
-        text(&out)
-    );
+    assert!(text(&out).contains("[FAIL] Host config"), "{}", text(&out));
     fs::write(work.host(), r#"{"version": 1, "surprise": true}"#).unwrap();
-    assert!(text(&work.doctor(&[], &[])).contains("알 수 없는 최상위 키"));
+    assert!(
+        text(&work.doctor(&[], &[]))
+            .to_ascii_lowercase()
+            .contains("unknown")
+    );
     let good = Work::new("personal");
     let out = work.doctor(
         &[("BOT_DATABASE_URL", "postgres://u@localhost/db")],
@@ -193,18 +195,17 @@ fn missing_credentials_are_listed_by_name_and_values_are_never_printed() {
     );
     let shown = text(&out);
     assert_eq!(out.status.code(), Some(1), "{shown}");
-    assert!(shown.contains("[실패] 자격"), "{shown}");
+    assert!(shown.contains("[FAIL] Secrets"), "{shown}");
     assert!(
         shown.contains("beta-key"),
-        "없는 자격은 이름으로 알린다: {shown}"
+        "missing secret must be listed by name: {shown}"
     );
     assert!(shown.contains("BOT_SECRET__demo__beta_key"), "{shown}");
     assert!(
         !shown.contains("alpha-key"),
-        "있는 자격은 나오지 않는다: {shown}"
+        "present secret must not be listed as missing: {shown}"
     );
-    assert!(!shown.contains(SECRET), "값은 출력하지 않는다: {shown}");
-    // 다 갖추면 통과하고 그래도 값은 나오지 않는다
+    assert!(!shown.contains(SECRET), "secret value leaked: {shown}");
     let out = work.doctor(
         &[
             ("BOT_DATABASE_URL", "postgres://u@localhost/db"),
@@ -214,7 +215,11 @@ fn missing_credentials_are_listed_by_name_and_values_are_never_printed() {
         &[],
     );
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("[통과] 자격 — 필요한 자격 2개가 모두 있어요"));
+    assert!(
+        text(&out).contains("[PASS] Secrets — all 2 required secret(s) present"),
+        "{}",
+        text(&out)
+    );
     assert!(!text(&out).contains(SECRET));
 }
 
@@ -235,27 +240,26 @@ fn providers_without_a_runner_or_a_model_vm_fail_and_only_names_are_shown() {
     "real": {{"kind": "claude-cli", "model": "synthetic-model", "endpoint": "https://api.example.test/v1?k=x", "secret": "model-key"}}}}}}"#,
         my_uid()
     );
-    // 쿼리가 든 주소는 호스트 설정 단계에서 거절된다(자격·쿼리 금지)
     fs::write(work.host(), &host).unwrap();
     let out = work.doctor(&[("BOT_DATABASE_URL", "postgres://u@localhost/db")], &[]);
-    assert!(text(&out).contains("[실패] 호스트 설정"), "{}", text(&out));
+    assert!(text(&out).contains("[FAIL] Host config"), "{}", text(&out));
     fs::write(work.host(), host.replace("/v1?k=x", "/v1")).unwrap();
     let out = work.doctor(&[("BOT_DATABASE_URL", "postgres://u@localhost/db")], &[]);
     let shown = text(&out);
     assert_eq!(out.status.code(), Some(1), "{shown}");
     for expected in [
-        "[실패] 모델 제공자",
-        "ghost의 실행 방법이 없어요",
+        "[FAIL] Model providers",
+        "ghost",
         "sandbox.apple",
-        "real: claude-cli · 모델 synthetic-model · 상류 api.example.test · 자격 이름 model-key",
-        "[실패] 자격",
+        "real: claude-cli · model synthetic-model · upstream api.example.test · secret model-key",
+        "[FAIL] Secrets",
         "model-key",
     ] {
         assert!(shown.contains(expected), "{expected}\n{shown}");
     }
     assert!(
         !shown.contains("/v1"),
-        "상류 경로는 보여 주지 않는다: {shown}"
+        "upstream path must not be printed: {shown}"
     );
 }
 
@@ -272,17 +276,17 @@ fn without_a_host_file_it_says_it_uses_the_demo_host_without_failing() {
     let shown = text(&out);
     assert!(out.status.success(), "{shown}");
     assert!(
-        shown
-            .contains("[주의] 호스트 설정 — BOT_HOST_CONFIG·--host가 없어 내장 데모 호스트를 써요"),
+        shown.contains(
+            "[WARN] Host config — neither BOT_HOST_CONFIG nor --host is set; using the built-in demo host"
+        ),
         "{shown}"
     );
     assert!(
-        shown.contains("요약: 통과 6 · 주의 1 · 실패 0 · 미검사 1"),
+        shown.contains("Summary: 6 pass · 1 warn · 0 fail · 1 skipped"),
         "{shown}"
     );
 }
 
-/// 막음 3: 주소의 모르는 매개변수 값(합성 `sslpassword`)이 드라이버 경고로 새지 않는다(접속하지 않을 때도, 접속할 때도).
 #[test]
 fn driver_warnings_never_carry_address_values() {
     let work = Work::new("personal");
@@ -301,7 +305,6 @@ fn driver_warnings_never_carry_address_values() {
     }
 }
 
-/// 막음 4: 접속하지 않는 기본 점검도 연결 라이브러리와 같은 구문 분석으로 주소를 본다(고정 문구만 나오고 주소는 안 나온다).
 #[test]
 fn a_malformed_address_fails_without_connecting_or_echoing_it() {
     let work = Work::new("personal");
@@ -313,7 +316,7 @@ fn a_malformed_address_fails_without_connecting_or_echoing_it() {
         let shown = text(&out);
         assert_eq!(out.status.code(), Some(1), "{shown}");
         assert!(
-            shown.contains("[실패] 데이터베이스 — BOT_DATABASE_URL 형식이 맞지 않아요"),
+            shown.contains("[FAIL] Database — BOT_DATABASE_URL has invalid format"),
             "{shown}"
         );
         for hidden in [PASSWORD, "not-a-port", "bogus"] {
@@ -329,7 +332,6 @@ fn with_host_keys(work: &Work, edit: impl FnOnce(&mut serde_json::Value)) {
     fs::write(work.host(), host.to_string()).unwrap();
 }
 
-/// 막음 5: 수집(OTLP) 헤더가 참조하는 자격도 다른 자격처럼 점검한다 — `bot validate`·`serve`가 같은 목록을 쓴다.
 #[test]
 fn credentials_referenced_by_collector_headers_are_checked_by_name() {
     let work = Work::new("personal");
@@ -343,7 +345,7 @@ fn credentials_referenced_by_collector_headers_are_checked_by_name() {
     let out = work.doctor(&env, &[]);
     let shown = text(&out);
     assert_eq!(out.status.code(), Some(1), "{shown}");
-    assert!(shown.contains("[실패] 자격"), "{shown}");
+    assert!(shown.contains("[FAIL] Secrets"), "{shown}");
     assert!(shown.contains("collector-token"), "{shown}");
     let (profiles, host) = (work.profiles(), work.host());
     let checked = bot(
@@ -353,7 +355,10 @@ fn credentials_referenced_by_collector_headers_are_checked_by_name() {
         ],
         &["validate"],
     );
-    assert!(!checked.status.success(), "validate도 같은 목록을 쓴다");
+    assert!(
+        !checked.status.success(),
+        "validate must share the secret list"
+    );
     assert!(
         text(&checked).contains("collector-token"),
         "{}",
@@ -370,7 +375,6 @@ fn credentials_referenced_by_collector_headers_are_checked_by_name() {
     assert!(!text(&out).contains(SECRET));
 }
 
-/// 막음 6: worker가 거절하는 `state: required` 도구 서버를 doctor도 실패로 본다(같은 판정 함수). `ephemeral`이면 같은 서버가 통과한다.
 #[test]
 fn a_required_state_server_fails_the_way_the_worker_refuses_it() {
     use std::os::unix::fs::PermissionsExt;
@@ -392,15 +396,14 @@ fn a_required_state_server_fails_the_way_the_worker_refuses_it() {
         let shown = text(&out);
         assert_eq!(out.status.success(), ok, "{state}: {shown}");
         if ok {
-            assert!(shown.contains("[통과] 도구 서버"), "{shown}");
+            assert!(shown.contains("[PASS] Tool servers"), "{shown}");
         } else {
-            assert!(shown.contains("[실패] 도구 서버"), "{shown}");
+            assert!(shown.contains("[FAIL] Tool servers"), "{shown}");
             assert!(shown.contains("servers.stateful.state=required"), "{shown}");
         }
     }
 }
 
-/// 작업 1(API 직접 호출) 연결: 자격 이름·상류 호스트만 보이고, 주소·키 규칙은 worker 시작이 쓰는 함수가 판정한다.
 #[test]
 fn api_model_providers_show_credential_names_and_use_the_workers_rules() {
     let work = Work::new("personal");
@@ -422,14 +425,14 @@ fn api_model_providers_show_credential_names_and_use_the_workers_rules() {
     let db = ("BOT_DATABASE_URL", "postgres://u@localhost/db");
     let out = work.doctor(&[db], &[]);
     let shown = text(&out);
-    assert_eq!(out.status.code(), Some(1), "키가 없다: {shown}");
+    assert_eq!(out.status.code(), Some(1), "missing keys: {shown}");
     for expected in [
-        "[통과] 모델 제공자 — 5개",
-        "claude: anthropic-api · 모델 synthetic-model · 상류 api.example.test · 자격 이름 anthropic-key",
-        "gpt: openai-api · 모델 synthetic-model · 상류 api.example.test · 자격 이름 openai-key · 최대 토큰 1024",
-        "local: openai-api · 모델 synthetic-model · 상류 127.0.0.1:11434 · 서비스 키 없음(loopback 전용)",
-        "gpt-new: openai-api · 모델 synthetic-model · 상류 api.example.test · 자격 이름 openai-key · 최대 토큰 2048(max_completion_tokens)",
-        "[실패] 자격",
+        "[PASS] Model providers — 5",
+        "claude: anthropic-api · model synthetic-model · upstream api.example.test · secret anthropic-key",
+        "gpt: openai-api · model synthetic-model · upstream api.example.test · secret openai-key · max tokens 1024",
+        "local: openai-api · model synthetic-model · upstream 127.0.0.1:11434 · no service key (loopback only)",
+        "gpt-new: openai-api · model synthetic-model · upstream api.example.test · secret openai-key · max tokens 2048 (max_completion_tokens)",
+        "[FAIL] Secrets",
         "anthropic-key",
         "openai-key",
     ] {
@@ -437,7 +440,7 @@ fn api_model_providers_show_credential_names_and_use_the_workers_rules() {
     }
     assert!(
         !shown.contains("/private/path"),
-        "상류 경로는 보이지 않는다: {shown}"
+        "upstream path must not be printed: {shown}"
     );
     let out = work.doctor(
         &[
@@ -449,7 +452,6 @@ fn api_model_providers_show_credential_names_and_use_the_workers_rules() {
     );
     assert!(out.status.success(), "{}", text(&out));
     assert!(!text(&out).contains(SECRET));
-    // 키 없는 주소는 loopback뿐이다: worker 시작과 같은 규칙으로 거절된다
     with_host_keys(&work, |host| {
         host["providers"]["local"]["endpoint"] = "https://api.example.test/v1".into();
     });
@@ -458,7 +460,6 @@ fn api_model_providers_show_credential_names_and_use_the_workers_rules() {
     assert!(text(&out).contains("loopback"), "{}", text(&out));
 }
 
-/// 작업 2(원격 MCP 서버) 연결: 판본은 로컬·원격 모두 `measure_all`로, IP 리터럴 정책은 연결 때 쓰는 함수로 거른다. 접속하지 않는다.
 #[test]
 fn remote_mcp_servers_follow_the_connection_policy_without_connecting() {
     let work = Work::new("personal");
@@ -474,17 +475,16 @@ fn remote_mcp_servers_follow_the_connection_policy_without_connecting() {
     let shown = text(&out);
     assert!(out.status.success(), "{shown}");
     for expected in [
-        "[통과] 도구 서버 — 2개",
-        "notes: 원격 https · tools.example.test:443 · bearer 자격 이름 notes-token · 이름 풀이는 접속할 때 검사해요",
-        "local-mcp: 원격 http · 127.0.0.1:8931 · 인증 없음",
+        "[PASS] Tool servers — 2",
+        "notes: remote https · tools.example.test:443 · bearer secret notes-token · DNS resolution checked at connect time",
+        "local-mcp: remote http · 127.0.0.1:8931 · no auth",
     ] {
         assert!(shown.contains(expected), "{expected}\n{shown}");
     }
     assert!(
         !shown.contains("secret-in-path"),
-        "경로·질의는 보이지 않는다: {shown}"
+        "path/query must not be printed: {shown}"
     );
-    // 사설 IP 리터럴은 연결 때 거절되므로 미리 실패로 알린다
     with_host_keys(&work, |host| {
         host["servers"]["intranet"] =
             serde_json::json!({"transport": "http", "url": "https://10.1.2.3/mcp"});
@@ -492,6 +492,6 @@ fn remote_mcp_servers_follow_the_connection_policy_without_connecting() {
     let out = work.doctor(&env, &[]);
     let shown = text(&out);
     assert_eq!(out.status.code(), Some(1), "{shown}");
-    assert!(shown.contains("[실패] 도구 서버"), "{shown}");
+    assert!(shown.contains("[FAIL] Tool servers"), "{shown}");
     assert!(shown.contains("servers.intranet"), "{shown}");
 }

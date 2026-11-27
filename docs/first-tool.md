@@ -1,35 +1,35 @@
-# 첫 도구 만들기
+# Build Your First Tool
 
-스킬은 지침(`SKILL.md`)만으로 동작할 수도 있고, 외부 작업이 필요할 때 MCP 서버에 연결한 도구(`tools.yaml`)를 붙일 수 있다. 도구 실행 코드는 프로필 폴더 밖에 독립 MCP stdio 서버로 설치하고, 프로필에는 선언과 권한 상한만 둔다.
+English | [한국어](ko/first-tool.md)
 
-`bot add tool`은 스킬 폴더의 `tools.yaml` 항목만 만들고 권한(`profile.yaml`)과 호스트 설정(`host.json`)은 자동으로 바꾸지 않는다. 이 문서는 첫 읽기 도구를 붙이고 검증한 뒤, 사람 승인이 필요한 쓰기 도구로 확장하는 전체 순서를 다룬다. 완성된 참조 구현은 [demo-agenda](../examples/servers/demo-agenda/bin/server)와 [일정 스킬 선언](../examples/profiles/personal/agents/main/skills/agenda/tools.yaml)에 있다.
+Skills can run on instructions (`SKILL.md`) alone, or attach tools (`tools.yaml`) backed by an external MCP server. Tool code lives outside the profile directory as a standalone MCP stdio server; the profile holds only declarations and permission caps.
 
-## 네 곳 체크리스트
+`bot add tool` creates or appends entries in `tools.yaml` and never edits `profile.yaml` or `host.json` automatically. This guide wires a minimal read-only tool, validates it, and extends it into an approval-gated write tool. For a complete reference, see [`demo-agenda`](../examples/servers/demo-agenda/bin/server) and [`examples/profiles/personal/agents/main/skills/agenda/tools.yaml`](../examples/profiles/personal/agents/main/skills/agenda/tools.yaml).
 
-첫 도구가 `bot validate`를 통과하고 실행되려면 아래 네 곳을 맞춰야 한다.
+## Four-Part Checklist
 
-| 순서 | 위치 | 맞추는 것 |
+All four items must align for `bot validate` and runtime execution to succeed:
+
+| Step | Location | What to configure |
 |---|---|---|
-| 1 | 설치 폴더 + `host.json` (`servers.<별칭>`) | 실행 가능한 MCP stdio 서버 파일(`chmod +x`), 절대 경로 `root`, 실행 인자 `command` |
-| 2 | 스킬 폴더 `tools.yaml` | `bot add tool <스킬>.<도구>`로 선언한 `server`, `id`, `class`, `scopes`, `input`(원격 HTTP 서버면 `tools.lock.yaml`) |
-| 3 | `profile.yaml` (`roles` · `policy`) | 역할(`roles`)에 스코프 추가, 전체 상한(`policy.scopes`)과 하위 에이전트 상한(`policy.agents`) 허용, 필요 시 `policy.approve` 지정 |
-| 4 | (선택) `env.yaml` · `secrets` · `egress` | 비비밀 설정(`env.yaml` + 도구 `env`), 자격 이름(`profile.yaml` `secrets` + 도구 `secrets` + 비밀 보관소), 외부 접속(`egress`) |
+| 1 | Server directory + `host.json` (`servers.<alias>`) | Executable MCP stdio binary/script (`chmod +x`), absolute `root`, and `command` args |
+| 2 | Skill `tools.yaml` | `server`, `id`, `class`, `scopes`, and `input` via `bot add tool <skill>.<tool>` (or `tools.lock.yaml` for remote HTTP) |
+| 3 | `profile.yaml` (`roles`, `policy`) | Grant scopes in `roles`, allow them in `policy.scopes` and `policy.agents`, and add to `policy.approve` if gating writes |
+| 4 | Optional (`env.yaml`, `secrets`, `egress`) | Non-secret config (`env.yaml` + tool `env`), secret names (`profile.yaml` `secrets` + tool `secrets` + secret store), outbound `egress` |
 
-## 1단계: 가장 작은 MCP stdio 서버 만들기
+## Step 1: Create a Minimal MCP stdio Server
 
-호스트는 `servers.<별칭>.root`를 읽기 전용 설치본으로 복사해 SHA-256 판본을 계산하고, 호출마다 빈 작업 폴더에서 새 프로세스로 실행한다. 아래는 Python 3 표준 라이브러리만으로 `initialize`·`ping`·`tools/list`·`tools/call`을 처리하는 최소 서버 예시다.
-
-`/절대/경로/servers/notes/bin/server`로 저장하고 실행 권한(`chmod +x /절대/경로/servers/notes/bin/server`)을 준다.
+At startup, the host copies `servers.<alias>.root` into a read-only installation, hashes its contents to a SHA-256 revision, and runs each call in a fresh empty workspace. Save the following stdlib-only Python 3 server to `/absolute/path/servers/notes/bin/server` and run `chmod +x /absolute/path/servers/notes/bin/server`:
 
 ```python
 #!/usr/bin/env python3
-"""가장 작은 MCP stdio 도구 서버 예시(Python 표준 라이브러리만 사용)."""
+"""Minimal MCP stdio tool server (Python stdlib only)."""
 import json, sys
 
 TOOLS = [
     {
         "name": "lookup",
-        "description": "키로 고정 메모를 조회한다(읽기 전용 예시).",
+        "description": "Look up a fixed note by key (read-only example).",
         "inputSchema": {
             "type": "object",
             "required": ["key"],
@@ -38,7 +38,7 @@ TOOLS = [
         },
     }
 ]
-NOTES = {"status": "배포 준비 완료", "owner": "main"}
+NOTES = {"status": "ready for deploy", "owner": "main"}
 
 def send(mid, **body):
     line = json.dumps({"jsonrpc": "2.0", "id": mid, **body}, ensure_ascii=False) + "\n"
@@ -51,7 +51,7 @@ for raw in sys.stdin.buffer:
         continue
     msg = json.loads(line)
     if "id" not in msg:
-        continue  # notifications/initialized 같은 알림에는 답하지 않는다
+        continue  # Ignore notifications such as notifications/initialized
     mid, method, params = msg["id"], msg.get("method"), msg.get("params") or {}
     if method == "initialize":
         send(mid, result={
@@ -65,25 +65,26 @@ for raw in sys.stdin.buffer:
         send(mid, result={"tools": TOOLS})
     elif method == "tools/call" and params.get("name") == "lookup":
         key = (params.get("arguments") or {}).get("key", "")
-        payload = {"key": key, "value": NOTES.get(key, "없음")}
+        payload = {"key": key, "value": NOTES.get(key, "not found")}
         send(mid, result={"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}], "isError": False})
     else:
         send(mid, error={"code": -32601, "message": "method or tool not found"})
 ```
 
-- `root` 안에는 링크나 특수 파일을 둘 수 없다. 비밀 값과 실행 데이터는 설치 폴더 밖에 둔다.
-- 입력 크기 제한, `_meta`의 논리 호출 ID(`bot/profile-id`·`bot/run-id`·`bot/call-id`)로 재시도 안전한 영수증 만들기, 오류 응답 형식은 참조 구현 [demo-agenda](../examples/servers/demo-agenda/bin/server)를 참고한다.
+- Never place symlinks, special files, secret values, or runtime data inside `root`.
+- For line-size guards, deterministic retry-safe receipts keyed by `_meta` (`bot/profile-id`, `bot/run-id`, `bot/call-id`), and error formatting, see [`demo-agenda`](../examples/servers/demo-agenda/bin/server).
 
-## 2단계: 스킬과 `tools.yaml` 선언 만들기
+## Step 2: Scaffold the Skill and `tools.yaml`
 
-`bot init my-bot`으로 만든 프로필 폴더에서 스킬을 먼저 만들고 `bot add tool`로 도구를 선언한다.
+Create a workspace with `bot init`, add a skill, and declare the tool:
 
 ```sh
+bot init my-bot
 bot add skill notes --dir ./my-bot/profiles/my-bot
 bot add tool notes.lookup --class read --server notes --dir ./my-bot/profiles/my-bot
 ```
 
-생성된 `skills/notes/tools.yaml`에서 `input`을 서버의 `inputSchema`와 정확히 맞춘다(브로커가 실행 시 서버가 내세우는 스키마와 대조한다).
+Update `input` in `my-bot/profiles/my-bot/skills/notes/tools.yaml` to match the server's `inputSchema` exactly (the broker verifies this schema on every call):
 
 ```yaml
 version: 1
@@ -101,65 +102,66 @@ tools:
       additionalProperties: false
 ```
 
-- 서버가 내세우는 도구 이름이 `get_note`처럼 snake_case라면 `name: get_note`를 함께 적는다([도구 정의 잠금](plugins.md#도구-정의-잠금-toolslockyaml)).
-- 이미 운영 중인 원격 HTTP MCP 서버를 붙일 때는 `input`을 생략하고 `bot mcp sync <프로필>/skills/notes`로 `tools.lock.yaml`을 만든다.
+- If the server exposes a non-kebab name such as `get_note`, add `name: get_note` to the tool entry ([plugins.md](plugins.md#tool-definition-locking-toolslockyaml)).
+- For an existing remote Streamable HTTP MCP server, omit `input` and run `bot mcp sync <profile>/skills/notes` to generate `tools.lock.yaml`.
 
-## 3단계: `host.json`·`profile.yaml`·(선택) 환경과 비밀 연결
+## Step 3: Wire `host.json`, `profile.yaml`, and Optional Config
 
-`bot add tool`이 출력한 안내대로 두 파일을 직접 고친다.
+Follow the instructions printed by `bot add tool` to update `host.json` and `profile.yaml`.
 
-**`host.json` (`servers` 절 추가):**
+**`my-bot/host.json`** (add `servers`):
 
 ```json
 {
   "servers": {
     "notes": {
-      "root": "/절대/경로/servers/notes",
+      "root": "/absolute/path/servers/notes",
       "command": ["bin/server", "--stdio"]
     }
   }
 }
 ```
 
-**`profile.yaml` (필요한 역할과 상한에만 스코프 추가):**
+**`my-bot/profiles/my-bot/profile.yaml`** (grant scopes only where needed):
 
 ```yaml
 roles:
   owner: [run, notes.lookup]
 policy:
   scopes: [run, notes.lookup]
-  # 특정 하위 에이전트의 스킬이라면 policy.agents의 해당 경로에도 스코프를 더한다
+  # If scoped to a sub-agent, also add notes.lookup under policy.agents.<path>
 ```
 
-도구에 설정·자격·외부 접속이 필요하면 아래를 함께 맞춘다(필요 없으면 비워 둔다).
+If the tool needs config, credentials, or external network access, configure only what it uses:
 
-- **일반 설정**: 에이전트의 `env.yaml`에 `NOTES_NAMESPACE: team`을 쓰고, 도구 항목에 `env: [NOTES_NAMESPACE]`를 적는다.
-- **비밀**: `profile.yaml`의 `secrets: [notes-api-key]`, 도구 항목의 `secrets: {NOTES_API_KEY: notes-api-key}`를 맞추고, 개발용 보관소면 환경 변수 `BOT_SECRET__my_bot__notes_api_key`에 값을 넣는다.
-- **외부 접속**: 도구 항목에 `egress: ["api.example.com:443"]`을 적는다(호스트가 `egress` 상한을 두면 교집합만 허용).
+- **Non-secret config:** Add `NOTES_NAMESPACE: team` in the agent's `env.yaml` and `env: [NOTES_NAMESPACE]` on the tool entry.
+- **Secrets:** Declare `secrets: [notes-api-key]` in `profile.yaml`, map `secrets: {NOTES_API_KEY: notes-api-key}` in `tools.yaml`, and store the value in your secret backend (for the dev `env` store, `BOT_SECRET__my_bot__notes_api_key`).
+- **Outbound network:** List `egress: ["api.example.com:443"]` on the tool entry (intersected with any host `egress` cap).
 
-모두 맞춘 뒤 DB·네트워크 접속 없이 검증한다.
+Validate offline (no DB or network connection required) and run `bot doctor`:
 
 ```sh
 export BOT_PROFILES="$PWD/my-bot/profiles"
 export BOT_HOST_CONFIG="$PWD/my-bot/host.json"
 bot validate
+bot doctor
 ```
 
-`검증 통과`와 함께 `서버 notes: 판본 <해시>` 줄이 나오고 경고가 0건이면 준비 완료다.
+`bot validate` succeeds when it prints `Server notes: revision <hash>` and `Entrance and secret checks passed` with zero warnings.
 
-## 4단계: 승인이 필요한 쓰기 도구로 바꾸기
+## Step 4: Upgrade to an Approval-Gated Write Tool
 
-외부 상태를 바꾸는 도구는 위험 등급을 `write` 또는 `irreversible`로 나눈다.
+Classify state-changing tools as `write` or `irreversible`:
 
 ```sh
 bot add tool notes.save --class write --dir ./my-bot/profiles/my-bot
 ```
 
-1. **서버 구현**: `TOOLS` 목록과 `tools/call` 분기에 `save`를 추가한다. `tools.yaml`의 `input`도 `save`의 `inputSchema`에 맞춘다.
-2. **승인 규칙 선택**:
-   - **`class: write` + `policy.approve`**: `profile.yaml`의 `roles`·`policy.scopes`에 `notes.save`를 더하고, **`policy.approve: [notes.save]`**에 넣으면 호출 전에 반드시 사람 승인 카드를 띄운다(`policy.approve`에 넣지 않으면 권한 있는 멤버가 바로 실행).
-   - **`class: irreversible`**: `policy.approve`에 적지 않아도 **항상** 사람 승인을 거친다([demo-agenda의 `agenda.delete`](../examples/profiles/personal/agents/main/skills/agenda/tools.yaml)와 같다).
-3. **여러 단계 쓰기라면**: 중단 뒤 중복 쓰기를 막아야 하는 도구는 `tools.yaml`에 `effects: true`를 선언하고 호스트의 `effect.request`/`effect.status` 콜백을 사용한다([선택적 콜백](plugins.md#여러-번-쓰는-작업의-선택적-콜백)).
-4. **다시 검증**: `bot validate`를 실행해 스코프·승인 정책·서버 판본을 확인하고, 이미 실행 중인 서버에는 `bot serve --role all --activate`로 새 판본을 게시한다. 서버 코드가 바뀌면 설치 판본이 달라지므로 이전 승인 카드는 새 코드에 쓰이지 않는다.
+1. **Implement the tool:** Add `save` to `TOOLS` and `tools/call` in your server, and align `input` in `tools.yaml` with its `inputSchema`.
+2. **Choose the approval rule:**
+   - **`class: write` + `policy.approve`:** Add `notes.save` to `roles` and `policy.scopes`. Listing `policy.approve: [notes.save]` requires a human approval card before every call; omitting it lets authorized members run directly.
+   - **`class: irreversible`:** Always requires human approval even when omitted from `policy.approve` (like `agenda.delete` in [`examples/profiles/personal/agents/main/skills/agenda/tools.yaml`](../examples/profiles/personal/agents/main/skills/agenda/tools.yaml)).
+3. **Multi-step writes:** If the tool performs multiple external writes that must not duplicate after a crash, declare `effects: true` and use the `effect.request`/`effect.status` callbacks ([plugins.md](plugins.md#optional-callbacks-for-multi-step-writes)).
+4. **Re-validate and activate:** Run `bot validate`, then publish to a running deployment with `bot serve --role all --activate`. Any change to server code changes its install revision, invalidating old approval cards.
 
-더 자세한 MCP 프로토콜·원격 서버·잠금·콜백 규칙은 [MCP 도구 명세](plugins.md)와 [프로필 명세](profile-spec.md)에 있다.
+See [plugins.md](plugins.md) and [profile-spec.md](profile-spec.md) for full protocol, remote HTTP, lockfile, and callback specifications.

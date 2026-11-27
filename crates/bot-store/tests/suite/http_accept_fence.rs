@@ -54,10 +54,10 @@ async fn a_new_http_request_waits_for_profile_replacement_and_keeps_its_first_re
                 "select exists(select 1 from pg_stat_activity where $1 = any(pg_blocking_pids(pid)))"
             ).bind(writer).fetch_one(db.store.pool()).await.unwrap();
             if waiting { break }
-            assert!(!submission.is_finished(), "접수가 판본 교체보다 먼저 끝났다");
+            assert!(!submission.is_finished(), "accept finished before revision replacement");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("접수가 판본 교체를 기다려야 한다");
+    }).await.expect("accept must wait for revision replacement");
     change.commit().await.unwrap();
     assert!(matches!(submission.await.unwrap(), Err(Error::Stale)));
     assert_eq!(

@@ -1,4 +1,4 @@
-//! 예약 회신(전송 초안) 시험 도구.
+//! Scheduled delivery draft test helpers.
 #![allow(dead_code)]
 
 use super::*;
@@ -15,7 +15,6 @@ pub fn replies(db: &TestDb) -> &dyn ScheduledReplies {
     &db.store
 }
 
-/// 목적지가 고정된 발화 run(`advance`가 발화를 접수한 커밋에서 하는 일을 직접 흉내 낸다).
 pub async fn destination_run(db: &TestDb, kind: ConversationKind) -> RunContext {
     destination_run_as(db, "r1", kind).await
 }
@@ -24,7 +23,6 @@ pub async fn destination_run_as(db: &TestDb, request: &str, kind: ConversationKi
     destination_run_to(db, request, kind, "D9").await
 }
 
-/// 목적지 대화 ID를 고른다(그 외는 `destination_run_as`와 같다).
 pub async fn destination_run_to(
     db: &TestDb,
     request: &str,
@@ -54,7 +52,7 @@ pub fn answers(texts: &[&str]) -> Finish {
     }
 }
 
-/// 승인 문서를 카드의 `전송 초안` 한 행으로(줄 상한 안에서 이어 쓴다: 첫 줄은 라벨, 이어지는 줄은 공백 두 칸으로 시작).
+/// Formats an approval document under `DELIVERY_CARD_LABEL` wrapped at 480-byte UTF-8 boundaries with `"  "` continuations.
 pub fn card_for(nonce: &str, document: &str) -> JsonPayload {
     let mut lines = Vec::new();
     let mut rest = document;
@@ -73,7 +71,7 @@ pub fn card_for(nonce: &str, document: &str) -> JsonPayload {
         rest = tail;
     }
     JsonPayload(
-        json!({"approval": {"nonce": nonce, "title": "예약 회신 승인", "lines": lines}})
+        json!({"approval": {"nonce": nonce, "title": "Scheduled delivery approval", "lines": lines}})
             .to_string(),
     )
 }
@@ -97,7 +95,6 @@ pub fn open_delivery(approval: &Approval, document: &str) -> OpenApproval {
     }
 }
 
-/// 초안을 동결하고 호출을 연 뒤 승인을 요청한다(소유자가 결정하기 전).
 pub async fn request_delivery(
     db: &TestDb,
     run: &RunContext,
@@ -107,7 +104,7 @@ pub async fn request_delivery(
         .draft(run.attempt.clone(), Some(finish))
         .await
         .unwrap()
-        .expect("초안이 필요하다");
+        .expect("expected draft");
     let hash = draft.sha256().unwrap();
     calls(db)
         .begin(
@@ -126,7 +123,6 @@ pub async fn request_delivery(
     (draft, approval)
 }
 
-/// 소유자가 승인하고 run이 재개되었다: 재개한 시도와 `enqueue`에 낼 호출.
 pub async fn approved_start(db: &TestDb, approval: &Approval) -> (Attempt, StartCall) {
     calls(db)
         .decide(Decision {

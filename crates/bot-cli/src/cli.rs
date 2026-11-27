@@ -1,4 +1,4 @@
-//! 명령줄 정의. 각 명령의 동작은 같은 이름의 모듈에 있다.
+//! CLI definition; each subcommand is implemented in the matching module.
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -6,8 +6,8 @@ use std::path::PathBuf;
 #[command(
     name = "bot",
     version,
-    about = "프로필 폴더를 연결하면 같은 봇으로 대화하고 작업을 예약합니다",
-    after_help = "환경: BOT_PROFILES(프로필 폴더) · BOT_HOST_CONFIG(호스트 등록부 JSON, 없으면 데모) · BOT_DATABASE_URL · BOT_SOCKET · BOT_SECRETS"
+    about = "Run bots and scheduled tasks from declarative profile directories",
+    after_help = "Env: BOT_PROFILES (profile root) · BOT_HOST_CONFIG (host registry JSON; demo if unset) · BOT_DATABASE_URL · BOT_SOCKET · BOT_SECRETS"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -16,44 +16,44 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// 프로필·호스트 설정을 검증한다(DB·Slack 접속 없이)
+    /// Validate profiles and host config without connecting to DB or Slack
     Validate,
-    /// 에이전트와 대화한다(이 사용자의 로컬 입구)
+    /// Chat with an agent via the local CLI gateway
     Chat(ChatArgs),
-    /// 프로필의 구조 지도를 출력한다
+    /// Print the structure map of loaded profiles
     Map(MapArgs),
-    /// 역할을 시작한다
+    /// Start one or more runtime roles
     Serve(ServeArgs),
-    /// 프로필 판본의 묶음을 저장소에서 다룬다(재배포 뒤 옛 판본 복원용)
+    /// Manage stored profile revision bundles for restoring historical revisions
     ProfileBundle(BundleArgs),
-    /// 새 작업 폴더를 만든다(프로필 폴더 + 호스트 설정 예시). 있는 것은 덮어쓰지 않는다
+    /// Create a new workspace (profile directory + sample host.json) without overwriting existing files
     Init(InitArgs),
-    /// 프로필에 에이전트·스킬 뼈대를 더한다. 권한 상한(profile.yaml)은 바꾸지 않는다
+    /// Scaffold an agent, skill, or tool entry without modifying profile.yaml permissions
     Add(AddArgs),
-    /// 설정을 점검해 한국어로 요약한다(기본은 네트워크 접속 없이 설정만 본다). 실패 항목이 있으면 종료 코드가 0이 아니다
+    /// Check host, profile, secret, and DB configuration (offline by default; exits non-zero on failure)
     Doctor(DoctorArgs),
-    /// MCP 도구 서버의 도구 정의를 프로필에 고정한다
+    /// Lock MCP server tool definitions into a skill directory
     Mcp(McpArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Template {
-    /// 에이전트 하나: 가장 작은 개인 비서
+    /// Single-agent personal assistant
     Personal,
-    /// 팀 리드 아래에 개발·디자인·기획 에이전트
+    /// Team lead with developer, designer, and planner sub-agents
     Team,
-    /// 매니저 아래에 제품·고객지원 팀과 팀원
+    /// Manager with product and support teams
     Company,
 }
 
 #[derive(Args)]
 pub struct InitArgs {
-    /// 만들 이름: 작업 폴더 이름이자 프로필 ID(소문자·숫자·하이픈)
+    /// Workspace directory name and profile ID (lowercase letters, digits, hyphens)
     pub name: String,
-    /// 시작 템플릿
+    /// Starter template
     #[arg(long, value_enum, default_value = "personal")]
     pub template: Template,
-    /// 이 폴더 안에 `<이름>/`을 만든다(이미 있는 폴더, 기본은 현재 폴더)
+    /// Existing parent directory in which to create `<name>/` (default: current directory)
     #[arg(long, default_value = ".")]
     pub dir: PathBuf,
 }
@@ -66,49 +66,49 @@ pub struct AddArgs {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ToolClass {
-    /// 읽기 전용 도구
+    /// Read-only tool
     Read,
-    /// 상태 변경 도구(`policy.approve`에 스코프를 넣으면 사람 승인을 거친다)
+    /// State-changing tool (requires human approval when listed in `policy.approve`)
     Write,
-    /// 되돌릴 수 없는 도구(항상 사람 승인을 거친다)
+    /// Irreversible tool (always requires human approval)
     Irreversible,
 }
 
 #[derive(Subcommand)]
 pub enum AddKind {
-    /// 에이전트 뼈대(AGENT.md)를 더한다. 경로는 계보로 쓴다(예: main/cs)
+    /// Add an agent skeleton (AGENT.md) by lineage path (e.g. main/cs)
     Agent {
-        /// 에이전트 경로(상위 에이전트는 이미 있어야 한다)
+        /// Agent lineage path (parent agent must already exist)
         path: String,
-        /// 프로필 폴더(profile.yaml이 있는 곳, 기본은 현재 폴더)
+        /// Profile directory containing profile.yaml (default: current directory)
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// 스킬 뼈대(SKILL.md)를 더한다
+    /// Add a skill skeleton (SKILL.md)
     Skill {
-        /// 스킬 이름(소문자·숫자·하이픈)
+        /// Skill name (lowercase letters, digits, hyphens)
         name: String,
-        /// 이 에이전트의 스킬로 둔다(생략하면 프로필 전체가 보는 스킬)
+        /// Attach skill to this agent (omit for profile-wide skill)
         #[arg(long)]
         agent: Option<String>,
-        /// 프로필 폴더(profile.yaml이 있는 곳, 기본은 현재 폴더)
+        /// Profile directory containing profile.yaml (default: current directory)
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// 스킬 폴더의 tools.yaml에 도구 항목을 더한다(권한 상한은 바꾸지 않는다)
+    /// Add a tool entry to a skill's tools.yaml without changing permission caps
     Tool {
-        /// 도구 ID(`<스킬>.<도구>`, 둘 다 소문자·숫자·하이픈, 예: agenda.search)
+        /// Tool ID (`<skill>.<tool>`, lowercase letters, digits, hyphens, e.g. agenda.search)
         id: String,
-        /// 위험 등급
+        /// Risk class
         #[arg(long, value_enum, default_value = "read")]
         class: ToolClass,
-        /// 도구 서버 별칭(생략하면 기존 tools.yaml의 server 또는 스킬 이름)
+        /// Tool server alias (defaults to existing tools.yaml server or skill name)
         #[arg(long)]
         server: Option<String>,
-        /// 스킬이 속한 에이전트 경로(생략하면 프로필에서 해당 스킬을 찾는다)
+        /// Agent lineage owning the skill (omit to search the profile)
         #[arg(long)]
         agent: Option<String>,
-        /// 프로필 폴더(profile.yaml이 있는 곳, 기본은 현재 폴더)
+        /// Profile directory containing profile.yaml (default: current directory)
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
@@ -116,13 +116,13 @@ pub enum AddKind {
 
 #[derive(Args)]
 pub struct DoctorArgs {
-    /// 호스트 등록부(host.json) 경로. 생략하면 BOT_HOST_CONFIG, 그것도 없으면 내장 데모 호스트
+    /// Path to host.json (defaults to BOT_HOST_CONFIG, or built-in demo host if unset)
     #[arg(long)]
     pub host: Option<PathBuf>,
-    /// 프로필 루트 폴더(프로필 폴더들의 부모). 생략하면 BOT_PROFILES
+    /// Profiles root directory (defaults to BOT_PROFILES)
     #[arg(long)]
     pub profiles: Option<PathBuf>,
-    /// 데이터베이스에 짧게 접속해 연결만 확인한다(쓰기·마이그레이션 없음). 기본은 접속하지 않는다
+    /// Test a brief read-only database connection (no writes or migrations)
     #[arg(long)]
     pub check_db: bool,
 }
@@ -135,9 +135,9 @@ pub struct McpArgs {
 
 #[derive(Subcommand)]
 pub enum McpAction {
-    /// 스킬 폴더의 tools.yaml이 선언한 도구의 정의(이름·설명·입력 스키마)를 서버에서 받아 tools.lock.yaml에 적는다(원격 `transport: "http"` 서버)
+    /// Fetch tool definitions declared in tools.yaml from a remote HTTP MCP server into tools.lock.yaml
     Sync {
-        /// 스킬 폴더(BOT_PROFILES 아래 프로필의 `skills/<이름>`)
+        /// Skill directory under BOT_PROFILES (e.g. `<profile>/skills/<name>`)
         dir: std::path::PathBuf,
     },
 }
@@ -150,51 +150,50 @@ pub struct BundleArgs {
 
 #[derive(Subcommand)]
 pub enum BundleAction {
-    /// 옛 판본의 원본 프로필 폴더를 저장소에 보관한다(이전 버전이 보관하지 않은 판본을 진행 중 작업이 아직 쓸 때 `bot serve`가 알려 준다)
+    /// Backfill a historical profile directory bundle into the store for in-flight runs
     Put {
-        /// 프로필 폴더(폴더 이름 = profile.yaml의 id)
+        /// Profile directory (directory name must match profile.yaml id)
         dir: std::path::PathBuf,
     },
 }
 
 #[derive(Args)]
 pub struct ChatArgs {
-    /// 여러 프로필에 입구가 있을 때 고른다
+    /// Profile to target when multiple profiles have CLI bindings
     #[arg(long)]
     pub profile: Option<String>,
-    /// 같은 대화 스레드를 이어 간다(생략하면 요청마다 새 스레드)
+    /// Thread ID to continue (omit to start a new thread per request)
     #[arg(long)]
     pub thread: Option<String>,
-    /// 재시도에도 같아야 하는 요청 ID(생략하면 새로 만든다)
+    /// Idempotent request ID reused across retries (generated if omitted)
     #[arg(long)]
     pub request_id: Option<String>,
-    /// 접수까지만 확인하고 돌아온다
+    /// Return immediately once the request is durably accepted
     #[arg(long)]
     pub no_wait: bool,
-    /// 새 접수 없이 --request-id의 결과를 다시 받는다
+    /// Wait for the result of an existing --request-id without accepting a new request
     #[arg(long, requires = "request_id", conflicts_with = "text")]
     pub attach: bool,
-    /// 보낼 글
+    /// Message text to send
     pub text: Option<String>,
 }
 
 #[derive(Args)]
 pub struct MapArgs {
-    /// JSON으로 출력한다(기본은 Markdown)
+    /// Output JSON instead of Markdown
     #[arg(long)]
     pub json: bool,
-    /// 이 프로필만
+    /// Limit output to a single profile
     #[arg(long)]
     pub profile: Option<String>,
 }
 
 #[derive(Args)]
 pub struct ServeArgs {
-    /// 시작할 역할(쉼표로 여러 개). all은 전 역할
+    /// Roles to start (comma-separated); `all` starts every role
     #[arg(long, value_enum, value_delimiter = ',', default_value = "all")]
     pub role: Vec<Role>,
-    /// 저장소에 게시된 활성 판본이 이 프로필 폴더와 다를 때 이 폴더의 판본으로 교체한다(명시 활성화).
-    /// 없으면 다른 판본이 게시돼 있는 한 시작하지 않는다(구판 역할이 새 판본을 덮지 않게).
+    /// Explicitly activate this revision when it differs from the published active revision
     #[arg(long)]
     pub activate: bool,
 }
@@ -205,7 +204,7 @@ pub enum Role {
     Gateway,
     Scheduler,
     Worker,
-    /// 브로커(도구 실행·승인)는 worker 안에서 돈다. 목록에서는 숨기고 요청하면 «worker에 포함»이라고 안내하며 거절한다.
+    // Hidden from help; selecting it parses so serve can reject with a clear explanation that broker runs inside worker.
     #[value(hide = true)]
     Broker,
     Admin,
@@ -223,12 +222,11 @@ impl Role {
         }
     }
 
-    /// `all`을 풀어 중복 없이 정렬한 역할 목록
     pub fn expand(roles: &[Role]) -> Vec<Role> {
         let mut out: Vec<Role> = roles
             .iter()
             .flat_map(|role| match role {
-                // 브로커는 worker에 포함돼 있어 별도 역할이 아니다
+                // Broker runs embedded in worker, not as a standalone role.
                 Role::All => vec![Role::Gateway, Role::Scheduler, Role::Worker, Role::Admin],
                 other => vec![*other],
             })
@@ -255,20 +253,25 @@ mod tests {
         assert_eq!(
             all,
             [Role::Gateway, Role::Scheduler, Role::Worker, Role::Admin],
-            "all에 브로커는 없다(worker에 포함)"
+            "all omits broker because it runs inside worker"
         );
         assert_eq!(Role::expand(&[Role::Worker, Role::Worker]), [Role::Worker]);
     }
 
     #[test]
     fn parses_the_documented_commands() {
-        let chat =
-            Cli::try_parse_from(["bot", "chat", "--profile", "personal", "오늘 일정 알려줘"])
-                .unwrap();
+        let chat = Cli::try_parse_from([
+            "bot",
+            "chat",
+            "--profile",
+            "personal",
+            "Show today's agenda",
+        ])
+        .unwrap();
         match chat.command {
             Command::Chat(args) => {
                 assert_eq!(args.profile.as_deref(), Some("personal"));
-                assert_eq!(args.text.as_deref(), Some("오늘 일정 알려줘"));
+                assert_eq!(args.text.as_deref(), Some("Show today's agenda"));
             }
             _ => panic!(),
         }
@@ -290,10 +293,9 @@ mod tests {
             Command::Serve(args) => assert!(args.activate),
             _ => panic!(),
         }
-        // 재부착은 요청 ID가 있어야 하고 글과 함께 쓸 수 없다
         assert!(Cli::try_parse_from(["bot", "chat", "--attach"]).is_err());
         assert!(
-            Cli::try_parse_from(["bot", "chat", "--attach", "--request-id", "r1", "글"]).is_err()
+            Cli::try_parse_from(["bot", "chat", "--attach", "--request-id", "r1", "text"]).is_err()
         );
         assert!(Cli::try_parse_from(["bot", "serve", "--role", "nope"]).is_err());
         match Cli::try_parse_from(["bot", "init", "my-bot", "--template", "team"])
@@ -369,7 +371,6 @@ mod tests {
             }
             _ => panic!(),
         }
-        // 도구 정의 고정: 스킬 폴더 하나를 받는다
         match Cli::try_parse_from(["bot", "mcp", "sync", "profiles/personal/skills/weather"])
             .unwrap()
             .command
@@ -385,7 +386,6 @@ mod tests {
             _ => panic!(),
         }
         assert!(Cli::try_parse_from(["bot", "mcp", "sync"]).is_err());
-        // 브로커는 목록에서 숨기지만 요청하면 파싱돼 이유와 함께 거절된다
         let hidden = Cli::command()
             .find_subcommand("serve")
             .unwrap()
@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(
             hidden,
             ["all", "gateway", "scheduler", "worker", "admin"],
-            "도움말의 역할 목록에 broker는 없다"
+            "broker must stay hidden from help"
         );
         match Cli::try_parse_from(["bot", "serve", "--role", "broker"])
             .unwrap()

@@ -1,9 +1,9 @@
-//! 글 다루기: JSON 문자열 이스케이프(RFC 8785 규칙).
+//! RFC 8785 JSON string escaping, hex encoding, and continuation-line formatting.
 
 pub use bot_core::canon::json_quote;
 
-/// 한 줄 상한(`max_bytes`) 안에서 값을 이어 쓴 줄들. 첫 줄은 `라벨: 값 조각`, 이어지는 줄은 공백 두 칸으로 시작한다.
-/// 이어 붙이면 원래 값이 그대로 나온다(자르지 않는다). 한 글자도 담을 수 없는 상한이면 `None`이다.
+/// Splits `value` across `max_bytes`-bounded lines (`"{label}: ..."` then `"  ..."`) without truncation.
+/// Returns `None` if fewer than 4 bytes remain after the prefix (cannot fit a 4-byte UTF-8 scalar).
 pub fn labeled_lines(label: &str, value: &str, max_bytes: usize) -> Option<Vec<String>> {
     let mut prefix = format!("{label}: ");
     let mut rest = value;
@@ -34,7 +34,7 @@ mod tests {
     #[test]
     fn quotes_follow_rfc_8785() {
         assert_eq!(json_quote("a\"b\\c"), r#""a\"b\\c""#);
-        assert_eq!(json_quote("줄\n바꿈\t탭"), "\"줄\\n바꿈\\t탭\"");
+        assert_eq!(json_quote("line\nbreak\ttab"), "\"line\\nbreak\\ttab\"");
         assert_eq!(
             json_quote("\u{1}\u{1f}\u{8}\u{c}\r"),
             r#""\u0001\u001f\b\f\r""#
@@ -44,22 +44,24 @@ mod tests {
 
     #[test]
     fn quoted_text_never_contains_a_raw_newline() {
-        let forged = "내용\n위험: read\n승인자: 누군가";
+        let forged = "content\nRisk: read\nApprover: someone";
         assert!(!json_quote(forged).contains('\n'));
     }
 
     #[test]
     fn long_values_continue_on_following_lines_without_losing_a_byte() {
-        let value = "가나다라마".repeat(40); // 600바이트
-        let lines = labeled_lines("내용", &value, 100).unwrap();
+        let value = "€★♦♣♠".repeat(40); // 600 bytes (3-byte UTF-8 scalars)
+        let lines = labeled_lines("Content", &value, 100).unwrap();
         assert!(lines.len() > 1 && lines.iter().all(|l| l.len() <= 100));
-        assert!(lines[0].starts_with("내용: ") && lines[1..].iter().all(|l| l.starts_with("  ")));
+        assert!(
+            lines[0].starts_with("Content: ") && lines[1..].iter().all(|l| l.starts_with("  "))
+        );
         let joined: String = lines
             .iter()
             .enumerate()
             .map(|(i, l)| {
                 if i == 0 {
-                    &l["내용: ".len()..]
+                    &l["Content: ".len()..]
                 } else {
                     &l[2..]
                 }
@@ -70,7 +72,7 @@ mod tests {
             labeled_lines("a", "", 100).unwrap(),
             vec!["a: ".to_string()]
         );
-        assert!(labeled_lines("긴라벨".repeat(10).as_str(), "x", 20).is_none());
+        assert!(labeled_lines("longlabel".repeat(10).as_str(), "x", 20).is_none());
     }
 
     #[test]

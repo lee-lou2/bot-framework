@@ -1,4 +1,5 @@
-//! 워커의 점유·체크포인트·완료를 기록하는 시험용 실행 저장소.
+//! Test double `RunStore` recording claims, heartbeats, checkpoints, completions, and failures.
+
 use super::fakes::lock;
 use bot_core::{
     command::*,
@@ -18,15 +19,13 @@ pub(super) struct RunsState {
     pub history: Vec<Turn>,
     pub steps: Vec<Step>,
     pub finished: Vec<Finish>,
-    /// `finish_with`로 받은 실행 계량(완료마다 하나)
     pub outcomes: Vec<RunOutcome>,
     pub failed: Vec<Failure>,
     pub renews: u32,
     pub renew_script: VecDeque<Result<Beat, Error>>,
     pub finish_error: Option<Error>,
-    /// 다음 `history` 한 번이 돌려줄 오류(소유권을 잃은 것처럼 새 읽기가 `Stale`로 거절될 때)
     pub history_error: Option<Error>,
-    /// 운영자가 취소를 요청했다: 하트비트가 이를 알리고, 실제 저장소처럼 새 읽기를 `Stale`로 거절한다(`fence`)
+    /// Mirrors real store fencing: reports cancel on heartbeat and rejects new reads with `Stale`.
     pub cancel: bool,
     pub events: Vec<String>,
 }

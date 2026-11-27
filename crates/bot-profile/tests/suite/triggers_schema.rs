@@ -1,7 +1,4 @@
-//! `schemas/v1/triggers.schema.json` 조임 불변식 검증:
-//! - 정상 사례(예시 프로필·경계값·별칭·유효 `preapproved`/`human_approval`)는 스키마와 `bot_profile::load`가 모두 받는다.
-//! - 스키마만으로 거절되는 사례는 `bot_profile::load`도 반드시 거절하며(스키마 거절 집합 ⊆ Rust 거절 집합),
-//!   고정 오류 코드(`invalid_preapproval`·`invalid_human_approval`·`bad-cron`)와 사람 말 안내(정규식 원문 없음)를 유지한다.
+//! Invariant tests for `schemas/v1/triggers.schema.json`: schema parity with Rust validation, fixed error codes, and legacy bundle restore.
 
 use crate::support::{Files, append, base, check, edit, ok};
 use bot_core::{
@@ -19,7 +16,7 @@ fn triggers_schema() -> Schema {
     let doc: Value =
         serde_json::from_str(include_str!("../../../../schemas/v1/triggers.schema.json"))
             .expect("triggers.schema.json");
-    Schema::compile_bundled(doc).expect("번들 triggers 스키마 컴파일")
+    Schema::compile_bundled(doc).expect("compile bundled triggers schema")
 }
 
 fn with_notify_and_slack() -> Files {
@@ -97,13 +94,13 @@ fn preapproved_target_pattern_matches_piece_ok_exactly() {
         "a\tb",
         "line\nbreak",
         "?x",
-        "한글",
+        "café",
         too_long.as_str(),
     ] {
         assert_eq!(
             check_piece(sample),
             piece_ok(sample),
-            "piece_ok와 스키마 패턴이 다름: {sample:?}"
+            "piece_ok and schema pattern disagree: {sample:?}"
         );
     }
 }
@@ -148,11 +145,10 @@ fn cron_pattern_accepts_all_valid_expressions_and_rejects_wrong_field_counts_and
         assert!(Cron::parse(good).is_ok(), "{good:?}");
         assert!(
             validate_cron(good).is_empty(),
-            "유효 cron을 스키마가 거절함: {good:?} -> {:?}",
+            "schema rejected valid cron {good:?}: {:?}",
             validate_cron(good)
         );
     }
-    // 칸 수 오류·미지원 별칭은 스키마와 Rust가 모두 거절한다
     for bad in [
         "",
         "   ",
@@ -167,15 +163,12 @@ fn cron_pattern_accepts_all_valid_expressions_and_rejects_wrong_field_counts_and
         "not a cron",
     ] {
         assert!(Cron::parse(bad).is_err(), "{bad:?}");
-        assert!(
-            !validate_cron(bad).is_empty(),
-            "스키마가 거절해야 함: {bad:?}"
-        );
+        assert!(!validate_cron(bad).is_empty(), "schema must reject {bad:?}");
         let yaml = format!(
             "version: 1\ntriggers:\n  - id: m\n    \"on\": {{cron: {}}}\n    principal: \"service:morning\"\n    target: {{tool: agenda.list, args: {{}}}}\n",
             serde_json::to_string(bad).unwrap()
         );
-        let report = check(&replace_triggers(base(), &yaml)).expect_err("거절");
+        let report = check(&replace_triggers(base(), &yaml)).expect_err("expected failure");
         assert!(report.has("bad-cron"), "{bad:?}: {report}");
         let msg = report.to_string();
         assert!(
@@ -183,25 +176,27 @@ fn cron_pattern_accepts_all_valid_expressions_and_rejects_wrong_field_counts_and
             "{bad:?}: {msg}"
         );
     }
-    // 5칸이지만 값 범위가 잘못된 경우는 스키마를 지나 Rust의 칸별 진단을 유지한다
+    // 5-field expressions with out-of-range values pass the schema so Rust emits per-field diagnostics.
     for range_bad in ["61 * * * *", "* 24 * * *", "*/0 * * * *", "5-1 * * * *"] {
         assert!(
             validate_cron(range_bad).is_empty(),
-            "5칸 값 오류는 Rust 칸별 진단으로 넘김: {range_bad:?}"
+            "5-field range errors must reach Rust parser: {range_bad:?}"
         );
         let yaml = format!(
             "version: 1\ntriggers:\n  - id: m\n    \"on\": {{cron: \"{range_bad}\"}}\n    principal: \"service:morning\"\n    target: {{tool: agenda.list, args: {{}}}}\n"
         );
-        let report = check(&replace_triggers(base(), &yaml)).expect_err("거절");
+        let report = check(&replace_triggers(base(), &yaml)).expect_err("expected failure");
         assert!(report.has("bad-cron"), "{range_bad}: {report}");
-        assert!(report.to_string().contains("칸"), "{range_bad}: {report}");
+        assert!(
+            report.to_string().contains("field"),
+            "{range_bad}: {report}"
+        );
     }
 }
 
 #[test]
 fn boundary_valid_preapproved_and_human_approval_pass_both_schema_and_loader() {
     let schema = triggers_schema();
-    // preapproved: max_per_day 경계(1·65535), targets 64개, 128자 조각
     let targets: Vec<Value> = (0..MAX_PAIRS)
         .map(|i| json!({"operation": "post", "target": format!("channel:r{i}")}))
         .collect();
@@ -223,7 +218,6 @@ fn boundary_valid_preapproved_and_human_approval_pass_both_schema_and_loader() {
     );
     ok(&replace_triggers(with_notify_and_slack(), &yaml));
 
-    // human_approval: 16명 상한(모두 다른 Slack 신원)
     let mut members = String::new();
     let mut approvers = Vec::new();
     for i in 1..=16 {
@@ -234,7 +228,7 @@ fn boundary_valid_preapproved_and_human_approval_pass_both_schema_and_loader() {
     let human_trigger = json!({
         "id": "confirm",
         "on": {"event": "message", "binding": "team"},
-        "match": {"body.text": "승인"},
+        "match": {"body.text": "approve"},
         "input": {"report": "body.text"},
         "target": {"tool": "agenda.notify"},
         "human_approval": {"approvers": approvers}
@@ -273,7 +267,7 @@ fn schema_rejections_stay_a_subset_of_loader_rejections_and_keep_fixed_codes() {
         json!({
             "id": "confirm",
             "on": {"event": "message", "binding": "team"},
-            "match": {"body.text": "승인"},
+            "match": {"body.text": "approve"},
             "input": {"report": "body.text"},
             "target": {"tool": "agenda.notify"},
             "human_approval": human
@@ -288,17 +282,17 @@ fn schema_rejections_stay_a_subset_of_loader_rejections_and_keep_fixed_codes() {
 
     let cases: Vec<(&str, Value, &str)> = vec![
         (
-            "preapproved 빈 객체",
+            "empty preapproved object",
             cron_with(json!({})),
             "invalid_preapproval",
         ),
         (
-            "preapproved 미지 키만",
+            "unknown key only in preapproved",
             cron_with(json!({"bogus": 1})),
             "invalid_preapproval",
         ),
         (
-            "preapproved 추가 키",
+            "extra key in preapproved",
             cron_with(
                 json!({"max_per_day": 3, "targets": [{"operation": "post", "target": "a"}], "note": "x"}),
             ),
@@ -317,101 +311,101 @@ fn schema_rejections_stay_a_subset_of_loader_rejections_and_keep_fixed_codes() {
             "invalid_preapproval",
         ),
         (
-            "max_per_day 문자열",
+            "string max_per_day",
             cron_with(
                 json!({"max_per_day": "3", "targets": [{"operation": "post", "target": "a"}]}),
             ),
             "invalid_preapproval",
         ),
         (
-            "targets 빈 배열",
+            "empty targets array",
             cron_with(json!({"max_per_day": 3, "targets": []})),
             "invalid_preapproval",
         ),
         (
-            "targets 65개 초과",
+            "targets over 64 limit",
             cron_with(json!({"max_per_day": 3, "targets": too_many_targets})),
             "invalid_preapproval",
         ),
         (
-            "targets 중복 쌍(키 순서 달라도)",
+            "duplicate target pair across key order",
             cron_with(
                 json!({"max_per_day": 3, "targets": [{"operation": "post", "target": "a"}, {"target": "a", "operation": "post"}]}),
             ),
             "invalid_preapproval",
         ),
         (
-            "targets 와일드카드",
+            "wildcard target",
             cron_with(
                 json!({"max_per_day": 3, "targets": [{"operation": "post", "target": "channel:*"}]}),
             ),
             "invalid_preapproval",
         ),
         (
-            "targets URL",
+            "URL target",
             cron_with(
                 json!({"max_per_day": 3, "targets": [{"operation": "post", "target": "https://hooks.example.com/x"}]}),
             ),
             "invalid_preapproval",
         ),
         (
-            "targets ..",
+            "double-dot target",
             cron_with(
                 json!({"max_per_day": 3, "targets": [{"operation": "post", "target": "a..b"}]}),
             ),
             "invalid_preapproval",
         ),
         (
-            "targets 추가 키",
+            "extra key in target pair",
             cron_with(
                 json!({"max_per_day": 3, "targets": [{"operation": "post", "target": "a", "params": "x"}]}),
             ),
             "invalid_preapproval",
         ),
-        ("preapproved 비객체", cron_with(json!(true)), "schema"),
+        ("non-object preapproved", cron_with(json!(true)), "schema"),
         (
-            "human_approval 빈 객체",
+            "empty human_approval object",
             evt_with(json!({})),
             "invalid_human_approval",
         ),
         (
-            "human_approval 미지 키",
+            "unknown key in human_approval",
             evt_with(json!({"bogus": 1})),
             "invalid_human_approval",
         ),
         (
-            "human_approval 빈 approvers",
+            "empty approvers",
             evt_with(json!({"approvers": []})),
             "invalid_human_approval",
         ),
         (
-            "human_approval 17명 초과",
+            "approvers over 16 limit",
             evt_with(json!({"approvers": too_many_approvers})),
             "invalid_human_approval",
         ),
         (
-            "human_approval 중복",
+            "duplicate approver",
             evt_with(json!({"approvers": ["slack:home/U1", "slack:home/U1"]})),
             "invalid_human_approval",
         ),
         (
-            "human_approval 서비스 주체",
+            "service approver",
             evt_with(json!({"approvers": ["service:morning"]})),
             "invalid_human_approval",
         ),
         (
-            "human_approval 로컬 주체",
+            "local approver",
             evt_with(json!({"approvers": ["local:owner"]})),
             "invalid_human_approval",
         ),
         (
-            "human_approval 소문자 Slack ID",
+            "lowercase Slack ID",
             evt_with(json!({"approvers": ["slack:home/u1"]})),
             "invalid_human_approval",
         ),
-        ("human_approval 비객체", evt_with(json!(true)), "schema"),
+        ("non-object human_approval", evt_with(json!(true)), "schema"),
         (
-            "cron 비문자열",
+            "non-string cron",
             json!({"id": "m", "on": {"cron": 123}, "principal": "service:morning", "target": {"tool": "agenda.list", "args": {}}}),
             "schema",
         ),
@@ -422,18 +416,19 @@ fn schema_rejections_stay_a_subset_of_loader_rejections_and_keep_fixed_codes() {
         let schema_errs = schema.validate(&doc);
         assert!(
             !schema_errs.is_empty(),
-            "{name}: 스키마가 거절해야 하는데 통과했어요"
+            "{name}: schema accepted an invalid trigger"
         );
         let yaml = format!(
             "version: 1\ntriggers:\n  - {}\n",
             serde_json::to_string(&trigger).unwrap()
         );
-        let report = check(&replace_triggers(with_notify_and_slack(), &yaml)).expect_err("거절");
-        assert!(report.has(code), "{name}: 기대 코드 {code}\n{report}");
+        let report =
+            check(&replace_triggers(with_notify_and_slack(), &yaml)).expect_err("expected failure");
+        assert!(report.has(code), "{name}: expected {code}\n{report}");
         let text = report.to_string();
         assert!(
-            !text.contains("(?:") && !text.contains("^[") && !text.contains("패턴"),
-            "{name}: 정규식 원문이 노출됨: {text}"
+            !text.contains("(?:") && !text.contains("^[") && !text.contains("(pattern "),
+            "{name}: raw regex leaked: {text}"
         );
     }
 }
@@ -468,7 +463,7 @@ fn legacy_v1_bundle_with_multiline_cron_preapproved_and_human_approval_restores_
         }
     }
 
-    // YAML 블록 스칼라(끝 개행 포함) cron + preapproved + human_approval이 든 구판 BOTPROFILE1 번들
+    // Legacy BOTPROFILE1 bundle with YAML block-scalar cron (trailing newline), preapproved, and human_approval.
     let yaml = "\
 version: 1
 triggers:
@@ -484,7 +479,7 @@ triggers:
         - {operation: post, target: \"channel:reports\"}
   - id: confirm
     \"on\": {event: message, binding: team}
-    match: {body.text: \"승인\"}
+    match: {body.text: \"approve\"}
     input: {report: body.text}
     target: {tool: agenda.notify}
     human_approval:
@@ -503,7 +498,7 @@ triggers:
     let rt = tokio::runtime::Runtime::new().unwrap();
     let restored = rt
         .block_on(registry.restore(&store, &wanted, &Limits::default()))
-        .expect("구판 BOTPROFILE1 트리거 번들 복원 성공");
+        .expect("legacy BOTPROFILE1 trigger bundle restore");
     assert_eq!(restored.len(), 1);
     let snap = registry.lookup(&id, &rev).unwrap();
     assert_eq!(
@@ -533,13 +528,13 @@ fn cron_schema_whitespace_matches_rust_char_is_whitespace_for_every_unicode_scal
         assert_eq!(
             re.is_match(&five),
             is_ws,
-            "cron 구분 공백 불일치: U+{:04X}",
+            "cron separator whitespace mismatch: U+{:04X}",
             ch as u32
         );
         assert_eq!(
             re.is_match(&alias),
             is_ws,
-            "cron 별칭 앞뒤 공백 불일치: U+{:04X}",
+            "cron alias surrounding whitespace mismatch: U+{:04X}",
             ch as u32
         );
         if is_ws {
@@ -555,11 +550,11 @@ fn cron_schema_whitespace_matches_rust_char_is_whitespace_for_every_unicode_scal
                 }));
                 assert!(
                     schema.validate(&d).is_empty(),
-                    "스키마가 Rust 공백 U+{:04X} 거절",
+                    "schema rejected Rust whitespace U+{:04X}",
                     ch as u32
                 );
             }
         }
     }
-    assert_eq!(ws_count, 25, "유니코드 White_Space 문자 25종 전부 대조");
+    assert_eq!(ws_count, 25, "all 25 Unicode White_Space scalars checked");
 }

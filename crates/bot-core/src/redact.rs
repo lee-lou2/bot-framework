@@ -1,8 +1,7 @@
-//! 토큰·JWT 모양 탐지 단일 표. 브로커 출력 가드와 관리 추적 가림 장치가 같은 접두사·JWT 규칙을 공유한다.
+//! Shared token-prefix and JWT detection table used by broker output guards and admin trace redaction.
 
 use std::ops::Range;
 
-/// 널리 쓰이는 서비스 토큰·키 접두사 단일 목록.
 pub const SECRET_PREFIXES: &[&str] = &[
     "xoxb-",
     "xoxp-",
@@ -26,7 +25,7 @@ pub const SECRET_PREFIXES: &[&str] = &[
     "ya29.",
 ];
 
-/// 접두사별 본문 규칙: `(접두사, 접두사 뒤 본문 최소 길이, 본문에 '.' 허용 여부)`.
+/// `(prefix, min_body_len, allow_dot_in_body)` in lockstep with `SECRET_PREFIXES`.
 const PREFIX_RULES: &[(&str, usize, bool)] = &[
     ("xoxb-", 10, false),
     ("xoxp-", 10, false),
@@ -50,12 +49,10 @@ const PREFIX_RULES: &[(&str, usize, bool)] = &[
     ("ya29.", 11, true),
 ];
 
-/// 낱말이 알려진 비밀 토큰 접두사로 시작하는가.
 pub fn has_secret_prefix(word: &str) -> bool {
     SECRET_PREFIXES.iter().any(|p| word.starts_with(p))
 }
 
-/// 낱말 하나가 JWT(`eyJ<헤더>.<본문>.<서명>`) 모양인가.
 pub fn looks_like_jwt(word: &str) -> bool {
     word.starts_with("eyJ")
         && word.len() >= 30
@@ -65,13 +62,13 @@ pub fn looks_like_jwt(word: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'='))
 }
 
-/// `begin` 앞 바이트가 ASCII 영숫자면 다른 낱말 내부이므로 토큰 시작으로 보지 않는다.
-/// 한글 등 멀티바이트 문자 뒤(`한글ghp_...`)나 구분자(`=`, `"`, `_`, 공백) 뒤는 토큰 시작으로 본다.
+/// Rejects matches preceded by an ASCII alphanumeric (mid-word); non-ASCII UTF-8 bytes
+/// (e.g. `caféghp_...`) and delimiters (`=`, `"`, `_`, space) count as boundaries.
 fn is_token_boundary(text: &str, begin: usize) -> bool {
     begin == 0 || !text.as_bytes()[begin - 1].is_ascii_alphanumeric()
 }
 
-/// 자유 텍스트 안에서 알려진 접두사 토큰과 JWT의 바이트 범위를 모두 찾는다.
+/// Finds byte ranges of known secret-prefix tokens and JWTs in free text.
 pub fn secret_spans(text: &str) -> Vec<Range<usize>> {
     let mut spans = Vec::new();
     for &(prefix, min_body, allow_dot) in PREFIX_RULES {
@@ -125,8 +122,8 @@ pub fn secret_spans(text: &str) -> Vec<Range<usize>> {
     spans
 }
 
-/// 오류 문자열 보수 가림용: 구분자(`-`·`_`·`.`)로 끝나는 알려진 토큰 접두사가 낱말 경계에서 시작하고
-/// 뒤에 본문 글자가 한 자 이상 이어지는가(`ASIA`·`task-123` 같은 일반 낱말 오탐을 막는다).
+/// Conservative error-string check: delimited prefix (`-`, `_`, `.`) at a word boundary
+/// followed by an ASCII alphanumeric, avoiding false positives on words like `ASIA` or `task-123`.
 pub fn has_delimited_secret_prefix(word: &str) -> bool {
     SECRET_PREFIXES
         .iter()
@@ -166,7 +163,7 @@ mod tests {
         for &prefix in SECRET_PREFIXES {
             let sample = format!("{prefix}{long_body}");
             assert!(has_secret_prefix(&sample), "{prefix}");
-            let text = format!("한글{sample}끝");
+            let text = format!("café{sample}π");
             let spans = secret_spans(&text);
             assert_eq!(spans.len(), 1, "{prefix}");
             assert_eq!(&text[spans[0].clone()], sample);
@@ -180,16 +177,16 @@ mod tests {
         let spans = secret_spans(&wrapped);
         assert_eq!(spans.len(), 1);
         assert_eq!(&wrapped[spans[0].clone()], jwt);
-        // 낱말 중간에 우연히 낀 접두사(`task-...`, `EASTASIA...`)는 오탐하지 않는다.
+        // Ignore prefixes embedded mid-word (`task-...`, `EASTASIA...`).
         assert!(secret_spans("task-1234567890123456789012345").is_empty());
         assert!(secret_spans("EASTASIA123456789012345").is_empty());
-        // `ya29.`·JWT 뒤의 문장 마침표는 토큰 범위에 삼키지 않는다.
+        // Trailing sentence periods after `ya29.` or JWT must not be consumed.
         let oauth = format!("{}{}", "ya29.", "a0AfH6SMBx123456");
-        let sent = format!("토큰 {oauth}. 끝");
+        let sent = format!("token {oauth}. done");
         let spans = secret_spans(&sent);
         assert_eq!(spans.len(), 1);
         assert_eq!(&sent[spans[0].clone()], oauth);
-        let jwt_sent = format!("Bearer {jwt}. 끝");
+        let jwt_sent = format!("Bearer {jwt}. done");
         let spans = secret_spans(&jwt_sent);
         assert_eq!(spans.len(), 1);
         assert_eq!(&jwt_sent[spans[0].clone()], jwt);

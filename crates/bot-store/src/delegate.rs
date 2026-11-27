@@ -1,5 +1,4 @@
-//! 위임: 부모가 직계 자식 에이전트에게 일을 맡긴다. 자식 run 생성과 부모 대기가 한 커밋이다.
-//! (부모 run, 단계 key)가 유일해서 부모가 죽었다 다시 와도 같은 자식을 쓴다. 자식 결과는 끝나는 커밋에서 부모에게 **한 번만** 간다(finish.rs).
+//! Agent delegation: creates a direct-child run and parks the parent atomically, deduplicated by `(parent, step)`.
 
 use crate::{
     audit::{self, Entry},
@@ -16,10 +15,10 @@ use serde_json::json;
 use sqlx::Row;
 use std::collections::BTreeSet;
 
-/// 위임 깊이 상한(루트가 0). 에이전트 트리가 이보다 깊을 수 없다.
+/// Maximum delegation tree depth (root is 0).
 const MAX_DEPTH: i32 = 8;
 
-/// `child`가 `parent`의 직계 자식 경로인가(`main` → `main/research`, `main/research/x`는 아님).
+/// Returns true if `child` is a direct child path of `parent` (e.g. `main` -> `main/research`).
 fn is_direct_child(parent: &str, child: &str) -> bool {
     child
         .strip_prefix(parent)
@@ -39,7 +38,7 @@ impl Store {
         })?;
         let (_, input) = canonical(&JsonPayload(json!({"text": d.instruction}).to_string()))?;
 
-        // 잠금 순서: 호스트 집합 펜스 → 활성 판본 → 부모 run. 권한을 판정한 판본이 지금도 활성인 채로 자식 생성과 부모 대기를 커밋한다
+        // Lock order: active set -> active revision -> parent run.
         let mut tx = self.begin_authorized().await?;
         crate::active::guard_active(&mut tx, &d.parent.profile.0, &d.checked_revision).await?;
         let parent = lock_leased(&mut tx, &d.parent).await?;
@@ -65,7 +64,7 @@ impl Store {
         {
             return Err(Error::Denied.into());
         }
-        // 같은 단계의 재요청은 같은 자식이다(대상·지시가 같을 때). 다르면 충돌.
+        // Deduplicate retries of the same step when agent, input, and scopes match.
         let existing = sqlx::query(
             "select id, agent, input, scopes from bot_runs where profile = $1 and parent = $2 and parent_step = $3",
         )

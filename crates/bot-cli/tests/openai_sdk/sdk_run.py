@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""공식 SDK 시험을 돌리고 «빼먹고 통과»를 막는 실행·검사기(표준 라이브러리만). 로컬 러너·Rust 종단 하네스·CI가 모두 이것으로 SDK 시험을 돌린다.
-규칙: 기대 시험 이름 목록(`expected.json`)의 시험이 **전부 정확히 한 번 통과**해야 한다 — 건너뜀(skip)·예상된 실패(xfail)·뜻밖의 성공·todo·취소가 하나라도 있거나, 기대한 이름이
-돌지 않았거나, 목록에 없는 시험이 끼었거나, 통과가 0건이거나, 프록시가 본 요청이 0건이면 실패다. 사람이 읽는 시험 출력은 표준 오류로, 기계가 읽는 결과 한 줄(JSON)은 표준 출력으로 낸다.
+"""Official SDK test runner and verifier (stdlib only).
+Requires every test in expected.json to pass exactly once; fails on skip, xfail, xpass, todo, cancel, missing/unlisted tests, zero passes, or zero proxied requests.
+Human output goes to stderr; one machine-readable JSON result line goes to stdout.
 
-사용: sdk_run.py py <시험 파일> | node <시험 파일> --node-dir <폴더> | proxy --url <…/__wire> --profile main|tight [--scope all|python|node] [--partial] | list <프로필> py|node | manifest [--write]
-(`--scope`: 프록시를 파이썬·Node가 함께 쓰면 all(기본), 따로 돌리면 그 언어 몫의 공식 스키마만 요구한다.)
-옵션: --expected <경로>(기본 이 폴더의 expected.json). 종료 코드 0이면 문제 없음, 1이면 문제(이유는 표준 오류), 2는 사용 오류."""
+Usage: sdk_run.py py <test_file> | node <test_file> --node-dir <dir> | proxy --url <.../__wire> --profile main|tight [--scope all|python|node] [--partial] | list <profile> py|node | manifest [--write]
+Options: --expected <path> (defaults to expected.json beside this script). Exit 0 ok, 1 failure, 2 usage error."""
 import ast
 import json
 import os
@@ -27,33 +26,30 @@ def load(path):
     return json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
 
 
-# ---- 순수 검사(합성 입력으로 시험한다) -----------------------------------------------------------------------------------------------------------------
-
 def compare(expected, ok_names, label):
-    """기대 이름 집합과 통과한 이름 집합을 양방향으로 대조한다."""
     problems, want, got = [], set(expected), set(ok_names)
     if len(expected) != len(want):
-        problems.append(f"{label}: 기대 목록에 같은 이름이 겹쳐 있다")
+        problems.append(f"{label}: duplicate test names in expected list")
     for name in sorted(want - got):
-        problems.append(f"{label}: 기대한 시험이 통과하지 않았다(돌지 않았거나 건너뛰었다): {name}")
+        problems.append(f"{label}: expected test did not pass (missing or skipped): {name}")
     for name in sorted(got - want):
-        problems.append(f"{label}: 기대 목록에 없는 시험이 돌았다(expected.json에 등록해야 한다): {name}")
+        problems.append(f"{label}: unexpected test ran (register it in expected.json): {name}")
     return problems
 
 
 def check_python(outcomes, expected):
-    """`outcomes`는 시험 이름 → ok|fail|error|skip|xfail|xpass. `expected`는 이 시험 파일의 기대 이름 목록."""
+    """`outcomes` maps test name -> ok|fail|error|skip|xfail|xpass."""
     problems = []
     if not outcomes:
-        problems.append("시험이 하나도 돌지 않았다")
+        problems.append("no tests ran")
     for name, outcome in sorted(outcomes.items()):
         if outcome != "ok":
-            problems.append(f"통과가 아니다({outcome}): {name}")
+            problems.append(f"did not pass ({outcome}): {name}")
     return problems + compare(expected, [n for n, o in outcomes.items() if o == "ok"], "python")
 
 
 def parse_tap(text):
-    """TAP 출력 → (이름→결과, 요약 수). 결과는 ok|fail|skip|todo. 들여쓴 하위 줄은 무시한다(시험은 평면이다)."""
+    """Parses flat TAP output into (name -> ok|fail|skip|todo, summary counts); ignores indented subtests."""
     outcomes, summary = {}, {}
     for line in text.splitlines():
         found = TAP_SUMMARY.match(line)
@@ -70,38 +66,37 @@ def parse_tap(text):
 def check_node(outcomes, summary, returncode, expected):
     problems = []
     if returncode != 0:
-        problems.append(f"node가 비정상 종료했다(종료 코드 {returncode})")
+        problems.append(f"node exited abnormally (exit code {returncode})")
     if not outcomes:
-        problems.append("시험이 하나도 돌지 않았다")
+        problems.append("no tests ran")
     for key in ("tests", "pass", "fail", "cancelled", "skipped", "todo"):
         if key not in summary:
-            problems.append(f"TAP 요약에 `# {key}`가 없다")
+            problems.append(f"TAP summary missing '# {key}'")
     for key in ("fail", "cancelled", "skipped", "todo"):
         if summary.get(key, 0) != 0:
-            problems.append(f"{key} {summary[key]}건")
+            problems.append(f"{key}: {summary[key]}")
     if summary.get("tests") != summary.get("pass") or summary.get("tests") != len(expected):
-        problems.append(f"통과 수가 기대와 다르다: tests={summary.get('tests')} pass={summary.get('pass')} 기대={len(expected)}")
+        problems.append(f"pass count mismatch: tests={summary.get('tests')} pass={summary.get('pass')} expected={len(expected)}")
     for name, outcome in sorted(outcomes.items()):
         if outcome != "ok":
-            problems.append(f"통과가 아니다({outcome}): {name}")
+            problems.append(f"did not pass ({outcome}): {name}")
     return problems + compare(expected, [n for n, o in outcomes.items() if o == "ok"], "node")
 
 
 def check_proxy(summary, schemas, partial):
-    """와이어 프록시가 실제로 본 것: 위반 0, 요청 1건 이상, (전체 실행이면) 기대한 공식 스키마를 모두 한 번 이상 검사했다."""
     problems = []
     if summary.get("violations"):
-        problems.append(f"공식 스키마·SSE 틀 위반 {len(summary['violations'])}건: {json.dumps(summary['violations'][:2], ensure_ascii=False)[:300]}")
+        problems.append(f"{len(summary['violations'])} OpenAPI/SSE schema violation(s): {json.dumps(summary['violations'][:2], ensure_ascii=False)[:300]}")
     if not summary.get("requests"):
-        problems.append("프록시가 본 HTTP 요청이 0건이다(시험이 입구에 닿지 않았다)")
+        problems.append("proxy saw 0 HTTP requests (tests never reached the gateway)")
     if not partial:
         for name in schemas:
             if not (summary.get("validated") or {}).get(name):
-                problems.append(f"공식 스키마 {name}을 한 번도 검사하지 않았다")
+                problems.append(f"official schema {name} was never validated")
     return problems
 
 
-# ---- 시험 소스에 있으면 안 되는 «건너뛰기» 표지 --------------------------------------------------------------------------------------------------------
+# Reject skip/focus/xfail markers in source before any runner executes.
 FORBIDDEN = {
     "python": re.compile(r"@(?:unittest\.)?(?:skip\w*|expectedFailure)\b|\.skipTest\(|\braise\s+(?:unittest\.)?SkipTest\b"),
     "node": re.compile(r"\b(?:test|it|describe|suite)\.(?:skip|todo|only)\(|\{[^{}]*\b(?:skip|todo|only)\s*:|\bt\.(?:skip|todo)\("),
@@ -110,8 +105,7 @@ COMMENT = {"python": re.compile(r"^\s*#"), "node": re.compile(r"^\s*//")}
 
 
 def forbidden_problems(kind, file, text):
-    """필수 시험 소스에 skip·todo·only·예상된 실패가 있으면(실행 결과가 아니라 소스에서) 그 줄을 알린다. 실행기가 같은 것을 결과로도 잡지만, 소스에서 먼저 막아 둔다."""
-    return [f"{kind} {file}:{n}: 건너뛰기 표지는 필수 시험에 둘 수 없다: {line.strip()[:80]}"
+    return [f"{kind} {file}:{n}: skip markers are forbidden in required tests: {line.strip()[:80]}"
             for n, line in enumerate(text.splitlines(), 1) if not COMMENT[kind].match(line) and FORBIDDEN[kind].search(line)]
 
 
@@ -124,10 +118,7 @@ def source_problems():
     return problems
 
 
-# ---- 소스에서 뽑는 시험 이름 ---------------------------------------------------------------------------------------------------------------------------
-
 def python_names(path):
-    """`test_` 메서드를 가진 클래스의 `클래스.메서드` 목록(소스 순서)."""
     tree = ast.parse(pathlib.Path(path).read_text(encoding="utf-8"))
     return [f"{cls.name}.{fn.name}" for cls in tree.body if isinstance(cls, ast.ClassDef) for fn in cls.body if isinstance(fn, ast.FunctionDef) and fn.name.startswith("test_")]
 
@@ -141,29 +132,26 @@ def source_manifest():
 
 
 def manifest_problems(expected, source):
-    """소스에 있는 시험이 모두 등록돼 있고(새 시험은 의식적으로 올린다) 등록된 시험이 모두 소스에 있다(지우는 것도 의식적이다). 모든 시험 파일은 어느 묶음엔가 속한다."""
     problems = []
     for kind in ("python", "node"):
         for file in sorted(set(expected.get(kind, {})) | set(source[kind])):
             want, got = expected.get(kind, {}).get(file), source[kind].get(file)
             if want is None:
-                problems.append(f"{kind} {file}: expected.json에 없는 시험 파일이다")
+                problems.append(f"{kind} {file}: test file missing from expected.json")
             elif got is None:
-                problems.append(f"{kind} {file}: 소스에 없는 시험 파일이 expected.json에 있다")
+                problems.append(f"{kind} {file}: test file in expected.json missing from source")
             elif want != got:
-                problems.append(f"{kind} {file}: 시험 이름이 expected.json과 다르다(없어진 것 {sorted(set(want) - set(got))}, 새로 생긴 것 {sorted(set(got) - set(want))})")
+                problems.append(f"{kind} {file}: test names differ from expected.json (removed {sorted(set(want) - set(got))}, added {sorted(set(got) - set(want))})")
         used = {f for suite in expected.get("suites", {}).values() for f in suite.get(kind, [])}
         for file in sorted(set(source[kind]) - used):
-            problems.append(f"{kind} {file}: 어느 묶음(suites)에도 들어 있지 않아 돌지 않는다")
+            problems.append(f"{kind} {file}: not listed in any suite (will not run)")
         for file in sorted(used - set(source[kind])):
-            problems.append(f"{kind} {file}: suites에 있는데 소스에 없다")
+            problems.append(f"{kind} {file}: listed in suites but missing from source")
     return problems
 
 
-# ---- 실행 ---------------------------------------------------------------------------------------------------------------------------------------------
-
 class Recorder(unittest.TextTestResult):
-    """시험마다 결과를 기록한다(소스 이름은 `모듈.클래스.메서드`에서 모듈을 뗀다)."""
+    """Records per-test outcomes keyed by Class.method."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -172,7 +160,7 @@ class Recorder(unittest.TextTestResult):
     def mark(self, test, outcome):
         name = test.id().split(".", 1)[-1]
         if self.outcomes.get(name) not in (None, "ok"):
-            return  # 이미 나쁜 결과가 있으면 그대로 둔다
+            return  # Preserve first non-ok outcome (e.g. failing subtest).
         self.outcomes[name] = outcome
 
     def addSuccess(self, test):
@@ -207,25 +195,25 @@ class Recorder(unittest.TextTestResult):
 
 def run_python(file, expected, py_dir=PY_DIR):
     sys.path.insert(0, str(py_dir))
-    sys.modules.pop(pathlib.Path(file).stem, None)  # 같은 이름의 시험 모듈을 다른 폴더에서 다시 돌려도 앞의 것이 남지 않게 한다
+    sys.modules.pop(pathlib.Path(file).stem, None)  # Clear cached module across runs from different temp dirs.
     suite = unittest.TestLoader().discover(str(py_dir), pattern=file)
     result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, resultclass=Recorder).run(suite)
     problems = check_python(result.outcomes, expected["python"].get(file, None) or [])
     if file not in expected["python"]:
-        problems.insert(0, f"python {file}: expected.json에 없는 시험 파일이다")
+        problems.insert(0, f"python {file}: test file missing from expected.json")
     return result.testsRun, problems
 
 
 def run_node(file, node_dir, expected):
     node = shutil.which("node")
     if node is None:
-        return 0, ["node가 없다"]
+        return 0, ["node not found"]
     done = subprocess.run([node, "--test", "--test-reporter=tap", "--test-concurrency=1", file], cwd=node_dir, capture_output=True, text=True)
     sys.stderr.write(done.stderr)
     outcomes, summary = parse_tap(done.stdout)
     problems = check_node(outcomes, summary, done.returncode, expected["node"].get(file, []))
     if file not in expected["node"]:
-        problems.insert(0, f"node {file}: expected.json에 없는 시험 파일이다")
+        problems.insert(0, f"node {file}: test file missing from expected.json")
     if problems:
         sys.stderr.write("\n".join(l for l in done.stdout.splitlines() if l.startswith(("not ok", "# ")) or l.lstrip().startswith(("error:", "expected:", "actual:", "message:", "code:"))) + "\n")
     return summary.get("tests", 0), problems
@@ -233,7 +221,7 @@ def run_node(file, node_dir, expected):
 
 def finish(ran, problems):
     for problem in problems:
-        print(f"문제: {problem}", file=sys.stderr)
+        print(f"problem: {problem}", file=sys.stderr)
     print(json.dumps({"ok": not problems, "ran": ran, "problems": problems}, ensure_ascii=False))
     return 1 if problems else 0
 

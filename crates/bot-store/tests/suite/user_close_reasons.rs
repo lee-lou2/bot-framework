@@ -1,6 +1,4 @@
-//! 사용자 예약의 닫기 사유(PG): 닫는 결정도 발화처럼 **읽은 커서**를 기준으로 한다. 낡은 커서로 닫으려 하면 `Stale`이고 감사·안내는 0이다.
-//! 이미 닫힌 예약을 다시 닫아도 처음 사유와 기록이 그대로다. 마지막 발생을 접수하면 같은 커밋에서 `finished`로 닫히고 감사 한 줄이 남는다(안내 없음).
-//! 사유마다 저장 열과 감사 낱말이 `CloseReason::code()`이고, 원래 대화 안내는 수신 경로가 없어진 종료(`Unrouted`)에만 있다.
+//! User schedule close reasons (PG): cursor-fenced close, idempotent re-close, code storage/audit, and `Unrouted`-only origin notices.
 
 use crate::support::{schedule::*, *};
 use bot_core::{
@@ -37,7 +35,7 @@ fn advance(id: &ScheduleId, cursor: i64, next: NextOccurrence) -> AdvanceSchedul
 
 fn close(id: &ScheduleId, cursor: i64, reason: CloseReason) -> AdvanceSchedule {
     let mut command = advance(id, cursor, NextOccurrence::Close(reason));
-    // 비활성 프로필의 닫기만 판본 없이 받고, 판본을 싣고는 받지 않는다
+    // Only ProfileInactive omits checked_revision.
     if reason == CloseReason::ProfileInactive {
         command.checked_revision = None;
     }
@@ -52,7 +50,6 @@ fn fire(at_ms: i64, next: Option<i64>) -> NextOccurrence {
     }
 }
 
-/// 이 예약을 만든 run의 outbox 행 수(원래 대화 안내가 쌓이는 곳).
 async fn notices(db: &TestDb, id: &ScheduleId) -> i64 {
     db.scalar(&format!(
         "select count(*) from bot_outbox where run = (select origin_run from bot_user_schedules where id = '{}')",
@@ -71,7 +68,6 @@ async fn close_audits(db: &TestDb, id: &ScheduleId) -> Vec<String> {
     .unwrap()
 }
 
-/// 소유자의 DM에서 만든 한 번짜리 예약을 지난 시각으로 옮겨 둔다. (예약, 예정 시각, 커서)
 async fn one_shot_due(db: &TestDb, request: &str) -> (ScheduleId, i64, i64) {
     let origin = run_in(db, request, OWNER, ConversationKind::Direct).await;
     let id = make(db, &origin, "c1", spec_in(db, 3_600_000).await)
@@ -97,20 +93,18 @@ async fn a_close_decided_from_a_stale_view_is_refused_with_no_audit_and_no_notic
     make_due(&db, &id, 5_000).await;
     let stale = column::<i64>(&db, &id, "cursor_ms").await;
     let due = column::<i64>(&db, &id, "next_ms").await;
-    // 다른 스케줄러가 먼저 이 발생을 접수해 커서가 움직였다
     let later = db.now_ms().await + 3_600_000;
     users(&db)
         .advance(advance(&id, stale, fire(due, Some(later))))
         .await
         .unwrap()
-        .expect("접수한 run");
+        .expect("fired run");
     let moved = column::<i64>(&db, &id, "cursor_ms").await;
     assert_ne!(moved, stale);
     let (notices_before, audits_before) = (
         notices(&db, &id).await,
         db.scalar::<i64>("select count(*) from bot_audit").await,
     );
-    // 옛 커서를 읽고 내린 닫기 결정은 받지 않는다(안내가 있는 사유도 같다)
     for reason in [CloseReason::Unrouted, CloseReason::MemberRevoked] {
         let refused = users(&db).advance(close(&id, stale, reason)).await;
         assert!(
@@ -125,14 +119,13 @@ async fn a_close_decided_from_a_stale_view_is_refused_with_no_audit_and_no_notic
     );
     assert_eq!(column::<i64>(&db, &id, "next_ms").await, later);
     assert_eq!(column::<i64>(&db, &id, "cursor_ms").await, moved);
-    assert_eq!(notices(&db, &id).await, notices_before, "안내 0");
+    assert_eq!(notices(&db, &id).await, notices_before, "no notice");
     assert_eq!(
         db.scalar::<i64>("select count(*) from bot_audit").await,
         audits_before,
-        "감사 0"
+        "no audit"
     );
     assert!(close_audits(&db, &id).await.is_empty());
-    // 지금 커서를 읽고 내린 결정은 받는다: 사유 낱말·안내 한 건·감사 한 줄
     assert!(
         users(&db)
             .advance(close(&id, moved, CloseReason::Unrouted))
@@ -161,7 +154,6 @@ async fn closing_again_keeps_the_first_reason_and_writes_nothing_more() {
         notices(&db, &id).await,
         db.scalar::<i64>("select count(*) from bot_audit").await,
     );
-    // 이미 닫힌 예약: 같은 사유·다른 사유·옛 커서 모두 받은 것으로 치고(`None`) 아무것도 쓰지 않는다
     for (stale, reason) in [
         (cursor, CloseReason::Unrouted),
         (cursor, CloseReason::MemberRevoked),
@@ -194,7 +186,7 @@ async fn every_close_reason_is_stored_and_audited_by_its_code_and_only_unrouted_
         let (id, _, cursor) = one_shot_due(&db, &format!("r{n}")).await;
         let before = notices(&db, &id).await;
         if reason == CloseReason::ProfileInactive {
-            // 정말 비활성인 프로필만 판본 없이 닫는다(마지막 사유라 뒤에 만들 예약은 없다)
+            // ProfileInactive is last in ALL so removing personal does not affect earlier iterations.
             db.sql("delete from bot_active_profiles where profile = 'personal'")
                 .await;
         }
@@ -216,7 +208,7 @@ async fn every_close_reason_is_stored_and_audited_by_its_code_and_only_unrouted_
         assert_eq!(
             notices(&db, &id).await,
             before + i64::from(reason == CloseReason::Unrouted),
-            "{reason:?}: 안내는 수신 경로가 없어진 종료에만 있다"
+            "{reason:?}: notice is posted only for Unrouted"
         );
     }
     assert_eq!(db.store.verify().await.unwrap().first_bad, None);
@@ -233,11 +225,15 @@ async fn the_last_occurrence_closes_the_schedule_as_finished_with_one_audit_and_
         .advance(advance(&id, cursor, fire(at_ms, None)))
         .await
         .unwrap()
-        .expect("접수한 run");
+        .expect("fired run");
     assert_eq!(column::<String>(&db, &id, "state").await, "closed");
     assert_eq!(column::<String>(&db, &id, "close_reason").await, "finished");
     assert_eq!(close_audits(&db, &id).await, ["finished"]);
-    assert_eq!(notices(&db, &id).await, before, "정상 종료에는 안내가 없다");
+    assert_eq!(
+        notices(&db, &id).await,
+        before,
+        "finished close posts no notice"
+    );
     assert_eq!(
         db.scalar::<String>(&format!(
             "select actor from bot_audit where action = 'schedule.close' and target = '{}'",
@@ -251,7 +247,6 @@ async fn the_last_occurrence_closes_the_schedule_as_finished_with_one_audit_and_
             .await,
         1
     );
-    // 같은 발생을 다시 접수해도 같은 run이고 닫기 감사는 늘지 않는다
     let again = users(&db)
         .advance(advance(&id, cursor, fire(at_ms, None)))
         .await
@@ -279,7 +274,7 @@ async fn an_occurrence_that_is_not_the_last_writes_no_close_audit_and_the_schedu
         .advance(advance(&id, cursor, fire(due, Some(later))))
         .await
         .unwrap()
-        .expect("접수한 run");
+        .expect("fired run");
     assert_eq!(column::<String>(&db, &id, "state").await, "active");
     assert_eq!(
         column::<Option<String>>(&db, &id, "close_reason").await,

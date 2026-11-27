@@ -1,4 +1,4 @@
-//! `bot_core::profile::InputValidator` 구현. 선언 검증과 실제 도구 호출이 같은 스키마 해석기를 쓴다.
+//! Implements `bot_core::profile::InputValidator` using the same schema compiler as profile loading.
 use crate::schema::Schema;
 use bot_core::{command::JsonPayload, port::Error, profile::InputValidator};
 use serde_json::Value;
@@ -9,7 +9,6 @@ use std::{
 
 const CACHE_LIMIT: usize = 256;
 
-/// 스키마 문서(정규 JSON 문자열)별로 컴파일 결과를 캐시한다.
 #[derive(Default)]
 pub struct SchemaValidator {
     cache: Mutex<HashMap<String, Arc<Schema>>>,
@@ -36,7 +35,6 @@ impl SchemaValidator {
 }
 
 impl InputValidator for SchemaValidator {
-    /// 스키마가 지원 어휘 밖이거나 인자가 스키마에 맞지 않으면 `Invalid`.
     fn validate(&self, schema: &JsonPayload, args: &JsonPayload) -> Result<(), Error> {
         let compiled = self.compiled(&schema.0)?;
         let value: Value = bot_core::json::parse(&args.0).ok_or(Error::Invalid)?;
@@ -81,7 +79,7 @@ mod tests {
         }
         assert!(
             v.validate(&schema, &payload(r#"{"event":"x"}"#)).is_ok(),
-            "캐시를 거쳐도 같다"
+            "cached validation matches"
         );
     }
 
@@ -108,7 +106,6 @@ mod tests {
     fn duplicate_keys_and_excessive_depth_are_rejected_in_schema_and_args() {
         let v = SchemaValidator::new();
         let schema = payload(r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#);
-        // 인자의 중복 키와 깊이 초과를 거절한다
         assert!(matches!(
             v.validate(&schema, &payload(r#"{"a":1,"a":2}"#)),
             Err(Error::Invalid)
@@ -123,7 +120,6 @@ mod tests {
             v.validate(&any_schema, &payload(&format!(r#"{{"a":{deep}}}"#))),
             Err(Error::Invalid)
         ));
-        // 스키마 자체의 중복 키도 거절한다
         let dup_schema = payload(r#"{"type":"object","type":"object"}"#);
         assert!(matches!(
             v.validate(&dup_schema, &payload("{}")),

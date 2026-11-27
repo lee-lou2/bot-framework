@@ -1,5 +1,4 @@
-//! 폴더 스캔. 링크·특수 파일·하드링크·과대 입력을 거절하고, 파일 바이트를 한 번만 읽어
-//! 메모리 트리에 고정한다. 이후 검증·판본·조립은 이 바이트만 쓴다(디스크를 다시 읽지 않는다).
+//! Directory scanner pinning profile bytes into memory once while rejecting links, special files, and oversized inputs.
 use crate::{issue::Issues, limits::Limits, names, text};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -9,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// 읽지도 해시하지도 않는 이름(저장소·운영체제 부산물). 그 밖의 모르는 이름은 구조 검사가 거절한다.
+/// VCS/OS artifacts skipped before reading or hashing; all other unknown entries fail layout checks.
 const IGNORED: &[&str] = &[
     ".git",
     ".DS_Store",
@@ -20,9 +19,7 @@ const IGNORED: &[&str] = &[
 
 #[derive(Clone, Debug, Default)]
 pub struct Tree {
-    /// 프로필 폴더 기준 `/` 경로 → 바이트
     pub files: BTreeMap<String, Vec<u8>>,
-    /// 모든 하위 폴더 경로(빈 폴더 포함)
     pub dirs: BTreeSet<String>,
 }
 
@@ -57,17 +54,14 @@ impl Tree {
         self.files.get(path).map(Vec::as_slice)
     }
 
-    /// `dir/` 바로 아래 하위 폴더 이름들(정렬)
     pub fn child_dirs(&self, dir: &str) -> Vec<&str> {
         children(self.dirs.iter().map(String::as_str), dir)
     }
 
-    /// `dir/` 바로 아래 파일 이름들(정렬)
     pub fn child_files(&self, dir: &str) -> Vec<&str> {
         children(self.files.keys().map(String::as_str), dir)
     }
 
-    /// `dir/` 아래 모든 파일 경로(정렬)
     pub fn files_under<'a>(&'a self, dir: &str) -> Vec<&'a str> {
         let prefix = format!("{dir}/");
         self.files
@@ -102,32 +96,32 @@ fn join(prefix: &str, rel: &str) -> String {
 
 fn kind_name(ft: fs::FileType) -> &'static str {
     if ft.is_socket() {
-        "소켓"
+        "socket"
     } else if ft.is_fifo() {
         "FIFO"
     } else if ft.is_block_device() {
-        "블록 장치"
+        "block device"
     } else if ft.is_char_device() {
-        "문자 장치"
+        "character device"
     } else {
-        "특수 파일"
+        "special file"
     }
 }
 
-/// BOT_PROFILES 바로 아래의 프로필 폴더들(이름순). 루트 자체는 링크여도 된다(운영자가 정한 위치).
+/// Lists sorted profile subdirectories under `BOT_PROFILES` (`root` itself may be an operator symlink).
 pub fn list_profiles(root: &Path, limits: &Limits, issues: &mut Issues) -> Vec<(String, PathBuf)> {
     let shown = root.display().to_string();
     let canon = match fs::canonicalize(root) {
         Ok(p) if p.is_dir() => p,
         Ok(_) => {
-            issues.error("root-not-dir", &shown, "BOT_PROFILES가 폴더가 아니에요");
+            issues.error("root-not-dir", &shown, "BOT_PROFILES is not a directory");
             return Vec::new();
         }
         Err(e) => {
             issues.error(
                 "root-missing",
                 &shown,
-                format!("BOT_PROFILES를 열 수 없어요: {e}"),
+                format!("Cannot open BOT_PROFILES: {e}"),
             );
             return Vec::new();
         }
@@ -136,7 +130,7 @@ pub fn list_profiles(root: &Path, limits: &Limits, issues: &mut Issues) -> Vec<(
         issues.error(
             "root-is-profile",
             &shown,
-            "BOT_PROFILES는 프로필 폴더들을 담는 폴더예요. 프로필 폴더 하나를 가리키고 있어요",
+            "BOT_PROFILES must point to the parent directory containing profile folders, not a single profile folder",
         );
         return Vec::new();
     }
@@ -146,7 +140,7 @@ pub fn list_profiles(root: &Path, limits: &Limits, issues: &mut Issues) -> Vec<(
             issues.error(
                 "root-missing",
                 &shown,
-                format!("BOT_PROFILES를 읽을 수 없어요: {e}"),
+                format!("Cannot read BOT_PROFILES: {e}"),
             );
             return Vec::new();
         }
@@ -154,19 +148,19 @@ pub fn list_profiles(root: &Path, limits: &Limits, issues: &mut Issues) -> Vec<(
     let mut names: Vec<(String, PathBuf)> = Vec::new();
     for entry in rd.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            issues.error("bad-name", &shown, "UTF-8이 아닌 이름이 있어요");
+            issues.error("bad-name", &shown, "Entry name is not valid UTF-8");
             continue;
         };
         if IGNORED.contains(&name.as_str()) {
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(entry.path()) else {
-            issues.error("dir-unreadable", &name, "상태를 읽을 수 없어요");
+            issues.error("dir-unreadable", &name, "Cannot read file metadata");
             continue;
         };
         let ft = meta.file_type();
         if ft.is_symlink() {
-            issues.error("symlink", &name, "링크는 허용하지 않아요");
+            issues.error("symlink", &name, "Symbolic links are not allowed");
         } else if ft.is_dir() {
             if names::is_name(&name) {
                 names.push((name, entry.path()));
@@ -174,16 +168,20 @@ pub fn list_profiles(root: &Path, limits: &Limits, issues: &mut Issues) -> Vec<(
                 issues.error(
                     "bad-profile-name",
                     &name,
-                    "프로필 폴더 이름은 소문자로 시작하는 소문자·숫자·`-` 63자 이하예요",
+                    "Profile directory name must start with a lowercase letter and use only lowercase letters, digits, and `-` (max 63 chars)",
                 );
             }
         } else if ft.is_file() {
-            issues.error("stray-file", &name, "프로필 폴더가 아닌 파일이에요");
+            issues.error(
+                "stray-file",
+                &name,
+                "Unexpected file in profiles root (expected profile directories)",
+            );
         } else {
             issues.error(
                 "special-file",
                 &name,
-                format!("{}은 허용하지 않아요", kind_name(ft)),
+                format!("{} is not allowed", kind_name(ft)),
             );
         }
     }
@@ -192,7 +190,7 @@ pub fn list_profiles(root: &Path, limits: &Limits, issues: &mut Issues) -> Vec<(
         issues.error(
             "too-many-profiles",
             &shown,
-            format!("프로필이 너무 많아요(최대 {})", limits.max_profiles),
+            format!("Too many profiles (max {})", limits.max_profiles),
         );
         names.truncate(limits.max_profiles);
     }
@@ -209,7 +207,7 @@ struct Walk<'a> {
     aborted: bool,
 }
 
-/// 프로필 폴더 하나를 읽는다. 오류가 하나라도 있으면(issues에 쌓임) 호출자는 트리를 쓰지 않는다.
+/// Reads a profile directory once into memory; callers must discard the tree if `issues` records errors.
 pub fn read_tree(dir: &Path, prefix: &str, limits: &Limits, issues: &mut Issues) -> Tree {
     let mut walk = Walk {
         limits,
@@ -243,20 +241,20 @@ impl Walk<'_> {
         let rd = match fs::read_dir(path) {
             Ok(rd) => rd,
             Err(e) => {
-                self.fail("dir-unreadable", rel, format!("폴더를 읽을 수 없어요: {e}"));
+                self.fail("dir-unreadable", rel, format!("Cannot read directory: {e}"));
                 return;
             }
         };
         let mut entries: Vec<(String, PathBuf)> = Vec::new();
         for entry in rd {
             let Ok(entry) = entry else {
-                self.fail("dir-unreadable", rel, "폴더 항목을 읽을 수 없어요");
+                self.fail("dir-unreadable", rel, "Cannot read directory entry");
                 return;
             };
             let name = match entry.file_name().to_str() {
                 Some(n) => n.to_owned(),
                 None => {
-                    self.fail("bad-name", rel, "UTF-8이 아닌 이름이 있어요");
+                    self.fail("bad-name", rel, "Entry name is not valid UTF-8");
                     continue;
                 }
             };
@@ -265,7 +263,7 @@ impl Walk<'_> {
                 self.fail(
                     "too-many-files",
                     rel,
-                    format!("파일이 너무 많아요(최대 {})", self.limits.max_files),
+                    format!("Too many files (max {})", self.limits.max_files),
                 );
                 self.aborted = true;
                 return;
@@ -284,14 +282,14 @@ impl Walk<'_> {
                 format!("{rel}/{name}")
             };
             if !text::name_is_clean(&name) {
-                self.fail("bad-name", &child, "이름에 허용하지 않는 문자가 있어요");
+                self.fail("bad-name", &child, "Name contains disallowed characters");
                 continue;
             }
             if !lower.insert(name.to_lowercase()) {
                 self.fail(
                     "case-collision",
                     &child,
-                    "같은 폴더에 대소문자만 다른 이름이 있어요",
+                    "Directory contains names differing only by case",
                 );
                 continue;
             }
@@ -299,7 +297,10 @@ impl Walk<'_> {
                 self.fail(
                     "too-deep",
                     &child,
-                    format!("폴더가 너무 깊어요(최대 {}단계)", self.limits.max_depth),
+                    format!(
+                        "Directory hierarchy is too deep (max {} levels)",
+                        self.limits.max_depth
+                    ),
                 );
                 continue;
             }
@@ -312,7 +313,7 @@ impl Walk<'_> {
 
     fn entry(&mut self, path: &Path, child: String, stack: &mut Vec<(PathBuf, String)>) {
         let Ok(meta) = fs::symlink_metadata(path) else {
-            self.fail("dir-unreadable", &child, "상태를 읽을 수 없어요");
+            self.fail("dir-unreadable", &child, "Cannot read file metadata");
             return;
         };
         let ft = meta.file_type();
@@ -323,14 +324,14 @@ impl Walk<'_> {
             self.fail(
                 "symlink",
                 &child,
-                format!("링크는 허용하지 않아요(→ {target})"),
+                format!("Symbolic links are not allowed (-> {target})"),
             );
         } else if ft.is_dir() {
             if !self.seen.insert((meta.dev(), meta.ino())) {
                 self.fail(
                     "dir-loop",
                     &child,
-                    "같은 폴더가 다시 나타나요(순환 또는 마운트)",
+                    "Directory appears twice (loop or bind mount)",
                 );
                 return;
             }
@@ -338,7 +339,7 @@ impl Walk<'_> {
                 self.fail(
                     "too-many-files",
                     &child,
-                    format!("폴더가 너무 많아요(최대 {})", self.limits.max_dirs),
+                    format!("Too many directories (max {})", self.limits.max_dirs),
                 );
                 self.aborted = true;
                 return;
@@ -351,7 +352,7 @@ impl Walk<'_> {
             self.fail(
                 "special-file",
                 &child,
-                format!("{}은 허용하지 않아요", kind_name(ft)),
+                format!("{} is not allowed", kind_name(ft)),
             );
         }
     }
@@ -362,7 +363,7 @@ impl Walk<'_> {
                 "hardlink",
                 &child,
                 format!(
-                    "하드링크 파일이에요(링크 수 {}). 복사해서 두세요",
+                    "Hard-linked files are not allowed (link count {}); copy the file instead",
                     meta.nlink()
                 ),
             );
@@ -377,7 +378,7 @@ impl Walk<'_> {
             self.fail(
                 "too-many-files",
                 &child,
-                format!("파일이 너무 많아요(최대 {})", self.limits.max_files),
+                format!("Too many files (max {})", self.limits.max_files),
             );
             self.aborted = true;
             return;
@@ -390,7 +391,7 @@ impl Walk<'_> {
                         "too-large-total",
                         &child,
                         format!(
-                            "프로필이 너무 커요(최대 {} 바이트)",
+                            "Profile exceeds total size limit (max {} bytes)",
                             self.limits.max_profile_bytes
                         ),
                     );
@@ -403,18 +404,14 @@ impl Walk<'_> {
                 self.fail(
                     "too-large",
                     &child,
-                    format!("파일이 너무 커요(최대 {limit} 바이트)"),
+                    format!("File exceeds size limit (max {limit} bytes)"),
                 );
             }
             Err(ReadError::Changed) => {
-                self.fail("changed", &child, "읽는 도중 파일이 바뀌었어요");
+                self.fail("changed", &child, "File changed while being read");
             }
             Err(ReadError::Io(e)) => {
-                self.fail(
-                    "file-unreadable",
-                    &child,
-                    format!("파일을 읽을 수 없어요: {e}"),
-                );
+                self.fail("file-unreadable", &child, format!("Cannot read file: {e}"));
             }
         }
     }
@@ -426,7 +423,7 @@ enum ReadError {
     Io(std::io::Error),
 }
 
-/// 연 파일이 방금 상태를 읽은 그 일반 파일인지(장치·i-node) 확인하고 상한까지만 읽는다.
+/// Verifies the opened fd still matches `(dev, ino)` of the inspected regular file before reading up to `limit`.
 fn read_pinned(path: &Path, before: &fs::Metadata, limit: u64) -> Result<Vec<u8>, ReadError> {
     let file = fs::File::open(path).map_err(ReadError::Io)?;
     let after = file.metadata().map_err(ReadError::Io)?;

@@ -1,12 +1,11 @@
-//! 승인자 확인: 지금 활성인 판본이 이 실행의 승인자로 지정한 사람.
+//! Resolves the active human approver for a run from the current profile snapshot.
 //!
-//! 실행이 접수 때 기록한 승인자(`RunContext.approver`)는 쓰지 않는다. 판본이 바뀌면 승인 카드가 옛 승인자에게 가면 안 된다.
-//! - 예약 실행(자식 포함): 실행이 보존한 루트 출처(`RunContext.trigger` = 에이전트 + 트리거 ID)와 **정확히 같은** 트리거가
-//!   지금 판본에 cron으로 있고, 같은 서비스 주체를 쓰고, 승인자가 지정돼 있어야 한다. 출처가 없거나 사라졌으면 다른
-//!   트리거로 대신하지 않고 확인할 수 없다.
-//! - 그 밖의 실행: 요청자 본인.
+//! Ignores `RunContext.approver` recorded at intake so revision changes never route cards to stale approvers:
+//! - Scheduled runs (including delegated children): requires the exact `RunContext.trigger` cron entry on the
+//!   current snapshot with the same service principal and an explicit approver.
+//! - Other runs: the requester themselves.
 //!
-//! 어느 쪽이든 사람 신원이고 지금 판본의 멤버여야 한다. 확인할 수 없으면 `None`이고 승인이 필요한 호출은 거절한다.
+//! Returns `None` unless the candidate is a human member of the current snapshot.
 
 pub mod openai;
 
@@ -73,7 +72,7 @@ mod tests {
     #[test]
     fn a_scheduled_run_follows_the_current_trigger_not_the_recorded_approver() {
         let mut ctx = scheduled("service:morning");
-        ctx.approver = Some(PrincipalId("local:owner".into())); // 접수 때 기록한 옛 승인자
+        ctx.approver = Some(PrincipalId("local:owner".into()));
         assert_eq!(
             approver_for(&ctx, &world(Some("local:alice"))).unwrap().0,
             "local:alice"
@@ -85,26 +84,26 @@ mod tests {
         let ctx = scheduled("service:morning");
         assert!(
             approver_for(&ctx, &world(None)).is_none(),
-            "승인자를 지정하지 않았다"
+            "no approver configured"
         );
         assert!(
             approver_for(&ctx, &world(Some("service:morning"))).is_none(),
-            "서비스 주체는 승인할 수 없다"
+            "service principal cannot approve"
         );
         assert!(
             approver_for(&ctx, &world(Some("local:ghost"))).is_none(),
-            "멤버가 아니다"
+            "not a profile member"
         );
         let gone = snapshot("personal", "r2")
             .role("owner", &["a"])
             .member("local:owner", &["owner"])
             .policy_scopes(&["a"])
             .build();
-        assert!(approver_for(&ctx, &gone).is_none(), "트리거가 사라졌다");
+        assert!(approver_for(&ctx, &gone).is_none(), "trigger removed");
         let other = scheduled("service:other");
         assert!(
             approver_for(&other, &world(Some("local:alice"))).is_none(),
-            "다른 서비스 주체의 트리거가 아니다"
+            "trigger belongs to a different service principal"
         );
     }
 
@@ -123,7 +122,7 @@ mod tests {
             approver_for(&ctx, &build(Some("local:owner"))).unwrap().0,
             "local:owner"
         );
-        // 원래 트리거의 승인자가 지워져도 같은 주체의 다른 트리거(evening)의 승인자에게 가지 않는다
+        // Must not fall back to another trigger sharing the same principal.
         assert!(approver_for(&ctx, &build(None)).is_none());
     }
 
@@ -132,13 +131,13 @@ mod tests {
         let snap = world(Some("local:alice"));
         let mut lost = scheduled("service:morning");
         lost.trigger = None;
-        assert!(approver_for(&lost, &snap).is_none(), "출처가 없다");
+        assert!(approver_for(&lost, &snap).is_none(), "missing origin");
         let mut renamed = scheduled("service:morning");
         renamed.trigger = Some(TriggerRef {
             agent: AgentId("main".into()),
             id: "gone".into(),
         });
-        assert!(approver_for(&renamed, &snap).is_none(), "트리거가 삭제됐다");
+        assert!(approver_for(&renamed, &snap).is_none(), "trigger deleted");
         let mut elsewhere = scheduled("service:morning");
         elsewhere.trigger = Some(TriggerRef {
             agent: AgentId("other".into()),
@@ -146,7 +145,7 @@ mod tests {
         });
         assert!(
             approver_for(&elsewhere, &snap).is_none(),
-            "다른 에이전트의 트리거다"
+            "trigger belongs to another agent"
         );
     }
 
@@ -158,7 +157,7 @@ mod tests {
             .cron_trigger("main", "morning", "service:morning", Some("local:alice"))
             .build();
         let mut child = scheduled("service:morning");
-        child.agent = AgentId("main/research".into()); // 자식이 일하지만 출처는 루트의 트리거다
+        child.agent = AgentId("main/research".into());
         assert_eq!(approver_for(&child, &snap).unwrap().0, "local:alice");
     }
 
@@ -174,7 +173,7 @@ mod tests {
             .build();
         assert!(
             approver_for(&http, &snap).is_none(),
-            "http 신원은 승인하지 못한다"
+            "http principal cannot approve"
         );
     }
 }

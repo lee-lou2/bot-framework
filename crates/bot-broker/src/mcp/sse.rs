@@ -1,21 +1,14 @@
-//! Server-Sent Events 해석기. 응답 본문 조각을 받아 완성된 이벤트의 `data`만 돌려준다(MCP는 `data`에 JSON-RPC 메시지 하나를 싣는다).
-//!
-//! 규칙(WHATWG SSE): 줄은 `\n`·`\r\n`·`\r`로 끝나고, `:`로 시작하는 줄은 주석, 빈 줄이 이벤트를 끝낸다. 한 이벤트의 `data` 줄은 `\n`으로 잇는다.
-//! `event`·`id`·`retry`는 읽되 쓰지 않는다(이 판의 MCP는 재개를 지원하지 않는다). 첫 글자의 BOM은 버린다.
-//! 끝나지 않은 이벤트(빈 줄 없이 연결이 끝남)는 내보내지 않는다. 이벤트 하나의 크기에 한도가 있다.
+//! Incremental WHATWG Server-Sent Events parser emitting completed `data` payloads.
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum SseError {
-    /// 이벤트 하나가 한도를 넘었다.
     TooLarge,
-    /// UTF-8이 아닌 줄이 있다.
     Text,
 }
 
 #[derive(Debug)]
 pub struct Events {
-    /// 아직 줄이 끝나지 않은 바이트
     pending: Vec<u8>,
-    /// 지금 모으는 이벤트의 `data`(줄 사이는 `\n`)
     data: Option<String>,
     max_event: usize,
     started: bool,
@@ -31,11 +24,9 @@ impl Events {
         }
     }
 
-    /// 조각을 먹고 완성된 이벤트의 `data`들을 돌려준다.
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, SseError> {
         self.pending.extend_from_slice(chunk);
         if self.pending.len() > self.max_event.saturating_mul(2).max(4096) {
-            // 줄바꿈 없이 이어지는 거대한 줄(이벤트 한도의 두 배까지만 쥔다)
             return Err(SseError::TooLarge);
         }
         let mut out = Vec::new();
@@ -45,7 +36,7 @@ impl Events {
             let byte = self.pending[i];
             let end = match byte {
                 b'\n' => Some((i, i + 1)),
-                // `\r`이 조각 끝이면 다음 바이트가 `\n`인지 모르므로 더 받은 뒤에 끝낸다
+                // Wait for the next byte when `\r` sits at chunk end in case it forms `\r\n`.
                 b'\r' if i + 1 < self.pending.len() => {
                     let next = if self.pending[i + 1] == b'\n' {
                         i + 2
@@ -91,7 +82,6 @@ impl Events {
         };
         if name == "data" {
             match &mut self.data {
-                // 한 이벤트의 `data` 줄은 `\n`으로 잇는다(빈 `data:` 줄도 한 줄이다)
                 Some(data) => {
                     if data.len() + value.len() + 1 > self.max_event {
                         return Err(SseError::TooLarge);
@@ -128,7 +118,6 @@ mod tests {
     fn events_end_on_a_blank_line_and_split_chunks_do_not_matter() {
         let text = b"event: message\ndata: {\"a\":1}\n\ndata: second\n\n";
         assert_eq!(all(&[text]), ["{\"a\":1}", "second"]);
-        // 어디서 잘라도 같다(바이트 하나씩 포함)
         let bytes: Vec<&[u8]> = text.chunks(1).collect();
         assert_eq!(all(&bytes), ["{\"a\":1}", "second"]);
         for cut in 1..text.len() {
@@ -152,9 +141,7 @@ mod tests {
             ["line1\nline2\n\nline4"]
         );
         assert_eq!(all(&[b"\xEF\xBB\xBFdata: bom\n\n"]), ["bom"]);
-        // `\r\n`이 조각 사이에서 갈려도 한 줄바꿈이다
         assert_eq!(all(&[b"data: a\r", b"\n\r", b"\ndata: b\n\n"]), ["a", "b"]);
-        // 값 앞 공백은 하나만 벗긴다. 필드 이름 뒤에 `:`가 없으면 값이 빈 글이다
         assert_eq!(all(&[b"data:  two\n\ndata\n\n"]), [" two", ""]);
     }
 

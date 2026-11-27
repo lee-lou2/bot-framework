@@ -1,54 +1,55 @@
-# 모델 VM 이미지: Claude Code CLI(`claude`)를 Apple container VM에서 돌리는 최소 이미지.
-# 운영자가 자기 컴퓨터에서 빌드하고 다이제스트로 고정해 쓴다(`images/model/build.sh`, 설명은 docs/model-image.md). 이미지는 배포하지 않는다.
+# Model VM image: minimal Apple container VM image for Claude Code CLI (`claude`).
+# Built locally and pinned by digest (`images/model/build.sh`; see docs/model-image.md). Not distributed.
 #
-# - 구성: 다이제스트로 고정한 Alpine 위에 nftables·setpriv(방화벽과 권한 전환)와 고정 판본의 Claude Code를 얹고, 쓰지 않는 것(패키지 관리자·busybox 명령 링크)을 지운 뒤
-#   한 층으로 합친다. 신뢰 init(`bot-init`, 짧은 POSIX sh)이 ENTRYPOINT다: root로 시작해 릴레이 하나로만 나가는 nft 규칙을 걸고, 모든 capability를 버리고
-#   no_new_privs로 비root(10001:10001)가 Claude를 exec한다. 닻(`bot-anchor`)은 따로 있는 비root·capability 0 대기 전용 진입이다.
-# - Claude Code는 독점 라이선스다. 이 저장소에 없고 재배포하지 않는다. 빌드하는 컴퓨터가 Anthropic의 공식 릴리스 저장소에서 받아 설치만 한다.
-# - 공급망 고정: 기반 이미지는 다이제스트로, CLI는 정확한 판본과 SHA-256으로 고정한다. 받은 `manifest.json`의 GPG 서명을 Anthropic 릴리스 서명 키(지문 고정)로
-#   확인하고, 서명된 매니페스트의 체크섬 · 아래 고정한 체크섬 · 받은 파일의 체크섬이 모두 같아야 설치한다. 하나라도 다르면 빌드가 멈춘다.
-#   nftables·setpriv는 고정한 Alpine 릴리스 가지의 현재 판본이고, 설치된 모든 패키지의 판본·라이선스는 이미지의 /etc/bot-model-image에 기록한다.
-# - 어댑터(`crates/bot-runtime/src/model/container`)가 기대하는 것: 루트는 읽기 전용이고 `/tmp`만 tmpfs · 읽기 전용 입력 `/bot`(작업 폴더) · 실행별 쓰기 공간 `/work`
-#   (HOME=/work/home, CLAUDE_CONFIG_DIR=/work/claude, 재개용 세션 기록은 그 아래) · DNS 없음·호스트 전용 망이라 상류는 호스트의 `http://` 주소 · 어댑터는 `--cap-drop ALL`
-#   뒤에 init에 필요한 capability만 더하고 BOT_RELAY_IP·BOT_RELAY_PORT를 환경으로 준다.
+# - Layout: digest-pinned Alpine + nftables/setpriv + pinned Claude Code, stripped of apk and unused busybox links,
+#   flattened to a single layer. `bot-init` (ENTRYPOINT) starts as root, applies a relay-only nftables firewall,
+#   drops all capabilities with no_new_privs, and execs Claude as 10001:10001. `bot-anchor` is a separate non-root,
+#   zero-capability idle entrypoint.
+# - Supply chain: base image pinned by digest; CLI pinned by version and SHA-256. `manifest.json` must pass GPG
+#   verification against the pinned Anthropic key fingerprint, and manifest/pinned/downloaded checksums must all match.
+#   Installed package versions/licenses are recorded in /etc/bot-model-image.
+# - Adapter contract (`crates/bot-runtime/src/model/container`): read-only rootfs with tmpfs /tmp, read-only /bot
+#   workdir, per-run writable /work (HOME=/work/home, CLAUDE_CONFIG_DIR=/work/claude), no DNS, host-only network,
+#   `--cap-drop ALL` plus only the caps needed by `bot-init`, and `BOT_RELAY_IP`/`BOT_RELAY_PORT`.
 #
-# 판본을 올릴 때: 새 판본의 `manifest.json`(서명 확인 뒤)에서 `platforms.linux-arm64-musl.checksum`을 읽어 아래 `CLAUDE_VERSION`·`CLAUDE_SHA256`을 함께 바꾼다.
+# To bump Claude Code: verify the new `manifest.json` signature, read `platforms.linux-arm64-musl.checksum`, and
+# update `CLAUDE_VERSION` and `CLAUDE_SHA256` together.
 
 ARG BUILDER=docker.io/library/alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
-# ---- 1단계(버려진다): Claude Code를 받아 서명·체크섬을 확인한다 ----------------------------------------------------
+# ---- Stage 1 (discarded): fetch Claude Code and verify signature and checksum --------------------------------------
 FROM ${BUILDER} AS fetch
 ARG CLAUDE_VERSION=2.1.331
 ARG CLAUDE_SHA256=36bd0de0054eb2deff83d62b883e342a443aa3a82d030ec80dc7f9554df2a8d1
 ARG CLAUDE_PLATFORM=linux-arm64-musl
-# Anthropic Claude Code 릴리스 서명 키의 주 키 지문(공식 문서: https://code.claude.com/docs/en/setup#binary-integrity-and-code-signing)
+# Anthropic Claude Code release signing primary key fingerprint (https://code.claude.com/docs/en/setup#binary-integrity-and-code-signing)
 ARG CLAUDE_SIGNER_FPR=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
 ARG CLAUDE_SITE=https://downloads.claude.ai
 
 RUN set -eu; \
-    [ "$(uname -m)" = aarch64 ] || { echo "arm64(Apple silicon) 전용이다: $(uname -m)" >&2; exit 1; }; \
+    [ "$(uname -m)" = aarch64 ] || { echo "arm64 (Apple silicon) only: $(uname -m)" >&2; exit 1; }; \
     apk add --no-cache curl gnupg jq >/dev/null; \
     export GNUPGHOME="$(mktemp -d)"; chmod 700 "$GNUPGHOME"; \
     cd /tmp; \
     base="$CLAUDE_SITE/claude-code-releases/$CLAUDE_VERSION"; \
     curl -fsSL "$CLAUDE_SITE/keys/claude-code.asc" -o key.asc; \
     fpr="$(gpg --batch --with-colons --import-options show-only --import key.asc | awk -F: '$1 == "fpr" { print $10; exit }')"; \
-    [ "$fpr" = "$CLAUDE_SIGNER_FPR" ] || { echo "서명 키 지문이 고정한 값과 다르다" >&2; exit 1; }; \
+    [ "$fpr" = "$CLAUDE_SIGNER_FPR" ] || { echo "signing key fingerprint does not match pinned value" >&2; exit 1; }; \
     gpg --batch --quiet --import key.asc; \
     curl -fsSL "$base/manifest.json" -o manifest.json; \
     curl -fsSL "$base/manifest.json.sig" -o manifest.json.sig; \
     gpg --batch --status-fd 1 --verify manifest.json.sig manifest.json 2>/dev/null \
       | awk -v want="$CLAUDE_SIGNER_FPR" '$1 == "[GNUPG:]" && $2 == "VALIDSIG" && $NF == want { ok = 1 } END { exit ok ? 0 : 1 }' \
-      || { echo "manifest.json의 서명이 올바르지 않다" >&2; exit 1; }; \
-    [ "$(jq -r .version manifest.json)" = "$CLAUDE_VERSION" ] || { echo "매니페스트의 판본이 다르다" >&2; exit 1; }; \
+      || { echo "invalid manifest.json signature" >&2; exit 1; }; \
+    [ "$(jq -r .version manifest.json)" = "$CLAUDE_VERSION" ] || { echo "manifest version mismatch" >&2; exit 1; }; \
     listed="$(jq -r --arg p "$CLAUDE_PLATFORM" '.platforms[$p].checksum // empty' manifest.json)"; \
-    [ -n "$listed" ] || { echo "매니페스트에 $CLAUDE_PLATFORM 항목이 없다" >&2; exit 1; }; \
-    [ "$listed" = "$CLAUDE_SHA256" ] || { echo "서명된 매니페스트의 체크섬이 이 파일에 고정한 값과 다르다" >&2; exit 1; }; \
+    [ -n "$listed" ] || { echo "manifest missing $CLAUDE_PLATFORM entry" >&2; exit 1; }; \
+    [ "$listed" = "$CLAUDE_SHA256" ] || { echo "signed manifest checksum does not match pinned value" >&2; exit 1; }; \
     curl -fsSL "$base/$CLAUDE_PLATFORM/claude" -o claude; \
-    echo "$CLAUDE_SHA256  claude" | sha256sum -c - >/dev/null || { echo "받은 claude의 체크섬이 다르다" >&2; exit 1; }; \
+    echo "$CLAUDE_SHA256  claude" | sha256sum -c - >/dev/null || { echo "downloaded claude checksum mismatch" >&2; exit 1; }; \
     install -m 0555 claude /claude
 
-# ---- 2단계(버려진다): 루트 파일시스템을 조립하고 쓰지 않는 것을 지운다 ---------------------------------------------
+# ---- Stage 2 (discarded): assemble rootfs and strip unused tools ---------------------------------------------------
 FROM ${BUILDER} AS rootfs
 ARG CLAUDE_VERSION=2.1.331
 RUN apk add --no-cache nftables setpriv >/dev/null \
@@ -62,16 +63,16 @@ RUN set -eu; \
     mkdir -p /bot /work; \
     chmod 1777 /tmp; \
     chmod 0700 /usr/sbin/nft /bin/setpriv; \
-    # 패키지 관리자를 지운다(이 이미지 안에서는 아무것도 설치하지 못한다).
+    # Remove package manager so nothing can be installed inside the image.
     rm -rf /sbin/apk /etc/apk /lib/apk /var/cache/apk /usr/share/apk; \
-    # busybox 명령 링크는 init·닻이 쓰는 sh와 sleep만 남긴다. (링크를 지우는 동안에도 쓰이는 명령은 `/bin/busybox`로 직접 부른다.)
+    # Keep only sh and sleep busybox links for bot-init and bot-anchor; invoke /bin/busybox directly while pruning.
     /bin/busybox find /bin /sbin /usr/bin /usr/sbin -type l | while read -r link; do \
       case "$(/bin/busybox readlink "$link")" in \
         *busybox) case "$link" in /bin/sh | /bin/sleep) ;; *) /bin/busybox rm -f "$link" ;; esac ;; \
       esac; \
     done
 
-# ---- 3단계(최종 이미지): 조립한 루트를 한 층으로 담는다 ---------------------------------------------------------
+# ---- Stage 3 (final image): flatten rootfs into a single layer -----------------------------------------------------
 FROM scratch
 ARG CLAUDE_VERSION=2.1.331
 COPY --from=rootfs / /
@@ -80,8 +81,8 @@ LABEL org.opencontainers.image.title="bot-model-vm" \
       org.opencontainers.image.licenses="NOASSERTION" \
       bot.claude-code.version="${CLAUDE_VERSION}"
 
-# 필수가 아닌 통신(자동 업데이트·원격 측정·오류 보고·피드백·기능 플래그·공식 마켓 자동 설치)을 끄고, 이 봇에 필요 없는 것을 뺀다.
-# 공식 환경변수다(https://code.claude.com/docs/en/env-vars). 어댑터도 같은 값을 실행마다 다시 준다(`ClaudeCodeRunner`의 FIXED_ENV 등).
+# Disable nonessential traffic (auto-updates, telemetry, error reporting, feedback, feature flags, marketplace
+# auto-install); mirrors ClaudeCodeRunner FIXED_ENV (https://code.claude.com/docs/en/env-vars).
 ENV PATH=/usr/local/bin:/usr/bin:/bin \
     HOME=/work/home \
     CLAUDE_CONFIG_DIR=/work/claude \
@@ -98,7 +99,7 @@ ENV PATH=/usr/local/bin:/usr/bin:/bin \
     CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
     CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1
 
-# init은 root로 시작해 방화벽을 걸고 권한을 버린다. 일반 실행(방화벽에 필요한 capability나 릴레이 환경이 없는 실행)은 init이 거절해 모델이 시작되지 않는다.
+# bot-init starts as root to apply nftables rules and drop privileges; invocations missing caps or relay env fail closed.
 USER 0:0
 ENTRYPOINT ["/usr/local/bin/bot-init"]
 CMD ["claude", "--version"]

@@ -1,5 +1,4 @@
-//! 실제 `claude` CLI를 호스트 프로세스로 돌리는 시험용 샌드박스(VM 대신)와, 실제 브로커 프런트(PlannedCalls·CheckpointSink)·가짜 상류·PG를 잇는
-//! 호스트 조립. 모델 호출은 0이다: CLI의 `ANTHROPIC_BASE_URL`은 프런트(루프백)이고 프런트의 상류는 가짜다.
+//! Local `claude` CLI test sandbox and full broker-front + fake-upstream + PostgreSQL host wiring.
 #![allow(dead_code)]
 
 use super::*;
@@ -35,7 +34,6 @@ use tokio::{
     process::{Child, ChildStdout, Command},
 };
 
-// 시험 파일들이 `support::cli::*`로 한꺼번에 쓰던 도우미(응답 조립·훑기). 어떤 시험 파일은 일부만 쓴다
 use super::sweep::Sweep;
 #[allow(unused_imports)]
 pub use super::{
@@ -43,7 +41,6 @@ pub use super::{
     turns::*,
 };
 
-/// 실제 CLI가 없으면 건너뛴다. `BOT_CLAUDE_CANARY=required`이면 실패한다.
 pub fn claude_bin() -> Option<PathBuf> {
     let found = std::env::var_os("BOT_CLAUDE_BIN")
         .map(PathBuf::from)
@@ -57,15 +54,14 @@ pub fn claude_bin() -> Option<PathBuf> {
     if found.is_none() {
         assert!(
             std::env::var("BOT_CLAUDE_CANARY").as_deref() != Ok("required"),
-            "claude CLI가 필요하다(BOT_CLAUDE_BIN)"
+            "claude CLI is required (set BOT_CLAUDE_BIN)"
         );
         eprintln!("skipped: claude CLI not found");
     }
     found
 }
 
-/// 가상 경로(`/bot`·`/work`)를 호스트 폴더로 옮겨 CLI를 호스트 프로세스로 띄운다. 환경은 상속하지 않는다.
-/// 프로세스가 끝난 직후(호출 폴더가 지워지기 전)에 두 마운트 폴더 전체에서 세션 토큰(`RELAY_TOKEN` 환경값)을 찾아 `swept`에 남긴다.
+/// Runs `claude` as a host process by mapping virtual `/bot` and `/work` paths to host directories, sweeping mounts for `RELAY_TOKEN` on exit.
 pub struct LocalSandbox {
     claude: PathBuf,
     swept: Arc<std::sync::Mutex<Vec<Swept>>>,
@@ -79,13 +75,11 @@ impl LocalSandbox {
         })
     }
 
-    /// 끝난 프로세스마다의 훑기 결과(시작 순서)
     pub fn swept(&self) -> Vec<Swept> {
         self.swept.lock().map(|s| s.clone()).unwrap_or_default()
     }
 }
 
-/// 값 앞부분이 가상 마운트 경로면 호스트 경로로 바꾼다.
 fn host_path(spec: &ModelSpec, value: &str) -> String {
     let mounts = spec.readonly_mounts.iter().chain(spec.scratch.iter());
     for mount in mounts {
@@ -99,7 +93,7 @@ fn host_path(spec: &ModelSpec, value: &str) -> String {
     value.to_owned()
 }
 
-/// CLI는 작업 폴더 경로로 프로젝트 폴더 이름을 정한다. 가상 `/bot`이 호스트의 다른 경로가 되므로, 그 이름의 폴더를 `-bot`으로 잇는다.
+/// Symlinks the host-encoded cwd project directory to `-bot` so `claude --resume` finds the same project dir as inside `/bot`.
 fn link_project_dir(spec: &ModelSpec, cwd: &Path) {
     let Some(work) = &spec.scratch else {
         return;
@@ -235,13 +229,9 @@ impl Sandbox<ModelSpec> for LocalSandbox {
     }
 }
 
-// ---- 호스트 조립 ----
-
-/// 이 프런트에서 시도마다 세션 토큰을 발급하는 `Relays`(실제 호스트의 `SessionTable::issue` 연결과 같다).
 pub struct FrontRelays {
     pub sessions: Arc<SessionTable>,
     pub addr: SocketAddr,
-    /// 이 프런트가 발급한 토큰들(다른 프로세스의 프런트가 이 토큰을 받아들이지 않는지 보려고 남긴다)
     pub issued: std::sync::Mutex<Vec<String>>,
 }
 
@@ -280,18 +270,16 @@ impl Relays for FrontRelays {
     }
 }
 
-/// 한 "프로세스": 자기 저장소 핸들·세션 표·프런트·워커. 버리면 프런트도 닫힌다(프로세스 교체를 흉내 낸다).
+/// Simulated process instance owning its own store handle, session table, front, and worker.
 pub struct Host {
     pub worker: Worker,
     pub front: ModelFront,
     pub store: Arc<Store>,
-    /// 프런트가 승인·보류·자식 대기로 알린 시도들(어느 시도가 왜 멈췄는가)
     pub park: Arc<RecordingPark>,
     pub relays: Arc<FrontRelays>,
 }
 
 impl Host {
-    /// 이 호스트가 발급한 토큰들.
     pub fn tokens(&self) -> Vec<String> {
         self.relays
             .issued
@@ -301,7 +289,6 @@ impl Host {
     }
 }
 
-/// 이 프런트에 이 토큰으로 MCP 요청 하나(`body`)를 보내 (HTTP 상태, 응답 본문)을 본다(다른 프로세스가 발급한 토큰은 401이어야 한다).
 pub async fn mcp_with(addr: SocketAddr, token: &str, body: &str) -> (u16, String) {
     use tokio::net::TcpStream;
     let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -325,7 +312,6 @@ pub async fn mcp_with(addr: SocketAddr, token: &str, body: &str) -> (u16, String
     (status, body)
 }
 
-/// 도구 목록 요청(유효한 MCP 요청)의 HTTP 상태와 본문.
 pub async fn list_tools_with(addr: SocketAddr, token: &str) -> (u16, String) {
     mcp_with(
         addr,
@@ -335,7 +321,6 @@ pub async fn list_tools_with(addr: SocketAddr, token: &str) -> (u16, String) {
     .await
 }
 
-/// 이 토큰이 이 프런트에서 받아들여지는가(`{}` 같은 잘못된 요청의 상태만 본다).
 pub async fn status_with(addr: SocketAddr, token: &str) -> u16 {
     mcp_with(addr, token, "{}").await.0
 }
@@ -364,8 +349,6 @@ fn model_host() -> ModelHost {
     }
 }
 
-/// 실제 프런트(PlannedCalls·CheckpointSink)와 이 저장소 핸들 위의 워커를 세운다. 도구 실행은 `world.broker`(가짜 실행기)다.
-/// 확정 거절의 사전 판정도 실제 브로커(`world.broker`)가 한다.
 pub async fn host(
     world: &World,
     store: Arc<Store>,
@@ -384,7 +367,6 @@ pub async fn host(
     .await
 }
 
-/// `host`와 같되 확정 거절을 가리는 사전 판정(`Preflight`)을 `judge`로 바꾼다(판본을 확인하지 못하는 판정자를 시험하려고).
 pub async fn host_judged(
     world: &World,
     store: Arc<Store>,
@@ -405,7 +387,6 @@ pub async fn host_judged(
     .await
 }
 
-/// `host_judged`와 같되 프런트를 `bind`에 열고(VM 시험은 게이트웨이 주소다), 프런트가 실제로 연 주소를 받아 샌드박스를 만든다.
 pub async fn host_at(
     world: &World,
     store: Arc<Store>,
@@ -428,7 +409,6 @@ pub async fn host_at(
     .await
 }
 
-/// `host_at`과 같되 워커 설정을 조립한 뒤 `tune`으로 고친다(종료 유예·정리 시간을 짧게 하려는 시험용).
 #[allow(clippy::too_many_arguments)]
 pub async fn host_tuned(
     world: &World,
@@ -453,7 +433,7 @@ pub async fn host_tuned(
         Arc::new(SystemClock),
         ModelLimits::default(),
     ));
-    // 호스트마다 다른 진짜 난수: 앞선 프로세스의 토큰이 다음 프로세스에서 우연히 통하지 않는다
+    // Distinct OS entropy per simulated host prevents cross-process token collisions.
     let sessions = SessionTable::new(Arc::new(OsEntropy));
     let park = Arc::new(RecordingPark::new());
     let front = ModelFront::start(

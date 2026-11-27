@@ -1,5 +1,4 @@
-//! 예약 저장소가 연결되지 않은 브로커용 기본 `UserSchedules` 구현(`NoSchedules`).
-//! 모든 대화 예약 연산을 상태 변경 없이 `Error::Unavailable`로 닫는다.
+//! Stub `UserSchedules` implementation returning `Error::Unavailable` when no schedule store is attached.
 
 use bot_core::{
     command::JsonPayload,
@@ -11,7 +10,6 @@ use bot_core::{
     },
 };
 
-/// 저장소를 붙이지 않은 브로커: 모든 예약 연산이 `Unavailable`로 닫힌다.
 pub struct NoSchedules;
 
 impl UserSchedules for NoSchedules {

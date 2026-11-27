@@ -1,12 +1,4 @@
-//! Anthropic Messages API(`POST {endpoint}/v1/messages`, tool use).
-//!
-//! 요청: `{"model","max_tokens","system"?,"output_config"?:{"effort"},"messages":[…],"tools"?:[{"name","description","input_schema"}]}`. 이전 차례는 비서 메시지(`thinking`·`redacted_thinking`·`text`·`tool_use` 블록)와
-//! 사용자 메시지(`tool_result` 블록)로 이어 붙인다(도구 결과는 사용자 역할이다). 도구 호출과 함께 온 사고 블록(서명 포함)과 상류 호출 ID는 공급자 지문(`ApiSettings::fingerprint`)에 묶어 불투명 `state`에 남겼다가
-//! 같은 공급자의 다음 차례에만 되돌려 보낸다(없거나 공급자가 바뀌었으면 이 요청 안에서만 쓰는 `t<차례>c<순번>`을 쓰고 사고 블록은 뺀다).
-//!
-//! 응답: `stop_reason`이 `end_turn`·`stop_sequence`면 최종 글, `tool_use`면 호출이다. 종료 사유와 블록이 어긋나면(`end_turn`인데 `tool_use` 블록이 있거나 그 반대) 실패다 — 호출은
-//! `tool_use`로 끝난 응답에서만 나온다. `max_tokens`(출력 한도로 끊김)·`model_context_window_exceeded`·`refusal`은 부분 글이나 잘린 호출을 쓰지 않고 실패로 끝낸다. 호출이 하나라도
-//! 잘못되면(모르는 도구 이름·없거나 객체가 아닌 인자·같은 호출 ID가 두 번) 아무 호출도 내지 않는다.
+//! Anthropic Messages API (`POST {endpoint}/v1/messages`) wire serialization and response parsing.
 
 use super::{
     Built, MAX_CALLS, args_object, checked_args, conversation, fail, invalid, name_table,
@@ -23,24 +15,19 @@ use std::collections::HashSet;
 
 pub(super) const PATH: &str = "/v1/messages";
 const VERSION: &str = "2023-06-01";
-/// 설정에 `max_tokens`가 없을 때(Anthropic은 필수 필드다)
+/// Required by Anthropic Messages API when `max_tokens` is unset.
 const DEFAULT_MAX_TOKENS: u32 = 4096;
-/// 최상위 조합자(`allOf`·`anyOf`·`oneOf`)를 펼칠 때의 중첩 깊이 상한
 const MAX_SCHEMA_FLATTEN_DEPTH: usize = 8;
-/// 불투명 공급자 상태의 형식 표지(다른 종류의 실행기가 남긴 상태는 읽지 않는다)
 const STATE_KIND: &str = "anthropic";
-/// 상류가 준 호출 ID의 길이 상한
 const MAX_ORIGINAL_ID: usize = 128;
-/// 한 차례에 보존할 사고 블록(`thinking`·`redacted_thinking`) 수 상한
 const MAX_THINKING_BLOCKS: usize = 16;
-/// 한 차례 공급자 상태의 최대 바이트(체크포인트 1 MiB 한도 보호)
+/// Caps opaque provider state per turn to stay well under the 1 MiB checkpoint limit.
 const MAX_STATE_BYTES: usize = 128 * 1024;
 
 fn id_ok(id: &str) -> bool {
     (1..=MAX_ORIGINAL_ID).contains(&id.len()) && id.bytes().all(|b| (0x21..=0x7e).contains(&b))
 }
 
-/// 서명이 있는 `thinking` 블록이나 `data`가 있는 `redacted_thinking` 블록만 되돌릴 수 있는 모양으로 추린다.
 fn thinking_block(block: &Value) -> Option<Value> {
     match block.get("type").and_then(Value::as_str) {
         Some("thinking") => {
@@ -241,9 +228,8 @@ pub(super) fn build(settings: &ApiSettings, request: &ModelRequest) -> Result<Bu
     Ok(Built { body, names })
 }
 
-/// Anthropic Messages API용 도구 `input_schema`.
-/// 상류는 최상위의 `oneOf`·`allOf`·`anyOf`를 거절하므로 최상위 조합자만 풀어 분기의 `properties`와 공통 필수 키(`allOf` 전체·`anyOf`/`oneOf` 교집합)를 끌어올린다.
-/// 속성 내부의 중첩 조합자는 그대로 두고, 실제 호출 인자는 브로커가 프로필 원본 스키마 전체로 다시 검증한다.
+/// Flattens top-level `allOf`/`anyOf`/`oneOf` combinators rejected by Anthropic while keeping nested ones intact;
+/// the broker still validates actual call arguments against the original full schema.
 fn input_schema(tool: &ToolSpec) -> Value {
     let Value::Object(mut root) = schema_of(tool) else {
         return json!({"type": "object"});
@@ -420,7 +406,7 @@ fn merge_property(props: &mut Map<String, Value>, name: String, incoming: Value)
     *existing = json!({"anyOf": variants});
 }
 
-/// 응답의 `usage`에서 (관측용, 실측). 입력은 `input_tokens`에 캐시 읽기·쓰기를 더한 값이다(CLI 실행기와 같은 규칙).
+/// Counts prompt tokens as `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` (matching CLI usage accounting).
 fn usage_of(usage: Option<&Value>) -> (crate::model::Usage, Option<TokenUsage>) {
     let field = |key: &str| usage.and_then(|u| u.get(key)).and_then(Value::as_u64);
     let prompt = field("input_tokens").map(|input| {
@@ -446,7 +432,7 @@ pub(super) fn parse(
         .and_then(Value::as_str)
         .ok_or_else(invalid)?;
     match stop {
-        // 출력 한도로 끊긴 글·호출은 쓰지 않는다(부분 글을 성공으로 올리지 않고, 잘린 호출은 실행하지 않는다)
+        // Never treat truncated or refused output as a valid answer or executable tool plan.
         "max_tokens" => return Err(fail("output_limit", false)),
         "model_context_window_exceeded" => return Err(fail("context_limit", false)),
         "refusal" => return Err(fail("refused", false)),
@@ -471,12 +457,12 @@ pub(super) fn parse(
                     thinking.push(saved);
                 }
             }
-            // 서버 도구 같은 그 밖의 블록은 이 실행기가 요청하지 않았다: 읽지 않는다
+            // Ignore unrequested server-side content blocks.
             _ => {}
         }
     }
     let text = texts.join("\n\n");
-    // 호출은 `tool_use`로 끝난 응답에서만 나온다: 종료 사유와 블록이 어긋난 응답은 실행 계획을 만들지 않는다
+    // Tool calls are accepted only when `stop_reason == "tool_use"` and vice versa.
     if uses.is_empty() == (stop == "tool_use") {
         return Err(invalid());
     }
@@ -496,7 +482,6 @@ pub(super) fn parse(
     let turn = request.exchanges.len();
     let mut calls = Vec::with_capacity(uses.len());
     let mut call_ids = Vec::with_capacity(uses.len());
-    // 상류가 준 호출 ID는 한 응답 안에서 겹치면 거절하고, 쓸 수 있는 모양이면 프롬프트 캐시·사고 블록 연속을 위해 공급자 상태에 담는다
     let mut upstream_ids: HashSet<&str> = HashSet::new();
     for (index, block) in uses.into_iter().enumerate() {
         let original = match block.get("id") {

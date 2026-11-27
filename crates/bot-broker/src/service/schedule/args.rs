@@ -1,9 +1,8 @@
-//! 내장 예약 도구의 인자 읽기와 결과 모양(순수 함수). 인자는 엄격히 읽는다(중복 키·모르는 키·두 가지 시간 설정·과대 지시문 거절).
+//! Pure argument parsing, sealing, and list rendering for built-in schedule tools.
 //!
-//! `schedule.create`는 구조를 읽어 `ScheduleSpec`을 만든 뒤 core의 `ScheduleSpec::seal_create`로 봉인한다(카드·해시·저장이 같은 값을
-//! 쓴다). 생략한 시간대(`cron`에 `timezone`이 없을 때)는 **봉인 전에** 실행이 고정한 판본의 프로필 시간대로 채우므로, 승인 뒤에 현재
-//! 판본의 기본 시간대가 바뀌어도 승인한 카드와 다른 시간으로 저장되지 않는다. 봉인은 현재 시각을 읽지 않는다 — 이미 끝낸 호출의
-//! 재전달도 같은 해시를 만든다(지나간 시각 검사는 새 호출에만 한다).
+//! `schedule.create` fills any omitted cron `timezone` from the run's pinned revision before
+//! calling `ScheduleSpec::seal_create`, so card, hash, and persisted spec stay identical across
+//! default-timezone changes without depending on wall-clock time (keeping replays deterministic).
 
 use crate::{
     canon::{canonicalize, sha256},
@@ -25,7 +24,6 @@ use bot_core::{
 use serde_json::{Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 인자를 거절한 이유.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum Reject {
     Invalid,
@@ -47,8 +45,7 @@ pub(super) fn seal(map: Map<String, Value>) -> Option<Sealed> {
     })
 }
 
-/// 구조·문법까지 읽은 `schedule.create` 명세(시간에 기대는 검사는 아직 하지 않았다). 시간대는 이미 채워져 있다. `requested`는 모델이 지정한 다른
-/// 수신자(없으면 원래 대화)이고, 호스트 등록부가 정규 경로로 확정한 값으로만 명세에 들어간다(`seal`).
+/// Structurally validated `schedule.create` request prior to destination canonicalization and time-range checks.
 pub(super) struct Create {
     spec: ScheduleSpec,
     requested: Option<DeliveryTarget>,
@@ -66,8 +63,6 @@ fn text_of<'a>(map: &'a Map<String, Value>, key: &str) -> Result<Option<&'a str>
     }
 }
 
-/// `{"binding": "<바인딩>", "conversation": {"kind": "direct"|"channel", "id": "<수신 ID>", "thread": "<스레드>"|null}}`. 모르는 키·다른 종류는 거절한다.
-/// 수신자의 이름·ID가 쓸 수 있는 글인지는 봉인(`seal_create`)이 가린다.
 fn destination_of(value: &Value) -> Result<DeliveryTarget, Reject> {
     let map = value.as_object().ok_or(Reject::Invalid)?;
     let conversation = match (map.len(), map.get("conversation")) {
@@ -100,8 +95,6 @@ fn destination_of(value: &Value) -> Result<DeliveryTarget, Reject> {
 }
 
 impl Create {
-    /// `default_timezone`은 실행이 고정한 판본의 프로필 시간대다. `cron`에 `timezone`이 없으면 이 값으로 채운 명세를 core가 봉인한다.
-    /// 시간대 이름·cron 문법·`at` 표현·지시문 한도·수신자의 모양은 core가 같은 규칙으로 거절한다(등록부를 묻기 전에 걸러진다).
     pub(super) fn parse(args: &JsonPayload, default_timezone: &str) -> Result<Self, Reject> {
         let map = strict_object(args).ok_or(Reject::Invalid)?;
         if !only_keys(
@@ -123,7 +116,6 @@ impl Create {
             text_of(&map, "cron")?,
             text_of(&map, "timezone")?,
         );
-        // 시간 설정은 하나만(`at` 한 번 또는 `cron` 반복)이고 시간대는 `cron`과만 쓴다.
         if at.is_some() == cron.is_some() || (zone.is_some() && cron.is_none()) {
             return Err(Reject::Invalid);
         }
@@ -147,7 +139,7 @@ impl Create {
             quiet,
             destination: None,
         };
-        // 명세와 지정한 수신자의 모양이 봉인할 수 있는지 먼저 본다(틀린 인자는 등록부를 묻지 않고 거절한다).
+        // Validate spec and destination shape via core sealing before querying the route registry.
         spec.seal_create().map_err(|_| Reject::Invalid)?;
         if let Some(target) = &requested {
             let mut trial = spec.clone();
@@ -157,12 +149,11 @@ impl Create {
         Ok(Self { spec, requested })
     }
 
-    /// 모델이 지정한 다른 수신자(없으면 원래 대화).
     pub(super) fn requested(&self) -> Option<&DeliveryTarget> {
         self.requested.as_ref()
     }
 
-    /// 등록부가 정규 경로로 확정한 수신자(없으면 원래 대화)를 명세에 넣고 봉인한다. 카드·해시·저장이 모두 이 값을 쓴다.
+    /// Binds the canonical registry-resolved destination (or `None` for the originating conversation) and seals it.
     pub(super) fn seal(&mut self, resolved: Option<DeliveryTarget>) -> Result<Sealed, Reject> {
         self.spec.destination = resolved;
         let sealed = self.spec.seal_create().map_err(|_| Reject::Invalid)?;
@@ -173,7 +164,7 @@ impl Create {
         })
     }
 
-    /// 새 호출의 `at`을 저장소와 같은 밀리초 범위로 검사한다. 이미 끝낸 호출의 재전달에는 부르지 않는다.
+    /// Enforces `at` bounds against `now` for new calls only (skipped on completed-call replays).
     pub(super) fn spec(self, now: SystemTime) -> Result<ScheduleSpec, Error> {
         if let Timing::At(at) = self.spec.timing {
             let millis = |time: SystemTime| match time.duration_since(UNIX_EPOCH) {
@@ -189,8 +180,7 @@ impl Create {
     }
 }
 
-/// 봉인을 core로 옮기기 전(구판)의 `schedule.create` 인자 지문: 시간대를 채운 인자 객체의 정규 JSON의 SHA-256(`quiet`·`at` 표기는
-/// 모델이 쓴 그대로였다). **이미 끝난 호출의 재전달에서 저장된 영수증을 읽는 데만** 쓴다 — 새 호출·열린 승인·승인된 승인에는 쓰지 않는다.
+/// Pre-core legacy `schedule.create` SHA-256 fingerprint, used solely to replay already-completed receipts.
 pub(super) fn legacy_create_sha256(args: &JsonPayload, default_timezone: &str) -> Option<[u8; 32]> {
     let mut map = strict_object(args)?;
     if map.contains_key("cron") && !map.contains_key("timezone") {
@@ -202,7 +192,6 @@ pub(super) fn legacy_create_sha256(args: &JsonPayload, default_timezone: &str) -
     seal(map).map(|sealed| sealed.sha256)
 }
 
-/// `{"id": "<예약 ID>"}`만 받는다.
 pub(super) fn parse_cancel(args: &JsonPayload) -> Result<(ScheduleId, Sealed), Reject> {
     let map = strict_object(args).ok_or(Reject::Invalid)?;
     let id = match (map.len(), map.get("id")) {
@@ -217,7 +206,6 @@ pub(super) fn parse_cancel(args: &JsonPayload) -> Result<(ScheduleId, Sealed), R
     Ok((id, sealed))
 }
 
-/// 목록의 인자는 비어 있어야 한다.
 pub(super) fn parse_list(args: &JsonPayload) -> Result<Sealed, Reject> {
     match strict_object(args) {
         Some(map) if map.is_empty() => seal(map).ok_or(Reject::Invalid),
@@ -225,7 +213,7 @@ pub(super) fn parse_list(args: &JsonPayload) -> Result<Sealed, Reject> {
     }
 }
 
-/// `{"schedules":[…]}`: 지시문·수신자·원래 대화는 싣지 않는다.
+/// Renders `{"schedules":[...]}` omitting instructions, destinations, and originating conversations.
 pub(super) fn render_list(list: &[ScheduleSummary]) -> Option<JsonPayload> {
     let items: Vec<Value> = list
         .iter()

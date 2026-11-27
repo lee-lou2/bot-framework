@@ -1,6 +1,6 @@
-//! 대화에서 만든 예약이 더 이상 발화하지 않는 이유(`CloseReason`).
+//! Terminal closure reasons and user-facing notices for chat-created schedules.
 
-/// 사용자 예약을 더 이상 발화하지 않는 이유. 같은 종료를 다시 받아도 감사와 안내는 한 번이다.
+/// Closing a schedule with the same reason is idempotent for both audit and notice emission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloseReason {
     Finished,
@@ -9,7 +9,7 @@ pub enum CloseReason {
     AgentRevoked,
     PermissionRevoked,
     InvalidTiming,
-    /// 저장된 목적지(종류·ID)를 읽을 수 없다(저장소 스키마는 받지만 지금 해석할 수 없는 값).
+    /// Stored destination kind or ID cannot be interpreted by the current runtime.
     InvalidDestination,
     Unrouted,
     ProfileInactive,
@@ -30,9 +30,10 @@ impl CloseReason {
         }
     }
 
-    /// 원래 대화에 넣을 공개 가능한 안내. 수신자 식별자나 예약 내용이 들어가지 않는다.
+    /// Public notice posted back to the origin conversation; must never include recipient IDs or schedule content.
     pub fn notice(self) -> Option<&'static str> {
-        (self == Self::Unrouted).then_some("예약 메시지의 목적지가 등록부에 없어 예약을 멈췄어요")
+        (self == Self::Unrouted)
+            .then_some("Scheduled message destination is no longer registered; schedule stopped.")
     }
 }
 
@@ -56,8 +57,9 @@ mod tests {
             assert_eq!(reason.code(), code);
             assert_eq!(
                 reason.notice(),
-                (code == "unrouted")
-                    .then_some("예약 메시지의 목적지가 등록부에 없어 예약을 멈췄어요")
+                (code == "unrouted").then_some(
+                    "Scheduled message destination is no longer registered; schedule stopped."
+                )
             );
         }
     }

@@ -1,5 +1,4 @@
-//! 지정한 사람의 승인 교차 시험: 인증된 Slack 반응 → 실제 게이트웨이 `Ingress` → 실제 PG 저장소(증거 접수) → 실제 브로커(카드 없이 한 번 승인).
-//! 게이트웨이(④)가 만드는 `AcceptExtras{source, chain}`가 저장소(③)의 증거 조건과 실제로 맞물리는지 확인한다. 시험 DB가 없으면 건너뛴다.
+//! Cross-crate test for human-approval reaction evidence: `Ingress` (`AcceptExtras`) -> PG store -> `BrokerService` one-time cardless approval.
 
 use crate::process_support::Schema;
 use bot_broker::{
@@ -56,7 +55,7 @@ async fn rig() -> Option<Rig> {
         .await
         .unwrap();
     store.migrate().await.unwrap();
-    // 승인이 필요한 도구를 고정 인자로 부르는 반응 트리거: U1만 승인자다(U2도 멤버라 반응은 접수된다)
+    // Only U1 is a designated approver; U2 is a member so reactions are admitted but not pre-approved.
     let mut notify = tool(Risk::Irreversible, &["reports.post"]);
     notify.server = "reports".into();
     let mut snap = snapshot("personal", "r1")
@@ -152,7 +151,6 @@ async fn rig() -> Option<Rig> {
     })
 }
 
-/// 게이트웨이가 반응 프레임에서 만드는 접수 입력과 인증된 원천(`SlackGateway::on_reaction`과 같은 모양).
 fn reaction(user: &str, event: &str) -> (Inbound, SlackSource) {
     let inbound = Inbound {
         real: Real::SlackChannel {
@@ -191,7 +189,7 @@ async fn admit(r: &Rig, user: &str, event: &str) -> RunId {
         .await
     {
         Admission::Accepted { run, .. } => run,
-        other => panic!("접수돼야 한다: {other:?}"),
+        other => panic!("expected admission: {other:?}"),
     }
 }
 
@@ -209,14 +207,13 @@ async fn an_authenticated_reaction_approves_once_without_a_card_and_others_get_t
     let Some(r) = rig().await else {
         return;
     };
-    // 지정한 사람(U1)의 반응: 접수 커밋에 증거가 남고, 시작 커밋에서 한 번 소비되며 카드는 없다
+    // Designated approver (U1): evidence is recorded on accept and consumed once with no card.
     let run = admit(&r, "U1", "Ev1").await;
     assert_eq!(
         r.schema
             .query("select trigger || '/' || actor || '/' || event_id || '/' || kind from {s}.bot_run_evidence"),
         "confirm/slack:home/U1/Ev1/reaction"
     );
-    // 같은 이벤트의 재전달은 같은 run으로 수렴한다(증거도 한 줄)
     assert_eq!(admit(&r, "U1", "Ev1").await, run);
     assert_eq!(r.schema.count("bot_run_evidence"), "1");
     let ctx = r.store.claim().await.unwrap().expect("run");
@@ -224,13 +221,13 @@ async fn an_authenticated_reaction_approves_once_without_a_card_and_others_get_t
     let done = r.broker.call(call_of(&ctx)).await.unwrap();
     assert!(matches!(done, CallResult::Done(_)));
     assert_eq!(r.runner.jobs().len(), 1);
-    assert_eq!(r.schema.count("bot_approvals"), "0", "카드 0");
+    assert_eq!(r.schema.count("bot_approvals"), "0", "expected zero cards");
     assert_eq!(
         r.schema
             .query("select team || '/' || event_id || '/' || actor || '/' || tool from {s}.bot_evidence_uses"),
         "T1/Ev1/slack:home/U1/reports.notify"
     );
-    // 다른 이벤트(Ev2)는 새 증거다: 같은 사람이 다시 반응하면 다시 승인된다(사람이 아니라 이벤트가 증거다)
+    // Distinct event (Ev2) provides fresh evidence for the same approver.
     let second = admit(&r, "U1", "Ev2").await;
     assert_ne!(second, run);
     let ctx = r.store.claim().await.unwrap().expect("run");
@@ -240,12 +237,16 @@ async fn an_authenticated_reaction_approves_once_without_a_card_and_others_get_t
     ));
     assert_eq!(r.runner.jobs().len(), 2);
     assert_eq!(r.schema.count("bot_evidence_uses"), "2");
-    // 지정하지 않은 멤버(U2)의 반응은 접수되지만 증거로 승인되지 않는다 → 기존 카드 규칙(요청자 본인 승인)
+    // Non-approver member (U2) falls back to the standard approval card flow.
     admit(&r, "U2", "Ev3").await;
     let ctx = r.store.claim().await.unwrap().expect("run");
     let waiting = r.broker.call(call_of(&ctx)).await.unwrap();
     assert!(matches!(waiting, CallResult::Awaiting(_)));
-    assert_eq!(r.runner.jobs().len(), 2, "카드를 거치기 전에는 실행 0");
+    assert_eq!(
+        r.runner.jobs().len(),
+        2,
+        "must not execute before card approval"
+    );
     assert_eq!(r.schema.count("bot_evidence_uses"), "2");
     assert_eq!(
         r.schema.query(

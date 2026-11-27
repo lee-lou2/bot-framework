@@ -1,7 +1,4 @@
-//! 운영자 판정(AdminAct): 보류된 호출·단계·회신 발송·민감 DM 요청을 닫는다. 판정과 감사는 한 커밋이다.
-//! - 호출 단위 보류(단일 쓰기): 영수증이면 실행됨, 미실행 증거면 같은 호출 ID로 재개한다. 판정이 서면 run을 깨운다.
-//! - 다단계 보류는 미결 단계부터 판정한다. 확정 단계가 하나라도 있으면 호출의 최종 결과는 별도 수신처 영수증으로만 확정한다.
-//! - 회신 발송(`reply:<run>:<seq>`)과 민감 DM(`private:<run>`)의 보류도 같은 입구로 판정한다.
+//! Operator hold resolution (`AdminAct`) for tool calls, effect steps, outbox replies, and private DM runs.
 
 use crate::{
     audit::{self, Entry},
@@ -29,7 +26,7 @@ fn verdict_ok(verdict: &HoldVerdict) -> R<()> {
     }
 }
 
-/// 감사에 남길 판정 표지. 민감 DM(`private`) 보류는 영수증·증거 원문을 저장하지 않고 고정 어휘만 남긴다.
+/// Audit verdict label; private DM holds omit raw evidence and record only fixed vocabulary.
 fn label(verdict: &HoldVerdict, private: bool) -> String {
     match verdict {
         HoldVerdict::Confirmed { .. } => "confirmed".into(),
@@ -41,7 +38,7 @@ fn label(verdict: &HoldVerdict, private: bool) -> String {
     }
 }
 
-/// 판정 종류와 영수증/증거의 지문. 원문은 저장하지 않는다(민감 DM의 증거도 같다).
+/// Verdict kind and SHA-256 evidence digest (raw evidence is never stored).
 fn fingerprint(verdict: &HoldVerdict) -> (&'static str, Vec<u8>) {
     let (kind, text) = match verdict {
         HoldVerdict::Confirmed { receipt } => ("confirmed", receipt),
@@ -51,11 +48,9 @@ fn fingerprint(verdict: &HoldVerdict) -> (&'static str, Vec<u8>) {
 }
 
 impl Store {
-    /// 발생 ID와 대상을 함께 대조하고 판정·감사를 한 커밋으로 낸다.
-    /// - 모르는 ID는 Missing, 다른 run·호출·단계를 가리키면 Conflict다.
-    /// - 이미 판정으로 닫힌 발생은 같은 운영자·같은 판정·같은 영수증/증거 지문이면 Repeated(쓰기 없음), 아니면 Conflict다.
-    ///   그 뒤 같은 대상이 다시 보류됐어도(새 발생) 옛 ID의 재전송은 새 발생을 건드리지 않는다.
-    /// - 잠금 순서: run → 호출·단계 / 회신 행 → 발생 → 감사. 정산·전이 쪽(대상 행 → 발생 트리거)과 같은 순서다.
+    /// Verifies the hold ID and target, records the verdict, and appends audit atomically.
+    /// Replaying the same operator, verdict, and evidence digest on a closed hold returns `Repeated`; mismatches return `Conflict`.
+    /// Lock order: run -> call/effect or outbox row -> hold -> audit.
     pub(crate) async fn resolve_hold_run(
         &self,
         actor: &PrincipalId,
@@ -75,7 +70,7 @@ impl Store {
         verdict_ok(verdict)?;
         let (decided, digest) = fingerprint(verdict);
         let mut tx = self.begin_authorized().await?;
-        // 발생의 profile·run은 바뀌지 않으므로 먼저 읽어 run을 잠근다
+        // `profile` and `run` on a hold are immutable; read them first to lock the run before locking targets.
         let owner: (String, String) =
             sqlx::query_as("select profile, run from bot_holds where id = $1")
                 .bind(&hold.hold_id.0)
@@ -85,7 +80,6 @@ impl Store {
         if owner.0 != hold.profile.0 || owner.1 != hold.run.0 {
             return Err(Error::Conflict.into());
         }
-        // 호출·회신을 추가하는 쪽과 같은 run 잠금 안에서 판정 대상을 찾는다.
         let (private, waiting_on_hold): (bool, bool) = sqlx::query_as(
             "select private, state = 'waiting' and wait_kind is not distinct from 'hold'
              from bot_runs where profile = $1 and id = $2 for update",
@@ -227,7 +221,7 @@ impl Store {
                 }
                 let (pending, confirmed) = step_evidence(tx, hold).await?;
                 if pending || confirmed {
-                    // 다음 미결 단계 또는 호출 전체 영수증을 기다린다. 단계 전이 트리거가 해당 발생을 열었다.
+                    // Wait for remaining unresolved steps or a call-level receipt; the DB trigger opened the next hold.
                     return Ok(format!("{call}:{}", effect.0));
                 }
                 set_call_resolution(tx, hold, "not_executed", None).await?;
@@ -256,8 +250,7 @@ impl Store {
         if state != "held" {
             return Err(Error::Conflict.into());
         }
-        // 발송 어댑터가 비어 있는 회신은 pending으로 돌려도 어떤 어댑터도 점유할 수 없다.
-        // 수동 발송 확인(`Confirmed`)만 허용하고 `NotExecuted` 재전송은 거절한다.
+        // Replies without a transport can never be claimed if reset to `pending`; allow `Confirmed` only.
         if transport.is_empty() && matches!(verdict, HoldVerdict::NotExecuted { .. }) {
             return Err(Error::Conflict.into());
         }
@@ -265,7 +258,7 @@ impl Store {
             HoldVerdict::Confirmed { .. } => {
                 "update bot_outbox set state = 'confirmed', receipt = $4, reason = null, updated_ms = bot_now_ms() where profile = $1 and run = $2 and seq = $3"
             }
-            // 미실행이 입증됐다: 처음부터 다시 보낼 수 있게 되돌린다(발송 세대는 이어서 오른다)
+            // Proven not executed: reset to `pending` for fresh delivery while keeping delivery generation monotonic.
             HoldVerdict::NotExecuted { .. } => {
                 "update bot_outbox set state = 'pending', attempts = 0, not_before_ms = 0, lease_until_ms = null, reason = null,
                         updated_ms = bot_now_ms() where profile = $1 and run = $2 and seq = $3 and $4::text is null"
@@ -298,7 +291,7 @@ impl Store {
         if !waiting_on_hold {
             return Err(Error::Conflict.into());
         }
-        // 본문이 없어 다시 실행할 수 없다: 실행됨이면 완료, 미실행이면 거절로 끝내고 사용자가 새로 요청한다
+        // Private runs store no payload and cannot be re-executed; settle as terminal state.
         let (state, error) = match verdict {
             HoldVerdict::Confirmed { .. } => ("succeeded", None),
             HoldVerdict::NotExecuted { .. } => ("dead", Some("not_executed")),
@@ -317,7 +310,7 @@ impl Store {
     }
 }
 
-/// 실행 여부가 아직 불명인 단계와 수신처 영수증이 확정된 단계가 각각 있는가.
+/// Returns `(has_unresolved_steps, has_confirmed_steps)` for a call.
 async fn step_evidence(tx: &mut Tx<'_>, hold: &HoldRef) -> R<(bool, bool)> {
     Ok(sqlx::query_as(
         "select coalesce(bool_or(state = 'started' or (state = 'held' and resolution is null)), false),
@@ -347,7 +340,6 @@ async fn set_call_resolution(
     Ok(())
 }
 
-/// `lock_target`이 한 번의 `FOR UPDATE`로 잠가 읽어 둔 판정 대상 행.
 enum LockedTarget {
     Tool {
         call_state: String,
@@ -362,7 +354,7 @@ enum LockedTarget {
     Private,
 }
 
-/// 발생이 가리키는 대상 행을 잠그고(호출 → 단계, 또는 회신 행) 판정에 필요한 열을 함께 돌려준다. 발생의 종류와 run의 성격이 어긋나면 Conflict다.
+/// Locks target rows (`call -> effect` or `outbox`) with `FOR UPDATE`, rejecting kind/privacy mismatches with `Conflict`.
 async fn lock_target(
     tx: &mut Tx<'_>,
     hold: &HoldRef,
