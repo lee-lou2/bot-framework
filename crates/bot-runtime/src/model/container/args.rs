@@ -7,9 +7,13 @@
 use bot_core::sandbox::ModelSpec;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
+
+/// Pinned CLI binaries accepted by `images/model/bot-init`.
+const FIREWALLED_PROGRAMS: [&str; 3] = ["claude", "codex", "agy"];
 
 /// Trusted entrypoint contract for the pinned image (host-configured, never model-selectable).
 #[derive(Clone, Debug)]
@@ -37,6 +41,8 @@ impl Entry {
 pub struct ContainerConfig {
     pub program: String,
     pub image: String,
+    /// Optional per-program digest-pinned images (`claude`, `codex`, `agy`).
+    pub images: BTreeMap<String, String>,
     pub network: String,
     pub prefix: String,
     pub instance: String,
@@ -72,6 +78,7 @@ impl ContainerConfig {
         Self {
             program: "container".into(),
             image: image.into(),
+            images: BTreeMap::new(),
             network: network.into(),
             prefix: "botvm".into(),
             instance: "botvm".into(),
@@ -83,6 +90,12 @@ impl ContainerConfig {
             subnet: None,
             lock_dir: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_image_for(mut self, program: impl Into<String>, image: impl Into<String>) -> Self {
+        self.images.insert(program.into(), image.into());
+        self
     }
 
     #[must_use]
@@ -255,6 +268,13 @@ pub fn label_value(owner: &str) -> String {
         .collect()
 }
 
+fn image_ref_ok(image: &str) -> bool {
+    !image.is_empty()
+        && image.len() <= 255
+        && !image.starts_with('-')
+        && !image.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 pub(super) fn valid(config: &ContainerConfig) -> Result<(), Refused> {
     if !token_ok(&config.prefix, &[])
         || !token_ok(&config.instance, &[])
@@ -287,15 +307,16 @@ pub(super) fn valid(config: &ContainerConfig) -> Result<(), Refused> {
             return Err(Refused("entry"));
         }
     }
-    if config.image.is_empty()
-        || config.image.len() > 255
-        || config.image.starts_with('-')
-        || config
-            .image
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace())
-    {
+    if !image_ref_ok(&config.image) {
         return Err(Refused("image"));
+    }
+    for (program, image) in &config.images {
+        if !token_ok(program, &[]) || program.starts_with('-') {
+            return Err(Refused("config"));
+        }
+        if !image_ref_ok(image) {
+            return Err(Refused("image"));
+        }
     }
     Ok(())
 }
@@ -371,8 +392,8 @@ pub fn build(
         || spec.program.starts_with('-')
         || spec.program.len() > 255
         || spec.program.chars().any(char::is_control)
-        // Firewalled image init only accepts `claude <args...>` to exec the pinned binary.
-        || (config.entry.is_some() && spec.program != "claude")
+        // Firewalled image init only accepts pinned model CLIs (`claude`, `codex`, `agy`).
+        || (config.entry.is_some() && !FIREWALLED_PROGRAMS.contains(&spec.program.as_str()))
     {
         return Err(Refused("program"));
     }
@@ -422,31 +443,45 @@ pub fn build(
         ));
     }
     let canonical = format!("http://{relay}");
+    if spec.program == "codex" && !super::codex_args::codex_relay_args_ok(&spec.args, &canonical) {
+        return Err(Refused("relay"));
+    }
     let mut env: Vec<(String, String)> = Vec::new();
     for (key, value) in &spec.env {
+        let is_relay_url = matches!(
+            key.as_str(),
+            "ANTHROPIC_BASE_URL" | "GOOGLE_GEMINI_BASE_URL"
+        );
         if !env_name_ok(key)
             || value.contains('\0')
             || env.iter().any(|(seen, _)| seen == key)
-            // Relay env vars are host-owned; specs cannot override them or point ANTHROPIC_BASE_URL elsewhere.
+            // Relay env vars are host-owned; specs cannot override them or point base URLs elsewhere.
             || matches!(key.as_str(), "BOT_RELAY_IP" | "BOT_RELAY_PORT")
-            || (key == "ANTHROPIC_BASE_URL" && value.trim_end_matches('/') != canonical)
+            || (is_relay_url && value.trim_end_matches('/') != canonical)
         {
-            return Err(Refused(
-                if key.starts_with("BOT_RELAY") || key == "ANTHROPIC_BASE_URL" {
-                    "relay"
-                } else {
-                    "env"
-                },
-            ));
+            return Err(Refused(if key.starts_with("BOT_RELAY") || is_relay_url {
+                "relay"
+            } else {
+                "env"
+            }));
         }
         env.push((key.clone(), value.clone()));
     }
-    env.retain(|(key, _)| key != "ANTHROPIC_BASE_URL");
+    env.retain(|(key, _)| {
+        !matches!(
+            key.as_str(),
+            "ANTHROPIC_BASE_URL" | "GOOGLE_GEMINI_BASE_URL"
+        )
+    });
     env.extend([
         ("BOT_RELAY_IP".to_owned(), relay.ip().to_string()),
         ("BOT_RELAY_PORT".to_owned(), relay.port().to_string()),
-        ("ANTHROPIC_BASE_URL".to_owned(), canonical),
     ]);
+    match spec.program.as_str() {
+        "agy" => env.push(("GOOGLE_GEMINI_BASE_URL".to_owned(), canonical)),
+        "codex" => {}
+        _ => env.push(("ANTHROPIC_BASE_URL".to_owned(), canonical)),
+    }
     let mut secret_env = Vec::new();
     for (key, value) in &env {
         args.push("-e".into());

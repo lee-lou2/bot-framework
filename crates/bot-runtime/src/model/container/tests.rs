@@ -482,3 +482,63 @@ async fn every_spawn_rechecks_the_network_and_the_pinned_image_and_refuses_when_
         .expect("spawn resumes once verified");
     sandbox.shutdown().await;
 }
+
+#[tokio::test]
+async fn per_program_images_are_pinned_selected_per_cli_and_fail_closed_when_missing() {
+    const CODEX_DIGEST: &str =
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    const CODEX_PINNED: &str =
+        "codex-img@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    let fake = Fake::new("multi-image");
+    fake.set(json!({
+        "images": {
+            "alpine:3.20": DIGEST,
+            "codex-img:latest": CODEX_DIGEST,
+        },
+        "lines": ["ok"],
+    }));
+    let config = fake
+        .firewalled()
+        .with_image_for("codex", "codex-img:latest");
+    let sandbox = start(&fake, config).await.relay(8787).await.unwrap();
+
+    // Codex spawns with its own digest-pinned image.
+    let mut codex_spec = fake.spec();
+    codex_spec.program = "codex".into();
+    codex_spec.args = vec![
+        "exec".into(),
+        "-c".into(),
+        "model_provider=\"relay\"".into(),
+        "-c".into(),
+        "model_providers.relay.base_url=\"http://192.168.99.1:8787/v1\"".into(),
+        "-c".into(),
+        "mcp_servers.relay.url=\"http://192.168.99.1:8787/mcp\"".into(),
+        "-".into(),
+    ];
+    codex_spec.env = vec![("HOME".into(), "/work/home".into())];
+    let mut proc = sandbox.spawn(codex_spec).await.expect("codex spawn");
+    assert_eq!(proc.next_line().await.as_deref(), Some("ok"));
+    let _ = proc.wait().await;
+    let run = fake
+        .argv("run")
+        .into_iter()
+        .rfind(|a| a.contains(&"codex".to_owned()))
+        .unwrap();
+    assert!(run.contains(&CODEX_PINNED.to_owned()), "{run:?}");
+
+    // On a codex-only host (non-empty `images` without a `claude` or `agy` entry), both fail closed.
+    assert!(matches!(
+        sandbox.spawn(fake.spec()).await,
+        Err(Error::Unavailable)
+    ));
+    let mut agy_spec = fake.spec();
+    agy_spec.program = "agy".into();
+    agy_spec.args = vec!["--print=".into()];
+    agy_spec.env = vec![("HOME".into(), "/work/home".into())];
+    assert!(matches!(
+        sandbox.spawn(agy_spec).await,
+        Err(Error::Unavailable)
+    ));
+    sandbox.shutdown().await;
+}

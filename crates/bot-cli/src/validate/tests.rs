@@ -79,6 +79,24 @@ fn a_claude_alias_needs_the_model_vm_in_the_host_config() {
     let demo =
         host_with(r#", "providers": {"assistant": {"kind": "demo"}, "plain": {"kind": "demo"}}"#);
     assert!(missing_model_sandbox(&snapshot, &demo).is_none());
+
+    let codex_providers = r#", "providers": {
+        "assistant": {"kind": "codex-cli", "model": "gpt-5", "endpoint": "https://api.openai.com/v1", "secret": "openai-key"},
+        "plain": {"kind": "agy-cli", "model": "gemini-3.1-pro-preview", "endpoint": "https://generativelanguage.googleapis.com", "secret": "gemini-key"}}"#;
+    let legacy_only = host_with(&format!("{codex_providers}{apple}"));
+    let msg = missing_model_sandbox(&snapshot, &legacy_only).unwrap();
+    assert!(
+        msg.contains("sandbox.apple.images.codex") && msg.contains("sandbox.apple.images.agy"),
+        "{msg}"
+    );
+    let multi = format!(
+        r#", "sandbox": {{"apple": {{"images": {{"codex": "c@sha256:{d}", "agy": "a@sha256:{d}"}}, "network": "bot-internal"}}}}"#,
+        d = "a".repeat(64)
+    );
+    assert!(
+        missing_model_sandbox(&snapshot, &host_with(&format!("{codex_providers}{multi}")))
+            .is_none()
+    );
 }
 
 #[test]

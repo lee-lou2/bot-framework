@@ -371,6 +371,7 @@ async fn an_approval_or_a_hold_parks_the_attempt_and_retires_its_session_but_not
             attempt: newer.clone(),
             agent: AgentId("main".into()),
             alias: "assistant".into(),
+            protocol: Protocol::Anthropic,
         })
         .unwrap();
     let reply = rpc(&r, call).await;

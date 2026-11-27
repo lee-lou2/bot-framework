@@ -218,6 +218,7 @@ async fn slot_is_free_for(r: &Rig, attempt: Attempt) -> bool {
             attempt,
             agent: AgentId("main".into()),
             alias: "assistant".into(),
+            protocol: Protocol::Anthropic,
         })
         .unwrap();
     let request = post(

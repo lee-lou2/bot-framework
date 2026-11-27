@@ -32,10 +32,11 @@ Rust 변경은 필요 없습니다. MCP 서버를 만들고 설정 4곳을 갱�
   - **새 파일:** `crates/bot-runtime/src/model/api/wire/` 아래 요청/응답 코덱.
   - **조용한 누락:** `parse_providers`(`provider.rs`)의 `kind` 문자열 `match`와 `docs/architecture.md`.
   - **주의:** **새** 핑거프린트 태그 바이트를 할당하고 기존 바이트는 절대 바꾸지 마세요(바꾸면 모든 배포에서 재활성화가 강제됨). `crates/bot-cli/src/execution/fingerprint_tests.rs`에 고정 입력 테스트로 못 박아 두세요.
-- **새 VM 호스팅 CLI 프로바이더** (새 `Provider` 변형):
-  - **컴파일러:** `crates/bot-cli/src/execution/provider.rs`의 `impl Provider`(자격 증명 이름, VM 플래그, 설명, 핑거프린트 입력)와 `crates/bot-cli/src/serve/models.rs`의 `build`.
-  - **조용한 누락:** `crates/bot-cli/src/serve/claude.rs`의 프록시 테이블과 CLI 설정은 `Provider::ClaudeCli`만 읽습니다(추가 누락 시 업스트림 부재로 별칭이 거부됨).
-  - **제약:** 브로커 프런트(`crates/bot-broker/src/front.rs`)는 Anthropic `/v1/messages`만 중계하므로 다른 CLI 프로토콜은 프런트를 먼저 확장해야 합니다.
+- **새 VM 호스팅 CLI 프로바이더** (`bot-runtime`의 새 `CliKind` 변형 + `Provider::Cli`):
+  - **컴파일러:** `crates/bot-runtime/src/model/cli.rs`의 `CliKind`, `crates/bot-broker/src/model.rs`의 `Protocol`, `crates/bot-cli/src/execution/provider.rs`의 `impl Provider`(핑거프린트 태그 바이트), `crates/bot-cli/src/execution.rs`의 `Apple::image_for`, `crates/bot-cli/src/serve/claude.rs`, `crates/bot-cli/src/serve/models.rs`, `crates/bot-cli/src/validate.rs`.
+  - **브로커 프로토콜:** CLI가 `Anthropic`(`POST /v1/messages`), `OpenAiResponses`(`POST /v1/responses`), `Gemini`(`POST /v1beta/models/...`) 외 새 와이어 프로토콜을 쓴다면 `crates/bot-broker/src/model/vet/` 아래 요청 검증기, `crates/bot-broker/src/model/stream.rs`의 SSE 종료·오류 포맷, `crates/bot-broker/src/front/observe/` 아래 엄격 옵저버, `crates/bot-broker/src/front.rs`와 `crates/bot-broker/src/front/mcp.rs`의 세션 고정 라우트·MCP 호출 ID 처리를 추가합니다.
+  - **런타임 및 VM:** `crates/bot-runtime/src/model/` 아래에 `ModelRunner`를 구현하고(`model/cli.rs`와 `model/driver.rs` 재사용), `FIREWALLED_PROGRAMS`(`crates/bot-runtime/src/model/container/args.rs`)와 `images/model/bot-init`에 바이너리 이름을 허용하며, Containerfile과 `build.sh` 대상을 추가하고 `crates/bot-cli/src/execution/fingerprint_tests.rs`에 새 핑거프린트 태그를 고정합니다.
+  - **조용한 누락:** `parse_providers`(`provider.rs`), `parse_sandbox`의 `images` 키(`execution.rs`), `docs/architecture.md`, `docs/model-image.md`, 동기화된 `docs/ko/*.md`.
 
 ## 채팅 채널
 

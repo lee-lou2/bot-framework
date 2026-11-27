@@ -7,6 +7,7 @@
 
 mod anchor;
 mod args;
+mod codex_args;
 mod lock;
 mod process;
 #[cfg(test)]
@@ -29,6 +30,7 @@ use bot_core::{
 use lock::{Identity, lock_instance};
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr},
     process::Stdio,
     sync::{
@@ -53,9 +55,27 @@ const REAP_WITHIN: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StartError(pub &'static str);
 
+struct PinnedImages {
+    default: String,
+    by_program: BTreeMap<String, String>,
+}
+
+impl PinnedImages {
+    fn for_program(&self, program: &str, unfirewalled: bool) -> Option<&str> {
+        if let Some(image) = self.by_program.get(program) {
+            return Some(image.as_str());
+        }
+        if (program == "claude" && self.by_program.is_empty()) || unfirewalled {
+            Some(self.default.as_str())
+        } else {
+            None
+        }
+    }
+}
+
 struct Checked {
     gateway: String,
-    image: String,
+    images: PinnedImages,
 }
 
 fn host_has(address: Ipv4Addr) -> bool {
@@ -106,7 +126,7 @@ pub(crate) struct Inner {
     config: ContainerConfig,
     incarnation: String,
     serial: AtomicU64,
-    pinned: OnceLock<String>,
+    pinned: OnceLock<PinnedImages>,
     address: OnceLock<Ipv4Addr>,
     relay: OnceLock<SocketAddr>,
     gate: OnceLock<watch::Receiver<Health>>,
@@ -186,6 +206,21 @@ impl Inner {
         found.as_array()?.first().cloned()
     }
 
+    async fn pin_image(&self, reference: &str) -> Result<String, StartError> {
+        let inspected = self
+            .json(&["image", "inspect", reference], COMMAND_WITHIN)
+            .await
+            .ok_or(StartError("image_missing"))?;
+        let item = inspected
+            .as_array()
+            .and_then(|a| a.first())
+            .unwrap_or(&inspected);
+        let digest = item["configuration"]["descriptor"]["digest"]
+            .as_str()
+            .ok_or(StartError("image_unpinnable"))?;
+        pin(reference, digest).ok_or(StartError("image_unpinnable"))
+    }
+
     async fn preflight(&self) -> Result<Checked, StartError> {
         let mut found = self.network().await;
         if found.is_none() {
@@ -210,28 +245,31 @@ impl Inner {
             .filter(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
             .ok_or(StartError("network_no_gateway"))?
             .to_owned();
-        let inspected = self
-            .json(&["image", "inspect", &self.config.image], COMMAND_WITHIN)
-            .await
-            .ok_or(StartError("image_missing"))?;
-        let item = inspected
-            .as_array()
-            .and_then(|a| a.first())
-            .unwrap_or(&inspected);
-        let digest = item["configuration"]["descriptor"]["digest"]
-            .as_str()
-            .ok_or(StartError("image_unpinnable"))?;
-        let image = pin(&self.config.image, digest).ok_or(StartError("image_unpinnable"))?;
-        Ok(Checked { gateway, image })
+        let default = self.pin_image(&self.config.image).await?;
+        let mut by_program = BTreeMap::new();
+        for (program, reference) in &self.config.images {
+            let pinned = self.pin_image(reference).await?;
+            by_program.insert(program.clone(), pinned);
+        }
+        Ok(Checked {
+            gateway,
+            images: PinnedImages {
+                default,
+                by_program,
+            },
+        })
     }
 
-    async fn ready(&self) -> bool {
-        let (Some(gate), Some(address), Some(image), Some(lock)) = (
+    async fn ready(&self, program: &str) -> bool {
+        let (Some(gate), Some(address), Some(pinned), Some(lock)) = (
             self.gate.get(),
             self.address.get(),
             self.pinned.get(),
             self.lock.get(),
         ) else {
+            return false;
+        };
+        let Some(image) = pinned.for_program(program, self.config.unfirewalled) else {
             return false;
         };
         // Fail closed if the instance lock file was replaced or unlinked.
@@ -330,7 +368,14 @@ impl Inner {
         role: Role,
         spec: Option<&ModelSpec>,
     ) -> Result<ContainerProcess, Error> {
-        let image = self.pinned.get().ok_or(Error::Unavailable)?;
+        let pinned = self.pinned.get().ok_or(Error::Unavailable)?;
+        let image = match (role, spec) {
+            (Role::Anchor, _) => pinned.default.as_str(),
+            (Role::Model, Some(spec)) => pinned
+                .for_program(&spec.program, self.config.unfirewalled)
+                .ok_or(Error::Unavailable)?,
+            (Role::Model, None) => return Err(Error::Invalid),
+        };
         let plan = Plan {
             image,
             incarnation: &self.incarnation,
@@ -441,7 +486,7 @@ impl ContainerSandbox {
         let _ = inner.lock.set(lock.identity());
         let checked = inner.preflight().await?;
         let address = anchor::gateway_ip(&checked.gateway)?;
-        let _ = inner.pinned.set(checked.image);
+        let _ = inner.pinned.set(checked.images);
         let _ = inner.address.set(address);
         inner
             .reap_matching(Filter::Orphans)
@@ -514,7 +559,11 @@ impl Sandbox<ModelSpec> for ContainerSandbox {
     fn spawn(&self, spec: ModelSpec) -> Reply<'_, Self::Process> {
         Box::pin(async move {
             if !matches!(
-                timeout(self.inner.hooks.ready_check, self.inner.ready()).await,
+                timeout(
+                    self.inner.hooks.ready_check,
+                    self.inner.ready(&spec.program)
+                )
+                .await,
                 Ok(true)
             ) {
                 return Err(Error::Unavailable);

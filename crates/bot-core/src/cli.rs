@@ -1,11 +1,25 @@
-//! Claude CLI (not gateway/`bot-cli`) tool-call checkpoint positions and pre-execution refusal (`CliRefusal`) contract.
+//! Model CLI (not gateway/`bot-cli`) tool-call checkpoint positions and pre-execution refusal (`CliRefusal`) contract.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 pub const GROUP_PREFIX: &str = "cli-group-";
 pub const USE_PREFIX: &str = "cli-use-";
 pub const RECORD_PREFIX: &str = "cli-rec-";
 pub const RESPONSE_PREFIX: &str = "cli-resp-";
+
+/// Derives a deterministic `CliResponse.id` (`cdx-<32 hex>`) from the first `function_call.call_id`
+/// in a Codex turn so broker observation and rollout journaling share one exact key.
+pub fn codex_response_id(first_call_id: &str) -> String {
+    let digest = Sha256::digest(first_call_id.as_bytes());
+    let mut out = String::with_capacity(36);
+    out.push_str("cdx-");
+    for byte in &digest[..16] {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
 
 /// Deterministic pre-execution refusal recorded under the current claim before returning the fixed error word to the model.
 /// Replayed at the same slot on retry/resume; never recorded when verdict/recording failed or execution status is unknown.
@@ -314,5 +328,23 @@ mod tests {
             positions,
             [CallId("cli-7-0".into()), CallId("cli-7-1".into())]
         );
+    }
+
+    #[test]
+    fn codex_response_id_is_deterministic_and_valid() {
+        let id = codex_response_id("call_spike_1");
+        assert_eq!(id.len(), 36);
+        assert!(id.starts_with("cdx-"));
+        assert_eq!(id, codex_response_id("call_spike_1"));
+        assert_ne!(id, codex_response_id("call_spike_2"));
+        let resp = CliResponse {
+            id,
+            uses: vec![CliResponseUse {
+                id: "call_spike_1".into(),
+                name: "mcp__relay__agenda_list".into(),
+                input: json!({}),
+            }],
+        };
+        assert!(resp.is_valid());
     }
 }

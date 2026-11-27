@@ -139,6 +139,7 @@ async fn harness_with(planned: bool) -> Harness {
         providers: [(
             "main".to_owned(),
             Provider {
+                protocol: bot_broker::model::Protocol::Anthropic,
                 endpoint: HostPort {
                     host: "api.main.example".into(),
                     port: 443,
@@ -177,6 +178,7 @@ async fn harness_with(planned: bool) -> Harness {
             attempt,
             agent: AgentId("main".into()),
             alias: "assistant".into(),
+            protocol: bot_broker::model::Protocol::Anthropic,
         })
         .unwrap();
     let front = ModelFront::start(

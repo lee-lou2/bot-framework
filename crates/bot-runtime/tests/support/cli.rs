@@ -7,7 +7,7 @@ use bot_broker::{
         FrontConfig, FrontParts, ModelFront, Session, SessionTable, cli::PlannedCalls,
         observe::CheckpointSink,
     },
-    model::{ModelHost, ModelLimits, ModelProxy, Provider},
+    model::{ModelHost, ModelLimits, ModelProxy, Protocol, Provider},
     resolve::HostPort,
     service::preflight::Preflight,
     sys::{OsEntropy, SystemClock},
@@ -252,6 +252,7 @@ impl Relays for FrontRelays {
             attempt: attempt.clone(),
             agent: agent.clone(),
             alias: alias.to_owned(),
+            protocol: Protocol::Anthropic,
         })?;
         if let Ok(mut issued) = self.issued.lock() {
             issued.push(token.clone());
@@ -330,6 +331,7 @@ fn model_host() -> ModelHost {
         providers: [(
             "main".to_owned(),
             Provider {
+                protocol: Protocol::Anthropic,
                 endpoint: HostPort {
                     host: "api.main.example".into(),
                     port: 443,

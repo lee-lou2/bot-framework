@@ -18,6 +18,16 @@ fn each_kind_names_the_credential_it_needs_and_whether_it_runs_in_the_model_vm()
         (json!({"kind": "demo"}), None, false),
         (claude(), Some("claude-key"), true),
         (
+            json!({"kind": "codex-cli", "model": "gpt-5", "endpoint": "https://api.openai.com/v1", "secret": "codex-key"}),
+            Some("codex-key"),
+            true,
+        ),
+        (
+            json!({"kind": "agy-cli", "model": "gemini-3.1-pro-preview", "endpoint": "https://generativelanguage.googleapis.com", "secret": "agy-key"}),
+            Some("agy-key"),
+            true,
+        ),
+        (
             json!({"kind": "anthropic-api", "model": "m", "endpoint": "https://h.example", "secret": "a-key"}),
             Some("a-key"),
             false,
@@ -53,6 +63,14 @@ fn the_description_shows_names_and_hosts_but_neither_paths_nor_values() {
         (
             json!({"kind": "claude-cli", "model": "m", "endpoint": "https://h.example/v1/private-path", "secret": "claude-key", "effort": "high"}),
             "a: claude-cli · model m · upstream h.example · secret claude-key · effort high",
+        ),
+        (
+            json!({"kind": "codex-cli", "model": "gpt-5", "endpoint": "https://api.openai.com/v1/responses", "secret": "codex-key", "effort": "medium"}),
+            "a: codex-cli · model gpt-5 · upstream api.openai.com · secret codex-key · effort medium",
+        ),
+        (
+            json!({"kind": "agy-cli", "model": "gemini-3.1-pro-preview", "endpoint": "https://generativelanguage.googleapis.com/v1beta", "secret": "agy-key"}),
+            "a: agy-cli · model gemini-3.1-pro-preview · upstream generativelanguage.googleapis.com · secret agy-key",
         ),
         (
             json!({"kind": "anthropic-api", "model": "m", "endpoint": "https://h.example/v1", "secret": "a-key", "max_tokens": 100, "effort": "medium"}),

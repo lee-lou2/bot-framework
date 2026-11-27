@@ -1,10 +1,11 @@
-//! Sandbox-facing HTTP entry point for model relay (`/v1/messages`) and MCP (`/mcp`).
+//! Sandbox-facing HTTP entry point for model relay (`/v1/messages`, `/v1/responses`, `/v1beta/models/...`) and MCP (`/mcp`).
 //!
-//! Both routes share one per-attempt session token (`x-api-key` or `Authorization: Bearer`) stored
-//! only as a SHA-256 hash. Every request checks live claim ownership against the ledger; model
-//! alias, agent, principal, and logical call ID are host-bound. Connections close per request and
-//! emit fixed-vocabulary error bodies only.
+//! Both routes share one per-attempt session token (`x-api-key`, `x-goog-api-key`, or
+//! `Authorization: Bearer`) stored only as a SHA-256 hash. Every request checks live claim
+//! ownership against the ledger; model alias, protocol, agent, principal, and logical call ID are
+//! host-bound. Connections close per request and emit fixed-vocabulary error bodies only.
 
+mod agy_calls;
 pub mod cli;
 mod delegate;
 mod http;
@@ -18,7 +19,12 @@ mod slots;
 #[cfg(test)]
 mod tests;
 
-use crate::{canon::sha256, model::ModelProxy, sys::Entropy, text::hex};
+use crate::{
+    canon::sha256,
+    model::{ModelProxy, Protocol},
+    sys::Entropy,
+    text::hex,
+};
 use bot_core::{
     command::JsonPayload,
     id::*,
@@ -45,6 +51,7 @@ pub struct Session {
     pub attempt: Attempt,
     pub agent: AgentId,
     pub alias: String,
+    pub protocol: Protocol,
 }
 
 struct Live {
@@ -114,6 +121,25 @@ impl SessionTable {
             .unwrap_or_else(|e| e.into_inner())
             .get(&token_key(token))
             .map(|live| (live.session.clone(), live.gone.subscribe()))
+    }
+
+    pub(super) fn active_attempt_keys(
+        &self,
+    ) -> std::collections::HashSet<(String, String, u64, Option<u64>)> {
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|live| {
+                let a = &live.session.attempt;
+                (
+                    a.profile.0.clone(),
+                    a.run.0.clone(),
+                    a.generation.0,
+                    a.claim.map(|c| c.0),
+                )
+            })
+            .collect()
     }
 }
 
@@ -210,6 +236,7 @@ struct Shared {
     parts: FrontParts,
     cfg: FrontConfig,
     slots: slots::Slots,
+    agy: agy_calls::AgyCalls,
 }
 
 pub struct ModelFront {
@@ -224,7 +251,50 @@ pub(crate) fn error_body(kind: &str, message: &str) -> String {
     format!("{{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":\"{message}\"}}}}")
 }
 
-/// Maps broker errors to HTTP status and Anthropic error types (`Stale` uses 403 so the CLI does not retry).
+pub(crate) fn protocol_error_body(
+    protocol: Protocol,
+    code: u16,
+    kind: &str,
+    message: &str,
+) -> String {
+    match protocol {
+        Protocol::Anthropic => error_body(kind, message),
+        Protocol::OpenAiResponses => {
+            format!("{{\"error\":{{\"type\":\"{kind}\",\"message\":\"{message}\"}}}}")
+        }
+        Protocol::Gemini => {
+            let status = match code {
+                400 => "INVALID_ARGUMENT",
+                401 => "UNAUTHENTICATED",
+                403 => "PERMISSION_DENIED",
+                404 => "NOT_FOUND",
+                _ => "UNAVAILABLE",
+            };
+            format!(
+                "{{\"error\":{{\"code\":{code},\"message\":\"{message}\",\"status\":\"{status}\"}}}}"
+            )
+        }
+    }
+}
+
+/// Parses `/v1beta/models/<model>:streamGenerateContent` (`Some(true)`) or `:generateContent` (`Some(false)`).
+pub(super) fn gemini_route(path: &str) -> Option<bool> {
+    let rest = path.strip_prefix("/v1beta/models/")?;
+    let (model, streaming) = if let Some(m) = rest.strip_suffix(":streamGenerateContent") {
+        (m, true)
+    } else {
+        let m = rest.strip_suffix(":generateContent")?;
+        (m, false)
+    };
+    let ok = !model.is_empty()
+        && model.len() <= 128
+        && model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    ok.then_some(streaming)
+}
+
+/// Maps broker errors to HTTP status and error types (`Stale` uses 403 so CLIs do not retry).
 fn http_error(error: &Error) -> (u16, &'static str, &'static str) {
     match error {
         Error::Invalid | Error::Conflict => (400, "invalid_request_error", "invalid"),
@@ -238,6 +308,7 @@ fn http_error(error: &Error) -> (u16, &'static str, &'static str) {
 fn bearer(request: &Request) -> Option<&str> {
     request
         .header("x-api-key")
+        .or_else(|| request.header("x-goog-api-key"))
         .or_else(|| {
             request
                 .header("authorization")
@@ -256,6 +327,7 @@ impl ModelFront {
             parts,
             cfg,
             slots: slots::Slots::default(),
+            agy: agy_calls::AgyCalls::default(),
         });
         let (stop, signal) = watch::channel(false);
         let accept = tokio::spawn(accept_loop(listener, shared.clone(), slots, signal));
@@ -331,10 +403,9 @@ async fn serve(mut client: TcpStream, shared: &Shared) {
         (code, body)
     };
     let route = (request.method.as_str(), request.path.as_str());
-    if !matches!(
-        route,
-        ("POST", "/v1/messages") | ("POST", "/mcp") | ("GET", "/mcp")
-    ) {
+    let known_model = route.0 == "POST"
+        && (matches!(route.1, "/v1/messages" | "/v1/responses") || gemini_route(route.1).is_some());
+    if !known_model && !matches!(route, ("POST", "/mcp") | ("GET", "/mcp")) {
         let (code, body) = reply(404, "not_found_error", "not_found");
         return write_response(
             &mut client,
@@ -375,6 +446,22 @@ async fn serve(mut client: TcpStream, shared: &Shared) {
             code,
             "application/json",
             &body,
+            cfg.write_timeout,
+        )
+        .await;
+    }
+    let protocol_matches = match session.protocol {
+        Protocol::Anthropic => route.1 == "/v1/messages",
+        Protocol::OpenAiResponses => route.1 == "/v1/responses",
+        Protocol::Gemini => gemini_route(route.1).is_some(),
+    };
+    if !protocol_matches {
+        let body = protocol_error_body(session.protocol, 404, "not_found_error", "not_found");
+        return write_response(
+            &mut client,
+            404,
+            "application/json",
+            body.as_bytes(),
             cfg.write_timeout,
         )
         .await;

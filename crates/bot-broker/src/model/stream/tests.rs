@@ -5,6 +5,7 @@ use bot_core::id::ClaimEpoch;
 const KEY: &str = "provider-key-for-personal";
 
 mod hold;
+mod multi_protocol_tests;
 
 struct Rig {
     proxy: ModelProxy,
@@ -16,6 +17,7 @@ fn rig(limits: impl FnOnce(&mut ModelLimits)) -> Rig {
         providers: [(
             "main".to_owned(),
             Provider {
+                protocol: Protocol::Anthropic,
                 endpoint: HostPort {
                     host: "api.main.example".into(),
                     port: 443,

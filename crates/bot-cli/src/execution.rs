@@ -1,12 +1,13 @@
 //! Host execution sections (`providers`, `sandbox`) and authority fingerprint calculation.
 use bot_core::id::Revision;
 use bot_profile::HostCatalog;
+use bot_runtime::model::CliKind;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
 mod provider;
-pub use provider::{ApiProvider, Provider, parse_providers};
+pub use provider::{ApiProvider, CliProvider, Provider, parse_providers};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Srt {
@@ -18,14 +19,39 @@ pub struct Srt {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Apple {
-    /// Digest-pinned VM image (`<name>@sha256:<64 hex>`).
-    pub image: String,
+    /// Legacy single digest-pinned VM image (`<name>@sha256:<64 hex>`, used for `claude-cli`).
+    pub image: Option<String>,
+    /// Per-CLI digest-pinned VM images keyed by `"claude"`, `"codex"`, or `"agy"`.
+    pub images: BTreeMap<String, String>,
     pub network: String,
     /// Host-only IPv4 relay bind address; omits to use the anchor-detected gateway IP on an ephemeral port.
     pub relay_bind: Option<SocketAddr>,
     pub work_root: Option<PathBuf>,
     pub instance: Option<String>,
     pub binary: Option<PathBuf>,
+}
+
+impl Apple {
+    /// Resolves the digest-pinned VM image for `kind`; `codex` and `agy` require explicit `images.<cli>` entries.
+    pub fn image_for(&self, kind: CliKind) -> Option<&str> {
+        match kind {
+            CliKind::Claude => self
+                .images
+                .get("claude")
+                .map(String::as_str)
+                .or(self.image.as_deref()),
+            CliKind::Codex => self.images.get("codex").map(String::as_str),
+            CliKind::Agy => self.images.get("agy").map(String::as_str),
+        }
+    }
+
+    /// Selects the digest-pinned image used to boot the shared anchor VM (`bot-anchor`).
+    pub fn anchor_image(&self) -> Option<&str> {
+        self.image
+            .as_deref()
+            .or_else(|| self.images.get("claude").map(String::as_str))
+            .or_else(|| self.images.values().next().map(String::as_str))
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -140,6 +166,7 @@ pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
                 fields,
                 &[
                     "image",
+                    "images",
                     "network",
                     "relay_bind",
                     "work_root",
@@ -148,10 +175,36 @@ pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
                 ],
                 "sandbox.apple",
             )?;
-            let image = text(fields, "image", "sandbox.apple")?;
-            if !image_pinned(image) {
+            let image = match fields.get("image") {
+                None => None,
+                Some(_) => {
+                    let value = text(fields, "image", "sandbox.apple")?;
+                    if !image_pinned(value) {
+                        return Err(
+                            "sandbox.apple.image: must be pinned to a digest (`name@sha256:<64 hex chars>`)"
+                                .to_owned(),
+                        );
+                    }
+                    Some(value.to_owned())
+                }
+            };
+            let mut images = BTreeMap::new();
+            if let Some(raw_images) = fields.get("images") {
+                let map = object(raw_images, "sandbox.apple.images")?;
+                only(map, &["claude", "codex", "agy"], "sandbox.apple.images")?;
+                for key in map.keys() {
+                    let value = text(map, key, "sandbox.apple.images")?;
+                    if !image_pinned(value) {
+                        return Err(format!(
+                            "sandbox.apple.images.{key}: must be pinned to a digest (`name@sha256:<64 hex chars>`)"
+                        ));
+                    }
+                    images.insert(key.clone(), value.to_owned());
+                }
+            }
+            if image.is_none() && images.is_empty() {
                 return Err(
-                    "sandbox.apple.image: must be pinned to a digest (`name@sha256:<64 hex chars>`)"
+                    "sandbox.apple: must set `image` or a non-empty `images` map (`claude`, `codex`, `agy`)"
                         .to_owned(),
                 );
             }
@@ -194,7 +247,8 @@ pub fn parse_sandbox(value: &Value) -> Result<Sandbox, String> {
                 }
             };
             Some(Apple {
-                image: image.to_owned(),
+                image,
+                images,
                 network: text(fields, "network", "sandbox.apple")?.to_owned(),
                 relay_bind,
                 work_root,
@@ -259,10 +313,30 @@ pub fn authority_fingerprint(
     }
     hash.update(b"vm");
     match &sandbox.apple {
-        Some(apple) => {
+        // Legacy configs without `images` keep the exact v1 byte layout (tag `1`) to avoid re-activation.
+        Some(apple) if apple.images.is_empty() => {
             hash.update([1]);
-            field(&mut hash, apple.image.as_bytes());
+            field(
+                &mut hash,
+                apple.image.as_deref().unwrap_or_default().as_bytes(),
+            );
             // The host-only VM network is part of isolation; changing it must trigger re-activation.
+            field(&mut hash, apple.network.as_bytes());
+        }
+        Some(apple) => {
+            hash.update([2]);
+            match &apple.image {
+                Some(img) => {
+                    hash.update([1]);
+                    field(&mut hash, img.as_bytes());
+                }
+                None => hash.update([0]),
+            }
+            count(&mut hash, apple.images.len());
+            for (cli, img) in &apple.images {
+                field(&mut hash, cli.as_bytes());
+                field(&mut hash, img.as_bytes());
+            }
             field(&mut hash, apple.network.as_bytes());
         }
         None => hash.update([0]),

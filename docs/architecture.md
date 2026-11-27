@@ -51,26 +51,27 @@ Start all four roles together on one host with `bot serve --role all`, or split 
 
 The eight core concepts — **profile** (isolation unit), **agent** (role folder), **skill** (instructions + tools), **gateway** (ingress/egress), **trigger** (activation condition), **run** (unit of work), **broker** (tool gate), and **effect** (external write) — plus crate-specific code names are mapped in the [Glossary](glossary.md).
 
-### How Claude Code Connects to the Broker
+### How VM-Hosted Model CLIs Connect to the Broker
 
-In `claude-cli` mode, the worker keeps a host-only network alive via an anchor VM and passes the relay listener's real IP and TCP port to the model VM's trusted `bot-init`. Because the private network can reach other host ports and peer VMs, `bot-init` installs the VM firewall first, drops privileges, and then launches the model CLI. Every relay request is authenticated with a session token bound to the run's active lease (`claim`).
+In VM CLI mode (`claude-cli`, `codex-cli`, `agy-cli`), the worker keeps a host-only network alive via a shared anchor VM and passes the relay listener's real IP and TCP port to the model VM's trusted `bot-init`. Because the private network can reach other host ports and peer VMs, `bot-init` installs the VM firewall first, drops privileges, and then launches the pinned model CLI. Every relay request is authenticated with a session token bound to the run's active lease (`claim`) and pinned to that alias's wire protocol.
 
-The worker assembles agent instructions, skill bodies, and operator knowledge docs into read-only `/bot/AGENTS.md` and passes `--append-system-prompt-file /bot/AGENTS.md` on both fresh runs and `--resume`. Recalled memory is member-editable, so it is tagged with provenance and injected into user input (stdin on fresh runs; resumed session thereafter).
+The worker assembles agent instructions, skill bodies, and operator knowledge docs into read-only `/bot/AGENTS.md` (loaded via `--append-system-prompt-file /bot/AGENTS.md` on `claude-cli` and auto-loaded from `/bot` on `codex-cli` and `agy-cli`, with `agy-cli` spilling tool schemas into stdin when needed to stay within its 24 KB rule limit). Recalled memory is member-editable, so it is tagged with provenance and injected into user input rather than trusted system instructions.
 
-| Traffic | Endpoint | Auth & Isolation |
-|---|---|---|
-| Model completions | `POST /v1/messages` (SSE or JSON) | `ANTHROPIC_BASE_URL` points to the broker relay; `ANTHROPIC_API_KEY` holds the session token. The broker injects the real provider key only on the upstream hop. |
-| Tool listing & calls | `POST /mcp` (MCP over HTTP) | Launched with `--bare --strict-mcp-config`. MCP config lives outside the model input dir (`/work/mcp.claude.json`) using `Authorization: Bearer ${RELAY_TOKEN}`; the token is passed via env var only and never written to disk. |
+| CLI Runner | Model Relay Route | Tool Relay & Auth | Recovery & Resume |
+|---|---|---|---|
+| `claude-cli` | `POST /v1/messages` (`Anthropic`, `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`) | `POST /mcp` via `/work/mcp.claude.json` (`Bearer ${RELAY_TOKEN}`); matches `_meta["claudecode/toolUseId"]`. | Audited JSONL session tail + `--resume` with broker-recalled tool outputs. |
+| `codex-cli` | `POST /v1/responses` (`OpenAiResponses`, `Authorization: Bearer ${RELAY_TOKEN}`) | `POST /mcp` via `mcp_servers.relay.bearer_token_env_var="RELAY_TOKEN"`; matches `_meta["callId"]`. | Audited rollout JSONL tail + `codex exec resume` with broker-recalled tool outputs. |
+| `agy-cli` | `POST /v1beta/models/<model>:streamGenerateContent` (`Gemini`, `GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY`) | `POST /mcp` via symlink to RAM-only `/tmp/mcp_config.json` expanded by `bot-init` from `/work/mcp.agy.template.json`; broker matches `call_mcp_tool` plans FIFO by `_meta["progressToken"]`. | Broker commits `cli-group-*` / `cli-use-*` directly; park/resume settles ledger slots and launches a fresh session with rendered exchanges. |
 
-The broker verifies the active claim on tool listing as well, matches the CLI's `toolUseId`, tool name, and arguments against the saved model turn to assign deterministic call IDs, and revokes only tokens it issued on worker shutdown. ([Reliability](reliability.md))
+In every CLI mode, the broker injects the real upstream provider key only on the outbound proxy hop, verifies the active claim on tool listing as well, matches every `/mcp` call against broker-observed model turns before assigning deterministic call IDs, and revokes only tokens it issued on worker shutdown. ([Reliability](reliability.md))
 
 ## Host Configuration & Model Execution
 
-In `BOT_HOST_CONFIG`, `models` declares allowed model aliases per profile, and `providers` defines how each alias runs — for example `{"models":{"personal":["assistant"]},"providers":{"assistant":{"kind":"demo"}}}` for the account-free local demo. A `claude-cli` provider requires upstream `model`, HTTPS `endpoint`, and profile secret name `secret`, with optional `effort` (`low`, `medium`, `high`, `xhigh`, `max`; defaults to `medium`) passed to `--effort`.
+In `BOT_HOST_CONFIG`, `models` declares allowed model aliases per profile, and `providers` defines how each alias runs — for example `{"models":{"personal":["assistant"]},"providers":{"assistant":{"kind":"demo"}}}` for the account-free local demo. VM CLI providers (`claude-cli`, `codex-cli`, `agy-cli`) require upstream `model`, HTTPS `endpoint`, and profile secret name `secret`, with optional `effort` (`low`, `medium`, `high`, `xhigh`, `max`; defaults to `medium`).
 
 ### Choosing a Model Runner
 
-Use direct API runners (`anthropic-api`, `openai-api`) by default for chat and broker tools. Use `claude-cli` in an Apple `container` VM only when an agent declares `builtin: [read]` for isolated workspace file reads.
+Use direct API runners (`anthropic-api`, `openai-api`) by default for chat and broker tools. Use VM-hosted CLI runners (`claude-cli`, `codex-cli`, `agy-cli`) in an Apple `container` VM when you want a CLI agent harness (or `claude-cli` when an agent declares `builtin: [read]` for isolated `/bot` file reads).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/model-execution-paths-dark.svg">
@@ -82,6 +83,7 @@ Use direct API runners (`anthropic-api`, `openai-api`) by default for chat and b
 |---|---|---|---|---|
 | `anthropic-api`, `openai-api` | Linux, macOS | None — worker calls upstream HTTP API directly without a VM. | Read from `SecretStore` immediately before sending and attached to the request header. May be omitted only for loopback endpoints. | Scope-capped `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`; super-admin `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`; direct-child `delegate`. Declaring file built-ins fails permanently with `unsupported_builtin`. |
 | `claude-cli` | macOS with Apple `container` | Disposable VM running Claude Code connected to the broker relay. | Read only by the host broker model proxy; VM receives a session token. | All tools above plus isolation-backed `read` when allowed by the profile. |
+| `codex-cli`, `agy-cli` | macOS with Apple `container` | Disposable VM running Codex CLI or Antigravity CLI connected to the broker relay. | Read only by the host broker model proxy; VM receives a session token. | All broker tools above. Declaring file built-ins (`read`, `grep`, `glob`) fails with `unsupported_builtin`. |
 
 The host reserves `schedule.deliver` for per-firing delivery approvals. ([MCP Tools](plugins.md))
 
@@ -114,7 +116,7 @@ Error bodies are read up to 16 KiB solely for classification and never logged or
 |---|---|
 | `sandbox.srt.binary`, `work_root`, `extra_path` | Absolute paths for `srt` binary and read-only tool install/work root. Optional `extra_path` appends up to 16 absolute host directories (e.g., `/opt/homebrew/bin`) to sandboxed tools' `PATH`. |
 | `limits.tool_call_max_secs` | Optional ceiling in seconds for per-tool `timeout_secs` (default `60`, max `900`). Raising the ceiling does not raise the 60 s default for tools omitting `timeout_secs`. Included in activation fingerprint. ([MCP Tools](plugins.md)) |
-| `sandbox.apple.image`, `sandbox.apple.network` | Pinned image digest and host-only network name for `claude-cli` workers (anchor VM holds the host interface). Included in activation fingerprint. |
+| `sandbox.apple.image`, `sandbox.apple.images`, `sandbox.apple.network` | Digest-pinned VM image(s) and host-only network name for CLI workers (one shared anchor VM holds the host interface). `sandbox.apple.images` maps per-CLI keys (`claude`, `codex`, `agy`) to digest-pinned refs (`claude` falls back to `sandbox.apple.image`; `codex` and `agy` require their explicit key). Included in activation fingerprint. |
 | `sandbox.apple.relay_bind` | Optional worker-local relay bind address; defaults to the anchor VM's gateway IPv4 with an OS-assigned port and must match that gateway IP if set. |
 | `sandbox.apple.work_root` | Optional worker-local absolute dir for model workdirs (`0700`); defaults to `<tool-root-parent>/work/models`. |
 | `sandbox.apple.instance` | Optional worker-local VM name prefix (default `botvm`). |
@@ -122,7 +124,7 @@ Error bodies are read up to 16 KiB solely for classification and never logged or
 | `bot/<profile>/private-intake` | Required per-profile fingerprint key (plus configured tool runner) for gateways accepting private DMs; never injected into tool environments. |
 | `admin.trace`, `admin.logs`, `admin.issues` | OTLP trace/log and Sentry-compatible issue exporter settings (endpoints, headers, secrets, levels, content flags, ID format, sample rates). Included in activation fingerprint; changing or removing requires re-activation so stale processes stop exporting. ([Admin & Observability](admin.md)) |
 
-From the relay listener's real address, the Rust adapter derives `BOT_RELAY_IP` (RFC 1918 IPv4), `BOT_RELAY_PORT` (`1..=65535`), and `ANTHROPIC_BASE_URL` (`http://IP:port`) on the host only. Model VMs boot `bot-init`; anchor VMs run `bot-anchor` as UID:GID `10001:10001`. ([Model Image](model-image.md))
+From the relay listener's real address, the Rust adapter derives `BOT_RELAY_IP` (RFC 1918 IPv4), `BOT_RELAY_PORT` (`1..=65535`), and the CLI-specific relay base URL (`ANTHROPIC_BASE_URL` for `claude-cli`, `model_providers.relay.base_url` / `mcp_servers.relay.url` for `codex-cli`, `GOOGLE_GEMINI_BASE_URL` for `agy-cli`) on the host only. Model VMs boot `bot-init`; anchor VMs run `bot-anchor` as UID:GID `10001:10001`. ([Model Image](model-image.md))
 
 The demo model needs no VM or upstream key, while demo tools enforce the same install, sandbox, and approval rules as production tools.
 

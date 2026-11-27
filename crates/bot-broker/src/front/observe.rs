@@ -1,12 +1,18 @@
-//! Strict observation of completed model responses to persist ordered `tool_use` plans.
+//! Strict observation of completed model responses to persist ordered tool-call plans.
 //!
-//! The front withholds the terminal `message_stop` event or JSON body until `TurnSink::completed`
-//! succeeds. Any ambiguous or malformed stream framing rejects the whole response so the recorded
-//! plan cannot diverge from what the CLI executes.
+//! The front withholds the terminal SSE event or JSON body until `TurnSink::completed`
+//! (or `completed_direct` for Gemini/AGY) succeeds. Any ambiguous or malformed stream framing
+//! rejects the whole response so the recorded plan cannot diverge from what the CLI executes.
 
-use crate::json::parse;
+mod gemini;
+mod responses;
+
+use crate::{json::parse, model::Protocol};
 use bot_core::{
-    cli::{CliRefusal, CliResponse, CliResponseUse, RESPONSE_PREFIX},
+    cli::{
+        CliGroup, CliRefusal, CliResponse, CliResponseUse, CliUse, GROUP_PREFIX, RESPONSE_PREFIX,
+        USE_PREFIX,
+    },
     command::{JsonPayload, Step},
     id::{Attempt, CallId},
     port::{Error, Reply, RunStore},
@@ -30,6 +36,12 @@ pub struct Observed {
 /// Sink for observed turn plans and deterministic pre-execution CLI refusal markers.
 pub trait TurnSink: Send + Sync {
     fn completed(&self, attempt: Attempt, turn: Observed) -> Reply<'_, ()>;
+
+    /// Atomically commits a broker-authored turn plan (`cli-resp-`, `cli-use-`, `cli-group-`)
+    /// for CLIs whose session store cannot be audited on disk (e.g. AGY).
+    fn completed_direct(&self, attempt: Attempt, _turn: u64, observed: Observed) -> Reply<'_, ()> {
+        self.completed(attempt, observed)
+    }
 
     fn refused(&self, _: Attempt, _: CallId, _: CliRefusal) -> Reply<'_, ()> {
         Box::pin(async { Ok(()) })
@@ -83,6 +95,67 @@ impl TurnSink for CheckpointSink {
                 body: JsonPayload(body),
             };
             self.runs.checkpoint(attempt, step).await
+        })
+    }
+
+    fn completed_direct(&self, attempt: Attempt, turn: u64, observed: Observed) -> Reply<'_, ()> {
+        Box::pin(async move {
+            let mut resp_uses = Vec::with_capacity(observed.uses.len());
+            let mut group_uses = Vec::with_capacity(observed.uses.len());
+            let mut steps = Vec::with_capacity(observed.uses.len() + 2);
+            for (pos, u) in observed.uses.iter().enumerate() {
+                let input: Value = serde_json::from_str(&u.input).map_err(|_| Error::Invalid)?;
+                let pos_u32 = u32::try_from(pos).map_err(|_| Error::Invalid)?;
+                let cli_use = CliUse {
+                    seq: turn,
+                    turn,
+                    pos: pos_u32,
+                    name: u.name.clone(),
+                    input: input.clone(),
+                };
+                let use_body = serde_json::to_string(&cli_use).map_err(|_| Error::Invalid)?;
+                if use_body.len() > MAX_STEP {
+                    return Err(Error::Invalid);
+                }
+                steps.push(Step {
+                    key: format!("{USE_PREFIX}{}", u.id),
+                    body: JsonPayload(use_body),
+                });
+                group_uses.push(u.id.clone());
+                resp_uses.push(CliResponseUse {
+                    id: u.id.clone(),
+                    name: u.name.clone(),
+                    input,
+                });
+            }
+            let response = CliResponse {
+                id: observed.id,
+                uses: resp_uses,
+            };
+            if !response.is_valid() {
+                return Err(Error::Invalid);
+            }
+            let resp_body = serde_json::to_string(&response).map_err(|_| Error::Invalid)?;
+            if resp_body.len() > MAX_STEP {
+                return Err(Error::Invalid);
+            }
+            let group = CliGroup {
+                seq: turn,
+                uses: group_uses,
+            };
+            let group_body = serde_json::to_string(&group).map_err(|_| Error::Invalid)?;
+            if group_body.len() > MAX_STEP {
+                return Err(Error::Invalid);
+            }
+            steps.push(Step {
+                key: format!("{RESPONSE_PREFIX}{}", response.id),
+                body: JsonPayload(resp_body),
+            });
+            steps.push(Step {
+                key: format!("{GROUP_PREFIX}{turn}"),
+                body: JsonPayload(group_body),
+            });
+            self.runs.checkpoint_batch(attempt, steps).await
         })
     }
 
@@ -370,4 +443,60 @@ pub(super) fn observe_body(body: &str) -> Result<Option<Observed>, Error> {
     }
     let message = value.get("id").and_then(Value::as_str).map(str::to_owned);
     observed(message, uses)
+}
+
+pub(super) enum ProtocolObserver {
+    Anthropic(Observer),
+    OpenAiResponses(responses::ResponsesObserver),
+    Gemini(gemini::GeminiObserver),
+}
+
+impl ProtocolObserver {
+    pub(super) fn new(protocol: Protocol) -> Self {
+        match protocol {
+            Protocol::Anthropic => Self::Anthropic(Observer::default()),
+            Protocol::OpenAiResponses => Self::OpenAiResponses(Default::default()),
+            Protocol::Gemini => Self::Gemini(Default::default()),
+        }
+    }
+
+    pub(super) fn feed(&mut self, event: &[u8]) {
+        match self {
+            Self::Anthropic(o) => o.feed(event),
+            Self::OpenAiResponses(o) => o.feed(event),
+            Self::Gemini(o) => o.feed(event),
+        }
+    }
+
+    pub(super) fn stopped(&self) -> bool {
+        match self {
+            Self::Anthropic(o) => o.stopped(),
+            Self::OpenAiResponses(o) => o.stopped(),
+            Self::Gemini(o) => o.stopped(),
+        }
+    }
+
+    pub(super) fn broken(&self) -> bool {
+        match self {
+            Self::Anthropic(o) => o.broken(),
+            Self::OpenAiResponses(o) => o.broken(),
+            Self::Gemini(o) => o.broken(),
+        }
+    }
+
+    pub(super) fn finish(&mut self) -> Result<Option<Observed>, Error> {
+        match self {
+            Self::Anthropic(o) => o.finish(),
+            Self::OpenAiResponses(o) => o.finish(),
+            Self::Gemini(o) => o.finish(),
+        }
+    }
+}
+
+pub(super) fn observe_body_for(protocol: Protocol, body: &str) -> Result<Option<Observed>, Error> {
+    match protocol {
+        Protocol::Anthropic => observe_body(body),
+        Protocol::OpenAiResponses => responses::observe_body(body),
+        Protocol::Gemini => gemini::observe_body(body),
+    }
 }

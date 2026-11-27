@@ -6,6 +6,7 @@ mod delegate_refusal;
 mod limit_cause;
 mod limits;
 mod mcp;
+mod multi_protocol;
 mod observe;
 mod refusal;
 mod refuse_all;
@@ -121,6 +122,7 @@ pub(super) async fn rig_full(
         providers: [(
             "main".to_owned(),
             Provider {
+                protocol: Protocol::Anthropic,
                 endpoint: HostPort {
                     host: "api.main.example".into(),
                     port: 443,
@@ -161,6 +163,7 @@ pub(super) async fn rig_full(
             attempt: attempt.clone(),
             agent: AgentId("main".into()),
             alias: "assistant".into(),
+            protocol: Protocol::Anthropic,
         })
         .unwrap();
     let turns = Arc::new(RecordingTurns::new());
@@ -490,6 +493,7 @@ async fn a_revoked_session_stops_working_and_so_does_a_run_that_changed_hands() 
             attempt: fresh,
             agent: AgentId("main".into()),
             alias: "assistant".into(),
+            protocol: Protocol::Anthropic,
         })
         .unwrap();
     let ok = raw(

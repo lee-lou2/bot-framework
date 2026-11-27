@@ -1,6 +1,6 @@
 //! Offline pre-flight validation (`bot validate`) for profiles, host config, routes, and secrets.
 use crate::{
-    execution::Provider,
+    execution::{CliProvider, Provider},
     host::HostFile,
     load::{check_entrances, load, secret_store},
     settings::{SecretsKind, Settings},
@@ -11,6 +11,7 @@ use bot_core::{
     profile::{Builtin, Snapshot, TriggerSource},
 };
 use bot_gateway::{host::HostConfig, http::token::MIN_KEY_BYTES};
+use bot_runtime::model::CliKind;
 use std::collections::BTreeSet;
 
 mod trace;
@@ -93,23 +94,41 @@ pub fn has_private_triggers(snapshot: &Snapshot) -> bool {
 }
 
 pub fn missing_model_sandbox(snapshot: &Snapshot, host: &HostFile) -> Option<String> {
-    let uses_claude_cli = host
+    let kinds: BTreeSet<CliKind> = host
         .catalog
         .models
         .get(&snapshot.id.0)
         .into_iter()
         .flatten()
-        .any(|alias| {
-            host.providers
-                .get(alias)
-                .is_some_and(Provider::needs_model_vm)
-        });
-    (uses_claude_cli && host.sandbox.apple.is_none()).then(|| {
-        format!(
-            "{}: allows a claude-cli alias, but host config is missing sandbox.apple (digest-pinned image and host-only network) — see docs/model-image.md",
+        .filter_map(|alias| host.providers.get(alias).and_then(Provider::cli_kind))
+        .collect();
+    if kinds.is_empty() {
+        return None;
+    }
+    let Some(apple) = &host.sandbox.apple else {
+        let names = kinds
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!(
+            "{}: allows a {names} alias, but host config is missing sandbox.apple (digest-pinned image and host-only network) — see docs/model-image.md",
             snapshot.id.0
-        )
-    })
+        ));
+    };
+    let missing: Vec<_> = kinds
+        .iter()
+        .filter(|kind| apple.image_for(**kind).is_none())
+        .map(|kind| format!("sandbox.apple.images.{}", kind.program()))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: sandbox.apple is missing digest-pinned image(s) ({}) — see docs/model-image.md",
+        snapshot.id.0,
+        missing.join(", ")
+    ))
 }
 
 fn builtin_name(tool: Builtin) -> &'static str {
@@ -140,7 +159,10 @@ pub fn unsupported_builtin_tools(snapshot: &Snapshot, host: &HostFile) -> Vec<St
                     snapshot.id.0, agent_id.0, list, agent.model
                 ));
             }
-            Some(Provider::ClaudeCli { .. }) => {
+            Some(Provider::Cli(CliProvider {
+                kind: CliKind::Claude,
+                ..
+            })) => {
                 let bad: Vec<_> = agent
                     .builtin
                     .iter()
@@ -156,6 +178,25 @@ pub fn unsupported_builtin_tools(snapshot: &Snapshot, host: &HostFile) -> Vec<St
                         bad.join(", ")
                     ));
                 }
+            }
+            Some(Provider::Cli(CliProvider {
+                kind: kind @ (CliKind::Codex | CliKind::Agy),
+                ..
+            })) => {
+                let list = agent
+                    .builtin
+                    .iter()
+                    .copied()
+                    .map(builtin_name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                problems.push(format!(
+                    "{}: agent {} declares built-in tools ({}), but {} does not support built-in file tools",
+                    snapshot.id.0,
+                    agent_id.0,
+                    list,
+                    kind.as_str()
+                ));
             }
             Some(Provider::Demo) | None => {}
         }

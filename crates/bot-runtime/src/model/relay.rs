@@ -82,8 +82,12 @@ impl RelayChannel {
         }
     }
 
-    fn mcp_url(&self) -> String {
+    pub fn mcp_url(&self) -> String {
         format!("{}/mcp", self.base_url)
+    }
+
+    pub fn codex_base_url(&self) -> String {
+        format!("{}/v1", self.base_url)
     }
 
     fn bearer() -> String {
@@ -93,6 +97,15 @@ impl RelayChannel {
     pub fn claude_config(&self) -> String {
         let server = json!({
             "type": "http",
+            "url": self.mcp_url(),
+            "headers": {"Authorization": Self::bearer()},
+        });
+        json!({"mcpServers": {&self.name: server}}).to_string()
+    }
+
+    /// AGY MCP config template using `${RELAY_TOKEN}` (expanded to RAM-only `/tmp/mcp_config.json` by `bot-init`).
+    pub fn agy_mcp_template(&self) -> String {
+        let server = json!({
             "url": self.mcp_url(),
             "headers": {"Authorization": Self::bearer()},
         });
@@ -146,6 +159,10 @@ mod tests {
         let config = relay.claude_config();
         assert!(!config.contains(&sample), "{config}");
         assert!(config.contains("Bearer ${RELAY_TOKEN}"), "{config}");
+        let agy = relay.agy_mcp_template();
+        assert!(!agy.contains(&sample), "{agy}");
+        assert!(agy.contains("Bearer ${RELAY_TOKEN}"), "{agy}");
+        assert_eq!(relay.codex_base_url(), "http://192.168.64.1:8787/v1");
     }
 
     #[test]

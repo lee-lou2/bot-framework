@@ -5,7 +5,16 @@ use bot_core::{
     command::RunOutcome,
     sandbox::{Exit, ModelProcess, ModelSandbox, ModelSpec},
 };
+use std::{future::Future, pin::Pin, time::Duration};
 use tokio::{sync::watch, time::Instant};
+
+const WATCH_EVERY: Duration = Duration::from_millis(25);
+
+/// Host-side watcher paired with a CLI process (e.g. session JSONL tailer) to confirm progress before returning final text.
+pub(crate) trait SessionWatcher: Send {
+    fn poll(&mut self) -> Pin<Box<dyn Future<Output = Result<(), ModelError>> + Send + '_>>;
+    fn finish(&mut self) -> Pin<Box<dyn Future<Output = Result<(), ModelError>> + Send + '_>>;
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Event {
@@ -165,6 +174,50 @@ pub async fn drive_with(
             transient: false,
         },
     })
+}
+
+/// Runs a CLI process while polling `watcher` and verifying final session state under the same deadline and cancel signal.
+pub(crate) async fn drive_watched(
+    sandbox: &ModelSandbox,
+    spec: ModelSpec,
+    parser: Box<dyn Parser>,
+    limits: Limits,
+    cancel: watch::Receiver<bool>,
+    mut watcher: impl SessionWatcher,
+) -> Result<Output, ModelError> {
+    let (abort, aborted) = watch::channel(false);
+    let deadline = Instant::now() + limits.total;
+    let mut finish_cancel = cancel.clone();
+    let driven = drive_with(sandbox, spec, parser, limits, cancel, aborted);
+    let output = {
+        let watching = async {
+            loop {
+                tokio::time::sleep(WATCH_EVERY).await;
+                if let Err(error) = watcher.poll().await {
+                    return error;
+                }
+            }
+        };
+        tokio::pin!(driven, watching);
+        tokio::select! {
+            output = &mut driven => output,
+            error = &mut watching => {
+                let _ = abort.send(true);
+                let _ = driven.await;
+                return Err(error);
+            }
+        }
+    }?;
+    // Refuse to emit a final answer if any relay call was unsaved or unfinished in the ledger.
+    tokio::select! {
+        biased;
+        () = cancelled(&mut finish_cancel) => Err(ModelError::Cancelled),
+        checked = tokio::time::timeout_at(deadline, watcher.finish()) => match checked {
+            Ok(Ok(())) => Ok(output),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(ModelError::Timeout),
+        },
+    }
 }
 
 #[cfg(test)]

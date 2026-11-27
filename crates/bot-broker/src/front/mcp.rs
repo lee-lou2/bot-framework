@@ -12,7 +12,9 @@ use super::{
     park::ParkReason,
     refuse,
 };
-use crate::{canon::canonicalize, json::parse, service::schedule, text::json_quote};
+use crate::{
+    canon::canonicalize, json::parse, model::Protocol, service::schedule, text::json_quote,
+};
 use bot_core::{
     cli::{ToolOutput, error_word},
     command::{CallResult, JsonPayload, ToolCall},
@@ -25,9 +27,14 @@ use tokio::sync::watch;
 /// Supported MCP protocol versions (newest first); unknown versions fall back to `SUPPORTED[0]`.
 const SUPPORTED: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// Extracts a valid `toolUseId`; missing or malformed IDs are rejected because resumes require stable call identity.
-fn tool_use_id(meta: Option<&Value>) -> Option<String> {
-    meta.and_then(|m| m.get("claudecode/toolUseId"))
+/// Extracts a clean protocol-specific call ID (`claudecode/toolUseId` or Codex `callId`).
+fn tool_use_id(protocol: Protocol, meta: Option<&Value>) -> Option<String> {
+    let key = match protocol {
+        Protocol::Anthropic => "claudecode/toolUseId",
+        Protocol::OpenAiResponses => "callId",
+        Protocol::Gemini => return None,
+    };
+    meta.and_then(|m| m.get(key))
         .and_then(Value::as_str)
         .filter(|t| {
             !t.is_empty()
@@ -36,6 +43,19 @@ fn tool_use_id(meta: Option<&Value>) -> Option<String> {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         })
         .map(str::to_owned)
+}
+
+/// Extracts AGY's `_meta.progressToken` (`<traj_id>:<step_idx>` or integer) for idempotent FIFO slot binding.
+fn progress_token(meta: Option<&Value>) -> Option<String> {
+    match meta?.get("progressToken")? {
+        Value::String(s)
+            if !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_graphic()) =>
+        {
+            Some(s.clone())
+        }
+        Value::Number(n) => n.as_u64().map(|v| v.to_string()),
+        _ => None,
+    }
 }
 
 fn rpc_result(id: &Value, result: &str) -> Vec<u8> {
@@ -210,30 +230,48 @@ async fn tools_call(
     let Some(params) = params.and_then(Value::as_object) else {
         return rpc_error(id, -32602, "invalid params");
     };
-    let delegating = params.get("name").and_then(Value::as_str) == Some(delegate::NAME);
-    let tool = params
+    let Some(raw_name) = params
         .get("name")
         .and_then(Value::as_str)
-        .and_then(ToolId::from_mcp_name)
-        .or_else(|| delegating.then(|| ToolId(delegate::NAME.to_owned())));
+        .filter(|s| !s.is_empty())
+    else {
+        return rpc_result(id, &notice("invalid"));
+    };
     let args = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| Value::Object(Default::default()));
-    let (Some(tool), true) = (tool, args.is_object()) else {
+    if !args.is_object() {
         return rpc_result(id, &notice("invalid"));
-    };
+    }
     let Some(args) = canonicalize(&args) else {
         return rpc_result(id, &notice("invalid"));
     };
-    let Some(tool_use) = tool_use_id(params.get("_meta")) else {
+    let name = raw_name.to_owned();
+    // Bind AGY's FIFO slot before `ToolId` validation so hallucinated names consume their slot cleanly.
+    let tool_use = match session.protocol {
+        Protocol::Gemini => {
+            let Some(token) = progress_token(params.get("_meta")) else {
+                return rpc_result(id, &notice("invalid"));
+            };
+            match shared.agy.resolve(&session.attempt, &token, &name, &args) {
+                Ok(resolved) => resolved,
+                Err(error) => return rpc_result(id, &notice(error_word(&error))),
+            }
+        }
+        other => {
+            let Some(id_str) = tool_use_id(other, params.get("_meta")) else {
+                return rpc_result(id, &notice("invalid"));
+            };
+            id_str
+        }
+    };
+    let delegating = name == delegate::NAME;
+    let Some(tool) = ToolId::from_mcp_name(&name)
+        .or_else(|| delegating.then(|| ToolId(delegate::NAME.to_owned())))
+    else {
         return rpc_result(id, &notice("invalid"));
     };
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
     // Gate planning, slot acquisition, and marker reads with `unless_revoked` so revocation stops execution before calling the broker.
     let book = shared.parts.calls.call_id(
         session.attempt.clone(),
@@ -319,6 +357,7 @@ async fn tools_call(
 /// preventing the CLI from making further model calls or finishing early.
 fn park(shared: &Shared, session: &Session, reason: Option<ParkReason>) {
     if let Some(reason) = reason {
+        shared.agy.clear(&session.attempt);
         shared.parts.sessions.revoke_attempt(&session.attempt);
         shared.parts.park.parked(&session.attempt, reason);
     }
@@ -350,14 +389,29 @@ mod tests {
     fn tool_use_ids_must_be_clean_and_present() {
         let meta = |v: &str| serde_json::json!({"claudecode/toolUseId": v, "progressToken": 2});
         assert_eq!(
-            tool_use_id(Some(&meta("toolu_01-AbC"))).as_deref(),
+            tool_use_id(Protocol::Anthropic, Some(&meta("toolu_01-AbC"))).as_deref(),
             Some("toolu_01-AbC")
         );
         for bad in ["", "has space", "evil/../x", "a;b"] {
-            assert!(tool_use_id(Some(&meta(bad))).is_none(), "{bad}");
+            assert!(
+                tool_use_id(Protocol::Anthropic, Some(&meta(bad))).is_none(),
+                "{bad}"
+            );
         }
-        assert!(tool_use_id(Some(&meta(&"x".repeat(65)))).is_none());
-        assert!(tool_use_id(None).is_none() && tool_use_id(Some(&serde_json::json!({}))).is_none());
+        assert!(tool_use_id(Protocol::Anthropic, Some(&meta(&"x".repeat(65)))).is_none());
+        assert!(
+            tool_use_id(Protocol::Anthropic, None).is_none()
+                && tool_use_id(Protocol::Anthropic, Some(&serde_json::json!({}))).is_none()
+        );
+        let codex = serde_json::json!({"callId": "call_spike_1", "progressToken": 1});
+        assert_eq!(
+            tool_use_id(Protocol::OpenAiResponses, Some(&codex)).as_deref(),
+            Some("call_spike_1")
+        );
+        assert!(tool_use_id(Protocol::Anthropic, Some(&codex)).is_none());
+        let agy = serde_json::json!({"progressToken": "traj-1:2"});
+        assert_eq!(progress_token(Some(&agy)).as_deref(), Some("traj-1:2"));
+        assert!(progress_token(Some(&serde_json::json!({"progressToken": "bad token"}))).is_none());
     }
 
     #[test]

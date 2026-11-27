@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Build the model VM image locally and pin it by digest (Apple container, Apple silicon). See docs/model-image.md.
+# Build a model VM image locally and pin it by digest (Apple container, Apple silicon). See docs/model-image.md.
 #
-#   images/model/build.sh              build, pin by digest, and print the image reference
-#   NO_CACHE=1 images/model/build.sh   rebuild fetch and signature verification without cache
+#   images/model/build.sh                           build Claude Code image (default), pin by digest, print ref
+#   images/model/build.sh --cli codex --build-arg CODEX_VERSION=... --build-arg CODEX_SHA256=...
+#   images/model/build.sh --cli agy --build-arg AGY_VERSION=... --build-arg AGY_URL=... --build-arg AGY_SHA256=...
+#   NO_CACHE=1 images/model/build.sh [--cli ...]    rebuild fetch and verification without cache
 #
-# Stdout emits only the single digest reference (`name@sha256:...`) for `sandbox.apple.image`; progress and summary go to stderr:
+# Stdout emits only the single digest reference (`name@sha256:...`) for `sandbox.apple.image` / `sandbox.apple.images.<cli>`;
+# progress and summary go to stderr:
 #   ref=$(images/model/build.sh)
-# Env: MODEL_IMAGE_NAME (default bot-model-vm), MODEL_IMAGE_REGISTRY_PORT (default 5088, bound briefly to 127.0.0.1).
+# Env: MODEL_IMAGE_NAME (default bot-model-vm / bot-model-codex / bot-model-agy), MODEL_IMAGE_REGISTRY_PORT (default 5088).
 # Acquires `/tmp/bot-vm-canary.lock` to serialize real VM runs on the same host.
 #
 # Why a temporary loopback registry: `container build` produces only a mutable name:tag reference (`name@sha256:...`
@@ -15,22 +18,63 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-name=${MODEL_IMAGE_NAME:-bot-model-vm}
+cli=claude
+build_args=()
+orig_args=("$@")
+
+say() { echo "$@" >&2; }
+die() { say "error: $*"; exit 1; }
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h | --help)
+      sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2
+      exit 0
+      ;;
+    --cli)
+      [ "$#" -ge 2 ] || die "--cli requires a value (claude | codex | agy)"
+      cli=$2
+      shift 2
+      ;;
+    --build-arg)
+      [ "$#" -ge 2 ] || die "--build-arg requires KEY=VALUE"
+      build_args+=(--build-arg "$2")
+      shift 2
+      ;;
+    *)
+      die "unknown argument: $1 (see --help)"
+      ;;
+  esac
+done
+
+case "$cli" in
+  claude)
+    containerfile=$here/Containerfile
+    default_name=bot-model-vm
+    cli_label="Claude Code"
+    ;;
+  codex)
+    containerfile=$here/Containerfile.codex
+    default_name=bot-model-codex
+    cli_label="Codex CLI"
+    ;;
+  agy)
+    containerfile=$here/Containerfile.agy
+    default_name=bot-model-agy
+    cli_label="Antigravity CLI"
+    ;;
+  *)
+    die "unsupported --cli value: $cli (expected claude, codex, or agy)"
+    ;;
+esac
+
+name=${MODEL_IMAGE_NAME:-$default_name}
 port=${MODEL_IMAGE_REGISTRY_PORT:-5088}
 registry_image=docker.io/library/registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
 registry_name=bot-model-image-registry
 stamp=$(date +%Y%m%d%H%M%S)-$$
 tag=$name:build-$stamp
 host_ref=127.0.0.1:$port/$name
-
-say() { echo "$@" >&2; }
-die() { say "error: $*"; exit 1; }
-
-case "${1:-}" in
-  -h | --help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 0 ;;
-  '') ;;
-  *) die "unknown argument: $1 (see --help)" ;;
-esac
 
 # Serialize real VM runs via `/tmp/bot-vm-canary.lock` (shared with adapter VM tests) to avoid flaky concurrent runs.
 if [ -z "${BOT_VM_LOCKED:-}" ]; then
@@ -42,7 +86,7 @@ except OSError:
     print("waiting for another VM task to finish (/tmp/bot-vm-canary.lock)", file=sys.stderr)
     fcntl.flock(fd, fcntl.LOCK_EX)
 os.set_inheritable(fd, True)
-os.execvp(sys.argv[1], sys.argv[1:])' "${BASH:-bash}" "$0" "$@"
+os.execvp(sys.argv[1], sys.argv[1:])' "${BASH:-bash}" "$0" ${orig_args[@]+"${orig_args[@]}"}
 fi
 
 command -v container >/dev/null 2>&1 || die "Apple container is required (brew install container)"
@@ -66,11 +110,11 @@ container delete --force "$registry_name" >/dev/null 2>&1 || true
 
 progress=plain
 [ -t 2 ] && progress=auto
-say "==> Building image (pinned base digest, Claude Code version/SHA-256, and GPG signature)"
+say "==> Building $cli_label image ($(basename "$containerfile"), pinned base digest and SHA-256 verification)"
 no_cache=()
 [ -n "${NO_CACHE:-}" ] && no_cache=(--no-cache)
-container build --platform linux/arm64 --tag "$tag" --file "$here/Containerfile" --progress "$progress" \
-  ${no_cache[@]+"${no_cache[@]}"} "$here" >&2 || die "build failed (see output above)"
+container build --platform linux/arm64 --tag "$tag" --file "$containerfile" --progress "$progress" \
+  ${no_cache[@]+"${no_cache[@]}"} ${build_args[@]+"${build_args[@]}"} "$here" >&2 || die "build failed (see output above)"
 
 say "==> Pinning digest via temporary loopback registry 127.0.0.1:$port"
 container image pull --platform linux/arm64 --progress none "$registry_image" >&2 || die "failed to pull temporary registry image"
@@ -104,16 +148,25 @@ container stop "$registry_name" >/dev/null 2>&1 || true
 # Smoke-test bot-init (nft rules + privilege drop) on this host kernel using a dummy private relay address.
 version=$(container run --progress none --rm --name "bot-model-image-check-$$" \
   --cap-drop ALL --cap-add CAP_NET_ADMIN --cap-add CAP_SETUID --cap-add CAP_SETGID --cap-add CAP_SETPCAP \
-  -e BOT_RELAY_IP=10.0.0.1 -e BOT_RELAY_PORT=1 "$ref" claude --version 2>/dev/null | tail -1) || true
-case "$version" in *"(Claude Code)") ;; *) die "failed to run via bot-init using digest reference (check manually with container run)" ;; esac
+  -e BOT_RELAY_IP=10.0.0.1 -e BOT_RELAY_PORT=1 "$ref" "$cli" --version 2>/dev/null | tail -1) || true
+case "$cli:$version" in
+  claude:*"(Claude Code)") ;;
+  codex:*codex* | codex:*Codex*) ;;
+  agy:?*) ;;
+  *) die "failed to run $cli via bot-init using digest reference (check manually with container run)" ;;
+esac
 
 say ""
 say "Image ref  : $ref"
-say "Claude Code: $version"
+say "$cli_label : $version"
 say "Size       : $(container image list --verbose 2>/dev/null | awk -v n="$host_ref" -v d="$short" '$1 == n && $3 == d { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9.]+$/ && $(i + 1) ~ /^[KMG]B$/) { print $i, $(i + 1); exit } }') (compressed)"
 say ""
 say "Add to host config (BOT_HOST_CONFIG):"
-say "  \"sandbox\": { \"apple\": { \"image\": \"$ref\", \"network\": \"<host-only network>\", \"relay_bind\": \"<network host IP:port>\" } }"
-say "Verify (init rejection, firewall, privilege drop, anchor, chat, session): images/model/verify.sh \"$ref\""
+if [ "$cli" = claude ]; then
+  say "  \"sandbox\": { \"apple\": { \"image\": \"$ref\", \"network\": \"<host-only network>\", \"relay_bind\": \"<network host IP:port>\" } }"
+  say "Verify (init rejection, firewall, privilege drop, anchor, chat, session): images/model/verify.sh \"$ref\""
+else
+  say "  \"sandbox\": { \"apple\": { \"images\": { \"$cli\": \"$ref\" }, \"network\": \"<host-only network>\", \"relay_bind\": \"<network host IP:port>\" } }"
+fi
 say "Keep this reference: 'container image prune -a' removes unused local images."
 echo "$ref"

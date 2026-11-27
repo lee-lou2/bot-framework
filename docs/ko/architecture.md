@@ -51,26 +51,27 @@ flowchart LR
 
 8가지 핵심 개념인 **프로필**(격리 단위), **에이전트**(역할 폴더), **스킬**(지침 + 도구), **게이트웨이**(인그레스/이그레스), **트리거**(실행 조건), **실행(run)**(작업 단위), **브로커**(도구 게이트), **이펙트**(외부 쓰기)와 크레이트별 코드 식별자는 [용어집](glossary.md)에 정리되어 있습니다.
 
-### Claude Code가 브로커에 연결하는 방식
+### VM 호스팅 모델 CLI가 브로커에 연결하는 방식
 
-`claude-cli` 모드에서 워커는 앵커 VM을 통해 호스트 전용 네트워크를 유지하고, 릴레이 리스너의 실제 IP와 TCP 포트를 모델 VM 내부의 신뢰할 수 있는 `bot-init`에 전달합니다. 사설 네트워크는 다른 호스트 포트나 피어 VM에도 도달할 수 있으므로, `bot-init`은 먼저 VM 방화벽을 설정하고 권한을 강등한 뒤 모델 CLI를 실행합니다. 모든 릴레이 요청은 현재 실행의 활성 리스(`claim`)에 바인딩된 세션 토큰으로 인증됩니다.
+VM CLI 모드(`claude-cli`, `codex-cli`, `agy-cli`)에서 워커는 공유 앵커 VM을 통해 호스트 전용 네트워크를 유지하고, 릴레이 리스너의 실제 IP와 TCP 포트를 모델 VM 내부의 신뢰할 수 있는 `bot-init`에 전달합니다. 사설 네트워크는 다른 호스트 포트나 피어 VM에도 도달할 수 있으므로, `bot-init`은 먼저 VM 방화벽을 설정하고 권한을 강등한 뒤 고정된 모델 CLI를 실행합니다. 모든 릴레이 요청은 현재 실행의 활성 리스(`claim`)와 해당 별칭의 와이어 프로토콜에 바인딩된 세션 토큰으로 인증됩니다.
 
-워커는 에이전트 지침, 스킬 본문, 운영자 지식 문서를 읽기 전용 `/bot/AGENTS.md`로 조합해 신규 실행과 `--resume` 모두에 `--append-system-prompt-file /bot/AGENTS.md`로 전달합니다. 회상된 메모리는 구성원이 편집할 수 있으므로 출처 태그를 붙여 사용자 입력(신규 실행은 stdin, 이후는 재개 세션)으로 주입합니다.
+워커는 에이전트 지침, 스킬 본문, 운영자 지식 문서를 읽기 전용 `/bot/AGENTS.md`로 조합합니다(`claude-cli`는 `--append-system-prompt-file /bot/AGENTS.md`로, `codex-cli`와 `agy-cli`는 `/bot`에서 자동 로드하며 `agy-cli`는 24 KB 규칙 제한을 넘기지 않도록 필요 시 도구 스키마를 stdin으로 넘깁니다). 회상된 메모리는 구성원이 편집할 수 있으므로 출처 태그를 붙여 신뢰된 시스템 지침이 아닌 사용자 입력으로 주입합니다.
 
-| 트래픽 | 엔드포인트 | 인증 및 격리 |
-|---|---|---|
-| 모델 완성(completion) | `POST /v1/messages` (SSE 또는 JSON) | `ANTHROPIC_BASE_URL`은 브로커 릴레이를 가리키고, `ANTHROPIC_API_KEY`에는 세션 토큰이 들어갑니다. 브로커가 업스트림 구간에서만 실제 프로바이더 키를 주입합니다. |
-| 도구 목록 조회 및 호출 | `POST /mcp` (HTTP 기반 MCP) | `--bare --strict-mcp-config`로 실행합니다. MCP 설정은 모델 입력 디렉터리 바깥(`/work/mcp.claude.json`)에 두고 `Authorization: Bearer ${RELAY_TOKEN}`을 사용하며, 토큰은 환경 변수로만 전달하고 디스크에는 기록하지 않습니다. |
+| CLI 러너 | 모델 릴레이 경로 | 도구 릴레이 및 인증 | 복구 및 재개 |
+|---|---|---|---|
+| `claude-cli` | `POST /v1/messages` (`Anthropic`, `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`) | `/work/mcp.claude.json`(`Bearer ${RELAY_TOKEN}`)으로 `POST /mcp` 호출; `_meta["claudecode/toolUseId"]` 매칭. | 감사된 JSONL 세션 추적 + 브로커 회상 도구 출력으로 `--resume`. |
+| `codex-cli` | `POST /v1/responses` (`OpenAiResponses`, `Authorization: Bearer ${RELAY_TOKEN}`) | `mcp_servers.relay.bearer_token_env_var="RELAY_TOKEN"`으로 `POST /mcp` 호출; `_meta["callId"]` 매칭. | 감사된 롤아웃 JSONL 추적 + 브로커 회상 도구 출력으로 `codex exec resume`. |
+| `agy-cli` | `POST /v1beta/models/<model>:streamGenerateContent` (`Gemini`, `GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY`) | `bot-init`이 `/work/mcp.agy.template.json`에서 RAM 전용 `/tmp/mcp_config.json`으로 확장한 심볼릭 링크를 통해 `POST /mcp` 호출; 브로커가 `call_mcp_tool` 계획을 `_meta["progressToken"]` 기준 FIFO로 매칭. | 브로커가 `cli-group-*` / `cli-use-*`를 직접 커밋하며, 대기/재개 시 원장 슬롯을 정산하고 렌더링된 대화 기록으로 새 세션을 시작. |
 
-브로커는 도구 목록 조회 시에도 활성 claim을 검증하고, CLI의 `toolUseId`·도구 이름·인자를 저장된 모델 턴과 대조해 결정적 호출 ID를 부여하며, 워커 종료 시 자신이 발급한 토큰만 폐기합니다. ([신뢰성](reliability.md))
+모든 CLI 모드에서 브로커는 업스트림 프록시 구간에서만 실제 프로바이더 키를 주입하고, 도구 목록 조회 시에도 활성 claim을 검증하며, 모든 `/mcp` 호출을 브로커가 관찰한 모델 턴과 대조해 결정적 호출 ID를 부여하고, 워커 종료 시 자신이 발급한 토큰만 폐기합니다. ([신뢰성](reliability.md))
 
 ## 호스트 설정 및 모델 실행
 
-`BOT_HOST_CONFIG`에서 `models`는 프로필별로 허용되는 모델 별칭을 선언하고, `providers`는 각 별칭의 실행 방식을 정의합니다. 예를 들어 외부 계정 없는 로컬 데모에서는 `{"models":{"personal":["assistant"]},"providers":{"assistant":{"kind":"demo"}}}`를 사용합니다. `claude-cli` 프로바이더는 업스트림 `model`, HTTPS `endpoint`, 프로필 시크릿 이름 `secret`이 필수이며, 선택적으로 `--effort`에 전달할 `effort`(`low`, `medium`, `high`, `xhigh`, `max`; 기본값 `medium`)를 지정할 수 있습니다.
+`BOT_HOST_CONFIG`에서 `models`는 프로필별로 허용되는 모델 별칭을 선언하고, `providers`는 각 별칭의 실행 방식을 정의합니다. 예를 들어 외부 계정 없는 로컬 데모에서는 `{"models":{"personal":["assistant"]},"providers":{"assistant":{"kind":"demo"}}}`를 사용합니다. VM CLI 프로바이더(`claude-cli`, `codex-cli`, `agy-cli`)는 업스트림 `model`, HTTPS `endpoint`, 프로필 시크릿 이름 `secret`이 필수이며, 선택적으로 `effort`(`low`, `medium`, `high`, `xhigh`, `max`; 기본값 `medium`)를 지정할 수 있습니다.
 
 ### 모델 러너 선택
 
-일반 대화와 브로커 도구 호출에는 기본적으로 직접 API 러너(`anthropic-api`, `openai-api`)를 사용하세요. Apple `container` VM 기반 `claude-cli`는 에이전트가 격리된 워크스페이스 파일 읽기를 위해 `builtin: [read]`를 선언한 경우에만 사용합니다.
+일반 대화와 브로커 도구 호출에는 기본적으로 직접 API 러너(`anthropic-api`, `openai-api`)를 사용하세요. CLI 에이전트 하니스가 필요하거나(또는 에이전트가 격리된 `/bot` 파일 읽기를 위해 `builtin: [read]`를 선언한 `claude-cli`인 경우) Apple `container` VM 기반 CLI 러너(`claude-cli`, `codex-cli`, `agy-cli`)를 사용합니다.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../diagrams/model-execution-paths-dark.svg">
@@ -82,6 +83,7 @@ flowchart LR
 |---|---|---|---|---|
 | `anthropic-api`, `openai-api` | Linux, macOS | 없음 — 워커가 VM 없이 업스트림 HTTP API를 직접 호출합니다. | 요청 전송 직전에 `SecretStore`에서 읽어 요청 헤더에 첨부합니다. 루프백 엔드포인트에서만 생략할 수 있습니다. | 스코프 제한 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`; 슈퍼 관리자 전용 `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`; 직계 자식용 `delegate`. 파일 내장 도구를 선언하면 `unsupported_builtin`으로 영구 실패합니다. |
 | `claude-cli` | Apple `container`가 설치된 macOS | 브로커 릴레이에 연결된 일회용 VM에서 Claude Code를 실행합니다. | 호스트 브로커의 모델 프록시만 읽으며, VM에는 세션 토큰만 전달합니다. | 위 모든 도구에 더해, 프로필이 허용한 경우 격리 기반 `read`를 사용할 수 있습니다. |
+| `codex-cli`, `agy-cli` | Apple `container`가 설치된 macOS | 브로커 릴레이에 연결된 일회용 VM에서 Codex CLI 또는 Antigravity CLI를 실행합니다. | 호스트 브로커의 모델 프록시만 읽으며, VM에는 세션 토큰만 전달합니다. | 위 모든 브로커 도구. 파일 내장 도구(`read`, `grep`, `glob`)를 선언하면 `unsupported_builtin`으로 실패합니다. |
 
 호스트는 발화별 전달 승인을 위해 `schedule.deliver`를 예약합니다. ([MCP 도구](plugins.md))
 
@@ -114,7 +116,7 @@ flowchart LR
 |---|---|
 | `sandbox.srt.binary`, `work_root`, `extra_path` | `srt` 바이너리와 읽기 전용 도구 설치/작업 루트의 절대 경로. 선택적 `extra_path`는 최대 16개의 호스트 절대 디렉터리(예: `/opt/homebrew/bin`)를 샌드박스 도구의 `PATH`에 추가합니다. |
 | `limits.tool_call_max_secs` | 도구별 `timeout_secs`의 선택적 상한(초 단위; 기본 `60`, 최대 `900`). 상한을 높여도 `timeout_secs`를 생략한 도구의 기본값 60초는 올라가지 않습니다. 활성화 지문에 포함됩니다. ([MCP 도구](plugins.md)) |
-| `sandbox.apple.image`, `sandbox.apple.network` | `claude-cli` 워커용 고정 이미지 다이제스트와 호스트 전용 네트워크 이름(앵커 VM이 호스트 인터페이스를 유지). 활성화 지문에 포함됩니다. |
+| `sandbox.apple.image`, `sandbox.apple.images`, `sandbox.apple.network` | CLI 워커용 다이제스트 고정 VM 이미지와 호스트 전용 네트워크 이름(공유 앵커 VM 1대가 호스트 인터페이스를 유지). `sandbox.apple.images`는 CLI별 키(`claude`, `codex`, `agy`)를 다이제스트 고정 참조에 매핑합니다(`claude`는 `sandbox.apple.image`로 폴백하며 `codex`와 `agy`는 명시적 키가 필요). 활성화 지문에 포함됩니다. |
 | `sandbox.apple.relay_bind` | 선택적 워커 로컬 릴레이 바인드 주소. 기본값은 앵커 VM 게이트웨이 IPv4 + OS 할당 포트이며, 지정 시 해당 게이트웨이 IP와 일치해야 합니다. |
 | `sandbox.apple.work_root` | 선택적 워커 로컬 모델 작업 디렉터리 절대 경로(`0700`). 기본값은 `<tool-root-parent>/work/models`입니다. |
 | `sandbox.apple.instance` | 선택적 워커 로컬 VM 이름 접두사(기본값 `botvm`). |
@@ -122,7 +124,7 @@ flowchart LR
 | `bot/<profile>/private-intake` | 프라이빗 DM을 받는 게이트웨이에 필요한 프로필별 지문 키(설정된 도구 러너와 함께 사용). 도구 환경 변수에는 절대 주입되지 않습니다. |
 | `admin.trace`, `admin.logs`, `admin.issues` | OTLP 트레이스/로그 및 Sentry 호환 이슈 익스포터 설정(엔드포인트, 헤더, 시크릿, 레벨, 콘텐츠 플래그, ID 형식, 샘플링 비율). 활성화 지문에 포함되므로 변경·제거 시 구버전 프로세스의 내보내기를 멈추기 위해 재활성화가 필요합니다. ([관리자 및 관측성](admin.md)) |
 
-Rust 어댑터는 릴레이 리스너의 실제 주소에서 `BOT_RELAY_IP`(RFC 1918 IPv4), `BOT_RELAY_PORT`(`1..=65535`), `ANTHROPIC_BASE_URL`(`http://IP:port`)를 호스트 측에서만 파생합니다. 모델 VM은 `bot-init`으로 부팅하고, 앵커 VM은 UID:GID `10001:10001`로 `bot-anchor`를 실행합니다. ([모델 이미지](model-image.md))
+Rust 어댑터는 릴레이 리스너의 실제 주소에서 `BOT_RELAY_IP`(RFC 1918 IPv4), `BOT_RELAY_PORT`(`1..=65535`) 및 CLI별 릴레이 기본 URL(`claude-cli`는 `ANTHROPIC_BASE_URL`, `codex-cli`는 `model_providers.relay.base_url` / `mcp_servers.relay.url`, `agy-cli`는 `GOOGLE_GEMINI_BASE_URL`)을 호스트 측에서만 파생합니다. 모델 VM은 `bot-init`으로 부팅하고, 앵커 VM은 UID:GID `10001:10001`로 `bot-anchor`를 실행합니다. ([모델 이미지](model-image.md))
 
 데모 모델은 VM이나 업스트림 키가 필요 없지만, 데모 도구는 운영 도구와 동일한 설치·샌드박스·승인 규칙을 그대로 적용합니다.
 
