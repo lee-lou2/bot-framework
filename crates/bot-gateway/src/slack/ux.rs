@@ -5,26 +5,27 @@
 //! - Stop cancels the run tree via `RunAdmin::cancel` (audited) and is restricted to the requester or `admin`/`owner`.
 mod cards;
 mod stop;
+mod stream;
 
 pub use cards::{STOP_CONFIRM, STOP_CONTINUE, is_stop_phrase};
 pub use stop::StopMention;
 
-use super::{
-    api::{Body, Raw},
-    creds::Credentials,
-};
+use super::creds::Credentials;
 use bot_core::{
     id::{PrincipalId, ProfileId, RunId},
     port::{RunAdmin, RunStore},
     state::RunState,
 };
 use cards::{STOP_ACK, STOP_FINISHED, describe_progress, stop_card_blocks};
-use serde_json::json;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
+use stream::ThreadStream;
 use tokio_util::sync::CancellationToken;
 
 pub(super) const EYES: &str = "eyes";
@@ -58,6 +59,7 @@ pub(super) struct RunUxState {
 }
 
 pub(super) struct ActiveRun {
+    pub(super) seq: u64,
     pub(super) info: TrackedRun,
     pub(super) started: Instant,
     pub(super) st: Mutex<RunUxState>,
@@ -92,13 +94,6 @@ struct ActiveTable {
     by_thread: HashMap<ThreadKey, Vec<RunId>>,
 }
 
-#[derive(Default)]
-struct ThreadStream {
-    open: Option<(RunId, String)>,
-    // Runs whose final reply has started or finished; blocks late polls from reopening a card after the reply.
-    closed: HashSet<RunId>,
-}
-
 type ThreadKey = (String, String);
 type StreamSlot = Arc<tokio::sync::Mutex<ThreadStream>>;
 
@@ -108,6 +103,7 @@ pub struct SlackUx {
     pub(super) admin: Arc<dyn RunAdmin>,
     poll_every: Duration,
     watch_limit: Duration,
+    next_seq: AtomicU64,
     // Deduplicates duplicate events for the same run (e.g. app_mention + message.channels).
     seen: Mutex<SeenRuns>,
     active: Mutex<ActiveTable>,
@@ -122,6 +118,7 @@ impl SlackUx {
             admin,
             poll_every: POLL_EVERY,
             watch_limit: WATCH_LIMIT,
+            next_seq: AtomicU64::new(1),
             seen: Mutex::new(SeenRuns::default()),
             active: Mutex::new(ActiveTable::default()),
             streams: Mutex::new(HashMap::new()),
@@ -164,14 +161,25 @@ impl SlackUx {
         let key = Self::key(channel, thread_ts);
         let mut map = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         let removable = map.get(&key).is_some_and(|slot| {
-            Arc::strong_count(slot) == 1
-                && slot
-                    .try_lock()
-                    .is_ok_and(|g| g.open.is_none() && g.closed.is_empty())
+            Arc::strong_count(slot) == 1 && slot.try_lock().is_ok_and(|g| g.is_empty())
         });
         if removable {
             map.remove(&key);
         }
+    }
+
+    fn has_other_unclosed_active(
+        &self,
+        channel: &str,
+        thread_ts: &str,
+        run: &RunId,
+        closed: &HashSet<RunId>,
+    ) -> bool {
+        let table = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        table
+            .by_thread
+            .get(&Self::key(channel, thread_ts))
+            .is_some_and(|stack| stack.iter().any(|id| id != run && !closed.contains(id)))
     }
 
     fn remove_active(&self, info: &TrackedRun) {
@@ -217,7 +225,9 @@ impl SlackUx {
                 return false;
             }
         }
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let entry = Arc::new(ActiveRun {
+            seq,
             info,
             started: Instant::now(),
             st: Mutex::new(RunUxState {
@@ -257,6 +267,8 @@ impl SlackUx {
             )
         {
             self.remove_active(info);
+            self.retire_run(&info.channel, &info.thread_ts, &info.run, false)
+                .await;
             return;
         }
         self.react(
@@ -268,7 +280,6 @@ impl SlackUx {
         )
         .await;
 
-        let mut last_card: Option<String> = None;
         let mut final_state: Option<RunState> = None;
         let deadline = tokio::time::Instant::now() + self.watch_limit;
         let mut first = true;
@@ -307,33 +318,17 @@ impl SlackUx {
                 final_state = Some(progress.state);
                 break;
             }
-            if let Some(card_text) = card_text
-                && last_card.as_deref() != Some(card_text.as_str())
-            {
-                self.set_status(
-                    &info.profile,
-                    &info.workspace,
-                    &info.channel,
-                    &info.thread_ts,
-                    &info.run,
-                    &card_text,
-                    &info.team,
-                    &info.user,
-                )
+            self.update_status(active.seq, info, card_text.as_deref())
                 .await;
-                last_card = Some(card_text);
-            }
         }
 
-        // Deregister before clearing this run's stream, and only set a terminal reaction on confirmed completion.
+        // Deregister before retiring this run's stream, and only set a terminal reaction on confirmed completion.
         self.remove_active(info);
-        self.clear_stream_for_run(
-            &info.profile,
-            &info.workspace,
+        self.retire_run(
             &info.channel,
             &info.thread_ts,
             &info.run,
-            true,
+            !stop.is_cancelled(),
         )
         .await;
 
@@ -393,174 +388,6 @@ impl SlackUx {
             }
             // Watch deadline or graceful shutdown: run may still be active, so do not react with :x:.
             None | Some(_) => {}
-        }
-    }
-
-    async fn close_and_delete_stream(
-        &self,
-        profile: &ProfileId,
-        workspace: &str,
-        channel: &str,
-        ts: &str,
-    ) {
-        let Some(token) = self.creds.bot_token(profile, workspace).await else {
-            return;
-        };
-        let stop_body = json!({"channel": channel, "ts": ts, "markdown_text": ""});
-        let _ = self
-            .creds
-            .call_passive("chat.stopStream", &token, Body::Json(&stop_body))
-            .await;
-        let del_body = json!({"channel": channel, "ts": ts});
-        let _ = self
-            .creds
-            .call_passive("chat.delete", &token, Body::Json(&del_body))
-            .await;
-    }
-
-    /// Closes and deletes the progress stream opened by `run` without touching other runs in the thread.
-    /// When `mark_closed` is true (final reply), blocks late polls from reopening a card after the reply.
-    pub async fn clear_stream(
-        &self,
-        profile: &ProfileId,
-        workspace: &str,
-        channel: &str,
-        thread_ts: &str,
-        run: &RunId,
-        mark_closed: bool,
-    ) {
-        let slot = if mark_closed && self.active_by_run(&run.0).is_some() {
-            Some(self.stream_slot(channel, thread_ts))
-        } else {
-            self.existing_stream_slot(channel, thread_ts)
-        };
-        let Some(slot) = slot else { return };
-        let mut guard = slot.lock().await;
-        let ts = if guard.open.as_ref().is_some_and(|(r, _)| r == run) {
-            guard.open.take().map(|(_, ts)| ts)
-        } else {
-            None
-        };
-        if mark_closed && self.active_by_run(&run.0).is_some() {
-            guard.closed.insert(run.clone());
-        }
-        if let Some(ts) = ts {
-            self.close_and_delete_stream(profile, workspace, channel, &ts)
-                .await;
-        }
-        drop(guard);
-        drop(slot);
-        self.prune_stream_slot(channel, thread_ts);
-    }
-
-    async fn clear_stream_for_run(
-        &self,
-        profile: &ProfileId,
-        workspace: &str,
-        channel: &str,
-        thread_ts: &str,
-        run: &RunId,
-        retire: bool,
-    ) {
-        let Some(slot) = self.existing_stream_slot(channel, thread_ts) else {
-            return;
-        };
-        let mut guard = slot.lock().await;
-        let ts = if guard.open.as_ref().is_some_and(|(r, _)| r == run) {
-            guard.open.take().map(|(_, ts)| ts)
-        } else {
-            None
-        };
-        if retire {
-            guard.closed.remove(run);
-        }
-        if let Some(ts) = ts {
-            self.close_and_delete_stream(profile, workspace, channel, &ts)
-                .await;
-        }
-        drop(guard);
-        drop(slot);
-        self.prune_stream_slot(channel, thread_ts);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn set_status(
-        &self,
-        profile: &ProfileId,
-        workspace: &str,
-        channel: &str,
-        thread_ts: &str,
-        run: &RunId,
-        status: &str,
-        team_id: &str,
-        user_id: &str,
-    ) {
-        if status.is_empty() {
-            self.clear_stream_for_run(profile, workspace, channel, thread_ts, run, false)
-                .await;
-            return;
-        }
-        let Some(token) = self.creds.bot_token(profile, workspace).await else {
-            return;
-        };
-        let slot = self.stream_slot(channel, thread_ts);
-        let mut guard = slot.lock().await;
-        if guard.closed.contains(run) {
-            return;
-        }
-        // Close any lingering stream card from an earlier run in the same thread first.
-        if guard.open.as_ref().is_some_and(|(r, _)| r != run)
-            && let Some((_, old_ts)) = guard.open.take()
-        {
-            self.close_and_delete_stream(profile, workspace, channel, &old_ts)
-                .await;
-        }
-        let chunk = json!({
-            "type": "task_update",
-            "id": "status",
-            "title": status,
-            "status": "in_progress"
-        });
-        match guard.open.as_ref().map(|(_, ts)| ts.clone()) {
-            Some(ts) => {
-                let body = json!({"channel": channel, "ts": ts, "chunks": [chunk]});
-                match self
-                    .creds
-                    .call_passive("chat.appendStream", &token, Body::Json(&body))
-                    .await
-                {
-                    Raw::Ok(_) => {}
-                    _ => {
-                        guard.open = None;
-                        let del = json!({"channel": channel, "ts": ts});
-                        let _ = self
-                            .creds
-                            .call_passive("chat.delete", &token, Body::Json(&del))
-                            .await;
-                    }
-                }
-            }
-            None => {
-                let mut body = json!({
-                    "channel": channel,
-                    "thread_ts": thread_ts,
-                    "chunks": [chunk]
-                });
-                if !team_id.is_empty() {
-                    body["recipient_team_id"] = json!(team_id);
-                }
-                if !user_id.is_empty() {
-                    body["recipient_user_id"] = json!(user_id);
-                }
-                if let Raw::Ok(val) = self
-                    .creds
-                    .call_passive("chat.startStream", &token, Body::Json(&body))
-                    .await
-                    && let Some(ts) = val["ts"].as_str()
-                {
-                    guard.open = Some((run.clone(), ts.to_owned()));
-                }
-            }
         }
     }
 }

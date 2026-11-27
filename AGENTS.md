@@ -66,7 +66,7 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 | Host config (`host.json`) | `crates/bot-cli/src/{host,embeddings,memory_judge,execution,execution/provider,install,tool_limits}.rs`, `crates/bot-gateway/src/host.rs`, `crates/bot-admin/src/settings.rs` |
 | Activation & restore | `crates/bot-cli/src/serve/{activation,restore}.rs`, `crates/bot-store/src/{active,profile_bundles}.rs` |
 | Reply outbox & transport scoping | `crates/bot-core/src/intake.rs`, `crates/bot-gateway/src/{routes,delivery,slack/send}.rs`, `crates/bot-store/src/{accept,outbox,finish,delivery}.rs`, `crates/bot-store/migrations/0026_reply_transport.sql` |
-| Slack progress UX & stop | `crates/bot-gateway/src/slack/{ux,ux/cards,ux/stop}.rs` |
+| Slack progress UX & stop | `crates/bot-gateway/src/slack/{ux,ux/cards,ux/stop,ux/stream}.rs` |
 | Schedules | Static cron `crates/bot-runtime/src/scheduler.rs`+`crates/bot-core/src/cron.rs`, chat schedules `crates/bot-store/src/user_schedule.rs`+`crates/bot-broker/src/service/schedule.rs` |
 | Memory & private DM | `crates/bot-core/src/memory.rs`, `crates/bot-store/src/{memory,memory_search,memory_ops,memory_auto,share,private}.rs`, `crates/bot-runtime/src/{embeddings.rs,memory_judge.rs,context/memory.rs}`, `crates/bot-broker/src/{private.rs,service/memory.rs}` |
 | Pre-approval grants | `crates/bot-core/src/grant.rs`, `crates/bot-store/src/grants.rs`, `crates/bot-broker/src/preapproval.rs`, `crates/bot-admin/src/preapproval.rs` |

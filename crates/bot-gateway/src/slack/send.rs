@@ -435,22 +435,21 @@ impl Sender for SlackSender {
             let channel = split_route(&item.destination.id)
                 .map_or(item.destination.id.as_str(), |(_, channel)| channel);
             let thread = item.destination.thread.as_deref();
-            if let (Some(ux), Some(thread)) = (&self.ux, thread) {
-                ux.clear_stream(
-                    &item.key.profile,
-                    workspace,
-                    channel,
-                    thread,
-                    &item.key.run,
-                    body.approval.is_none(),
-                )
-                .await;
-            }
+            let reply_guard = match (&self.ux, thread) {
+                (Some(ux), Some(thread)) => Some(
+                    ux.begin_reply(channel, thread, &item.key.run, body.approval.is_none())
+                        .await,
+                ),
+                _ => None,
+            };
             let delivery = match (body.attachments.is_empty(), &body.approval) {
                 (true, _) => self.post(&token, channel, thread, body).await,
                 (false, None) => self.upload(&token, channel, thread, body).await,
                 (false, Some(_)) => Delivery::Rejected,
             };
+            if let Some(guard) = reply_guard {
+                guard.finish().await;
+            }
             if let (Delivery::Sent { receipt }, ConversationKind::Channel) =
                 (&delivery, &item.destination.kind)
             {
