@@ -73,5 +73,5 @@ impl Default for Limits {
 pub const KNOWLEDGE_MAX_DOCS: usize = 8;
 pub const KNOWLEDGE_MAX_BYTES: usize = 32 * 1024;
 /// 에이전트 하나에게 보이는 스킬 본문(front matter 제외) 합계 상한(profile-spec).
-/// 한 요청의 지식 문서 상한(`KNOWLEDGE_MAX_BYTES`, 32 KiB)과 같은 수준으로 맞춘다.
-pub const SKILL_MAX_BYTES: usize = 32 * 1024;
+/// 한국어·마크다운 실무 프로필의 멀티 스킬 여유를 확보하면서도 시스템 프롬프트 비대화를 막기 위해 64 KiB로 둔다.
+pub const SKILL_MAX_BYTES: usize = 64 * 1024;

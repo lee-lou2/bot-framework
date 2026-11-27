@@ -92,7 +92,7 @@ pub const SKILL_INSPECT: ModelTool = ModelTool {
     class: Risk::Read,
     external: false,
     super_admin: true,
-    description: "슈퍼 관리자 전용. 현재 프로필의 에이전트 구조·설명·스킬 용량(32 KiB 한도), 스킬 목록, 등록된 MCP 서버, 비밀 이름(값 제외)을 조회합니다. skill을 지정하면 해당 스킬의 본문까지 반환합니다.",
+    description: "슈퍼 관리자 전용. 현재 프로필의 에이전트 구조·설명·스킬 용량(64 KiB 한도), 스킬 목록, 등록된 MCP 서버, 비밀 이름(값 제외)을 조회합니다. skill을 지정하면 해당 스킬의 본문까지 반환합니다.",
     schema: r#"{"additionalProperties":false,"properties":{"agent":{"maxLength":256,"minLength":1,"type":["string","null"]},"skill":{"maxLength":63,"minLength":1,"type":"string"}},"type":"object"}"#,
 };
 pub const SKILL_INSPECT_TOOL: &str = SKILL_INSPECT.id;
@@ -103,7 +103,7 @@ pub const SKILL_CREATE: ModelTool = ModelTool {
     external: false,
     super_admin: true,
     description: "슈퍼 관리자 전용. 새 스킬(SKILL.md)을 프로필 공용(agent 생략 또는 null) 또는 특정 에이전트에 생성하고 검증 뒤 즉시 활성화합니다.",
-    schema: r#"{"additionalProperties":false,"properties":{"agent":{"maxLength":256,"minLength":1,"type":["string","null"]},"body":{"maxLength":32768,"minLength":1,"type":"string"},"description":{"maxLength":1024,"minLength":1,"type":"string"},"name":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"}},"required":["name","description","body"],"type":"object"}"#,
+    schema: r#"{"additionalProperties":false,"properties":{"agent":{"maxLength":256,"minLength":1,"type":["string","null"]},"body":{"maxLength":65536,"minLength":1,"type":"string"},"description":{"maxLength":1024,"minLength":1,"type":"string"},"name":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"}},"required":["name","description","body"],"type":"object"}"#,
 };
 pub const SKILL_CREATE_TOOL: &str = SKILL_CREATE.id;
 
@@ -113,7 +113,7 @@ pub const SKILL_UPDATE: ModelTool = ModelTool {
     external: false,
     super_admin: true,
     description: "슈퍼 관리자 전용. 기존 스킬의 description이나 본문(body)을 수정하고 기존 도구 선언은 유지한 채 검증 뒤 즉시 활성화합니다.",
-    schema: r#"{"additionalProperties":false,"properties":{"agent":{"maxLength":256,"minLength":1,"type":["string","null"]},"body":{"maxLength":32768,"minLength":1,"type":"string"},"description":{"maxLength":1024,"minLength":1,"type":"string"},"name":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"}},"required":["name"],"type":"object"}"#,
+    schema: r#"{"additionalProperties":false,"properties":{"agent":{"maxLength":256,"minLength":1,"type":["string","null"]},"body":{"maxLength":65536,"minLength":1,"type":"string"},"description":{"maxLength":1024,"minLength":1,"type":"string"},"name":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"}},"required":["name"],"type":"object"}"#,
 };
 pub const SKILL_UPDATE_TOOL: &str = SKILL_UPDATE.id;
 
@@ -133,7 +133,7 @@ pub const MCP_ADD: ModelTool = ModelTool {
     external: true,
     super_admin: true,
     description: "슈퍼 관리자 전용. 원격 Streamable HTTP 또는 로컬 stdio MCP 서버를 호스트 설정·프로필·스킬에 연결하고 검증 뒤 즉시 활성화합니다. 비밀 값은 SOPS/키체인 보관소에만 암호화 저장하고 평문 파일에는 적지 않습니다.",
-    schema: r#"{"additionalProperties":false,"properties":{"agent":{"maxLength":256,"minLength":1,"type":["string","null"]},"alias":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"},"auth_secret":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"},"command":{"items":{"minLength":1,"type":"string"},"minItems":1,"type":"array"},"default_class":{"enum":["read","write","irreversible"],"type":"string"},"description":{"maxLength":1024,"minLength":1,"type":"string"},"instructions":{"maxLength":32768,"minLength":1,"type":"string"},"only_tools":{"items":{"minLength":1,"type":"string"},"type":"array"},"roles":{"items":{"maxLength":63,"minLength":1,"type":"string"},"type":"array"},"root":{"minLength":1,"type":"string"},"secret_value":{"minLength":1,"type":"string"},"secret_values":{"additionalProperties":{"minLength":1,"type":"string"},"type":"object"},"skill":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"},"stdio_tools":{"items":{"additionalProperties":false,"properties":{"class":{"enum":["read","write","irreversible"],"type":"string"},"description":{"maxLength":4096,"type":"string"},"egress":{"items":{"type":"string"},"type":"array"},"env":{"items":{"type":"string"},"type":"array"},"input":{"type":"object"},"name":{"maxLength":63,"minLength":1,"type":"string"},"secrets":{"additionalProperties":{"maxLength":63,"minLength":1,"type":"string"},"type":"object"},"timeout_secs":{"maximum":900,"minimum":1,"type":"integer"}},"required":["name","class","input"],"type":"object"},"type":"array"},"tool_classes":{"additionalProperties":{"enum":["read","write","irreversible"],"type":"string"},"type":"object"},"transport":{"enum":["http","stdio"],"type":"string"},"url":{"minLength":1,"type":"string"}},"required":["alias","transport"],"type":"object"}"#,
+    schema: r#"{"additionalProperties":false,"properties":{"agent":{"maxLength":256,"minLength":1,"type":["string","null"]},"alias":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"},"auth_secret":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"},"command":{"items":{"minLength":1,"type":"string"},"minItems":1,"type":"array"},"default_class":{"enum":["read","write","irreversible"],"type":"string"},"description":{"maxLength":1024,"minLength":1,"type":"string"},"instructions":{"maxLength":65536,"minLength":1,"type":"string"},"only_tools":{"items":{"minLength":1,"type":"string"},"type":"array"},"roles":{"items":{"maxLength":63,"minLength":1,"type":"string"},"type":"array"},"root":{"minLength":1,"type":"string"},"secret_value":{"minLength":1,"type":"string"},"secret_values":{"additionalProperties":{"minLength":1,"type":"string"},"type":"object"},"skill":{"maxLength":63,"minLength":1,"pattern":"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$","type":"string"},"stdio_tools":{"items":{"additionalProperties":false,"properties":{"class":{"enum":["read","write","irreversible"],"type":"string"},"description":{"maxLength":4096,"type":"string"},"egress":{"items":{"type":"string"},"type":"array"},"env":{"items":{"type":"string"},"type":"array"},"input":{"type":"object"},"name":{"maxLength":63,"minLength":1,"type":"string"},"secrets":{"additionalProperties":{"maxLength":63,"minLength":1,"type":"string"},"type":"object"},"timeout_secs":{"maximum":900,"minimum":1,"type":"integer"}},"required":["name","class","input"],"type":"object"},"type":"array"},"tool_classes":{"additionalProperties":{"enum":["read","write","irreversible"],"type":"string"},"type":"object"},"transport":{"enum":["http","stdio"],"type":"string"},"url":{"minLength":1,"type":"string"}},"required":["alias","transport"],"type":"object"}"#,
 };
 pub const MCP_ADD_TOOL: &str = MCP_ADD.id;
 

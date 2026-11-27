@@ -103,7 +103,7 @@ fn nothing_is_located_when_the_profile_would_not_load_like_validate() {
 fn invalid_target_skill_md_is_refused_before_location_succeeds() {
     let over = "a".repeat(bot_profile::SKILL_MAX_BYTES + 1);
     let cases = [
-        ("단일 32 KiB 초과", over.as_str(), "skill-too-large"),
+        ("단일 64 KiB 초과", over.as_str(), "skill-too-large"),
         (
             "allowed-tools 금지",
             "---\nname: agenda\nallowed-tools: Bash\n---\n일정\n",

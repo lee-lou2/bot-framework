@@ -311,7 +311,7 @@ async fn invalid_skill_md_fails_before_reading_secrets_or_connecting_to_remote()
 
     let over = "x".repeat(bot_profile::SKILL_MAX_BYTES + 1);
     for (label, content, want) in [
-        ("단일 32 KiB 초과", over.as_str(), "[skill-too-large]"),
+        ("단일 64 KiB 초과", over.as_str(), "[skill-too-large]"),
         (
             "allowed-tools 금지",
             "---\nname: docs\nallowed-tools: Bash\n---\n본문\n",

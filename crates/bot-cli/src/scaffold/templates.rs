@@ -52,7 +52,7 @@ pub fn skill_md(name: &str) -> String {
 
 /// 슈퍼 관리자 전용 스킬·MCP 생성·수정·삭제 스킬(`bot add skill skill-creator`).
 /// Claude·Codex skill-creator의 핵심 원칙(간결·명확·판단을 바꾸는 규칙 중심)과 `bot-framework`의
-/// 32 KiB 한도·SOPS 암호화 비밀·즉시 활성화 구조를 함께 담는다.
+/// 64 KiB 한도·SOPS 암호화 비밀·즉시 활성화 구조를 함께 담는다.
 pub const SKILL_CREATOR: &str = r##"---
 name: "skill-creator"
 description: "슈퍼 관리자의 자연어 요청으로 에이전트 스킬을 생성·수정·삭제하거나 MCP 서버를 추가·제거하고 즉시 활성화한다. '스킬 만들어줘', '스킬 수정/삭제해줘', 'MCP 추가/제거해줘' 요청에 사용한다."
@@ -66,7 +66,7 @@ description: "슈퍼 관리자의 자연어 요청으로 에이전트 스킬을 
 - 관리 도구(`skill.inspect`·`skill.create`·`skill.update`·`skill.delete`·`mcp.add`·`mcp.remove`)가 보이지 않거나 거절되면 권한이 없음을 분명히 알리고 작업을 진행하지 않는다.
 
 ## 2. 현황 먼저 조회
-- 스킬을 만들거나 고치기 전에 항상 `skill.inspect({})`를 호출해 에이전트 목록(`id`·`description`), 기존 스킬과 이름 충돌 여부, 에이전트별 스킬 본문 용량(32 KiB 한도), 등록된 MCP 서버, 비밀 보관소 종류(`sops`·`keychain`·`env`)와 비밀 **이름**을 확인한다.
+- 스킬을 만들거나 고치기 전에 항상 `skill.inspect({})`를 호출해 에이전트 목록(`id`·`description`), 기존 스킬과 이름 충돌 여부, 에이전트별 스킬 본문 용량(64 KiB 한도), 등록된 MCP 서버, 비밀 보관소 종류(`sops`·`keychain`·`env`)와 비밀 **이름**을 확인한다.
 - 기존 스킬을 수정할 때는 `skill.inspect({"skill": "<이름>"})`으로 현재 본문을 먼저 읽는다.
 
 ## 3. 대상 에이전트 고르기
@@ -80,7 +80,7 @@ description: "슈퍼 관리자의 자연어 요청으로 에이전트 스킬을 
 - **본문(`body`)**:
   - 모델이 이미 아는 일반 설명·군더더기는 빼고, 실제 판단과 출력을 바꾸는 핵심 절차·출력 형식·제약·예외 처리만 명령형으로 짧게 적는다.
   - YAML front matter(`---`)는 본문에 넣지 않는다(`skill.create`·`skill.update`가 자동 생성한다).
-  - `allowed-tools`는 쓸 수 없으며, 대상 에이전트의 전체 스킬 본문 합계가 32 KiB를 넘지 않게 유지한다.
+  - `allowed-tools`는 쓸 수 없으며, 대상 에이전트의 전체 스킬 본문 합계가 64 KiB를 넘지 않게 유지한다.
 - 생성·수정·삭제 후에는 자동으로 검증과 즉시 활성화가 끝나 다음 요청부터 바로 동작한다.
 
 ## 5. MCP 추가·제거와 암호화 파일(SOPS) 처리

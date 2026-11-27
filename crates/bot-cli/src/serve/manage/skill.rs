@@ -48,7 +48,7 @@ fn check_skill_text(description: Option<&str>, body: Option<&str>) -> Result<(),
         if trimmed.is_empty() || trimmed.len() > bot_profile::SKILL_MAX_BYTES {
             return Err(reject(
                 "invalid_body",
-                "스킬 본문은 1바이트 이상 32 KiB 이하여야 해요",
+                "스킬 본문은 1바이트 이상 64 KiB 이하여야 해요",
             ));
         }
         if trimmed.starts_with("---\n") || trimmed.starts_with("---\r\n") {

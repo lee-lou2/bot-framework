@@ -21,7 +21,10 @@ fn write_legacy_skills(personal: &Path) {
             "skills/legacy-authority",
             "---\nallowed-tools: noop\n---\n본문\n".to_owned(),
         ),
-        ("skills/legacy-big", "x".repeat(32_769)),
+        (
+            "skills/legacy-big",
+            "x".repeat(bot_profile::SKILL_MAX_BYTES + 1),
+        ),
     ] {
         let target = personal.join(dir);
         fs::create_dir_all(&target).unwrap();
@@ -131,7 +134,7 @@ fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
         .unwrap();
     let host = host_file(dir.path());
 
-    // 구판에서 유효했던 원본 폴더(미닫힘 `---`·`allowed-tools`·32 KiB 초과·front matter 포함)
+    // 구판에서 유효했던 원본 폴더(미닫힘 `---`·`allowed-tools`·64 KiB 초과·front matter 포함)
     let legacy_profiles = dir.path().join("legacy_profiles");
     copy_dir(&examples(), &legacy_profiles);
     write_legacy_skills(&legacy_profiles.join("personal"));
@@ -208,7 +211,7 @@ fn pg_upgrade_restores_legacy_v1_bundle_and_separates_v2_revision() {
                 .instructions
                 .text
                 .len(),
-            32_769
+            bot_profile::SKILL_MAX_BYTES + 1
         );
         assert_eq!(
             new_snap.agents[&main].skills["memo"].instructions.text, "Visible stable paragraph.",

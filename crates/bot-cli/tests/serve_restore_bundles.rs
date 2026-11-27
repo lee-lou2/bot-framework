@@ -152,7 +152,7 @@ fn joining_the_same_set_fills_in_the_current_bundles_an_older_version_never_stor
     );
 }
 
-/// 구판(`417162e`)에서는 유효했으나 신판 SKILL.md 규칙(미닫힘 `---`·32 KiB 초과·front matter)에 걸리는 원본 폴더와 그 `BOTPROFILE1` 묶음.
+/// 구판(`417162e`)에서는 유효했으나 신판 SKILL.md 규칙(미닫힘 `---`·64 KiB 초과·front matter)에 걸리는 원본 폴더와 그 `BOTPROFILE1` 묶음.
 fn legacy_v1_folder_and_bundle(c: &Cluster) -> (PathBuf, String, Vec<u8>) {
     let legacy_root =
         c.profiles("legacy_v1", |personal| {
@@ -163,7 +163,10 @@ fn legacy_v1_folder_and_bundle(c: &Cluster) -> (PathBuf, String, Vec<u8>) {
                     .to_owned(),
             ),
             ("skills/legacy-unclosed", "---\n구판에서 쓰던 스킬\n".to_owned()),
-            ("skills/legacy-big", "x".repeat(32_769)),
+            (
+                "skills/legacy-big",
+                "x".repeat(bot_profile::SKILL_MAX_BYTES + 1),
+            ),
         ] {
             let folder = personal.join(dir);
             std::fs::create_dir_all(&folder).unwrap();
@@ -228,7 +231,7 @@ fn a_legacy_v1_bundle_with_unclosed_or_oversized_skill_restores_and_resumes_a_pe
     let v2 = v2_front_matter_profiles(&c);
     pin_parked_run_to_legacy(&c, &legacy_rev, Some(&legacy_bytes));
 
-    // 신판은 새 V2 프로필을 활성화하면서 구판 V1 묶음(미닫힘 `---` + 32 KiB 초과)을 오류 없이 복원하고 대기 카드를 이어서 완료한다
+    // 신판은 새 V2 프로필을 활성화하면서 구판 V1 묶음(미닫힘 `---` + 64 KiB 초과)을 오류 없이 복원하고 대기 카드를 이어서 완료한다
     let second = c.start(&v2, true, &["worker", "admin"]);
     assert_ne!(c.schema.active(), active, "새 V2 판본이 게시됐다");
     assert_ne!(
@@ -285,7 +288,9 @@ fn profile_bundle_put_backfills_a_missing_legacy_v1_bundle_for_upgrade() {
         );
     }
     assert_eq!(
-        c.q("select count(*) from {s}.bot_profile_bundles"),
+        c.q(&format!(
+            "select count(*) from {{s}}.bot_profile_bundles where revision = '{legacy_rev}'"
+        )),
         "1",
         "같은 구판 폴더를 두 번 보충해도 묶음은 한 건만 남는다"
     );

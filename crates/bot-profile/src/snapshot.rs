@@ -19,7 +19,7 @@ const MAGIC_V2: &[u8] = b"BOTPROFILE2\n";
 
 /// 묶음 판본(해석 규칙 세대).
 /// - `V1`(`BOTPROFILE1\n`): 구판이 보관한 묶음 또는 `SKILL.md` front matter를 쓰지 않는 프로필. 복원 시 구판의 `SKILL.md` 규칙을 쓴다.
-/// - `V2`(`BOTPROFILE2\n`): `SKILL.md` front matter를 해석·제거하고 에이전트별 32 KiB 상한을 적용한 묶음.
+/// - `V2`(`BOTPROFILE2\n`): `SKILL.md` front matter를 해석·제거하고 에이전트별 64 KiB 상한을 적용한 묶음.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BundleFormat {
     V1,

@@ -279,8 +279,8 @@ fn invalid_skill_front_matter_is_rejected() {
 #[test]
 fn skill_body_size_limit_is_enforced_per_agent_excluding_front_matter() {
     let limit = bot_profile::SKILL_MAX_BYTES;
-    assert_eq!(limit, bot_profile::KNOWLEDGE_MAX_BYTES);
-    // 본문이 정확히 32 KiB이고 front matter가 덧붙어도 본문 기준이라 통과한다
+    assert_eq!(limit, 64 * 1024);
+    // 본문이 정확히 64 KiB이고 front matter가 덧붙어도 본문 기준이라 통과한다
     let exact = format!(
         "---\nname: agenda\ndescription: {}\n---\n{}\n",
         "설명".repeat(200),
@@ -296,7 +296,7 @@ fn skill_body_size_limit_is_enforced_per_agent_excluding_front_matter() {
         limit
     );
 
-    // 단일 스킬 본문이 32 KiB를 1바이트 넘으면 거절한다
+    // 단일 스킬 본문이 64 KiB를 1바이트 넘으면 거절한다
     let over_one = edit(
         base(),
         SKILL_MD,
@@ -305,32 +305,32 @@ fn skill_body_size_limit_is_enforced_per_agent_excluding_front_matter() {
     );
     assert_eq!(crate::support::codes(&over_one), ["skill-too-large"]);
 
-    // 상속을 합친 에이전트별 합계가 32 KiB를 넘으면 그 에이전트 경로로 거절하고, 한도 안인 형제는 문제없다
+    // 상속을 합친 에이전트별 합계가 64 KiB를 넘으면 그 에이전트 경로로 거절하고, 한도 안인 형제는 문제없다
     let mut inherited = family();
     inherited = edit(
         inherited,
         SKILL_MD,
         "일정 목록은 list로 조회한다.\n",
-        &"a".repeat(20 * 1024),
+        &"a".repeat(40 * 1024),
     );
     inherited = edit(
         inherited,
         "agents/main/agents/research/skills/extra/SKILL.md",
         "",
-        &"b".repeat(13 * 1024),
+        &"b".repeat(25 * 1024),
     );
     inherited = edit(
         inherited,
         "agents/main/agents/other/skills/small/SKILL.md",
         "",
-        &"c".repeat(10 * 1024),
+        &"c".repeat(20 * 1024),
     );
     let report = crate::support::check(&inherited).unwrap_err();
     assert_eq!(report.codes(), ["skill-too-large"]);
     let err = report.errors().next().unwrap();
     assert_eq!(err.path, "personal/agents/main/agents/research");
     assert!(
-        err.message.contains("main/research") && err.message.contains("32768"),
+        err.message.contains("main/research") && err.message.contains(&limit.to_string()),
         "{}",
         err.message
     );

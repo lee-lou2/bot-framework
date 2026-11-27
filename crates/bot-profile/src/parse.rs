@@ -40,8 +40,8 @@ pub struct ParsedAgent {
 }
 
 /// `SKILL.md` 해석 규칙 세대.
-/// - `Legacy`: 구판(`BOTPROFILE1`) 번들 복원 전용. front matter를 파싱·제거하지 않고 32 KiB 상한도 적용하지 않는다.
-/// - `Strict`: 새 폴더 검증과 `BOTPROFILE2` 복원. Agent Skills front matter 검증·제거와 32 KiB 상한을 적용한다.
+/// - `Legacy`: 구판(`BOTPROFILE1`) 번들 복원 전용. front matter를 파싱·제거하지 않고 64 KiB 상한도 적용하지 않는다.
+/// - `Strict`: 새 폴더 검증과 `BOTPROFILE2` 복원. Agent Skills front matter 검증·제거와 64 KiB 상한을 적용한다.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SkillMode {
     Legacy,
@@ -210,7 +210,7 @@ fn skills(
         .collect()
 }
 
-/// 단일 `SKILL.md` 바이트를 `Strict` 규칙(텍스트·front matter·폴더명·빈 본문·32 KiB)으로 검증한다.
+/// 단일 `SKILL.md` 바이트를 `Strict` 규칙(텍스트·front matter·폴더명·빈 본문·64 KiB)으로 검증한다.
 /// 성공 시 `(description, 본문, front matter 존재 여부)`를 돌려준다. `bot mcp sync` 접속 전 사전 검사도 이 함수를 쓴다.
 pub(crate) fn check_skill_md(
     skill_name: &str,
