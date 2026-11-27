@@ -484,3 +484,78 @@ async fn owner_quota_blocks_saves_past_limit_while_allowing_supersedes() {
     .unwrap();
     assert!(!replaced.deduplicated);
 }
+
+#[tokio::test]
+async fn save_cannot_supersede_shared_profile_memory_and_backfill_fences_stale_set() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let cli = run_in(&db, "cli", OWNER, ConversationKind::Cli).await;
+    let shared_id = db
+        .scalar::<String>(&format!(
+            "insert into bot_memories (profile, agent, owner, visibility, body) values ('personal', 'main', '{OWNER}', 'profile', 'shared policy') returning id"
+        ))
+        .await;
+    let denied = save_via_ledger(
+        &db,
+        &cli,
+        "supersede-shared",
+        MemorySave {
+            text: "private replacement".into(),
+            kind: MemoryKind::Fact,
+            supersedes: Some(MemoryId(shared_id.clone())),
+            embedding: None,
+        },
+    )
+    .await;
+    assert!(matches!(denied, Err(Error::Denied)));
+    assert_eq!(
+        db.scalar::<i64>(&format!(
+            "select count(*) from bot_memories where id = '{shared_id}' and visibility = 'profile' and superseded_by is null"
+        ))
+        .await,
+        1
+    );
+
+    let old = db
+        .peer("old-worker")
+        .await
+        .for_activation(Revision("set-1".into()));
+    let profiles = std::collections::BTreeMap::from([
+        (ProfileId("personal".into()), Revision("r1".into())),
+        (ProfileId("work".into()), Revision("r1".into())),
+    ]);
+    bot_core::profile::ActiveRevisions::replace(
+        &db.store,
+        Some(Revision("set-1".into())),
+        Revision("set-2".into()),
+        profiles,
+        vec![],
+        std::collections::BTreeMap::new(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        MemoryStore::unembedded(
+            &old,
+            ProfileId("personal".into()),
+            MODEL.into(),
+            DEFAULT_EMBEDDING_DIMENSIONS,
+            10,
+        )
+        .await,
+        Err(Error::Stale)
+    ));
+    let digest: [u8; 32] = Sha256::digest(b"shared policy").into();
+    assert!(matches!(
+        MemoryStore::store_embedding(
+            &old,
+            ProfileId("personal".into()),
+            MemoryId(shared_id),
+            digest,
+            basis_vec(&[(7, 1.0)]),
+        )
+        .await,
+        Err(Error::Stale)
+    ));
+}

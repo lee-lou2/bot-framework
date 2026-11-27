@@ -1,6 +1,6 @@
 //! Body size, attachment count, and token-bucket rate limits for gateway ingress.
 mod failures;
-pub use failures::{DEFAULT_BLOCK, DEFAULT_MAX, DEFAULT_WINDOW, SourceFailures};
+pub use failures::SourceFailures;
 
 use std::collections::HashMap;
 use std::sync::Mutex;

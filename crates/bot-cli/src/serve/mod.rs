@@ -17,13 +17,12 @@ pub mod remote;
 mod restore;
 mod runner;
 mod scheduler;
-pub mod seed;
+pub(crate) mod seed;
 mod token_file;
 mod tools;
 mod trace;
 mod unusable;
-#[doc(hidden)]
-pub mod upstream;
+mod upstream;
 pub(crate) mod watched;
 mod worker;
 

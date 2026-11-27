@@ -269,7 +269,7 @@ impl Inner {
         ) else {
             return false;
         };
-        let Some(image) = pinned.for_program(program, self.config.unfirewalled) else {
+        let Some(image) = pinned.for_program(program, self.config.is_unfirewalled()) else {
             return false;
         };
         // Fail closed if the instance lock file was replaced or unlinked.
@@ -372,7 +372,7 @@ impl Inner {
         let image = match (role, spec) {
             (Role::Anchor, _) => pinned.default.as_str(),
             (Role::Model, Some(spec)) => pinned
-                .for_program(&spec.program, self.config.unfirewalled)
+                .for_program(&spec.program, self.config.is_unfirewalled())
                 .ok_or(Error::Unavailable)?,
             (Role::Model, None) => return Err(Error::Invalid),
         };
@@ -478,7 +478,7 @@ impl ContainerSandbox {
 
     async fn start_with(config: ContainerConfig, hooks: Hooks) -> Result<Anchored, StartError> {
         args::valid(&config).map_err(|_| StartError("config"))?;
-        if config.entry.is_none() && !config.unfirewalled {
+        if config.entry.is_none() && !config.is_unfirewalled() {
             return Err(StartError("firewall_required"));
         }
         let lock = lock_instance(&config).await?;

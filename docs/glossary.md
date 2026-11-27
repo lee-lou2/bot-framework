@@ -41,7 +41,7 @@ Maps documentation terms to code identifiers and flags overloaded names across c
 
 | Name | Distinct Meanings |
 |---|---|
-| `cli` | `bot_core::cli` defines **Claude CLI tool-call positions** (checkpoint keys) and pre-execution refusal records (`CliRefusal`); `bot_gateway::cli` is the Unix-socket CLI entrance; `bot-cli` is the `bot` binary crate. |
+| `cli` | `bot_core::cli` defines **VM model CLI tool-call positions** (`claude-cli`, `codex-cli`, `agy-cli` checkpoint keys) and pre-execution refusal records (`CliRefusal`, also shared by direct API workers); `bot_gateway::cli` is the Unix-socket CLI entrance; `bot-cli` is the `bot` binary crate. |
 | `Sandbox` | `bot_core::sandbox::Sandbox<ModelSpec>` isolates model VMs (`ContainerSandbox`); `bot_broker::sandbox::Sandbox` isolates MCP tool servers (`SrtSandbox`). No shared trait links them. |
 | `Delivery` | Outbox dispatch outcomes in `bot_gateway::delivery`; scheduled-reply port bundle in `bot_runtime::worker`; operator-secret output target (terminal vs file) in `bot-cli`'s `serve::admin`. |
 

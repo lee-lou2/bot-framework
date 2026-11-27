@@ -1,7 +1,7 @@
 //! Main `Broker::call` flow: declaration merge, secret admission, authorization, and call spans.
 //!
 //! Follows the call sequence in `service.rs`, delegating approval gating to `gate`,
-//! execution/recovery to `exec`, and built-in tools to `share`, `schedule`, and `manage`.
+//! execution/recovery to `exec`, and built-in tools to `share`, `memory`, `schedule`, and `manage`.
 
 use super::{
     BrokerService,

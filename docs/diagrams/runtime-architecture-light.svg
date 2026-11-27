@@ -139,8 +139,8 @@
       <text x="760" y="256" text-anchor="middle" class="elbl-acc">Relay HTTP</text>
       <rect x="766" y="168" width="48" height="14" rx="2" class="lbl-bg"/>
       <text x="790" y="178" text-anchor="middle" class="elbl-lnk">API call</text>
-      <rect x="760" y="294" width="56" height="14" rx="2" class="lbl-bg"/>
-      <text x="788" y="304" text-anchor="middle" class="elbl-lnk">API proxy</text>
+      <rect x="764" y="294" width="68" height="14" rx="2" class="lbl-bg"/>
+      <text x="798" y="304" text-anchor="middle" class="elbl-lnk">Proxy / Embed</text>
       <rect x="748" y="368" width="56" height="13" rx="2" class="lbl-bg"/>
       <text x="776" y="378" text-anchor="middle" class="elbl">stdio</text>
       <rect x="738" y="494" width="76" height="13" rx="2" class="lbl-bg"/>
@@ -193,7 +193,7 @@
         <rect x="284" y="440" width="164" height="88" rx="6" class="node-soft"/>
         <text x="296" y="460" class="eye">HOST ONLY · SECRETS</text>
         <text x="296" y="480" class="ttl-sm">SecretStore · Profile</text>
-        <text x="296" y="498" class="sub">Service keys · Fingerprint</text>
+        <text x="296" y="498" class="sub">Role keys · Fingerprint</text>
         <text x="296" y="514" class="mono">Never exposed to models</text>
       </g>
       <g id="node-worker">
@@ -215,7 +215,7 @@
         <text x="532" y="384" class="mono-ink">· Caller ∩ Agent ∩ Tool</text>
         <text x="532" y="404" class="mono-ink">· Approvals · Effect ledger</text>
         <text x="532" y="424" class="mono-ink">· VM relay (/mcp)</text>
-        <text x="532" y="444" class="mono-ink">· Model proxy (/v1/messages)</text>
+        <text x="532" y="444" class="mono-ink">· Model proxy (3 protocols)</text>
         <text x="532" y="464" class="mono">Ordering · Rate limits · Audit</text>
       </g>
       <g id="node-vm">
@@ -225,7 +225,7 @@
         <line x1="848" y1="116" x2="1072" y2="116" class="div"/>
         <text x="848" y="134" class="sub">Disposable claude / codex / agy VM</text>
         <text x="848" y="150" class="mono">Session token only · bot-init firewall</text>
-        <text x="848" y="166" class="mono">Isolated read · Egress = relay only</text>
+        <text x="848" y="166" class="mono">claude-only read · Relay egress</text>
       </g>
       <g id="node-providers">
         <rect x="836" y="204" width="248" height="92" rx="6" class="node-link"/>

@@ -2,7 +2,7 @@
 
 English | [한국어](ko/security.md)
 
-Models execute without external network access or service credentials. Every model-provider call and tool invocation passes through the broker.
+Models execute without external network access or service credentials. Every tool invocation passes through the broker (`Broker::call`), VM CLI model calls traverse the broker model proxy, and direct API / embedding / memory-judge requests attach host-resolved keys only to outbound headers.
 
 ## Trust Zones
 
@@ -11,7 +11,7 @@ Models execute without external network access or service credentials. Every mod
 | Model sandbox (`Apple container` VM) | No external network or service credentials. Connects to the model proxy and MCP relay through a per-run session pinned to its wire protocol (`Anthropic`, `OpenAiResponses`, or `Gemini`). Mounts read-only inputs (`/bot`) and a per-attempt workspace (`/work`). Session tokens pass via environment variables only and are never written to host disk (`agy-cli` expands its template into RAM-only `/tmp/mcp_config.json` inside the VM after dropping privileges). Built-in file reads (`Read`, `/bot`-confined) are available only on `claude-cli`; `codex-cli` and `agy-cli` reject all file built-ins. |
 | Direct model API (`worker`) | `anthropic-api` and `openai-api` aliases call upstream APIs directly from the worker with no VM or relay. Models never touch the host filesystem or shell (messages in, text/tool calls out), and tools still route solely through `Broker::call`. Service keys are read just-in-time into request headers only, the active revision is checked immediately before each `POST`, and any response containing that request's key is discarded and closed. Destinations are restricted to the configured `https` `endpoint` (`http` only for loopback IP literals) with redirects and retries disabled ([Architecture](architecture.md)). |
 | Operator tool servers (`srt`) | Reviewed, pinned MCP servers run in a separate sandbox outside the model. The broker injects only `secrets` declared for that tool. Servers call external APIs directly through an egress proxy restricted to declared hosts. |
-| Trusted host | Gateway, scheduler, worker, broker, store, and Admin UI own authentication, execution, and state. One `SecretStore` resolves logical names: the gateway receives its own adapter credentials directly, and the broker receives per-tool credentials. |
+| Trusted host | Gateway, scheduler, worker, broker, store, and Admin UI own authentication, execution, and state. One `SecretStore` resolves logical names per role: the gateway reads adapter and private-intake credentials, the worker reads direct model API / `embeddings` / `memory_judge` keys, the broker reads VM model-proxy / `embeddings` / per-tool credentials, and Admin observability reads OTLP/Sentry credentials. |
 
 ## Model VM Boundary
 

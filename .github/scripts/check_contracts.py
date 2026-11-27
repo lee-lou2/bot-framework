@@ -1,4 +1,4 @@
-"""Validate schemas, example manifests, the public file list (length limit, no editor leftovers), the CI workflow hardening, the Rust toolchain pin and the pinned SDK test environment."""
+"""Validate schemas, example manifests, workspace layering and pins, the public file list, CI workflow hardening, the Rust toolchain pin, SDK pins, and docs parity."""
 import hashlib
 import importlib.util
 import json
@@ -23,7 +23,9 @@ IMAGE = re.compile(r"^\s*image:\s*(\S+)(.*)$")
 DIGEST_IMAGE = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
 # A tool version is a release (`1.98.1`), not a moving channel or a range.
 EXACT_VERSION = re.compile(r"\d+\.\d+\.\d+")
-# Text that must not appear in the code of a workflow (comments are ignored).
+EXACT_PIN = re.compile(r"=\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?")
+MIDDLE_CRATES = {"bot-profile", "bot-store", "bot-runtime", "bot-broker", "bot-gateway", "bot-admin"}
+# Text that must not appear in the code of a workflow (YAML comments are ignored).
 FORBIDDEN = (
     (re.compile(r"\bpull_request_target\b"), "`pull_request_target` runs fork code with the repository's token"),
     (re.compile(r"\bsecrets\."), "the public checks use no secrets"),
@@ -60,20 +62,72 @@ def check_files():
     listing = subprocess.check_output(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
     )
+    problems = []
     for entry in listing.split(b"\0"):
         if not entry:
             continue
         path = Path(entry.decode())
+        if not path.exists():
+            continue
         if LEFTOVER.search(path.name):
-            raise ValueError(f"{path}: an editor or merge leftover would be published — delete it (or ignore it)")
-        if path == Path("Cargo.lock"):
-            continue  # Cargo regenerates this file as one workspace-wide dependency graph.
+            problems.append(f"{path}: an editor or merge leftover would be published — delete it (or ignore it)")
+            continue
+        if path == Path("Cargo.lock") or not path.is_file():
+            continue  # Cargo regenerates Cargo.lock as one workspace-wide dependency graph.
         with path.open("rb") as source:
             lines = source.readlines()
         if len(lines) > 600:
-            raise ValueError(f"{path}: exceeds 600 lines")
-        if needs_module_header(path) and (not lines or not lines[0].startswith(b"//!")):
-            raise ValueError(f"{path}: missing `//!` module responsibility header on line 1")
+            problems.append(f"{path}: exceeds 600 lines")
+        if needs_module_header(path) and (not lines or not lines[0].startswith(b"//!") or not lines[0][3:].strip()):
+            problems.append(f"{path}: missing non-empty `//!` module responsibility header on line 1")
+    if problems:
+        raise ValueError("\n".join(problems))
+
+
+def workspace_problems(root=Path(".")):
+    """Enforce exact `=` pins on external dependencies and the crate layering rule (`bot-core` <- 6 middle crates <- `bot-cli`)."""
+    problems = []
+    try:
+        ws = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as err:
+        return [f"Cargo.toml: {err}"]
+    members = (ws.get("workspace") or {}).get("members") or []
+    member_names = {Path(m).name for m in members}
+    for name, spec in ((ws.get("workspace") or {}).get("dependencies") or {}).items():
+        if isinstance(spec, dict) and "path" in spec:
+            continue
+        version = spec if isinstance(spec, str) else spec.get("version") if isinstance(spec, dict) else None
+        if not (isinstance(version, str) and EXACT_PIN.fullmatch(version)):
+            problems.append(f"Cargo.toml [workspace.dependencies].{name}: `{version}` must use an exact `=x.y.z` pin")
+    for member in members:
+        crate = Path(member).name
+        try:
+            data = tomllib.loads((root / member / "Cargo.toml").read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as err:
+            problems.append(f"{member}/Cargo.toml: {err}")
+            continue
+        tables = [("", data)] + [(f"target.{k}.", v) for k, v in (data.get("target") or {}).items() if isinstance(v, dict)]
+        for prefix, table in tables:
+            for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+                for dep, spec in (table.get(section) or {}).items():
+                    pkg = spec.get("package", dep) if isinstance(spec, dict) else dep
+                    if section == "dependencies" and pkg in member_names:
+                        if crate == "bot-core":
+                            problems.append(f"{member}/Cargo.toml: `bot-core` must not depend on internal crate `{pkg}`")
+                        elif crate in MIDDLE_CRATES and pkg != "bot-core":
+                            problems.append(f"{member}/Cargo.toml: middle crate `{crate}` must not depend on `{pkg}` at runtime")
+                    if isinstance(spec, dict) and (spec.get("workspace") or "path" in spec):
+                        continue
+                    version = spec if isinstance(spec, str) else spec.get("version") if isinstance(spec, dict) else None
+                    if not (isinstance(version, str) and EXACT_PIN.fullmatch(version)):
+                        problems.append(f"{member}/Cargo.toml [{prefix}{section}].{dep}: `{version}` must inherit `.workspace = true` or use an exact `=x.y.z` pin")
+    return problems
+
+
+def check_workspace():
+    problems = workspace_problems(Path("."))
+    if problems:
+        raise ValueError("workspace manifest contracts:\n" + "\n".join(problems))
 
 
 def check_examples():
@@ -101,14 +155,30 @@ def check_examples():
             if key == "skill" and isinstance(meta, dict) and "name" in meta and meta["name"] != path.parent.name:
                 raise ValueError(f"{path}: front matter name {meta['name']!r} != folder {path.parent.name!r}")
     for path in examples.rglob("*.yaml"):
+        if path.name.endswith(".lock.yaml"):
+            continue
         validators[path.stem].validate(yaml.safe_load(path.read_text()))
+
+
+def strip_yaml_comment(line):
+    """Strip a YAML comment (`#` at line start or after whitespace outside quotes) without truncating quoted `#` or `${#var}`."""
+    quote = None
+    for i, ch in enumerate(line):
+        if quote is None:
+            if ch in ("'", '"'):
+                quote = ch
+            elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+                return line[:i]
+        elif ch == quote and (quote == "'" or line[i - 1] != "\\"):
+            quote = None
+    return line
 
 
 def workflow_problems(text):
     """The hardening rules one workflow file breaks; an empty list means it keeps all of them."""
     problems = []
     for number, line in enumerate(text.splitlines(), 1):
-        code = line.split("#", 1)[0]
+        code = strip_yaml_comment(line)
         for pattern, why in FORBIDDEN:
             if pattern.search(code):
                 problems.append(f"line {number}: {why}")
@@ -144,9 +214,11 @@ def workflow_problems(text):
             continue
         permissions = job.get("permissions")
         if "permissions" in job and not (
-            isinstance(permissions, dict) and set(permissions.values()) <= {"read", "none"}
+            isinstance(permissions, dict)
+            and set(permissions.keys()) <= {"contents"}
+            and set(permissions.values()) <= {"read", "none"}
         ):
-            problems.append(f"job {job_id}: `permissions` may only narrow to `read` or `none`")
+            problems.append(f"job {job_id}: `permissions` may only narrow `contents` to `read` or `none`")
         minutes = job.get("timeout-minutes")
         if not (isinstance(minutes, int) and not isinstance(minutes, bool) and 0 < minutes <= MAX_JOB_MINUTES):
             problems.append(f"job {job_id}: `timeout-minutes` must be set (at most {MAX_JOB_MINUTES})")
@@ -183,6 +255,10 @@ RAW_RUNNER = re.compile(r"-m\s+unittest\b|\bnode\s+--test\b|\bpytest\b")
 SWALLOW = re.compile(r"\|\||(?<!\|)\|(?!\|)|;\s*(?:true\b|:)")
 
 
+def active_run_lines(step):
+    return [line for line in str(step.get("run", "")).splitlines() if not line.lstrip().startswith("#")]
+
+
 def sdk_job_problems(text):
     """The official-SDK job must run the source check (`sdk_run.py manifest`) and the three runners — the ones that refuse skipped, missing and untouched tests — through steps that cannot be skipped or have their failure ignored:
     no `if`/`continue-on-error`/`shell` on the job or on those steps, no pipe or `|| true` after a runner, and no way around the runners (raw `unittest`, `node --test`, `pytest`)."""
@@ -199,17 +275,17 @@ def sdk_job_problems(text):
             problems.append(f"job {SDK_JOB}: `{key}` could skip the job or ignore its failure")
     steps = [step for step in job.get("steps") or [] if isinstance(step, dict)]
     for runner in SDK_RUNNERS:
-        owners = [step for step in steps if runner in str(step.get("run", ""))]
+        owners = [step for step in steps if any(runner in line for line in active_run_lines(step))]
         if not owners:
             problems.append(f"job {SDK_JOB}: no step runs `{runner}`")
         for step in owners:
             for key in ("if", "continue-on-error", "shell"):
                 if key in step:
                     problems.append(f"job {SDK_JOB}: the step running `{runner}` has `{key}`")
-            for line in str(step.get("run", "")).splitlines():
+            for line in active_run_lines(step):
                 if runner in line and SWALLOW.search(line):
                     problems.append(f"job {SDK_JOB}: `{line.strip()[:70]}` swallows the runner's exit code")
-    if any(RAW_RUNNER.search(str(step.get("run", ""))) for step in steps):
+    if any(RAW_RUNNER.search(line) for step in steps for line in active_run_lines(step)):
         problems.append(f"job {SDK_JOB}: run the SDK tests only through the runners, not `unittest`, `node --test` or `pytest` directly")
     return problems
 
@@ -271,7 +347,9 @@ NPM_PACKAGE_EXACT = re.compile(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+@\d+\.\d+\.\d+")
 INSTALL_HOOKS = {"preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare"}
 PIPE_TO_SHELL = re.compile(r"\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b")
 PIP_VALUE_OPTIONS = {"-i", "--index-url", "--extra-index-url", "-f", "--find-links", "-c", "--constraint", "-e", "--editable", "--trusted-host"}
+PIP_GLOBAL_VALUE_OPTIONS = {"--python", "--proxy", "--retries", "--timeout", "--cache-dir", "--cert", "--client-cert", "--log"}
 NPM_VALUE_OPTIONS = {"--prefix", "--loglevel", "--cache", "--registry"}
+ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def python_lock_problems(text, openai_version):
@@ -368,13 +446,29 @@ def check_sdk_pins():
         raise ValueError(f"{folder} pins:\n" + "\n".join(problems))
 
 
+def strip_cmd_prefix(tokens):
+    """Strip leading `VAR=val`, `env`, and `sudo` wrappers so prefixed `pip`/`npm`/`npx` commands are still inspected."""
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if ENV_ASSIGN.match(tok):
+            i += 1
+        elif tok in ("sudo", "env"):
+            i += 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                flag = tokens[i]
+                i += 2 if flag in ("-u", "-g", "-C") else 1
+        else:
+            break
+    return tokens[i:]
+
+
 def command_problems(run):
     """Install commands in a workflow step: pip needs exact versions or a hash lock, npm needs `--ignore-scripts` and exact packages, nothing pipes a download to a shell."""
     joined = re.sub(r"\\\n\s*", " ", run)
-    problems = [f"`{match.group(0)[:50]}…` pipes a download to a shell" for match in PIPE_TO_SHELL.finditer(joined)]
-    for line in joined.splitlines():
-        if line.lstrip().startswith("#"):
-            continue
+    active = [line for line in joined.splitlines() if not line.lstrip().startswith("#")]
+    problems = [f"`{match.group(0)[:50]}…` pipes a download to a shell" for line in active for match in PIPE_TO_SHELL.finditer(line)]
+    for line in active:
         for part in re.split(r"\s*(?:&&|\|\||;|\|)\s*", line):
             try:
                 tokens = shlex.split(part)
@@ -384,10 +478,31 @@ def command_problems(run):
     return problems
 
 
+def pip_install_args(tokens):
+    """Return the args after `pip ... install` (supporting global pip flags and `python -m pip`), or None."""
+    cmd = strip_cmd_prefix(tokens)
+    if not cmd:
+        return None
+    exe = Path(cmd[0]).name
+    if exe in ("pip", "pip3") or exe.startswith("pip3."):
+        rest = cmd[1:]
+    elif exe.startswith("python") and len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] in ("pip", "pip3"):
+        rest = cmd[3:]
+    else:
+        return None
+    i = 0
+    while i < len(rest) and rest[i].startswith("-"):
+        i += 2 if rest[i] in PIP_GLOBAL_VALUE_OPTIONS else 1
+    if i < len(rest) and rest[i] == "install":
+        return rest[i + 1:]
+    return None
+
+
 def pip_problems(tokens):
-    if "install" not in tokens or tokens.index("install") == 0 or not tokens[tokens.index("install") - 1].endswith(("pip", "pip3")):
+    args = pip_install_args(tokens)
+    if args is None:
         return []
-    args, problems, skip = tokens[tokens.index("install") + 1:], [], False
+    problems, skip = [], False
     for arg in args:
         if skip:
             skip = False
@@ -395,27 +510,50 @@ def pip_problems(tokens):
             skip = True
             if "--require-hashes" not in args:
                 problems.append("`pip install -r` needs `--require-hashes`")
+        elif arg.startswith("--requirement=") or (arg.startswith("-r") and len(arg) > 2):
+            if "--require-hashes" not in args:
+                problems.append("`pip install -r` needs `--require-hashes`")
         elif arg in PIP_VALUE_OPTIONS:
             skip = True
             problems.append(f"`pip install {arg}` can pull unpinned code from elsewhere")
+        elif any(arg.startswith(opt + "=") for opt in PIP_VALUE_OPTIONS if opt.startswith("--")) or any(
+            arg.startswith(opt) and len(arg) > 2 for opt in PIP_VALUE_OPTIONS if len(opt) == 2
+        ):
+            problems.append(f"`pip install {arg.split('=', 1)[0]}` can pull unpinned code from elsewhere")
         elif not arg.startswith("-") and not PIP_EXACT.fullmatch(arg):
             problems.append(f"`pip install {arg}` must name an exact version (`name==x.y.z`)")
     return problems
 
 
 def npm_problems(tokens):
-    if tokens[:1] == ["npx"]:
-        return ["`npx` runs unpinned code — install an exact version first"]
-    if tokens[:1] != ["npm"]:
+    cmd = strip_cmd_prefix(tokens)
+    if not cmd:
         return []
-    args = tokens[1:]
-    command = next((a for a in args if not a.startswith("-")), "")
+    exe = Path(cmd[0]).name
+    if exe == "npx":
+        return ["`npx` runs unpinned code — install an exact version first"]
+    if exe != "npm":
+        return []
+    args = cmd[1:]
+    command, cmd_idx, skip = "", -1, False
+    for idx, arg in enumerate(args):
+        if skip:
+            skip = False
+        elif arg in NPM_VALUE_OPTIONS:
+            skip = True
+        elif not arg.startswith("-"):
+            command, cmd_idx = arg, idx
+            break
+    if command == "exec":
+        return ["`npm exec` runs unpinned code — install an exact version first"]
     if command not in {"install", "i", "add", "ci", "install-test", "it", "update", "up"}:
         return []
     problems, skip = [], False
     if "--ignore-scripts" not in args:
         problems.append(f"`npm {command}` needs `--ignore-scripts`")
-    for arg in args[args.index(command) + 1:]:
+    if any(a == "--registry" or a.startswith("--registry=") for a in args):
+        problems.append(f"`npm {command} --registry` can pull packages from another registry")
+    for arg in args[cmd_idx + 1:]:
         if skip:
             skip = False
         elif arg in NPM_VALUE_OPTIONS:
@@ -435,6 +573,7 @@ def check_docs():
 
 def main():
     check_files()
+    check_workspace()
     check_examples()
     check_workflows()
     check_toolchain()

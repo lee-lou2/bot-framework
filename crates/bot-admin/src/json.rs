@@ -205,7 +205,7 @@ pub fn hold(h: &HoldView) -> Value {
 
 /// Owner-only card bodies are visible only when the viewer is both requester and approver (operators included).
 pub fn body_visible(a: &ApprovalView, viewer: &Viewer) -> bool {
-    card_body(&a.tool.0) == CardBody::None
+    !bot_core::builtin::owner_only_card(&a.tool.0)
         || (viewer.principal == a.requester && viewer.principal == a.approver)
 }
 

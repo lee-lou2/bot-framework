@@ -44,7 +44,8 @@ pub fn classify(e: &Error) -> (StatusCode, &'static str) {
     }
 }
 
-pub fn from_error(e: &Error) -> Response {
+#[cfg(test)]
+fn from_error(e: &Error) -> Response {
     let (status, word) = classify(e);
     reply(status, word)
 }

@@ -10,8 +10,10 @@ VM 호스팅 모델 CLI(`claude-cli`, `codex-cli`, `agy-cli`)는 운영자가 �
 
 ```sh
 ref=$(images/model/build.sh --cli claude)   # `--cli claude|codex|agy` (기본값 `claude`); `name@sha256:...` 출력
-images/model/verify.sh "$ref"               # 가짜 업스트림으로 실제 이미지 검증(실제 모델·API 키 불필요)
+images/model/verify.sh "$ref"               # 가짜 업스트림으로 실제 `claude` 이미지 검증(실제 모델·API 키 불필요)
 ```
+
+`--cli codex`에는 `--build-arg CODEX_VERSION=... --build-arg CODEX_SHA256=...`가 필요하며, `--cli agy`에는 `--build-arg AGY_VERSION=... --build-arg AGY_URL=... --build-arg AGY_SHA256=...`(glibc 링크 arm64 바이너리용 선택적 `--build-arg AGY_GLIBC_COMPAT=1`)가 필요합니다. 필수 인자가 누락되면 빌드가 fail-closed로 중단됩니다. `images/model/verify.sh`는 현재 `claude` 이미지만 검증합니다.
 
 `host.json`의 `sandbox.apple.image`(`claude-cli` 전용 호스트) 또는 `sandbox.apple.images`(`{"claude": "...", "codex": "...", "agy": "..."}`)에 `build.sh`가 출력한 다이제스트 참조를 설정하세요. `container build`는 가변 `name:tag` 참조만 생성하므로 `build.sh`가 `127.0.0.1`에 바인딩된 다이제스트 고정 CNCF Distribution 레지스트리를 임시로 띄워 이미지를 푸시한 뒤 **다이제스트로 다시 풀**해 불변 로컬 참조를 저장하고 종료 시 레지스트리를 삭제합니다(런타임에는 불필요). `container image prune -a`는 사용하지 않는 다이제스트 참조를 삭제하므로 실행하지 마세요.
 
@@ -33,7 +35,7 @@ images/model/verify.sh "$ref"               # 가짜 업스트림으로 실제 �
 `images/model/verify.sh`는 어댑터와 동등한 플래그로 실제 이미지를 실행하는 동시에, 차단 경로가 원래 열려 있음을 확인하는 무방화벽 대조 실행을 병행합니다.
 
 - **버전과 초기화 무결성:** 읽기 전용 루트 파일시스템에서 `bot-init`을 통해 `claude --version`이 실행되고 이미지 라벨과 일치하며, 이미지 내 `bot-init`이 `images/model/bot-init`과 일치합니다.
-- **Fail-closed 초기화 거부:** 릴레이 환경 변수 누락/오류, capability 1개 이상 누락, 비루트 시작, `claude`가 아닌 첫 인자는 모두 정확한 stderr `vm_init_failed`와 0이 아닌 코드로 종료하며 모델을 시작하지 않습니다.
+- **Fail-closed 초기화 거부:** 릴레이 환경 변수 누락/오류, capability 1개 이상 누락, 비루트 시작, 허용되지 않은 첫 인자(`claude`, `codex`, `agy` 이외)는 모두 정확한 stderr `vm_init_failed`와 0이 아닌 코드로 종료하며 모델을 시작하지 않습니다.
 - **권한 강등과 방화벽:** 모델이 UID/GID `10001`, 보조 그룹 없음, 모든 capability 세트 0, `no_new_privs=1`로 실행됩니다. 릴레이는 도달 가능하고 다른 게이트웨이 포트, IPv4/IPv6 형제 VM, 호스트 IPv6/LAN 포트, 인터넷(`1.1.1.1:443`, `8.8.8.8:53`), 인바운드 피어 트래픽, 새 네트워크 네임스페이스 및 10가지 변조 시도(규칙, 주소, 라우트, 권한)는 모두 차단됩니다.
 - **가짜 업스트림 대화:** 실제 `claude -p --bare`가 로컬 가짜 업스트림을 대상으로 `/v1/messages` 요청 1건, 다른 호스트 시도 0건으로 완료됩니다. 비활성화 환경 변수를 지운 대조 실행에서는 외부 `CONNECT` 시도(예: `api.anthropic.com:443`)가 기록됩니다.
 - **세션 영속성과 앵커:** UID `10001`이 `0700` `/work` 안에 `/work/claude/projects/-bot/<id>.jsonl`을 쓰고, 새 컨테이너가 `--resume`으로 재개하며, 호스트가 파일을 읽고 삭제합니다. `bot-anchor`는 비루트·무권한으로 유휴 유지되고 root이거나 capability가 하나라도 있으면 `vm_anchor_failed`로 종료합니다.
@@ -42,9 +44,9 @@ images/model/verify.sh "$ref"               # 가짜 업스트림으로 실제 �
 
 ## 버전 업데이트
 
-1. 새 릴리스의 서명된 `manifest.json`을 검증하고 `platforms.linux-arm64-musl.checksum`을 읽습니다.
-2. `images/model/Containerfile`에서 `CLAUDE_VERSION`과 `CLAUDE_SHA256`을 함께 수정합니다(베이스 이미지 업데이트 시 `BUILDER` 태그와 다이제스트를 모두 수정).
-3. `images/model/build.sh`와 `images/model/verify.sh`를 다시 실행한 뒤 새 다이제스트 참조를 `sandbox.apple.image`에 반영합니다.
+1. 새 릴리스의 체크섬을 검증합니다(Claude는 서명된 `manifest.json`의 `platforms.linux-arm64-musl.checksum`, Codex/Agy는 운영자가 고정한 arm64 릴리스 체크섬).
+2. `images/model/Containerfile`에서 `CLAUDE_VERSION`과 `CLAUDE_SHA256`을 수정합니다(또는 `images/model/Containerfile.codex`/`images/model/Containerfile.agy`에 새 고정 `--build-arg` 값을 전달하며, 베이스 이미지 업데이트 시 `BUILDER` 태그와 다이제스트를 모두 수정).
+3. `images/model/build.sh --cli <cli>`(`claude`는 `images/model/verify.sh` 포함)를 다시 실행한 뒤 새 다이제스트 참조를 `sandbox.apple.image` 또는 `sandbox.apple.images.<cli>`에 반영합니다.
 
 `nftables`와 `setpriv`는 고정된 Alpine 브랜치에서 설치되며 버전이 `/etc/bot-model-image`에 기록됩니다. Alpine 패키지 업데이트 이후 같은 `Containerfile`을 다시 빌드하면 다른 다이제스트가 나오므로 항상 `build.sh`가 출력한 정확한 다이제스트를 배포하세요.
 
@@ -53,5 +55,5 @@ images/model/verify.sh "$ref"               # 가짜 업스트림으로 실제 �
 - **v2.0 범위:** 이미지 정의와 빌드/검증 스크립트만 공개하며 운영자가 로컬에서 빌드합니다(사전 빌드 배포는 추후 과제).
 - **라이선스:** `deny.toml`은 Rust 의존성과 저장소에 커밋된 파일만 다룹니다. 빌드된 이미지에 설치된 패키지 버전과 라이선스(BusyBox, nftables, setpriv)는 이미지 내부 `/etc/bot-model-image`를 확인하세요.
 - **심층 방어:** `--internal`만으로는 `0.0.0.0`에 바인딩된 호스트 서비스와 같은 네트워크의 형제 VM에 도달할 수 있습니다. VM 내부에서는 `bot-init`의 `nftables`가 둘 다 차단하고, 호스트는 릴레이를 게이트웨이 IP에만 바인딩합니다.
-- **플랫폼:** Apple Silicon 전용(`linux-arm64-musl`). Apple container는 `nftables`(`CONFIG_NF_TABLES`)가 내장된 Linux 커널을 제공합니다.
+- **플랫폼:** Apple Silicon 전용(`linux-arm64-musl`; glibc 링크 `agy` 바이너리는 `AGY_GLIBC_COMPAT=1`로 선택적 `gcompat`/`libstdc++` 지원). Apple container는 `nftables`(`CONFIG_NF_TABLES`)가 내장된 Linux 커널을 제공합니다.
 - **캐시 정리:** 빌더 캐시와 베이스 이미지는 `container builder stop`과 `container image prune`으로 정리하세요(`-a`는 절대 사용 금지).

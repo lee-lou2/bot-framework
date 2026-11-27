@@ -169,5 +169,14 @@ mod tests {
         assert_ne!(bind(base, Some(&a)), base);
         assert_ne!(bind(base, Some(&a)), bind(base, Some(&b)));
         assert_eq!(bind(base, Some(&a)), bind(base, Some(&a)));
+        // Fixed-input golden pins to catch accidental activation fingerprint drift.
+        assert_eq!(
+            bot_core::random::hex(&bind(base, Some(&a))),
+            "87cdcf5a97d5839e1b7ed4ca5b5c07589613d33e2b5fdbf673bc78d58f0aace3"
+        );
+        assert_eq!(
+            bot_core::random::hex(&bind(base, Some(&b))),
+            "09dfe777311e22f6dc72e0ed78ddca8743f959ea8a9565433daab4619eb27569"
+        );
     }
 }

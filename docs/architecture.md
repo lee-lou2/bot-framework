@@ -32,7 +32,7 @@ flowchart LR
   B -->|Streamable HTTP, exact host:port only| R[Remote MCP Server]
   P -->|Allowed hosts| E[External API]
   P -. Optional step receipts .-> B
-  B -->|Model proxy| M
+  B -->|Model proxy / Embed| M
   B <--> D
   W -->|Finish & outbox| D
   D -->|Reply to origin| G
@@ -62,7 +62,7 @@ The worker assembles agent instructions, skill bodies, and operator knowledge do
 |---|---|---|---|
 | `claude-cli` | `POST /v1/messages` (`Anthropic`, `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`) | `POST /mcp` via `/work/mcp.claude.json` (`Bearer ${RELAY_TOKEN}`); matches `_meta["claudecode/toolUseId"]`. | Audited JSONL session tail + `--resume` with broker-recalled tool outputs. |
 | `codex-cli` | `POST /v1/responses` (`OpenAiResponses`, `Authorization: Bearer ${RELAY_TOKEN}`) | `POST /mcp` via `mcp_servers.relay.bearer_token_env_var="RELAY_TOKEN"`; matches `_meta["callId"]`. | Audited rollout JSONL tail + `codex exec resume` with broker-recalled tool outputs. |
-| `agy-cli` | `POST /v1beta/models/<model>:streamGenerateContent` (`Gemini`, `GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY`) | `POST /mcp` via symlink to RAM-only `/tmp/mcp_config.json` expanded by `bot-init` from `/work/mcp.agy.template.json`; broker matches `call_mcp_tool` plans FIFO by `_meta["progressToken"]`. | Broker commits `cli-group-*` / `cli-use-*` directly; park/resume settles ledger slots and launches a fresh session with rendered exchanges. |
+| `agy-cli` | `POST /v1beta/models/<model>:streamGenerateContent` / `:generateContent` (`Gemini`, `GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY`) | `POST /mcp` via symlink to RAM-only `/tmp/mcp_config.json` expanded by `bot-init` from `/work/mcp.agy.template.json`; broker matches `call_mcp_tool` plans FIFO by `_meta["progressToken"]`. | Broker commits `cli-group-*` / `cli-use-*` directly; park/resume settles ledger slots and launches a fresh session with rendered exchanges. |
 
 In every CLI mode, the broker injects the real upstream provider key only on the outbound proxy hop, verifies the active claim on tool listing as well, matches every `/mcp` call against broker-observed model turns before assigning deterministic call IDs, and revokes only tokens it issued on worker shutdown. ([Reliability](reliability.md))
 
@@ -102,7 +102,7 @@ The staged worker persists each turn's planned tool calls. If one call awaits ap
 | Failure Class | Fixed Codes | Triggers |
 |---|---|---|
 | Transient | `rate_limited`, `overloaded`, `network`, `timeout` | HTTP 429 (non-quota), 5xx, 408, connection failure, timeout |
-| Permanent | `upstream_rejected`, `upstream_auth`, `upstream_redirect`, `invalid_response`, `output_limit`, `refused`, `content_filter` | HTTP 400/404/other 4xx, 401/403, 3xx, malformed payload, HTTP 429 with `error.code`/`error.type` in `insufficient_quota`/`quota_exhausted`, truncated output (`max_tokens`/`length`), `refusal`, content filter |
+| Permanent | `upstream_rejected`, `upstream_auth`, `upstream_redirect`, `invalid_response`, `quota_exhausted`, `context_limit`, `output_limit`, `refused`, `content_filter` | HTTP 400/404/other 4xx, 401/403, 3xx, malformed payload, HTTP 429 with `error.code`/`error.type == insufficient_quota`, Anthropic `model_context_window_exceeded`, truncated output (`max_tokens`/`length`), `refusal`, content filter |
 
 Error bodies are read up to 16 KiB solely for classification and never logged or stored; logs record only the HTTP status and fixed allowlisted reason code. Truncated tool calls are never executed.
 
@@ -124,8 +124,11 @@ Error bodies are read up to 16 KiB solely for classification and never logged or
 | `sandbox.apple.work_root` | Optional worker-local absolute dir for model workdirs (`0700`); defaults to `<tool-root-parent>/work/models`. |
 | `sandbox.apple.instance` | Optional worker-local VM name prefix (default `botvm`). |
 | `sandbox.apple.binary` | Optional worker-local absolute path to Apple `container` binary (default `container`). |
-| `bot/<profile>/private-intake` | Required per-profile fingerprint key (plus configured tool runner) for gateways accepting private DMs; never injected into tool environments. |
+| `private_egress` | Optional per-profile `host:port -> IP:port` overrides for local sandboxed tools on already-allowed egress targets. Included in activation fingerprint when non-empty. |
+| `super_admins` | Optional per-profile list of non-service human principals authorized for live `skill.*` and `mcp.*` authoring tools. Included in activation fingerprint when non-empty. |
 | `admin.trace`, `admin.logs`, `admin.issues` | OTLP trace/log and Sentry-compatible issue exporter settings (endpoints, headers, secrets, levels, content flags, ID format, sample rates). Included in activation fingerprint; changing or removing requires re-activation so stale processes stop exporting. ([Admin & Observability](admin.md)) |
+
+Gateways accepting private DMs also require the `SecretStore` key `bot/<profile>/private-intake` (plus a configured tool runner); it is never injected into tool environments.
 
 From the relay listener's real address, the Rust adapter derives `BOT_RELAY_IP` (RFC 1918 IPv4), `BOT_RELAY_PORT` (`1..=65535`), and the CLI-specific relay base URL (`ANTHROPIC_BASE_URL` for `claude-cli`, `model_providers.relay.base_url` / `mcp_servers.relay.url` for `codex-cli`, `GOOGLE_GEMINI_BASE_URL` for `agy-cli`) on the host only. Model VMs boot `bot-init`; anchor VMs run `bot-anchor` as UID:GID `10001:10001`. ([Model Image](model-image.md))
 
@@ -151,18 +154,19 @@ flowchart LR
   R <--> DB[(PostgreSQL bot_memories f16)]
   R -->|Untrusted user block| M[Model Turn]
   M -->|memory.search/save/forget/share| B[Broker Memory Gate]
+  B -->|query / fact vec| E
   B <--> DB
   M -->|Done on root DM/CLI| F[Human Filter + Secret Check]
   F -->|JSON state| J[MemoryJudgeClient /v1/systemone]
   J -->|save / supersede / forget| A[auto_save / auto_forget]
-  A -->|Embed 3072d + private TX| DB
+  A -->|Optional embed + private TX| DB
 ```
 
 </details>
 
 - **Turn-start hybrid recall:** When `host.json` sets `embeddings`, the worker lazily backfills up to 16 unembedded rows (SHA-256 race-safe), embeds the query (default `3072` dims, IEEE-754 `f16` `bytea`), and ranks candidates with Unicode char-trigrams, ASCII word-boundary + Korean particle-stripped tokens, code-ID matches, zero-alloc `f16` cosine, z-score anti-false-taint gating, RRF, and 30-day recency decay. Omitting `embeddings` or transient API errors fall back cleanly to lexical recall.
 - **Built-in memory tools:** `memory.search`, `memory.save`, and `memory.forget` are enabled by default in starter templates (`bot init`) and example profiles; when `memory.save` is in scope, the runtime adds concise `## Memory` prompt guidance. `memory.save` writes private owner-only entries in 1:1 DM/CLI (500 active quota, exact + `cos >= 0.94` dedup, non-destructive `supersedes`, optional `policy.approve` opt-in). `memory.share` remains `irreversible` and always requires owner approval over the full body.
-- **System One auto-capture (`memory_judge`):** When `host.json` sets `memory_judge` (e.g., Liquid `d1.2-ultra` or TypeSafe `jev-latest`), the worker evaluates only the authenticated human's raw 1:1 DM/CLI message and their own recalled private memories in one zero-output-token pass (`save`, `supersede`, `forget`, or `none`), blocks credentials locally and via `contains_secret`, skips turns where the model already invoked `memory.save`/`memory.forget`, embeds new facts at `3072` dims, and commits only `private` owner-owned rows (failing open on transient errors).
+- **System One auto-capture (`memory_judge`):** When `host.json` sets `memory_judge` (e.g., Liquid `d1.2-ultra` or TypeSafe `jev-latest`), the worker evaluates only the authenticated human's raw 1:1 DM/CLI message and their own recalled private memories in a zero-output-token pass (`save`, `supersede`, `forget`, or `none`; endpoints without `spans` fall back on HTTP 422), blocks credentials locally and via `contains_secret`, skips turns where the model already invoked `memory.save`/`memory.forget`, embeds new facts when `embeddings` is configured (default `3072` dims), and commits only `private` owner-owned rows (failing open on transient errors).
 
 ## Rust Workspace Crates
 
@@ -172,7 +176,7 @@ flowchart LR
   <img alt="Rust workspace crate dependency graph (8 crates)" src="diagrams/crate-dependencies-light.svg" width="100%">
 </picture>
 
-| Crate | Responsibility | Internal Dependencies |
+| Crate | Responsibility | Internal Runtime Dependencies |
 |---|---|---|
 | `bot-core` | Shared IDs, state types, port traits, built-in tool table, deterministic algorithms | None |
 | `bot-profile` | Profile discovery, validation, bundle packing, and revision creation | `bot-core` |
@@ -183,6 +187,6 @@ flowchart LR
 | `bot-admin` | Admin API/UI and OTLP trace/log + Sentry-compatible issue exporters (used by every role) | `bot-core` |
 | `bot-cli` | `bot` binary, host configuration, `SecretStore` implementations, and role wiring | All 7 above |
 
-There are two separate sandbox ports with no shared parent trait: `ContainerSandbox` implements `bot_core::sandbox::Sandbox<ModelSpec>` for model VMs, while `SrtSandbox` implements `bot_broker::sandbox::Sandbox` for MCP tools; `bot-cli` injects each adapter independently.
+The six middle crates never depend on one another in runtime `[dependencies]` (only integration `[dev-dependencies]` wire peer crates and `testing` doubles for end-to-end tests). There are two separate sandbox ports with no shared parent trait: `ContainerSandbox` implements `bot_core::sandbox::Sandbox<ModelSpec>` for model VMs, while `SrtSandbox` implements `bot_broker::sandbox::Sandbox` for MCP tools; `bot-cli` injects each adapter independently.
 
 Runtime environment variables use the `BOT_` prefix, and profile directories are supplied via `BOT_PROFILES`. The public workspace has no hardcoded profile names, paths, or private identifiers.

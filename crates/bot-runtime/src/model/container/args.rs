@@ -20,7 +20,7 @@ const FIREWALLED_PROGRAMS: [&str; 3] = ["claude", "codex", "agy"];
 pub struct Entry {
     pub anchor: String,
     pub anchor_user: (u32, u32),
-    /// Minimal startup capabilities for `bot-init`, dropped before execing non-root Claude.
+    /// Minimal startup capabilities for `bot-init`, dropped before execing the non-root model CLI.
     pub model_caps: Vec<String>,
 }
 
@@ -51,8 +51,10 @@ pub struct ContainerConfig {
     pub memory_mib: u32,
     pub entry: Option<Entry>,
     /// Test-only escape hatch allowing startup without a firewalled image entrypoint.
+    #[cfg(any(test, feature = "testing"))]
     pub unfirewalled: bool,
-    /// Leave `None` in production to use the canonical per-user lock path (`~/.local/state/bot-framework/locks`).
+    /// Test-only override for the per-user lock path (`~/.local/state/bot-framework/locks`).
+    #[cfg(any(test, feature = "testing"))]
     pub lock_dir: Option<PathBuf>,
     /// Optional private IPv4 CIDR (`a.b.c.d/16..29`) used only when creating a new host-only network.
     pub subnet: Option<String>,
@@ -86,9 +88,33 @@ impl ContainerConfig {
             cpus: 2,
             memory_mib: 2048,
             entry: None,
+            #[cfg(any(test, feature = "testing"))]
             unfirewalled: false,
             subnet: None,
+            #[cfg(any(test, feature = "testing"))]
             lock_dir: None,
+        }
+    }
+
+    pub(super) fn is_unfirewalled(&self) -> bool {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.unfirewalled
+        }
+        #[cfg(not(any(test, feature = "testing")))]
+        {
+            false
+        }
+    }
+
+    pub(super) fn lock_dir_override(&self) -> Option<&Path> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.lock_dir.as_deref()
+        }
+        #[cfg(not(any(test, feature = "testing")))]
+        {
+            None
         }
     }
 
@@ -112,6 +138,7 @@ impl ContainerConfig {
         self
     }
 
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn with_lock_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.lock_dir = Some(dir.into());
@@ -124,6 +151,7 @@ impl ContainerConfig {
         self
     }
 
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn unfirewalled(mut self) -> Self {
         self.unfirewalled = true;
@@ -286,8 +314,7 @@ pub(super) fn valid(config: &ContainerConfig) -> Result<(), Refused> {
         return Err(Refused("config"));
     }
     if config
-        .lock_dir
-        .as_ref()
+        .lock_dir_override()
         .is_some_and(|dir| !dir.is_absolute())
     {
         return Err(Refused("config"));

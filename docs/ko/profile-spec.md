@@ -64,7 +64,7 @@ Locate relevant files and evidence in the provided workspace.
 
 - 허용되는 `builtin` 항목은 `read`(파일 내용 읽기), `grep`(텍스트 검색), `glob`(파일명 검색)뿐입니다. 생략하거나 `[]`이면 아무것도 부여하지 않습니다. 자식 에이전트는 `builtin`을 상속받지 않습니다. 중복, 셸/쓰기/웹 도구, 알 수 없는 이름은 검증에 실패합니다.
 - `builtin`은 추가 호스트 경로를 마운트하지 않습니다. 모델 VM에는 해당 시도(attempt)의 읽기 전용 입력 디렉터리와 쓰기 가능한 임시(scratch) 디렉터리만 마운트되며, 디스크에 세션 토큰 파일을 두지 않습니다.
-- 직접 API 공급자(`anthropic-api`, `openai-api`)는 내장 파일 도구가 없으므로 `builtin`을 선언한 에이전트를 호출 전에 거부합니다(`unsupported_builtin`). 버전이 고정된 Claude Code `--bare` VM은 `read`만 지원하며 `grep`이나 `glob`은 실행 전에 거부합니다. 워커는 상속된 `rules.md`와 `AGENT.md` 지침을 조립해 시스템 프롬프트로 전달합니다([architecture.md](architecture.md)).
+- 직접 API 공급자(`anthropic-api`, `openai-api`)와 비-Claude VM CLI(`codex-cli`, `agy-cli`)는 내장 파일 도구가 없으므로 `builtin`을 선언한 에이전트를 호출 전에 거부합니다(`unsupported_builtin`). 버전이 고정된 Claude Code `--bare` VM(`claude-cli`)은 `read`만 지원하며 `grep`이나 `glob`은 실행 전에 거부합니다. 워커는 상속된 `rules.md`와 `AGENT.md` 지침을 조립해 시스템 프롬프트로 전달합니다([architecture.md](architecture.md)).
 
 ## 새 프로필의 호스트 설정
 
@@ -96,11 +96,13 @@ Locate relevant files and evidence in the provided workspace.
 
 | 섹션 | 키 | 용도 |
 |---|---|---|
-| 최상위 | `version`, `gateway`, `models`, `providers`, `servers`, `egress`, `private_egress`, `super_admins`, `sandbox`, `limits`, `admin` | 호스트 권한 레지스트리(`models`, `egress`, `super_admins`, `private_egress`는 프로필 ID별 맵). |
-| `providers.<alias>` | `kind`, `model`, `endpoint`, `secret`, `effort`, `max_tokens`, `max_completion_tokens` | `kind`는 `demo`, `claude-cli`, `anthropic-api`, `openai-api` 중 하나. `effort`는 `low`/`medium`/`high`/`xhigh`/`max`. `max_tokens`(1..=1,000,000)와 OpenAI 전용 `max_completion_tokens`는 상호 배타적. `secret`은 루프백 직접 API 엔드포인트에서만 선택 사항. |
+| 최상위 | `version`, `gateway`, `models`, `providers`, `servers`, `egress`, `private_egress`, `super_admins`, `sandbox`, `limits`, `embeddings`, `memory_judge`, `admin` | 호스트 권한 레지스트리(`models`, `egress`, `super_admins`, `private_egress`는 프로필 ID별 맵). |
+| `providers.<alias>` | `kind`, `model`, `endpoint`, `secret`, `effort`, `max_tokens`, `max_completion_tokens` | `kind`는 `demo`, `claude-cli`, `codex-cli`, `agy-cli`, `anthropic-api`, `openai-api` 중 하나. `effort`는 `low`/`medium`/`high`/`xhigh`/`max`. `max_tokens`(1..=1,000,000)와 OpenAI 전용 `max_completion_tokens`는 상호 배타적. `secret`은 루프백 직접 API 엔드포인트에서만 선택 사항. |
 | `servers.<alias>` | `transport`, `root`, `command`, `state`, `url`, `auth` | 로컬 stdio(기본 `transport: "stdio"`): `root`, `command`, `state`(기본 `"ephemeral"` 또는 `"required"`). 원격 HTTP(`transport: "http"`): `url`, 선택적 `auth`(`{"kind":"bearer","secret":"<name>"}`). |
-| `sandbox` | `srt` (`binary`, `work_root`, `extra_path`), `apple` (`image`, `network`, `relay_bind`, `work_root`, `instance`, `binary`) | 도구 샌드박스(`srt`, `extra_path`는 절대 경로 최대 16개) 및 다이제스트 고정 모델 VM(`apple`, [model-image.md](model-image.md) 참고). |
+| `sandbox` | `srt` (`binary`, `work_root`, `extra_path`), `apple` (`image`, `images`, `network`, `relay_bind`, `work_root`, `instance`, `binary`) | 도구 샌드박스(`srt`, `extra_path`는 절대 경로 최대 16개) 및 다이제스트 고정 모델 VM(`apple`; `images`는 `claude`/`codex`/`agy`를 다이제스트 고정 참조에 매핑하며 `codex-cli`/`agy-cli`는 명시적 키 필수, [model-image.md](model-image.md) 참고). |
 | `limits` | `tool_call_max_secs` | 도구 호출당 타임아웃 상한(초, 기본 `60`, 최대 `900`). 기본값이 아니면 활성화 지문(fingerprint)에 포함. |
+| `embeddings` | `endpoint`, `model`, `secret`, `dimensions` | 하이브리드 메모리 회상용 선택적 OpenAI 호환 `/embeddings` API(`dimensions` `1..=4096`, 기본 `3072`; `secret`은 루프백 IP 리터럴에서만 선택 사항). 설정 시 활성화 지문에 포함([architecture.md](architecture.md#하이브리드-메모리와-자동-저장)). |
+| `memory_judge` | `endpoint`, `model`, `secret` | 1:1 DM/CLI 실행에서 턴 종료 자동 비공개 메모리 저장을 수행하는 선택적 System One 판단 모델(`d1.2-ultra`/`jev-latest`; `secret`은 루프백 IP 리터럴에서만 선택 사항). 설정 시 활성화 지문에 포함. |
 | `gateway` | `cli` (`accounts`, `uid`, `os_user`), `slack` (`workspaces`, `team_id`, `bot_token`, `app_token`, `dm`, `channels`), `http` (`endpoints`, `kind`, `keys`, `secret`, `subject`, `wait_ms`, `max_active_runs`, `issuer`, `audience`, `key`) | 활성화 시 검증되는 입구 매핑([gateway.md](gateway.md)). |
 | `admin` | `bind` | 로컬 관리자 UI/API 주소(`Admin UI: http://...`, [admin.md](admin.md) 참고). |
 
@@ -129,7 +131,7 @@ policy:
 
 - **바인딩(`bindings`):** 외부 입구 하나를 에이전트 하나에 연결합니다. CLI(`adapter: cli`, `account`), Slack 채널(`adapter: slack`, `workspace`, `channel`, 선택적 `events`), Slack DM(`adapter: slack`, `workspace`, `dm: true`, 선택적 `events: [dm]`), 웹훅 HTTP(`adapter: http`, `endpoint`), 또는 OpenAI 호환 HTTP(`model` 및 선택적 `approvers` 추가)를 지원합니다. 활성 프로필 전체에서 동일한 입구를 중복 바인딩할 수 없습니다.
 - **상속:** 지침은 `rules.md` -> 루트 `AGENT.md` -> ... -> 현재 `AGENT.md` 순으로 이어집니다. 에이전트는 자신과 조상의 `skills/`·`knowledge/`만 볼 수 있으며, 가시 경로 내 스킬 이름 충돌은 거부됩니다. 지식 검색은 요청당 최대 8개 문서 / 32 KiB를 출처 인용과 함께 읽습니다. `AGENT.md` 프런트매터는 `model`(부모 또는 프로필 `model` 상속), `description`(한 줄 <= 200자, 비상속, 기본값은 폴더명), `builtin`을 받습니다. `env.yaml`은 비비밀 문자열 맵으로 위에서 아래로 상속되며 자식이 덮어쓸 수 있고, 셸 확장이나 호스트 환경 변수 상속은 하지 않습니다.
-- **메모리 시드(`memory/`):** `(profile, agent, relative path, content hash)` 기준으로 최초 한 번만 부트스트랩됩니다. 프런트매터에는 프로필 멤버인 `owner`가 필수이며, `visibility` 기본값은 `private`(공유는 `profile`)입니다. 회상 시 프로필·에이전트·요청자 가시성(`private`은 소유자의 DM/CLI에서만, 채널·HTTP·예약은 `profile`만 조회)으로 필터링되며 회상된 항목은 신뢰할 수 없는 참고 입력으로 표시됩니다. 자식 위임 시 요청자와 대화 종류가 유지됩니다. 런타임 메모리는 `owner`를 인증된 주체에 고정하며, 소유자만 수정·삭제하거나 `profile` 공유를 승인할 수 있습니다.
+- **메모리 시드(`memory/`) 및 런타임 메모리:** 시드는 `(profile, agent, relative path, content hash)` 기준으로 최초 한 번만 부트스트랩됩니다. 프런트매터에는 프로필 멤버인 `owner`가 필수이며, `visibility` 기본값은 `private`(공유는 `profile`)입니다. 회상 시 프로필·에이전트·요청자 가시성(`private`은 소유자의 DM/CLI에서만, 채널·HTTP·예약은 `profile`만 조회)으로 필터링되며 회상된 항목은 신뢰할 수 없는 참고 입력으로 표시됩니다. 자식 위임 시 요청자와 대화 종류가 유지됩니다. 기본 템플릿(`bot init`)과 `personal`/`team` 예시는 기본적으로 `memory.search`, `memory.save`, `memory.forget`을 포함합니다([plugins.md](plugins.md)). 런타임 메모리는 `owner`를 인증된 주체에 고정하며, 소유자만 비공개 항목을 갱신(`supersedes`)·삭제하거나 `profile` 공유를 승인할 수 있습니다.
 
 ## 스킬, 도구, 트리거
 
@@ -222,7 +224,7 @@ triggers:
 }
 ```
 
-- 웹훅은 `kind: "webhook"`(레거시 JWT 엔드포인트의 기본값)을 사용하며 바인딩에서 `model`을 생략합니다. 하나의 별칭에 웹훅과 OpenAI 모드를 섞을 수 없으며, 함께 활성화하려면 `/v1`과 충돌하는 레거시 웹훅 별칭의 이름을 변경해야 합니다. SDK 사용법, 오류, 폴링 안내 문구(`"Awaiting approval. Query again with the same Idempotency-Key and request."` / `"Request is still in progress. Query again with the same Idempotency-Key and request."`)는 [gateway.md](gateway.md)의 OpenAI 호환 API 절을 참고하세요.
+- 웹훅은 `kind: "webhook"`(레거시 JWT 엔드포인트의 기본값)을 사용하며 바인딩에서 `model`을 생략합니다. 하나의 별칭에 웹훅과 OpenAI 모드를 섞을 수 없으며, 함께 활성화하려면 `/v1`과 충돌하는 레거시 웹훅 별칭의 이름을 변경해야 합니다. SDK 사용법, 오류, 폴링 안내 문구(`"Awaiting approval. Query again with the same Idempotency-Key and request."` / `"Request is still in progress. Query again with the same Idempotency-Key and request."`)는 [gateway.md](gateway.md#openai-호환-api)의 OpenAI 호환 API 절을 참고하세요.
 
 ## 이벤트-도구 직접 라우팅
 
@@ -363,7 +365,7 @@ Slack 이벤트에 여러 직접 도구 트리거가 일치하면 접수 시점�
 | `profile`/`tools`/`env`/`AGENT`/`SKILL` | 닫힌 객체, 버전, 네이밍/스코프/스키마 구문, `SKILL.md` 프런트매터 규칙. | `id`/스킬 `name` == 폴더명, 대소문자 정확한 IANA `timezone`, 역할/스코프/비밀/바인딩/에이전트/도구 참조, 예약 도구 ID 및 환경 변수, `skill-allowed-tools`, 64 KiB 스킬 합계, `tools.lock.yaml` 해시, 호스트 레지스트리 검사. |
 
 - **예약된 내장 도구 ID:** 프로필의 `tools.yaml`에는 프레임워크 예약 ID 15개(`delegate`, `memory.share`, `memory.search`, `memory.save`, `memory.forget`, `schedule.create`, `schedule.list`, `schedule.cancel`, `schedule.deliver`, `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`)를 선언할 수 없습니다(해당 스킬 네임스페이스의 다른 도구 이름은 허용).
-- **참조, `env`, 권한:** `id != folder`, 정확하지 않은 IANA `timezone`, 미등록 역할/스코프, 중복 주체/바인딩 ID/입구, 누락된 `env.yaml` 키(`env-missing`), 예약된 로더/셸/프록시/호스트 환경 변수명(`env-reserved`), env와 비밀 이름 충돌(`env-secret-conflict`), 비서비스 cron 주체, 승인 필요 cron 도구의 사람 `approver` 누락, 일반 핸들러 뒤에 배치되거나 승인 필요/`effects: true` 도구를 호출하는 `private` 트리거, `input`/`args` 충돌, 비도구 `sync` 응답, 호스트 `limits.tool_call_max_secs`를 초과하는 `timeout_secs`(`tool-timeout-over-cap`)를 거부합니다.
+- **참조, `env`, 권한:** `id != folder`, 정확하지 않은 IANA `timezone`, 미등록 역할/스코프, 중복 주체/바인딩 ID/입구, 누락된 `env.yaml` 키(`env-missing`), 예약된 로더/셸/프록시/호스트 환경 변수명(`tools.yaml`의 `env-reserved`, `env.yaml`의 `reserved-env`), env와 비밀 이름 충돌(`env-secret-conflict`), 비서비스 cron 주체, 승인 필요 cron 도구의 사람 `approver` 누락, 일반 핸들러 뒤에 배치되거나 승인 필요/`effects: true` 도구를 호출하는 `private` 트리거, `input`/`args` 충돌, 비도구 `sync` 응답, 호스트 `limits.tool_call_max_secs`를 초과하는 `timeout_secs`(`tool-timeout-over-cap`)를 거부합니다.
 - **권한 공식 및 해시:**
   - 멤버 스코프 = `(역할 스코프 합집합) ∩ policy.scopes`; 실행 스코프 = `멤버 스코프 ∩ 에이전트 상한`(부모 상한 ∩ `policy.agents`).
   - `irreversible` 도구와 스코프가 `policy.approve`에 포함된 `write` 도구는 승인이 필요합니다. `destination: {recipient, content}`를 가진 도구는 스냅샷에서 `irreversible`로 승격됩니다(`destination: "reply"`는 선언된 등급 유지).

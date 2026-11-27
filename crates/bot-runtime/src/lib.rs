@@ -1,13 +1,13 @@
 //! Worker loop, scheduler, delegation, and model isolation runners.
 
 pub mod context;
-pub mod cron;
+mod cron;
 pub mod embeddings;
-pub mod host;
+mod host;
 pub mod memory_judge;
 pub mod model;
 pub mod scheduler;
-pub mod worker;
+mod worker;
 
 pub use host::{
     Deps, Handback, Models, NoRelays, Quiesce, Relays, SchedulerConfig, SchedulerDeps, SingleModel,

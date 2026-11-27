@@ -70,7 +70,7 @@ examples/profiles/team/
 
 | 에이전트 | 스코프 상한 | 가능 작업 |
 |---|---|---|
-| `main` | 호출자 역할 기준(`lead`는 전체) | 일정 조회, 위임, 예약 |
+| `main` | 호출자 역할 기준(`lead`는 전체) | 일정 조회, 위임, 예약, 비공개 메모리(`memory.search`/`save`/`forget`) |
 | `main/developer` | `run` | MCP 도구 없음; 내장 `read`로 코드 조회 |
 | `main/designer` | `run` | 도구 없음; 텍스트·표 기반 리뷰만 수행 |
 | `main/pm` | `run`, `calendar.read`, `schedule.*` | 읽기 전용 일정 조회 + 대화 예약(`create`/`list`/`cancel`) |
@@ -85,7 +85,7 @@ examples/profiles/team/
 
 ## 우리 팀에 맞게 수정하기
 
-1. **복사:** `cp -R examples/profiles/team profiles/<your-team>`(`BOT_PROFILES` 바로 아래에는 프로필 디렉터리만 배치) 또는 `bot init <your-team> --template team`으로 새 작업 공간을 생성합니다.
+1. **복사:** 아래 단계에서 다루는 5개 에이전트 전체 예시로 시작하려면 `cp -R examples/profiles/team profiles/<your-team>`을 실행합니다(`BOT_PROFILES` 바로 아래에는 프로필 디렉터리만 배치). 샘플 도구·트리거·`ops`·시드 없는 최소 4개 에이전트 스타터(`main`, `developer`, `designer`, `pm`)가 필요하면 대신 `bot init <your-team> --template team`을 실행하세요.
 2. **ID 설정:** `profile.yaml`의 `id`를 폴더명(소문자, 숫자, 하이픈)과 일치시킵니다. `policy.agents` 경로는 그대로 유지합니다.
 3. **예시 내용 교체:** `knowledge/`와 `memory/` 아래 샘플 파일을 수정하거나 삭제합니다(모든 메모리 시드의 `owner`는 `members`에 존재해야 함).
 4. **멤버와 입구 설정:** `local:team`을 실제 식별자로 바꾸고 호스트에 등록된 입구(CLI 계정 또는 Slack 워크스페이스/채널; `profile.yaml`의 Slack 주석 해제)를 바인딩합니다. 각 입구는 활성 프로필 전체에서 고유해야 합니다.
@@ -114,8 +114,8 @@ bot add skill triage --agent main/support --dir profiles/<your-team>
 
 ## 알아두면 좋은 점
 
-- `main/developer`는 `builtin: [read]`를 선언하므로 읽기 격리가 검증된 `claude-cli` VM이 필요합니다. 직접 API 공급자(`anthropic-api`, `openai-api`, [architecture.md](architecture.md) 참고)에서 `main/developer`를 실행하려면 `builtin`을 제거하세요.
-- `main`과 `main/pm`은 `anthropic-api`, `openai-api`, `claude-cli` 모두에서 동일한 대화 예약 도구를 공유합니다. `lead`는 예약을 생성·조회·취소할 수 있고 `member`는 조회할 수 있습니다. 등록된 다른 Slack 채널을 대상으로 지정하려면 생성 시 소유자 승인이 필요하며, 발화 시마다 `Delivery draft` 카드를 승인해야 합니다. 프로필 단위의 반복 작업은 `triggers.yaml`을 사용하며, 서비스 주체는 사용자 예약을 생성할 수 없습니다([plugins.md](plugins.md#예약과-후속-깨우기wake)).
+- `main/developer`는 `builtin: [read]`를 선언하므로 읽기 격리가 검증된 `claude-cli` VM이 필요합니다. 직접 API 공급자(`anthropic-api`, `openai-api`)나 다른 VM CLI(`codex-cli`, `agy-cli`, [architecture.md](architecture.md) 참고)에서 `main/developer`를 실행하려면 `builtin`을 제거하세요.
+- `main`과 `main/pm`은 `anthropic-api`, `openai-api`, `claude-cli`, `codex-cli`, `agy-cli` 모두에서 동일한 대화 예약 도구를 공유합니다. `lead`는 예약을 생성·조회·취소할 수 있고 `member`는 조회할 수 있습니다. 등록된 다른 Slack 채널을 대상으로 지정하려면 생성 시 소유자 승인이 필요하며, 발화 시마다 `Delivery draft` 카드를 승인해야 합니다. 프로필 단위의 반복 작업은 `triggers.yaml`을 사용하며, 서비스 주체는 사용자 예약을 생성할 수 없습니다([plugins.md](plugins.md#예약과-후속-깨우기wake)).
 - 모든 예시 이름(`alice`, `bob` 등)은 가상의 값입니다. 실제 식별자와 비밀은 오직 `host.json`, `members`, 비밀 저장소에만 둡니다.
 
 관련 문서: [프로필 명세](profile-spec.md) · [보안](security.md) · [MCP 도구](plugins.md) · [게이트웨이](gateway.md)

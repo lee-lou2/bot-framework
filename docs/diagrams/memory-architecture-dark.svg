@@ -177,7 +177,7 @@
         <text x="424" y="418" class="mono-ink">· memory.save    (1:1 DM/CLI, private)</text>
         <text x="424" y="438" class="mono-ink">· memory.forget  (soft-delete + wipe)</text>
         <text x="424" y="458" class="mono-ink">· memory.share   (owner approval card)</text>
-        <text x="424" y="480" class="mono">Default scopes enabled in bot init</text>
+        <text x="424" y="480" class="mono">Default scopes · Uses EmbeddingClient</text>
       </g>
 
       <!-- ZONE 3 NODES -->
@@ -206,7 +206,7 @@
         <text x="788" y="430" class="ttl-sm">Auto-Save &amp; Auto-Forget</text>
         <line x1="788" y1="440" x2="1072" y2="440" class="div"/>
         <text x="788" y="458" class="sub">Skips if model already called memory.save/forget</text>
-        <text x="788" y="476" class="mono">3072d embed → private owner row · Fail-open</text>
+        <text x="788" y="476" class="mono">Optional embed → private row · Fail-open</text>
       </g>
     </g>
 

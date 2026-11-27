@@ -295,6 +295,7 @@ dependencies = [
  "bot-broker",
  "bot-core",
  "bot-profile",
+ "bot-runtime",
  "bot-store",
  "chrono",
  "chrono-tz",

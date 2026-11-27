@@ -61,7 +61,7 @@ Verifies the OpenAI-compatible HTTP entrance end-to-end with the official `opena
 | `RELEASE_CHECK_OFFLINE=1` | Disables network access for `cargo` and `cargo deny` (uses cached `~/.cargo/advisory-dbs`; run online `deny` before release). |
 | `RELEASE_CHECK_EMAIL_DOMAIN` | Allowed email domain for `identity` (default `users.noreply.github.com`). |
 | `RELEASE_CHECK_REFS` | Publishable ref patterns fetched into the pinned mirror (default `refs/heads/* refs/tags/*`). |
-| `BOT_MODEL_IMAGE` | Local digest-pinned model VM ref (`name@sha256:...` from `images/model/build.sh`). Required in `integration` / `--strict`; never printed. |
+| `BOT_MODEL_IMAGE` | Local digest-pinned `claude` model VM ref (`name@sha256:...` from `images/model/build.sh --cli claude`). Required in `integration` / `--strict`; never printed (`codex-cli` and `agy-cli` are exercised via scripted sandboxes in `crates/bot-cli/tests/cli_adapters.rs` under `test`). |
 | `BOT_CLAUDE_BIN` / `BOT_SRT_BIN` | Explicit paths to real `claude` CLI / `srt` (defaults to `PATH`). |
 | `BOT_OPENAI_SDK_DIR` | Absolute path for official SDK test env (default `$CARGO_TARGET_DIR/openai-sdk`). |
 | `BOT_OPENAI_SPEC` | Optional path to original `openapi.yaml` to verify committed schema subset extraction. |

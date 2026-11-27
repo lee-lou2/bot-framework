@@ -61,7 +61,7 @@ scripts/release-check.sh --list             # 단계 이름 출력
 | `RELEASE_CHECK_OFFLINE=1` | `cargo`와 `cargo deny`의 네트워크 접근 비활성화(캐시된 `~/.cargo/advisory-dbs` 사용, 릴리스 전 온라인 `deny` 실행 필요). |
 | `RELEASE_CHECK_EMAIL_DOMAIN` | `identity`에서 허용할 이메일 도메인(기본값 `users.noreply.github.com`). |
 | `RELEASE_CHECK_REFS` | 고정 미러로 fetch할 배포 가능 ref 패턴(기본값 `refs/heads/* refs/tags/*`). |
-| `BOT_MODEL_IMAGE` | 로컬 다이제스트 고정 모델 VM 참조(`images/model/build.sh`의 `name@sha256:...`). `integration` / `--strict` 필수, 출력하지 않음. |
+| `BOT_MODEL_IMAGE` | 로컬 다이제스트 고정 `claude` 모델 VM 참조(`images/model/build.sh --cli claude`의 `name@sha256:...`). `integration` / `--strict` 필수, 출력하지 않음(`codex-cli`와 `agy-cli`는 `test` 단계의 `crates/bot-cli/tests/cli_adapters.rs`에서 스크립트 샌드박스로 검증). |
 | `BOT_CLAUDE_BIN` / `BOT_SRT_BIN` | 실제 `claude` CLI / `srt`의 명시적 경로(기본값 `PATH`). |
 | `BOT_OPENAI_SDK_DIR` | 공식 SDK 테스트 환경의 절대 경로(기본값 `$CARGO_TARGET_DIR/openai-sdk`). |
 | `BOT_OPENAI_SPEC` | 커밋된 스키마 부분집합 추출을 검증하기 위한 원본 `openapi.yaml` 선택 경로. |

@@ -215,5 +215,28 @@ mod tests {
                 .unwrap()),
             "same input must produce a deterministic fingerprint"
         );
+        // Fixed-input golden pins for private_egress and super_admins binders.
+        let fixed = [5u8; 32];
+        let priv_map = BTreeMap::from([(
+            "personal".to_owned(),
+            BTreeMap::from([(
+                ("internal.lan".to_owned(), 443),
+                "10.0.0.5:443".parse().unwrap(),
+            )]),
+        )]);
+        assert_eq!(super::bind_private_egress(fixed, &BTreeMap::new()), fixed);
+        assert_eq!(
+            hex(super::bind_private_egress(fixed, &priv_map)),
+            "79f9d5fba1080bd5761310777ed6956afcf9efdab9366be44d90be19ac2040e1"
+        );
+        let admins_map = BTreeMap::from([(
+            "personal".to_owned(),
+            BTreeSet::from(["local:owner".to_owned()]),
+        )]);
+        assert_eq!(super::bind_super_admins(fixed, &BTreeMap::new()), fixed);
+        assert_eq!(
+            hex(super::bind_super_admins(fixed, &admins_map)),
+            "eadfe4b1b57504ef97b9e06a881990976c66da1fbacfe9d8cd572aea417963f1"
+        );
     }
 }

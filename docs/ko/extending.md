@@ -57,7 +57,7 @@ Rust 변경은 필요 없습니다. MCP 서버를 만들고 설정 4곳을 갱�
 
 ### 관련 타입과 아웃박스 라우팅 계약
 
-- **새 `ConversationKind`:** 컴파일러가 `crates/bot-store/src/codec.rs`, `crates/bot-store/src/delivery.rs`, `crates/bot-store/src/user_schedule.rs`, `crates/bot-runtime/src/worker/span.rs`, `crates/bot-gateway/src/inbound.rs`, `crates/bot-gateway/src/schedule_routes.rs`, `crates/bot-broker/src/runner.rs`, `crates/bot-admin/src/json.rs`를 지적합니다. **조용한 누락:** 새 마이그레이션으로 `crates/bot-store/migrations/0001_runs.sql`의 `conv_kind` `CHECK` 제약을 확장하세요.
+- **새 `ConversationKind`:** 컴파일러가 `crates/bot-store/src/accept.rs`, `crates/bot-store/src/codec.rs`, `crates/bot-store/src/delivery.rs`, `crates/bot-store/src/user_schedule.rs`, `crates/bot-runtime/src/worker/span.rs`, `crates/bot-gateway/src/inbound.rs`, `crates/bot-gateway/src/schedule_routes.rs`, `crates/bot-broker/src/runner.rs`, `crates/bot-admin/src/json.rs`를 지적합니다. **조용한 누락:** 새 마이그레이션으로 `crates/bot-store/migrations/0001_runs.sql`의 `conv_kind` `CHECK` 제약을 확장하세요.
 - **새 `IdentityKind`:** 컴파일러가 **아무것도** 지적하지 않습니다(`==`/`matches!`로 비교하고 `RunOrigin::from_ingress`가 `_ =>`로 끝남). `crates/bot-core/src/identity.rs`, `crates/bot-core/src/state.rs`, `crates/bot-profile/src/approval.rs`, `crates/bot-store/src/api.rs`를 수동으로 점검하세요(`grep -rn IdentityKind crates/*/src`).
 - **응답 아웃박스 라우팅 계약** (모든 푸시 어댑터 필수):
   1. **안정적인 `PushTransportId`:** `reply_transport`(`crates/bot-gateway/src/routes.rs`, 타입은 `crates/bot-core/src/intake.rs`)가 접수 시 `bot_runs.reply_transport`를 기록하며 재전달, 위임, 원 대화 묶임 스케줄 실행이 이를 상속합니다.
@@ -93,7 +93,7 @@ Rust 변경은 필요 없습니다. MCP 서버를 만들고 설정 4곳을 갱�
 
 내장 도구는 승인과 PostgreSQL 트랜잭션에 직접 결합되므로 의도적으로 최소한만 유지합니다. ID, 설명, 스키마, `reserved`, `card_body`는 단일 테이블(`crates/bot-core/src/builtin.rs`)에 모여 있습니다.
 
-- **중앙 테이블과 분류:** `crates/bot-core/src/builtin.rs`(`model_tools`, `reserved`, `card_body`, `delegate_schema`). 프로필 검증(`crates/bot-profile/src/tools.rs`)과 스캐폴딩(`crates/bot-cli/src/scaffold/tool.rs`)은 `builtin::reserved`를 직접 참조합니다.
-- **모델 노출과 핸들러:** API 러너 `crates/bot-runtime/src/context.rs`와 `crates/bot-runtime/src/worker/calls.rs`, VM 릴레이 `crates/bot-broker/src/front/{mcp,delegate}.rs`, 브로커 서비스 `crates/bot-broker/src/service/{share,schedule,deliver}.rs`.
-- **스토어와 승인 카드:** `crates/bot-store/src/{share,user_schedule,delivery,admin_approvals}.rs`와 `crates/bot-admin/src/json.rs`(둘 다 소유자 전용 카드 본문 보호에 `builtin::card_body` 사용).
-- **연결 및 문서:** `crates/bot-cli/src/serve/decide.rs`, `docs/architecture.md`, `docs/plugins.md`, `docs/profile-spec.md`(`.github/scripts/docs_contract.py`가 `crates/bot-core/src/builtin.rs`의 모든 예약 ID가 문서화되었는지 검증).
+- **중앙 테이블과 분류:** `crates/bot-core/src/builtin.rs`(`model_tools`, `model_tools_for`, `reserved`, `card_body`, `owner_only_card`, `memory_tool`, `manage_tool`, `delegate_schema`). 프로필 검증(`crates/bot-profile/src/tools.rs`)과 스캐폴딩(`crates/bot-cli/src/scaffold/tool.rs`)은 `builtin::reserved`를 직접 참조합니다.
+- **모델 노출과 핸들러:** API 러너 `crates/bot-runtime/src/context.rs`와 `crates/bot-runtime/src/worker/calls.rs`, VM 릴레이 `crates/bot-broker/src/front/{mcp,delegate}.rs`, 브로커 분기/서비스 `crates/bot-broker/src/service/{call,preflight,share,memory,schedule,deliver,manage}.rs`.
+- **스토어, 실시간 관리 및 승인 카드:** `crates/bot-store/src/{share,memory_ops,memory_search,memory_auto,user_schedule,delivery,admin_approvals}.rs`, `crates/bot-cli/src/serve/manage/`, `crates/bot-admin/src/json.rs`(스토어와 Admin은 소유자 전용 카드 본문 보호에 `builtin::owner_only_card`와 `builtin::card_body`를 공유).
+- **연결 및 문서:** `crates/bot-cli/src/serve/{tools,decide}.rs`, `docs/architecture.md`, `docs/plugins.md`, `docs/profile-spec.md`(`.github/scripts/docs_contract.py`가 `crates/bot-core/src/builtin.rs`의 모든 예약 ID가 문서화되었는지 검증).

@@ -6,7 +6,7 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 
 1. **Models cannot reach the host or see service keys.** Both execution paths enforce this (`docs/architecture.md`):
    - `claude-cli`, `codex-cli`, `agy-cli`: run the model CLI inside a disposable VM with no secrets (session token only) and one egress path through the broker relay.
-   - `anthropic-api` / `openai-api`: no VM or relay; the worker sends conversation messages to the configured host `endpoint` and receives text/tool calls only. No host filesystem or shell exists, and the worker reads the provider key from `SecretStore` solely to attach the request header.
+   - `anthropic-api` / `openai-api` (plus host-configured `embeddings` and `memory_judge`): no VM or relay; the worker (and broker for `embeddings`) sends messages/inputs to the configured host `endpoint` and receives structured responses only. No host filesystem or shell exists, and the host reads the profile key from `SecretStore` solely to attach the outbound request header (checking active revision twice and scanning responses for key leaks).
 2. **All tool authorization, approval, and auditing pass through the broker (`crates/bot-broker/src/service.rs`).** Never add a direct model-to-tool execution path. Both paths route tool calls through `Broker::call` (`Broker::call_for_model` for model-planned calls).
 3. **Durable intake first.** A request is accepted only after the PostgreSQL transaction commits.
 4. **Humans approve irreversible actions.** Models can never approve actions.
@@ -14,11 +14,11 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 ## Conventions
 
 - **Language:** Write all code, comments, identifiers, user-facing copy (CLI, Admin UI, Slack cards, error messages), docs, and conventional commit messages (title and body) in **English**. Error reasons and audit outcomes use fixed vocabulary codes—never free-form sentences, payloads, or secrets.
-- **Minimal essential comments:** Keep comments minimal and high-signal. Every non-test `.rs` file under `crates/*/src/` (excluding `tests.rs`, `*_tests.rs`, `tests/`, `testing/`) must have a concise 1-line English `//!` responsibility header on line 1 (`.github/scripts/check_contracts.py`). Elsewhere, comment only non-obvious invariants, lock ordering, security boundaries, protocol quirks, or non-obvious "why"—never narrate obvious code or add redundant doc comments on self-explanatory items.
+- **Minimal essential comments:** Keep comments minimal and high-signal. Every non-test `.rs` file under `crates/*/src/` (excluding `tests.rs`, `*_tests.rs`, `tests/`, `testing/`) must have a concise 1-line English `//!` responsibility summary on line 1, optionally followed by brief invariant/lock-order `//!` lines when the module owns non-obvious contracts (`.github/scripts/check_contracts.py`). Elsewhere, comment only non-obvious invariants, lock ordering, security boundaries, protocol quirks, or non-obvious "why"—never narrate obvious code or add redundant doc comments on self-explanatory items.
 - **Concise documentation & Korean human editions:** Keep `README.md` and `docs/*.md` concise and focused on core intent and contracts. Update `docs/` in the **same change** when adding or changing config keys, schema properties, CLI flags, admin routes, or built-in tools (`.github/scripts/docs_contract.py`). Keep Korean companion editions (`README.ko.md`, `docs/ko/*.md`) in sync when human-readable docs change. Use tables or lists when a contract paragraph has 3+ numbers or 2+ rules.
 - **File size & boundaries:** Keep files at most 600 lines; split along conceptual boundaries rather than arbitrary line counts.
-- **Dependencies & visibility:** Add dependencies only with strong justification (`=` pinned, `deny.toml`). Never commit private names or secrets. Do not add cross-dependencies between the 6 middle crates; start new modules as `pub(crate)` and open `pub mod` only when another crate needs it.
-- **Test seams:** Place cross-crate test doubles behind the `testing` feature, and crate-local ones under `cfg(test)`. `serve::Overrides` and `serve::gateway::Deps.slack_base` (`crates/bot-cli/src/serve/`) are test-only seams.
+- **Dependencies & visibility:** Add dependencies only with strong justification (`=` pinned, `deny.toml`). Never commit private names or secrets. Do not add cross-dependencies between the 6 middle crates in runtime `[dependencies]` (integration `[dev-dependencies]` are allowed only for cross-crate test harnesses); start new modules as `pub(crate)` and open `pub mod` only when another crate needs it.
+- **Test seams:** Place cross-crate test doubles behind the `testing` feature (`bot-admin::fake`, `bot-broker::testing`, `bot-gateway::testing`, `bot-runtime`'s `ContainerConfig::{unfirewalled, with_lock_dir}`, `bot-cli`'s `serve::Overrides` / `serve::gateway::Deps.slack_base` / `serve::worker::Deps` / `serve::claude::Launch::Ready`), and crate-local ones under `cfg(test)`.
 - **Fingerprint stability:** Activation fingerprint bytes must remain stable; changing them forces re-activation on all existing deployments. Add fixed-input golden tests before touching fingerprint inputs.
 
 ## Commands
@@ -32,7 +32,7 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 
 ## Crates & Dependency Direction
 
-`bot-core` ◄ {`bot-profile`, `bot-store`, `bot-runtime`, `bot-broker`, `bot-gateway`, `bot-admin`} ◄ `bot-cli`. The six middle crates never depend on one another and communicate only through `bot-core` port traits.
+`bot-core` ◄ {`bot-profile`, `bot-store`, `bot-runtime`, `bot-broker`, `bot-gateway`, `bot-admin`} ◄ `bot-cli`. The six middle crates never depend on one another in runtime `[dependencies]` and communicate only through `bot-core` port traits.
 
 | Crate | Responsibility | Entry Points |
 |---|---|---|
@@ -80,6 +80,6 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 - Store rules and lock order: `crates/bot-store/src/lib.rs` header
 - Broker call sequence: `crates/bot-broker/src/service.rs` header
 - Gateway ingress sequence (`verify → normalize → durable accept → ack`): `crates/bot-gateway/src/lib.rs` header
-- Activation fingerprint: `authority_fingerprint` in `crates/bot-cli/src/host.rs`, `crates/bot-cli/src/execution.rs`, `crates/bot-gateway/src/mapping.rs`
+- Activation fingerprint: `HostFile::authority_fingerprint` in `crates/bot-cli/src/host.rs` (folding `crates/bot-gateway/src/mapping.rs` `fingerprint`, `crates/bot-cli/src/{execution,execution/provider,tool_limits,embeddings,memory_judge,host/lists}.rs`, and `bot_admin::obs_fingerprint` in `crates/bot-admin/src/lib.rs`)
 - Legacy restore compatibility: tightening profile validation must never break `BOTPROFILE1` (`SkillMode::Legacy`) restore; add regression cases to `crates/bot-cli/tests/legacy_v1_corpus.rs` first.
-- Migration immutability: never modify bytes of deployed files in `crates/bot-store/migrations/` (checksums are verified on startup); write new migrations (0029+) in English as the next numbered file.
+- Migration immutability: never modify bytes of deployed files in `crates/bot-store/migrations/` (checksums are verified on startup); write new migrations (0030+) in English as the next numbered file.

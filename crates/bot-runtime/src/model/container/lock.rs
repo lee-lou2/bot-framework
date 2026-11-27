@@ -50,8 +50,8 @@ impl Identity {
 
 /// Uses a fixed user-private path in production (independent of workdir/mount_root) so two processes with the same instance name always collide.
 pub(super) fn lock_dir(config: &ContainerConfig) -> Result<PathBuf, StartError> {
-    match &config.lock_dir {
-        Some(dir) => Ok(dir.clone()),
+    match config.lock_dir_override() {
+        Some(dir) => Ok(dir.to_path_buf()),
         None => default_lock_dir(std::env::var_os("HOME").map(PathBuf::from)),
     }
 }

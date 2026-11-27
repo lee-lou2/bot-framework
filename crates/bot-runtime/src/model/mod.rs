@@ -5,7 +5,7 @@
 //! Errors carry fixed vocabulary codes only.
 
 mod agy;
-pub mod api;
+pub(crate) mod api;
 mod claude_code;
 mod cli;
 mod codex;

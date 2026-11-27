@@ -16,7 +16,7 @@ Authentication uses a single secret—HTTP Basic in browsers (username ignored) 
 Every request passes host, rate-limit, and credential checks; `POST` mutations also pass CSRF validation:
 
 1. **`Host` check**: rejects `Host` headers outside the allowlist (bind address, loopback names, configured `hosts`) with `421` to block DNS rebinding.
-2. **Per-IP failure limit**: exceeding `max_failures` (default `5`) failed attempts in 60s blocks that peer IP for 60s (`429`) without affecting other clients. Uses only the socket peer address—never reads `X-Forwarded-For` or `Forwarded` (locked by tests; behind a proxy, the proxy IP shares one bucket). Requests without credentials (initial browser prompt) are not counted; only invalid or malformed credentials count.
+2. **Per-IP failure limit**: reaching `max_failures` (default `5`) failed attempts in 60s blocks that peer IP for 60s (`429`) without affecting other clients. Uses only the socket peer address—never reads `X-Forwarded-For` or `Forwarded` (locked by tests; behind a proxy, the proxy IP shares one bucket). Requests without credentials (initial browser prompt) are not counted; only invalid or malformed credentials count.
 3. **Secret match**: hashes the secret and compares in constant time across all entries (`401` on failure).
 4. **CSRF protection (`POST`)**: requires viewer-bound `X-Bot-Csrf` (issued by authenticated `GET /v1/admin/me`), `Content-Type: application/json`, and same-origin headers (`Origin` / `Sec-Fetch-Site`), returning `403` on failure.
 
@@ -123,7 +123,7 @@ Holds occur when an external write's outcome cannot be confirmed. Multi-step too
 
 | View | Audience | Contents |
 |---|---|---|
-| Overview | All (scoped) | Default home dashboard: system health banner, immediate action queue (pending approvals, holds, dead runs, paused automations), run throughput metrics, recent activity, and (for operators) active profile cards, pre-approved automations, and observability status. |
+| Overview | All (scoped) | Default home dashboard: system health banner, personal queue (assigned approvals and recent runs) plus recent activity for all users, and (for operators) full action queue (pending approvals, holds, dead runs, paused automations), run throughput metrics, active profile cards, pre-approved automations, and observability status. |
 | Approvals & Holds | All (holds: operator) | Filterable action inbox (`All open`, `Assigned to me`, `Approvals`, `Holds`) with quick hold jump, visually emphasized cards assigned to the signed-in principal (verified by `seen` hash), two-step hold resolution forms, and recent decisions. |
 | Runs | All | Searchable, state-filterable run list and detail pane (lineage, compact facts grid, tool calls, effects, child runs, trace links), plus operator resume/cancel controls. |
 | Pre-approvals | Operator | Filterable status (`All`/`Active`/`Paused`), UTC daily usage meter, and emergency pause/resume controls ([Pre-Approvals UI](#pre-approvals-ui)). |
@@ -138,7 +138,7 @@ In **Runs** detail, **Resume** on a `dead` root run requires two presses within 
 
 ### Structure View & Map
 
-Built from the active `ProfileCatalog` with 8 card kinds (profile, agent, skill, tool, trigger, binding, scope, secret) and 6 edge kinds (delegates, uses, owns, handles, wakes, needs) under a deterministic revision (`rev`). Exposes names, classifications, and counts only—never instructions, knowledge bodies, env vars, or secret values. **Directory** mode (default) groups agents and their bindings, triggers, skills, tools, and shared scopes/secrets into searchable cards; **Graph** mode renders the interactive pan/zoom topology canvas. Both modes share the same slide-out detail drawer. Inherited skills appear once on the defining agent. Agent summaries show the first line of description (≤ 140 chars, fallback to model) and non-inherited `builtin` read-only tools (schema allows `read`/`grep`/`glob`; `claude-cli` VM supports `read` only).
+Built from the active `ProfileCatalog` with 8 card kinds (profile, agent, skill, tool, trigger, binding, scope, secret) and 6 edge kinds (delegates, uses, runs, handles, triggers, needs) under a deterministic revision (`rev`). Exposes names, classifications, and counts only—never instructions, knowledge bodies, env vars, or secret values. **Directory** mode (default) groups agents and their bindings, triggers, skills, tools, and shared scopes/secrets into searchable cards; **Graph** mode renders the interactive pan/zoom topology canvas. Both modes share the same slide-out detail drawer. Inherited skills appear once on the defining agent. Agent summaries show the first line of description (≤ 140 chars, fallback to model) and non-inherited `builtin` read-only tools (schema allows `read`/`grep`/`glob`; `claude-cli` VM supports `read` only, while `codex-cli`, `agy-cli`, and direct API providers support none).
 
 ### Pre-Approvals UI
 
@@ -168,7 +168,7 @@ Worker, broker, and gateway submit completed spans to `bot_core::trace::Tracer` 
 
 Both share the same transport, circuit breaker, activation fence, and `Redactor`:
 
-- **Structured stderr and OTLP logs (`admin.logs`)**: `BOT_LOG_FORMAT=json` writes line-delimited `{ts_ms, level, target, message, fields}` to stderr (default `text`), filtered by `BOT_LOG` (workspace crates only; external crates capped at `warn`; `sqlx` off). Enabling `admin.logs` batches the same events over OTLP/HTTP(S) protobuf (`ExportLogsServiceRequest`, default path `/v1/logs`) at minimum `level` (`debug`, `info`, `warn` default, `error`, bounded by `BOT_LOG`). Bodies and fields are redacted and capped (2 KiB body, 256-char values, 32 fields).
+- **Structured stderr and OTLP logs (`admin.logs`)**: `BOT_LOG_FORMAT=json` writes line-delimited `{ts_ms, level, target, message, fields}` to stderr (default `text`), filtered by `BOT_LOG` (workspace crates only; external crates capped at `warn`; `sqlx` off). Enabling `admin.logs` batches the same events over OTLP/HTTP(S) protobuf (`ExportLogsServiceRequest`, default path `/v1/logs`) at minimum `level` (`debug`, `info`, `warn` default, `error`, bounded by `BOT_LOG`). Bodies and fields are redacted and capped (2,048-char body, 256-char values, 32 attributes total including `code.namespace`).
 - **Issue tracker (`admin.issues`, `kind: "sentry"`)**: implements `bot_core::issue::IssueReporter` via Sentry Envelope v7 (`POST <endpoint>`, `Content-Type: application/x-sentry-envelope`, `X-Sentry-Auth`) for Sentry, GlitchTip, Bugsink, and compatible backends. Auto-reports: (1) `tracing::error!`, (2) panics (`fatal`), and (3) abnormal failed spans (excluding expected rejections/cancellations: `cancelled`, `denied`, `invalid`, `rate_limited`, `forbidden`, `unregistered`, `no_route`, `too_large`, `parked`, `lost`). Links failed spans via `contexts.trace.trace_id` and omits extra tags on `bot.private` spans. Loop/flood guards: exporter failures update counters/`last_error` without logging, observability/HTTP transport targets are skipped, and `(kind, target)` deduplicates with a 5s cooldown.
 - **Host-scoped secret refs**: `admin.logs.headers` secret objects and `admin.issues.key` accept `{"secret": "<name>"}` (resolves under `bot/host/<name>`) or `{"profile": "<profile>", "secret": "<name>"}` (checked by `bot validate`/`bot doctor` and preloaded into the redactor by `bot serve`). `admin.issues.key` may be omitted only for loopback plaintext `http://` mocks.
 - **Status**: `GET /v1/admin/status` exposes `process.logs` and `process.issues` with `{enabled, queued, sent, dropped, failed, circuit, last_error, backends}` (shows `origin` only—never paths, headers, or keys).
@@ -184,8 +184,8 @@ Both share the same transport, circuit breaker, activation fence, and `Redactor`
 | `hosts` | `[]` | Additional allowed `Host` values (`host:port`) behind a reverse proxy. |
 | `max_failures` | `5` | Per-peer-IP auth failures allowed in 60s before a 60s block (range `1..=100`). |
 | `trace.<profile>` | off | Per-profile OTLP trace exporter (`null` disables): required `endpoint`, optional `name` (default `default`), `link` (`http(s)` template with `{trace_id}`), `headers` (string or `{"secret": "<name>"}` from that profile's `SecretStore`), `content` (`false`), `ids` (`hash` or `plain`), `sample` (`0.0..=1.0`, default `1.0`), `remote` (`false`). |
-| `logs` | off | Host-wide OTLP log exporter: `endpoint`, `name`, `headers` (string or `{"secret": "<name>"}` / `{"profile": "<p>", "secret": "<name>"}`), `level` (`warn`), `remote` (`false`). |
-| `issues` | off | Host-wide issue tracker: `kind` (`sentry`), `name`, `endpoint`, `key` (`{"secret": "<name>"}` or with `profile`; optional on loopback `http://` only), `environment`, `release`, `sample` (`1.0`), `remote` (`false`). |
+| `logs` | off | Host-wide OTLP log exporter: `endpoint`, `name` (default `otlp-logs`), `headers` (string or `{"secret": "<name>"}` / `{"profile": "<p>", "secret": "<name>"}`), `level` (`warn`), `remote` (`false`). |
+| `issues` | off | Host-wide issue tracker: `kind` (`sentry`), `name` (default `sentry`), `endpoint`, `key` (`{"secret": "<name>"}` or with `profile`; optional on loopback `http://` only), `environment`, `release`, `sample` (`1.0`), `remote` (`false`). |
 
 Example local collector config (`admin` object in `host.json`):
 

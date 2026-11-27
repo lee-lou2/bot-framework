@@ -32,9 +32,9 @@
 | **Worker & Broker** | `bot-runtime` · `bot-broker` | 큐 리스, 모델 실행(직접 API / Apple `container` VM), 자식 위임, 도구 권한/승인/MCP(`srt`) |
 | **Admin & Obs** | `bot-admin` | 승인·보류(hold)·실행 재개/취소용 웹 UI/API, OTLP 트레이스/로그 및 Sentry 호환 이슈 내보내기 |
 
-- **8개 크레이트 단방향 그래프:** `bot-core` ◄ {`bot-profile`, `bot-gateway`, `bot-store`, `bot-runtime`, `bot-broker`, `bot-admin`} ◄ `bot-cli`. 중간 6개 크레이트는 서로 의존하지 않으며 `bot-core` 포트 트레이트를 통해서만 통신합니다. ([아키텍처 및 다이어그램](docs/ko/architecture.md))
+- **8개 크레이트 단방향 그래프:** `bot-core` ◄ {`bot-profile`, `bot-gateway`, `bot-store`, `bot-runtime`, `bot-broker`, `bot-admin`} ◄ `bot-cli`. 중간 6개 크레이트는 런타임 의존성에서 서로 의존하지 않으며 `bot-core` 포트 트레이트를 통해서만 통신합니다. ([아키텍처 및 다이어그램](docs/ko/architecture.md))
 - **하이브리드 메모리 및 자동 저장:** 추가 확장 없는 PostgreSQL 하이브리드 회상(3072차원 IEEE-754 `f16` 임베딩 + 유니코드 어휘/트라이그램 + z-score 오탐 방지 게이트 + RRF), 내장 `memory.search`/`save`/`forget`/`share` 도구, 그리고 1:1 DM/CLI 대화에서 생성 토큰 없이 저장·갱신·삭제를 자동 판단하는 선택적 System One(`memory_judge`: `d1.2-ultra`/`jev-latest`) 연동. ([메모리 아키텍처](docs/ko/architecture.md#하이브리드-메모리와-자동-저장))
-- **OpenAI 호환 엔드포인트:** 공식 Python 또는 Node SDK의 `base_url`을 `http://127.0.0.1:8788/v1`로 지정하고 발급된 키를 넣으면 `models.list()`와 `chat.completions.create()`를 호출할 수 있습니다. ([SDK 예제](docs/ko/gateway.md) · [모델 바인딩](docs/ko/profile-spec.md))
+- **OpenAI 호환 엔드포인트:** 공식 Python 또는 Node SDK의 `base_url`을 `http://127.0.0.1:8788/v1`로 지정하고 발급된 키를 넣으면 `models.list()`와 `chat.completions.create()`를 호출할 수 있습니다. ([SDK 예제](docs/ko/gateway.md#openai-호환-api) · [모델 바인딩](docs/ko/profile-spec.md#openai-모델-바인딩))
 - **프로필 단위 격리:** 개인·팀·조직 봇을 별도 프로필 디렉터리로 분리하고 활성화 전에 `bot validate`로 검증합니다. ([개인 예제](examples/profiles/personal) · [팀 템플릿](examples/profiles/team))
 
 ## 빠른 시작 (로컬 데모)
@@ -73,7 +73,7 @@ export BOT_DATABASE_URL="postgres://postgres:${PG_DEMO_PASS}@127.0.0.1:5432/bot_
 
 ### 2. Admin UI 열기
 
-`bot serve`가 출력한 URL(`Admin UI: http://...`, 기본 포트 `8787`, `admin.bind`로 변경 가능)을 엽니다. 아무 사용자 이름과 터미널에 출력된 비밀번호를 입력하세요. 비대화형 환경에서는 `BOT_ADMIN_TOKEN_FILE`에 권한 `0600`의 절대 경로를 지정합니다. ([호스트 설정 예제](docs/ko/profile-spec.md))
+`bot serve`가 출력한 URL(`Admin UI: http://...`, 기본 포트 `8787`, `admin.bind`로 변경 가능)을 엽니다. 아무 사용자 이름과 터미널에 출력된 비밀번호를 입력하세요. 비대화형 환경에서는 `BOT_ADMIN_TOKEN_FILE`에 권한 `0600`의 절대 경로를 지정합니다. ([호스트 설정 예제](docs/ko/profile-spec.md#새-프로필의-호스트-설정))
 
 ### 3. 대화, 스케줄, 승인 체험하기
 
@@ -95,7 +95,7 @@ bot add tool triage.lookup                 # 도구 선언 (스코프 상한은 
 bot validate && bot doctor                 # 설정 및 호스트 사전 요구 사항 점검
 ```
 
-자세한 내용은 [첫 번째 도구](docs/ko/first-tool.md), [팀 템플릿](docs/ko/team-template.md), [시크릿 저장소 및 명령](docs/ko/gateway.md)을 참고하세요.
+자세한 내용은 [첫 번째 도구](docs/ko/first-tool.md), [팀 템플릿](docs/ko/team-template.md), [시크릿 저장소 및 명령](docs/ko/gateway.md#시크릿-저장소와-명령)을 참고하세요.
 
 ## 문서
 

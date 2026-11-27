@@ -41,7 +41,7 @@
 
 | 이름 | 서로 다른 의미 |
 |---|---|
-| `cli` | `bot_core::cli`는 **Claude CLI 도구 호출 위치**(체크포인트 키)와 실행 전 거부 기록(`CliRefusal`)을 정의하고, `bot_gateway::cli`는 Unix 소켓 CLI 입구이며, `bot-cli`는 `bot` 바이너리 크레이트입니다. |
+| `cli` | `bot_core::cli`는 **VM 모델 CLI 도구 호출 위치**(`claude-cli`, `codex-cli`, `agy-cli` 체크포인트 키)와 실행 전 거부 기록(`CliRefusal`, 직접 API 워커도 공유)을 정의하고, `bot_gateway::cli`는 Unix 소켓 CLI 입구이며, `bot-cli`는 `bot` 바이너리 크레이트입니다. |
 | `Sandbox` | `bot_core::sandbox::Sandbox<ModelSpec>`은 모델 VM(`ContainerSandbox`)을 격리하고, `bot_broker::sandbox::Sandbox`는 MCP 도구 서버(`SrtSandbox`)를 격리합니다. 둘을 잇는 공통 트레이트는 없습니다. |
 | `Delivery` | `bot_gateway::delivery`에서는 아웃박스 발송 결과, `bot_runtime::worker`에서는 예약 응답 포트 묶음, `bot-cli`의 `serve::admin`에서는 운영자 시크릿 출력 대상(터미널 vs 파일)을 뜻합니다. |
 

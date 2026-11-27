@@ -107,7 +107,7 @@ bot mcp sync <skill-dir-under-BOT_PROFILES>
 프레임워크 예약 도구 ID 15개(`delegate`, `memory.share`, `memory.search`, `memory.save`, `memory.forget`, `schedule.create`, `schedule.list`, `schedule.cancel`, `schedule.deliver`, `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`)는 `tools.yaml`에 선언할 수 없습니다.
 
 - `anthropic-api`, `openai-api` 및 VM CLI 러너는 에이전트 스코프 상한 내에 있을 때 `memory.share`, `memory.search`, `memory.save`, `memory.forget`, `schedule.create`, `schedule.list`, `schedule.cancel`을 노출하며, 직계 자식이 있는 에이전트에는 `delegate`(`{"agent":"main/research","instruction":"Summarize today's agenda"}`)를 추가로 노출합니다. `schedule.deliver`는 호스트가 전달 초안 승인용으로 내부 사용합니다.
-- 프로필 `super_admins`가 해당 스코프를 보유하면 아래 6개 실시간 관리 도구도 함께 노출됩니다(비슈퍼관리자에게는 숨겨지며 직접 호출 시 `not_super_admin`으로 실패). Claude CLI는 점 표기 이름을 밑줄(`memory_share`, `skill_create`)로 노출하며 API 러너는 요청별로 별칭을 매핑합니다.
+- 프로필 `super_admins`가 해당 스코프를 보유하면 아래 6개 실시간 관리 도구도 함께 노출됩니다(비슈퍼관리자에게는 숨겨지며 직접 호출 시 `not_super_admin`으로 실패). VM CLI 러너(`claude-cli`, `codex-cli`, `agy-cli`)는 점 표기 이름을 밑줄(`memory_share`, `skill_create`)로 노출하며 API 러너는 요청별로 별칭을 매핑합니다.
 
 | 슈퍼관리자 도구 | 등급 | 동작 |
 |---|---|---|
@@ -119,8 +119,8 @@ bot mcp sync <skill-dir-under-BOT_PROFILES>
 | `mcp.remove` | `write` | MCP 서버와 해당 스킬 도구 바인딩, 미사용 스코프를 제거하고(`remove_secrets: true`면 미사용 암호화 비밀도 삭제) 검증 및 실시간 활성화. |
 
 - 관리 변경은 원자적으로 처리됩니다. 검증, 설치, DB 오류가 발생하면 디스크 수정이 롤백됩니다. 성공 시 기존 `bot_grants`를 유지한 채 새 번들과 활성 리비전을 커밋하고 재시작 없이 프로세스 내 레지스트리·러너·샌드박스·결정 게이트를 핫 리로드합니다.
-- 비밀 값(`secret_value`, `secret_values`)은 `Redactor`에 등록되고 SOPS(`sops set`) 또는 키체인(`bot/<profile>/<name>`)에 즉시 캐시 플러시와 함께 암호화 저장되며, 평문 파일이나 승인 카드에는 절대 기록되지 않습니다.
-- 브로커는 모든 내장 도구 호출마다 고정 리비전과 현재 권한을 검사합니다. `memory.share`는 소유자가 자신의 DM이나 `bot chat`에서 정확한 본문을 승인해야 합니다. `memory.search`는 턴 시작 회상과 동일한 가시성 및 `private_memory_read` 오염 규칙으로 하이브리드(임베딩 + 어휘) 회상을 수행합니다. `memory.save`(1:1 DM/CLI 비공개 전용, 소유자당 활성 500건 상한, 정확/근접 중복 자동 생략, 선택적 `kind: "core"|"fact"` 및 비파괴 `supersedes`)는 `policy.approve`에 `memory.save`가 포함된 경우에만 소유자 승인을 요구하며(승인 통과 후에만 임베딩 계산), 스코프가 허용된 경우 런타임이 간결한 `## Memory` 지침을 주입해 모델이 장기 사실을 능동적으로 저장하도록 돕고, `host.json`의 `memory_judge`를 설정하면 1:1 DM/CLI 사용자 턴의 저장·갱신·삭제 판단까지 자동화할 수 있습니다. `memory.forget`은 1:1 DM/CLI에서 본인 소유 기억 1건을 소프트 삭제합니다. 확정된 거부는 호출 ID 기준으로 결정적으로 재생됩니다([reliability.md](reliability.md)).
+- 비밀 값(`secret_value`, `secret_values`)은 `Redactor`에 등록되고 SOPS(`sops set`) 또는 키체인(`bot/<profile>/<name>`)에 즉시 캐시 플러시와 함께 암호화 저장되며, 평문 파일이나 승인 카드에는 절대 기록되지 않습니다. `BOT_SECRETS=env`에서는 런타임 비밀 쓰기가 거부되므로(`secret_store_failed`), `BOT_SECRET__<PROFILE>__<NAME>`을 미리 설정하고 `secret_value`/`secret_values`를 생략하거나 `sops:<file>` / `keychain`을 사용해야 합니다.
+- 브로커는 모든 내장 도구 호출마다 고정 리비전과 현재 권한을 검사합니다. `memory.share`는 소유자가 자신의 DM이나 `bot chat`에서 정확한 본문을 승인해야 합니다. `memory.search`는 턴 시작 회상과 동일한 가시성 및 `private_memory_read` 오염 규칙으로 하이브리드(임베딩 + 어휘) 회상을 수행합니다. `memory.save`(1:1 DM/CLI 비공개 전용, 소유자당 활성 500건 상한, 정확/근접 중복 자동 생략, 선택적 `kind: "core"|"fact"` 및 본인 비공개 항목에 대한 비파괴 `supersedes`)는 `policy.approve`에 `memory.save`가 포함된 경우에만 소유자 승인을 요구하며(승인 통과 후에만 임베딩 계산), 스코프가 허용된 경우 런타임이 간결한 `## Memory` 지침을 주입해 모델이 장기 사실을 능동적으로 저장하도록 돕고, `host.json`의 `memory_judge`를 설정하면 1:1 DM/CLI 사용자 턴의 저장·갱신·삭제 판단까지 자동화할 수 있습니다. `memory.forget`은 1:1 DM/CLI에서 본인 소유 기억 1건을 소프트 삭제합니다(본문과 임베딩 컬럼을 비우며, `policy.approve`에 `memory.forget`이 포함되면 소유자 승인을 요구). 확정된 거부는 호출 ID 기준으로 결정적으로 재생됩니다([reliability.md](reliability.md)).
 
 ### 예약과 후속 깨우기(Wake)
 

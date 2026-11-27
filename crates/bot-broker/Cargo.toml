@@ -14,8 +14,8 @@ base64.workspace = true
 bot-core.workspace = true
 hmac.workspace = true
 serde.workspace = true
-# float_roundtrip ensures deterministic float parsing so canonical JSON and hashes match across implementations.
-serde_json = { workspace = true, features = ["float_roundtrip"] }
+# Workspace serde_json enables float_roundtrip for deterministic canonical JSON and hashes.
+serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["process"] }
 

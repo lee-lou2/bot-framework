@@ -60,7 +60,8 @@ impl Cron {
         core::Cron::parse(input).map(Cron)
     }
 
-    pub fn as_str(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn as_str(&self) -> &str {
         self.0.as_str()
     }
 

@@ -10,15 +10,15 @@
 
 `host.json`은 프로필 별칭을 OS 계정, 서비스, 실행 파일에 매핑합니다. `BOT_HOST_CONFIG`를 생략하면 예제 프로필용 내장 데모 기본값이 사용됩니다. 사용자 정의 프로필은 모델과 입구를 직접 등록해야 합니다([새 프로필의 호스트 설정](profile-spec.md#새-프로필의-호스트-설정)).
 
-최상위 키: `version` (`1`), `gateway`, `servers`, `models`, `providers`, `egress`, `private_egress`, `super_admins`, `sandbox`, `limits`, `admin`.
+최상위 키: `version` (`1`), `gateway`, `servers`, `models`, `providers`, `egress`, `private_egress`, `super_admins`, `sandbox`, `limits`, `embeddings`, `memory_judge`, `admin`.
 
-- `models` / `providers`: 프로필별 허용 모델 별칭을 `demo`, `claude-cli`, `anthropic-api`, `openai-api`에 바인딩합니다. 업스트림 엔드포인트는 자격 증명, 쿼리, 프래그먼트가 없는 `https://` URL이어야 합니다(직접 API 제공자는 루프백 IP 리터럴의 `http://`도 허용하며, 이 경우에만 `secret`을 생략할 수 있습니다).
+- `models` / `providers`: 프로필별 허용 모델 별칭을 `demo`, `claude-cli`, `codex-cli`, `agy-cli`, `anthropic-api`, `openai-api`에 바인딩합니다. 업스트림 엔드포인트는 자격 증명, 쿼리, 프래그먼트가 없는 `https://` URL이어야 합니다(직접 API 제공자는 루프백 IP 리터럴의 `http://`도 허용하며, 이 경우에만 `secret`을 생략할 수 있습니다).
 - `egress` / `private_egress`: 프로필별 허용 외부 `host:port` 상한과 고정된 사설/로컬 대상 매핑입니다.
 - `super_admins`: 프로필별 슈퍼 관리자 주체의 호스트 수준 상한입니다(비어 있지 않으면 활성화 지문에 포함).
 - `servers`: 로컬 MCP 패키지(`root`, 명령) 또는 원격 HTTP 서버(`transport: "http"`, `url`)를 등록합니다. `bot validate`는 서버 파일과 명령에서 서버 리비전을 계산합니다. 도구 러너는 `BOT_INSTALLS` 아래 읽기 전용 설치본을 사용합니다. 기본 `state`는 `ephemeral`이며, `required` 서버는 현재 `srt` 호스트에서 시작할 수 없습니다([MCP 도구](plugins.md)).
-- `sandbox` / `limits` / `admin`: 모델 VM 및 샌드박스 설정(`instance`, 이미지, 네트워크 — [아키텍처](architecture.md) 참고), 도구 제한, Admin UI/관측성 설정(`bind`, `hosts`, `max_failures`, `trace`, `logs`, `issues` — [Admin UI](admin.md) 참고)입니다.
+- `sandbox` / `limits` / `embeddings` / `memory_judge` / `admin`: 모델 VM 및 샌드박스 설정(`instance`, `image`/`images`, `network` — [아키텍처](architecture.md) 참고), 도구 제한, 선택적 하이브리드 메모리 `/embeddings` 및 System One `memory_judge` 엔드포인트, Admin UI/관측성 설정(`bind`, `hosts`, `max_failures`, `trace`, `logs`, `issues` — [Admin UI](admin.md) 참고)입니다.
 
-활성 세트(active set)는 프로필 리비전과 권한에 영향을 주는 호스트 설정(CLI 사용자 매핑, Slack 팀/채널, HTTP 인증, 허용 모델/업스트림/시크릿 이름, 서버 리비전, `egress`, `private_egress`, `super_admins`, VM 이미지/네트워크)을 함께 묶습니다. 시크릿 값은 절대 포함되지 않습니다. 호스트 매핑 변경을 적용하려면 `bot serve --activate`를 실행합니다.
+활성 세트(active set)는 프로필 리비전과 권한에 영향을 주는 호스트 설정(CLI 사용자 매핑, Slack 팀/채널, HTTP 인증, 허용 모델/업스트림/시크릿 이름, 서버 리비전, `egress`, `private_egress`, `super_admins`, VM `image`/`images`/네트워크, 비기본값 `limits.tool_call_max_secs`, 설정된 `embeddings`/`memory_judge`, 활성화된 `admin.trace`/`logs`/`issues`)을 함께 묶습니다. 시크릿 값은 절대 포함되지 않습니다. 호스트 매핑 변경을 적용하려면 `bot serve --activate`를 실행합니다.
 
 ### `gateway` 키
 
@@ -139,7 +139,7 @@ print(reply.choices[0].message.content)
 | `422` | `server_error` | `request_outcome_unknown`(동일 키+본문으로 폴링), `run_failed`, `run_cancelled` |
 
 - `max_active_runs`에 도달하면 `429`와 `Retry-After: 1`을 반환하며, 속도 제한은 남은 초의 올림값을 반환합니다. 이미 접수된 키를 폴링할 때는 활성 실행 슬롯을 소비하지 않습니다.
-- **인증 실패 제한**: 게이트웨이 프로세스별로 직접 피어 IP 기준 추적합니다(`X-Forwarded-For` 무시). 60초 내 `Authorization` 실패가 20회를 넘으면 키 조회 전에 해당 IP의 모든 모델/채팅 요청(유효한 키와 폴링 포함)을 60초간 차단합니다(`429` + `Retry-After`). 헤더 누락과 저장소 장애는 횟수에 포함하지 않습니다. v2.0 고정 값이며, 필요하면 공유 TLS 프록시에서 사용자별 제한을 적용하세요.
+- **인증 실패 제한**: 게이트웨이 프로세스별로 직접 피어 IP 기준 추적합니다(`X-Forwarded-For` 무시). 60초 내 `Authorization` 실패가 20회에 도달하면 키 조회 전에 해당 IP의 모든 모델/채팅 요청(유효한 키와 폴링 포함)을 60초간 차단합니다(`429` + `Retry-After`). 헤더 누락과 저장소 장애는 횟수에 포함하지 않습니다. v2.0 고정 값이며, 필요하면 공유 TLS 프록시에서 사용자별 제한을 적용하세요.
 - 인증 후 접수된 실행은 SDK가 자동 재시도하는 `408`/`409`/`429`/`5xx`를 반환하지 않으며, 커밋이 불확실한 경우 `422`와 `x-should-retry: false`를 반환합니다. 공식 [Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) 및 [Models](https://developers.openai.com/api/reference/resources/models/methods/list) 명세를 참고하세요. 향후 Responses API와 토큰 스트리밍도 동일한 인증·권한·결과 모델을 공유하며 외부에 안전한 텍스트만 순서대로 스트리밍합니다.
 
 ## Slack 입구
@@ -159,6 +159,7 @@ v2.0은 Slack 이벤트와 버튼 클릭을 오직 [Socket Mode](https://docs.sl
 | 승인 / 중지 버튼 | **Interactivity & Shortcuts → Interactivity** 활성화. | Socket Mode를 통한 `block_actions`. |
 | 채널 예약용 소유자 DM | 봇 스코프 `im:write`(및 `chat:write`, Interactivity). | [`conversations.open`](https://docs.slack.dev/reference/methods/conversations.open/)으로 소유자와 1:1 DM 열기(DM 접수가 꺼져 있어도 동작). |
 | 응답 파일 첨부 | 봇 스코프 `files:write`. | [`files.getUploadURLExternal`](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) → 바이트 업로드 → `files.completeUploadExternal`. |
+| 진행 표시 및 중지 (선택) | 봇 스코프 `reactions:write`(👀/✅/❌용); 스트리밍 진행 표시 및 중지 카드를 위해 `chat:write`·Interactivity와 Slack AI App/스트리밍 활성화. | `reactions.add`/`remove`, `chat.startStream`/`appendStream`/`stopStream`/`delete`, `agent_session_stopped`. |
 
 워크스페이스에 앱을 설치(스코프 변경 후 재설치)하고 봇/앱 토큰을 프로필의 `SecretStore`에 저장한 뒤, `gateway.slack.workspaces.<alias>`에 `team_id`, `channels`, `bot_token`, `app_token` 이름을 설정합니다.
 
@@ -198,7 +199,7 @@ v2.0은 Slack 이벤트와 버튼 클릭을 오직 [Socket Mode](https://docs.sl
 
 | 명령 | 동작 |
 |---|---|
-| `bot validate` | 프로필, 호스트 레지스트리, 입구 유일성, 필수 시크릿(선언·도구·입구 및 허용된 `claude-cli`/`anthropic-api`/`openai-api` 제공자 키 — 누락 시 이름과 환경 변수 보고), HTTP 키 길이(≥ 32바이트), 메모리 시드 본문 한도(8 KiB), 에이전트 `builtin` 호환성, 도구 서버 설치본을 오프라인 검증(DB/Slack 미접속). 모든 검사를 통과할 때만 활성화 리비전과 서버 리비전을 출력합니다. |
+| `bot validate` | 프로필, 호스트 레지스트리, 입구 유일성, 필수 시크릿(선언·도구·원격 HTTP bearer·입구·관측성 및 허용된 `claude-cli`/`codex-cli`/`agy-cli`/`anthropic-api`/`openai-api`, `embeddings`, `memory_judge` 키 — 누락 시 이름과 환경 변수 보고), HTTP 키 길이(≥ 32바이트), 메모리 시드 본문 한도(8 KiB), 에이전트 `builtin` 호환성, 도구 서버 설치본을 오프라인 검증(DB/Slack 미접속). 모든 검사를 통과할 때만 활성화 리비전과 서버 리비전을 출력합니다. |
 | `bot chat [--profile P] [--thread T] [--request-id ID] [--no-wait] "text"` | 채팅 요청을 보냅니다(예: `bot chat --profile personal "Show today's agenda"`, `bot chat --profile personal --request-id walk-1 "Delete the walk event"`). 연결이 끊겼다면 `bot chat --profile P --attach --request-id ID`로 재연결합니다. 종료 코드 `3`은 재시도 가능함을 뜻합니다. 모델/도구 출력이 OSC 52 클립보드 쓰기, 창 제목 변경, 화면 지우기를 일으키지 않도록 터미널 제어 문자(ESC, C1, BEL, CR, DEL 등)를 `\u{1b}` 형태로 이스케이프합니다(`\r\n`은 `\n`으로 정규화). |
 | `bot map [--json] [--profile P]` | 구조 맵을 출력합니다(이름, 분류, 개수만 포함). |
 | `bot init <name> [--template personal\|team\|company] [--dir <dir>]` | `bot validate`를 통과하는 `<name>/`(데모 모델과 현재 OS 사용자 CLI 계정이 들어간 `host.json` + `profiles/<name>/`)을 생성합니다. 소문자 영숫자+하이픈 이름만 허용하며 덮어쓰기나 심볼릭 링크 추적을 하지 않고, `$TMPDIR` 사본에서 검증한 뒤 `--dir` 아래 임시 디렉터리를 원자적으로 이동합니다(최종 umask 권한으로 한 번만 열기; `BOT_*` 환경 변수 무시). |
@@ -220,14 +221,14 @@ v2.0은 Slack 이벤트와 버튼 클릭을 오직 [Socket Mode](https://docs.sl
 | `BOT_ADMIN_TOKEN_FILE` | 비대화형 Admin UI 운영자 시크릿 전달용 절대 경로(`0600`). |
 | `BOT_LOG`, `BOT_LOG_FORMAT` | 로그 레벨(`error`, 기본 `warn`, `info`, `debug`, `trace`)과 stderr 형식(기본 `text`, 줄 단위 JSON `json`: `{ts_ms, level, target, message, fields}`). |
 
-접수, 전달, 승인은 식별자와 고정 어휘 코드만 담은 `core::trace` 스팬을 방출하며(`bot.private`는 비공개 DM 표시) 본문·인자·논스·영수증은 절대 남기지 않습니다. `BOT_LOG`는 워크스페이스 크레이트에만 적용됩니다. 외부 HTTP/WebSocket/TLS 크레이트는 `warn`으로 상한이 고정되고 `sqlx`는 완전히 꺼져 있어 `trace` 레벨에서도 원시 프레임, 비공개 DM 텍스트, 알 수 없는 DSN 파라미터가 유출되지 않습니다(`crates/bot-cli/src/logging.rs`). `admin.logs`가 켜져 있으면 필터링된 로그가 OTLP `/v1/logs`로도 전송되며(`admin.logs.level`은 `BOT_LOG` 범위 내로 제한), `admin.issues`가 켜져 있으면 오류·패닉·비정상 실패 스팬이 이슈 트래커로 보고됩니다.
+접수, 전달, 승인은 식별자와 고정 어휘 코드만 담은 `bot_core::trace` 스팬을 방출하며(`bot.private`는 비공개 DM 표시) 본문·인자·논스·영수증은 절대 남기지 않습니다. `BOT_LOG`는 워크스페이스 크레이트에만 적용됩니다. 외부 HTTP/WebSocket/TLS 크레이트는 `warn`으로 상한이 고정되고 `sqlx`는 완전히 꺼져 있어 `trace` 레벨에서도 원시 프레임, 비공개 DM 텍스트, 알 수 없는 DSN 파라미터가 유출되지 않습니다(`crates/bot-cli/src/logging.rs`). `admin.logs`가 켜져 있으면 필터링된 로그가 OTLP `/v1/logs`로도 전송되며(`admin.logs.level`은 `BOT_LOG` 범위 내로 제한), `admin.issues`가 켜져 있으면 오류·패닉·비정상 실패 스팬이 이슈 트래커로 보고됩니다.
 
 ## 역할 실행
 
 `--role all`은 `gateway`, `scheduler`, `worker`, `admin`을 함께 실행합니다. 분리 배포는 PostgreSQL과 동일한 활성 세트를 공유합니다.
 
 - **게이트웨이 (Gateway)**: 접수와 전달을 담당합니다. 비공개 DM 트리거는 대상 도구의 `srt` 러너와 프로필별 `private-intake` 지문 키가 필요하며, 원문 텍스트는 지정 도구에만 전달되고 불확실한 결과는 운영자 보류(hold)가 됩니다.
-- **워커 (Worker)**: 모델과 내장 도구 브로커를 실행합니다. 허용된 모델 별칭(`claude-cli`, `anthropic-api`, `openai-api`, 키 없는 루프백 제외) 중 하나라도 제공자 키가 없으면 활성 리비전 게시를 거부합니다. 누락된 도구 시크릿은 이름만 경고하고, 호출은 승인 카드를 열기 전에 실패하며 `secret_missing`을 감사 기록합니다(`bot validate`는 둘 다 보고; [신뢰성](reliability.md) 참고).
+- **워커 (Worker)**: 모델과 내장 도구 브로커를 실행합니다. 허용된 모델 별칭(`claude-cli`, `codex-cli`, `agy-cli`, `anthropic-api`, `openai-api`, 키 없는 루프백 제외)이나 설정된 `embeddings` / `memory_judge` 엔드포인트 중 하나라도 제공자 키가 없으면 활성 리비전 게시를 거부합니다. 누락된 도구 시크릿은 이름만 경고하고, 호출은 승인 카드를 열기 전에 실패하며 `secret_missing`을 감사 기록합니다(`bot validate`는 둘 다 보고; [신뢰성](reliability.md) 참고).
 - **스케줄러 (Scheduler)**: 실행 시점이 된 작업을 큐에 넣습니다. 정적 트리거는 어느 역할이 게시하든 활성 리비전 및 메모리 시드와 함께 원자적으로 커밋됩니다. 제거된 트리거 윈도우는 전환 시점에 닫히며 이전 발생분은 해당 윈도우에 남습니다([프로필 명세](profile-spec.md)).
 - **관리자 (Admin)**: 기본 주소는 `127.0.0.1:8787`입니다(HTTP 접수 기본값은 `127.0.0.1:8788`). 인증된 데이터 응답은 전송 직전에 활성 세트를 재검증합니다(드리프트/장애 시 `503` + 고정 오류 코드; [Admin UI](admin.md#시작-절차) 참고).
 
@@ -245,4 +246,4 @@ Slack 버튼과 Admin UI는 동일한 브로커 승인 경로를 공유합니다
 
 ### 배포 중 진행 중인 모델 요청
 
-Claude 워커는 앵커 VM 게이트웨이 주소에 릴레이를 바인딩하고 리스닝 포트를 모델 VM에 전달합니다. 릴레이는 매 업스트림 요청 전에 활성 세트를 확인합니다(구버전은 `403`, 장애/타임아웃은 `503`이며 업스트림으로 절대 전송하지 않음). 열린 스트림은 1초마다 재확인하며, 첫 예정 확인 시점으로부터 10초 안에 해소되지 않으면 고정 오류 이벤트와 함께 종료됩니다([아키텍처](architecture.md), [신뢰성](reliability.md)).
+VM CLI 워커(`claude-cli`, `codex-cli`, `agy-cli`)는 앵커 VM 게이트웨이 주소에 릴레이를 바인딩하고 리스닝 포트를 모델 VM에 전달합니다. 릴레이는 매 업스트림 요청 전에 활성 세트를 확인합니다(구버전은 `403`, 장애/타임아웃은 `503`이며 업스트림으로 절대 전송하지 않음). 열린 스트림은 1초마다 재확인하며, 첫 예정 확인 시점으로부터 10초 안에 해소되지 않으면 고정 오류 이벤트와 함께 종료됩니다([아키텍처](architecture.md), [신뢰성](reliability.md)).
