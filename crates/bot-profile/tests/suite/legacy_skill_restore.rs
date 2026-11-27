@@ -1,5 +1,5 @@
 //! 구판(`BOTPROFILE1`) 번들 복원과 신판(`BOTPROFILE2`) 판본 분리 회귀 시험:
-//! - 구판에서 유효했던 SKILL.md(정상 front matter·닫히지 않은 `---`·단독 `---`·미지 키·`allowed-tools`·이름 불일치·단일 32 KiB 초과·상속 합계 초과)로
+//! - 구판에서 유효했던 SKILL.md(정상 front matter·닫히지 않은 `---`·단독 `---`·미지 키·`allowed-tools`·이름 불일치·단일 64 KiB 초과·상속 합계 초과)로
 //!   만든 `BOTPROFILE1` 번들은 `from_bundle`로 거절 0건 복원되고, 조립된 스킬 지침이 구판(`md.trim_end()`)과 바이트 단위로 같다.
 //! - front matter가 있는 같은 폴더를 신판 로더로 읽으면 `BOTPROFILE2`로 묶여 구판과 판본 해시가 다르고, front matter가 제거되며 `description`이 보존된다.
 //! - 새 폴더 검증(`load`)과 `BOTPROFILE2` 복원에서는 새 규칙 거절이 그대로 집행된다.
@@ -31,14 +31,15 @@ fn minimal_profile(skill_text: &str) -> Files {
 }
 
 fn agg_profile() -> Files {
-    let mut files = minimal_profile(&"a".repeat(16_384));
+    let half = bot_profile::SKILL_MAX_BYTES / 2;
+    let mut files = minimal_profile(&"a".repeat(half));
     files.push((
         "agents/main/agents/research/AGENT.md".to_owned(),
         "Child agent.\n".to_owned(),
     ));
     files.push((
         "agents/main/skills/other/SKILL.md".to_owned(),
-        "b".repeat(16_385),
+        "b".repeat(bot_profile::SKILL_MAX_BYTES - half + 1),
     ));
     files
 }
@@ -54,13 +55,13 @@ fn legacy_v1_bundles_restore_every_previously_valid_skill_byte_identically() {
     let id = ProfileId("personal".into());
     let main = AgentId("main".into());
     let limits = Limits::default();
-    let big = "x".repeat(32_769);
+    let big = "x".repeat(bot_profile::SKILL_MAX_BYTES + 1);
     let crlf = VALID_FM.replace('\n', "\r\n");
     let unclosed = format!("---\n{BODY}");
     let unknown = fm("retired-example: text");
     let authority = fm("allowed-tools: noop");
     let wrongname = fm("name: elsewhere");
-    let agg_memo = "a".repeat(16_384);
+    let agg_memo = "a".repeat(bot_profile::SKILL_MAX_BYTES / 2);
     let cases: Vec<(&str, Files, String)> = vec![
         ("clean", minimal_profile(BODY), BODY.trim_end().to_owned()),
         (
@@ -245,7 +246,7 @@ fn new_disk_loads_and_v2_bundles_still_enforce_strict_skill_rules_and_v1_keeps_c
         ),
         (
             "big",
-            minimal_profile(&"x".repeat(32_769)),
+            minimal_profile(&"x".repeat(bot_profile::SKILL_MAX_BYTES + 1)),
             "skill-too-large",
         ),
         ("agg", agg_profile(), "skill-too-large"),
