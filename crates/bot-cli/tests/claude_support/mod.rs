@@ -317,6 +317,7 @@ impl Rig {
             upstream: launch.is_none().then(|| upstream.clone() as _),
             store_config: store_config.clone(),
             secrets: Some(secrets.clone()),
+            secret_admin: None,
             stop: Some(stop.clone()),
             slack_base: slack_base.map(str::to_owned),
         };

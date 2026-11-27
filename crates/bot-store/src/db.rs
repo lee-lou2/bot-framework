@@ -85,7 +85,7 @@ impl Default for Config {
 pub struct Store {
     pub(crate) pool: PgPool,
     pub(crate) cfg: Arc<Config>,
-    pub(crate) activation: Option<bot_core::id::Revision>,
+    pub(crate) activation: Option<Arc<std::sync::RwLock<bot_core::id::Revision>>>,
 }
 
 const MIGRATIONS: &[(i64, &str, &str)] = &[

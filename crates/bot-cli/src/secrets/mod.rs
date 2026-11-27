@@ -9,6 +9,7 @@
 //!
 //! 백엔드 종류(`SecretsKind`)마다 달라지는 **사실**은 아래 `impl SecretsKind`에 모았다: 도구가 읽지 못해야 하는 파일·자격이 없을 때의 힌트·복호화 필요 여부.
 //! 조립 코드(`serve::runner`·`validate`·`doctor`)는 종류를 직접 가르지 않고 이 메서드를 부른다. 새 백엔드를 더하면 컴파일러가 이 블록의 `match`를 모두 가리킨다.
+pub mod admin;
 pub mod env;
 pub mod keychain;
 pub mod sops;

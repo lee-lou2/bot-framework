@@ -194,6 +194,10 @@ pub fn policy_revision(built: &Built) -> Revision {
     if !openai.is_empty() {
         doc["openai"] = Value::Object(openai);
     }
+    if !parts.super_admins.is_empty() {
+        let admins: Vec<&str> = parts.super_admins.iter().map(|id| id.0.as_str()).collect();
+        doc["super_admins"] = json!(admins);
+    }
     Revision(sha256_hex(canonical_json(&doc).as_bytes()))
 }
 

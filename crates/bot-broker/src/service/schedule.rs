@@ -377,6 +377,7 @@ impl BrokerService {
             memory: None,
             delivery: None,
             route,
+            card_args: None,
         };
         let pointer = match &record.phase {
             CallPhase::Done(result) => {

@@ -111,7 +111,7 @@ fn exposes(value: &Value, credentials: &[Vec<u8>], shapes: bool) -> bool {
 }
 
 /// 서버가 내세운 정의들 중 선언한 도구(`(id, 서버 이름)`)의 항목을 검사해 잠금 항목으로 만든다. 문제는 모두 모아 돌려준다.
-fn entries_of(
+pub(crate) fn entries_of(
     declared: &[(String, String)],
     listed: &[Value],
     credentials: &[Vec<u8>],
@@ -226,7 +226,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
 }
 
 /// 서버가 응답하지 못한 이유를 사람이 읽을 말로.
-fn describe(error: &McpError) -> String {
+pub(crate) fn describe(error: &McpError) -> String {
     match error {
         McpError::Unreached => {
             "서버에 연결하지 못했어요(주소·인증서·이름 풀이 결과·egress를 확인하세요)".into()

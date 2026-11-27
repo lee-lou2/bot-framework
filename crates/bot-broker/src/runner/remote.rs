@@ -52,12 +52,15 @@ impl McpRunner {
             return Ran::NotSent;
         };
         // 접속 대상은 설정한 주소의 호스트:포트 하나이고 도구 선언 ∩ 프로필 상한에 정확히 있어야 한다
-        let cap = self
-            .host
-            .egress_caps
-            .get(&job.attempt.profile)
-            .map(Vec::as_slice);
-        if !EgressPolicy::new(&job.tool.egress, cap).permits(&remote.host, remote.port) {
+        let permitted = {
+            let host = self.host();
+            let cap = host
+                .egress_caps
+                .get(&job.attempt.profile)
+                .map(Vec::as_slice);
+            EgressPolicy::new(&job.tool.egress, cap).permits(&remote.host, remote.port)
+        };
+        if !permitted {
             return Ran::NotSent;
         }
         let (mut credentials, mut bearer) = (Vec::new(), None);

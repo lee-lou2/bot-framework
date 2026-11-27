@@ -82,6 +82,7 @@ pub(super) fn snapshot() -> Snapshot {
             PrincipalId("local:owner".into()),
             BTreeSet::from(["owner".to_owned()]),
         )]),
+        super_admins: BTreeSet::new(),
         policy: Policy {
             scopes: scopes(&["run", "calendar.read", "calendar.delete"]),
             agents: BTreeMap::new(),

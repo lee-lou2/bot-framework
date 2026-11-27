@@ -197,6 +197,7 @@ impl BrokerService {
             memory: None,
             delivery: Some(document),
             route: Some(draft.target.clone()),
+            card_args: None,
         };
         let pointer = match &record.phase {
             CallPhase::Done(result) => {

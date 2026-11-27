@@ -26,15 +26,54 @@ use bot_profile::{Registry, SchemaValidator};
 use bot_store::Store;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
+/// 실행 중 MCP 서버 추가·제거에 맞춰 갱신되는 설치 판본 표.
+#[derive(Clone, Default)]
+pub(super) struct LiveInstalled(Arc<RwLock<BTreeMap<String, String>>>);
+
+impl LiveInstalled {
+    pub(super) fn from_revisions(revisions: &BTreeMap<String, Revision>) -> Self {
+        let map = revisions
+            .iter()
+            .map(|(alias, revision)| (alias.clone(), revision.0.clone()))
+            .collect();
+        Self(Arc::new(RwLock::new(map)))
+    }
+
+    pub(super) fn update(&self, revisions: &BTreeMap<String, Revision>) {
+        let next: BTreeMap<String, String> = revisions
+            .iter()
+            .map(|(alias, revision)| (alias.clone(), revision.0.clone()))
+            .collect();
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = next;
+    }
+
+    fn get(&self, server: &str) -> Option<String> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(server)
+            .cloned()
+    }
+
+    fn keys(&self) -> BTreeSet<String> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+}
+
 /// 이 프로세스에서는 도구를 실행하지 않는다 — 설치 판본 조회에만 답한다.
-pub(super) struct InstalledOnly(pub(super) BTreeMap<String, String>);
+pub(super) struct InstalledOnly(pub(super) LiveInstalled);
 
 impl ToolRunner for InstalledOnly {
     fn installed(&self, server: &str) -> Option<String> {
-        self.0.get(server).cloned()
+        self.0.get(server)
     }
 
     fn run(&self, _: ToolJob) -> Reply<'_, Ran> {
@@ -69,8 +108,8 @@ struct Decisions {
     inner: Arc<dyn Broker>,
     ledger: Arc<dyn CallLedger>,
     catalog: Arc<dyn ProfileCatalog>,
-    /// 설치 판본을 아는 서버 별칭
-    installed: BTreeSet<String>,
+    /// 설치 판본을 아는 서버 별칭(실행 중 MCP 추가·제거에 따라 갱신된다)
+    installed: LiveInstalled,
 }
 
 impl Broker for Decisions {
@@ -84,10 +123,11 @@ impl Broker for Decisions {
             if allow {
                 let stored = self.ledger.approval(nonce.clone()).await?;
                 let approval = &stored.approval;
+                let known = self.installed.keys();
                 let unknown = self
                     .catalog
                     .current(&approval.attempt.profile)
-                    .is_some_and(|snapshot| holds(&snapshot, &approval.tool, &self.installed));
+                    .is_some_and(|snapshot| holds(&snapshot, &approval.tool, &known));
                 if unknown {
                     return Err(Error::Unavailable);
                 }
@@ -101,15 +141,10 @@ impl Broker for Decisions {
 pub fn broker(
     registry: Arc<Registry>,
     store: Arc<Store>,
-    revisions: &BTreeMap<String, Revision>,
+    installed: LiveInstalled,
     tracer: Arc<dyn Tracer>,
     routes: Arc<dyn ScheduleRoutes>,
 ) -> Arc<dyn Broker> {
-    let installed: BTreeMap<String, String> = revisions
-        .iter()
-        .map(|(alias, revision)| (alias.clone(), revision.0.clone()))
-        .collect();
-    let known = installed.keys().cloned().collect();
     let ledger = store.clone() as Arc<dyn CallLedger>;
     let schedules = store.clone() as Arc<dyn UserSchedules>;
     // 승인 클릭이 전송 카드의 수신자를 다시 보고, 빠졌으면 회신 저장소가 그 발생을 끝낸다(원래 대화 안내 한 번·옛 카드 무효·미발송 영수증)
@@ -121,7 +156,7 @@ pub fn broker(
             effects: store.clone() as Arc<dyn EffectJournal>,
             memory: store.clone() as Arc<dyn MemoryStore>,
             audit: store as Arc<dyn AuditLog>,
-            runner: Arc::new(InstalledOnly(installed)),
+            runner: Arc::new(InstalledOnly(installed.clone())),
             sealer: Arc::new(JcsSealer::new(Arc::new(SchemaValidator::new()))),
             tracer,
             clock: Arc::new(SystemClock),
@@ -136,7 +171,7 @@ pub fn broker(
         inner: Arc::new(service),
         ledger,
         catalog: registry as Arc<dyn ProfileCatalog>,
-        installed: known,
+        installed,
     })
 }
 
@@ -247,7 +282,12 @@ mod tests {
             inner: inner.clone(),
             ledger: ledger.clone(),
             catalog: TestCatalog::new([snapshot]),
-            installed: installed(known),
+            installed: LiveInstalled::from_revisions(
+                &known
+                    .iter()
+                    .map(|k| ((*k).to_owned(), Revision("r1".into())))
+                    .collect(),
+            ),
         };
         (decisions, inner, ledger)
     }
@@ -303,7 +343,10 @@ mod tests {
 
     #[test]
     fn the_runner_only_answers_installed_revisions_and_never_runs_tools() {
-        let runner = InstalledOnly(BTreeMap::from([("agenda".to_owned(), "r1".to_owned())]));
+        let runner = InstalledOnly(LiveInstalled::from_revisions(&BTreeMap::from([(
+            "agenda".to_owned(),
+            Revision("r1".into()),
+        )])));
         assert_eq!(runner.installed("agenda").as_deref(), Some("r1"));
         assert_eq!(runner.installed("other"), None);
     }

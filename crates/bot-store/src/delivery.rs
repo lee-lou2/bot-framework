@@ -367,8 +367,7 @@ impl Store {
                 .claim
                 .is_some_and(|c| row.get::<i64, _>("claim_epoch") == c.0 as i64);
         let pinned = self
-            .activation
-            .as_ref()
+            .pinned_revision()
             .is_none_or(|expected| current.as_deref() == Some(expected.0.as_str()));
         if !same_claim || !pinned || current.is_none() || current != registered {
             return Err(Error::Stale.into());

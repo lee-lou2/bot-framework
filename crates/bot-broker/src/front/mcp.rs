@@ -126,7 +126,10 @@ async fn tools_list(shared: &Shared, session: &Session, id: &Value) -> Vec<u8> {
     if let Some(snapshot) = shared.parts.catalog.current(&session.attempt.profile)
         && let Some(agent) = snapshot.agents.get(&session.agent)
     {
-        for spec in bot_core::builtin::model_tools(&agent.scopes) {
+        let super_admin = snapshot.is_super_admin(&ctx.principal);
+        for spec in bot_core::builtin::model_tools_for(&agent.scopes, super_admin)
+            .filter(|spec| !spec.super_admin || ctx.scopes.contains(spec.id))
+        {
             let name = ToolId(spec.id.into()).mcp_name();
             tools.push((
                 name.clone(),

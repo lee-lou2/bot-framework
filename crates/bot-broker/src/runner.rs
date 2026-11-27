@@ -63,7 +63,7 @@ pub struct Deps {
 
 pub struct McpRunner {
     deps: Deps,
-    host: HostRegistry,
+    host: std::sync::RwLock<HostRegistry>,
     cfg: RunnerConfig,
     /// 원격 서버로 나가는 전송. 없으면 원격 서버로 가는 호출은 실행하지 않는다.
     wire: Option<Arc<dyn RemoteWire>>,
@@ -169,7 +169,7 @@ impl McpRunner {
     pub fn new(deps: Deps, host: HostRegistry, cfg: RunnerConfig) -> Self {
         Self {
             deps,
-            host,
+            host: std::sync::RwLock::new(host),
             cfg,
             wire: None,
         }
@@ -181,6 +181,15 @@ impl McpRunner {
         self
     }
 
+    /// 실행 중 MCP 서버 추가·제거 뒤 호스트 등록부를 원자적으로 교체한다.
+    pub fn update_host(&self, next: HostRegistry) {
+        *self.host.write().unwrap_or_else(|e| e.into_inner()) = next;
+    }
+
+    pub(super) fn host(&self) -> std::sync::RwLockReadGuard<'_, HostRegistry> {
+        self.host.read().unwrap_or_else(|e| e.into_inner())
+    }
+
     async fn execute(&self, job: ToolJob) -> Ran {
         let started = tokio::time::Instant::now();
         let tool = &job.tool.tool;
@@ -190,8 +199,15 @@ impl McpRunner {
             Err(why) => return Ran::Refused(why),
         };
         // 승인이 묶은 설치 판본이 지금 등록부와 같아야 한다.
-        let Some(image) = self.host.servers.get(&tool.server).cloned() else {
-            return Ran::NotSent;
+        let (image, remote, egress_cap, private_routes) = {
+            let host = self.host();
+            let Some(image) = host.servers.get(&tool.server).cloned() else {
+                return Ran::NotSent;
+            };
+            let remote = host.remote.get(&tool.server).cloned();
+            let egress_cap = host.egress_caps.get(&job.attempt.profile).cloned();
+            let private_routes = host.private_egress.get(&job.attempt.profile).cloned();
+            (image, remote, egress_cap, private_routes)
         };
         if tool
             .revision
@@ -203,8 +219,8 @@ impl McpRunner {
             return Ran::NotSent;
         }
         // 원격 서버는 샌드박스 없이 브로커가 직접 연결한다
-        if let Some(remote) = self.host.remote.get(&tool.server) {
-            return self.execute_remote(&job, remote, budget).await;
+        if let Some(remote) = remote {
+            return self.execute_remote(&job, &remote, budget).await;
         }
         // 샌드박스가 이 서버를 실행할 수 있어야 한다(상태 볼륨을 요구하는데 지원하지 않으면 자격을 풀기 전에 시작하지 않는다).
         if self.deps.sandbox.admit(&tool.server, &image).is_err() {
@@ -263,12 +279,7 @@ impl McpRunner {
         // 샌드박스가 FD를 줄 수 없으면 단계 원장은 프록시의 전용 주소로 받는다.
         let via_proxy = tool.effects && self.deps.sandbox.effects_via_proxy();
         // 선언한 호스트 ∩ 운영자 상한으로만 나가는 프록시. 허용할 곳이 없으면 네트워크는 0이다.
-        let cap = self
-            .host
-            .egress_caps
-            .get(&job.attempt.profile)
-            .map(Vec::as_slice);
-        let policy = EgressPolicy::new(&job.tool.egress, cap);
+        let policy = EgressPolicy::new(&job.tool.egress, egress_cap.as_deref());
         let (mut proxy, mut endpoint, mut host_env) = (None, None, Vec::new());
         let mut hosts: Vec<String> = policy
             .allowed()
@@ -283,8 +294,8 @@ impl McpRunner {
             }
             let password = hex(&raw);
             let mut proxy_cfg = self.cfg.proxy(policy, password.clone(), budget);
-            if let Some(routes) = self.host.private_egress.get(&job.attempt.profile) {
-                proxy_cfg.private_routes = routes.clone();
+            if let Some(routes) = private_routes {
+                proxy_cfg.private_routes = routes;
             }
             // 프록시 암호도 이 호출이 쓰는 자격이다(결과와 단계 보고 검사에 함께 쓴다)
             credentials.push(password.clone().into_bytes());
@@ -507,23 +518,27 @@ impl McpRunner {
 
 impl ToolRunner for McpRunner {
     fn installed(&self, server: &str) -> Option<String> {
-        self.host.servers.get(server).cloned()
+        self.host().servers.get(server).cloned()
     }
 
     fn admit(&self, server: &str) -> Result<(), Error> {
-        let image = self.host.servers.get(server).ok_or(Error::Denied)?;
-        if self.host.remote.contains_key(server) {
+        let (image, is_remote) = {
+            let host = self.host();
+            let image = host.servers.get(server).cloned().ok_or(Error::Denied)?;
+            (image, host.remote.contains_key(server))
+        };
+        if is_remote {
             return if self.wire.is_some() {
                 Ok(())
             } else {
                 Err(Error::Denied)
             };
         }
-        self.deps.sandbox.admit(server, image)
+        self.deps.sandbox.admit(server, &image)
     }
 
     fn server_secrets(&self, server: &str) -> Vec<SecretName> {
-        self.host
+        self.host()
             .remote
             .get(server)
             .and_then(|remote| remote.bearer.clone())
@@ -533,7 +548,7 @@ impl ToolRunner for McpRunner {
 
     /// 원격 서버는 연결을 닫아도 원격 실행이 계속될 수 있다: `reap` 성공이 끝남의 증명이 아니다.
     fn reap_proves_end(&self, server: &str) -> bool {
-        !self.host.remote.contains_key(server)
+        !self.host().remote.contains_key(server)
     }
 
     /// 이 프로필의 보관소에 선언한 자격 이름이 모두 있는가(없으면 `Missing`). 값은 읽어도 곧바로 버리고 쓰거나 남기지 않는다.

@@ -234,7 +234,7 @@ impl Store {
         .bind(at.generation.0 as i64)
         .bind(at.claim.map(|c| c.0 as i64))
         .bind(key)
-        .bind(self.activation.as_ref().map(|revision| &revision.0))
+        .bind(self.pinned_revision().map(|revision| revision.0))
         .fetch_optional(&self.pool)
         .await?
         .ok_or(Error::Stale)?;

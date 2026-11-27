@@ -18,11 +18,12 @@ use bot_core::{
 use crate::db::Tx;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// 게시와 함께 받는 선택 입력: 준비한 목록 대조(없으면 대조하지 않는다)와 사전 승인 범위.
+/// 게시와 함께 받는 선택 입력: 준비한 목록 대조(없으면 대조하지 않는다), 사전 승인 범위, 사전 승인 동기화 여부.
 #[derive(Clone, Copy)]
 pub(crate) struct Extra<'a> {
     pub prepared: Option<&'a BTreeSet<(ProfileId, Revision)>>,
     pub grants: &'a [GrantSpec],
+    pub sync_grants: bool,
 }
 
 impl Store {
@@ -49,7 +50,11 @@ impl Store {
         schedules: BTreeMap<ProfileId, Vec<TriggerSpec>>,
         extra: Extra<'_>,
     ) -> R<Vec<(GrantId, GrantSpec)>> {
-        let Extra { prepared, grants } = extra;
+        let Extra {
+            prepared,
+            grants,
+            sync_grants,
+        } = extra;
         ids_ok(&[&next.0])?;
         if profiles.iter().any(|(p, r)| !id_ok(&p.0) || !id_ok(&r.0)) {
             return invalid();
@@ -137,8 +142,13 @@ impl Store {
             };
             sync_in(&mut tx, &empty, now).await?;
         }
-        // 사전 승인: 지문이 같으면 ID를 이어 가고, 바뀌었거나 사라졌으면 철회하며(되살아나지 않는다), 처음이거나 바뀌었으면 새 ID를 발급한다(감사 head 잠금보다 먼저)
-        let (issued, grant_notes) = crate::grants::sync_in(&mut tx, grants, &profiles).await?;
+        // 사전 승인: `sync_grants`일 때만 지문이 같으면 ID를 이어 가고, 바뀌었거나 사라졌으면 철회하며, 처음이거나 바뀌었으면 새 ID를 발급한다.
+        // 실행 중 스킬·MCP 편집(`replace_live`)은 기존 사전 승인을 건드리지 않는다.
+        let (issued, grant_notes) = if sync_grants {
+            crate::grants::sync_in(&mut tx, grants, &profiles).await?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         // 시드는 감사 head 잠금보다 먼저 넣는다(잠금 순서). 새로 들어간 것만 감사에 남긴다
         let mut fresh = Vec::new();
         for seed in &seeds {

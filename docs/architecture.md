@@ -60,8 +60,8 @@ flowchart LR
 
 | 실행기 | 워커 호스트 | 모델 프로세스 | 공급자 키 | 사용할 수 있는 내장 도구 |
 |---|---|---|---|---|
-| `anthropic-api` · `openai-api` | Linux · macOS | 워커가 상류 API에 직접 요청한다. 모델 실행용 프로세스와 VM 없이 동작한다. | 워커가 전송 직전 `SecretStore`에서 읽어 상류 요청 헤더에 넣는다. 루프백 주소에서만 키를 생략할 수 있다. | 스코프 상한에 따른 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`과 직계 자식에 대한 `delegate`. 파일 도구 선언은 실행 시 `unsupported_builtin` 영구 실패로 끝난다. |
-| `claude-cli` | Apple `container`를 실행할 수 있는 macOS | 실행별 VM에서 Claude Code를 띄우고 브로커 릴레이로 연결한다. | 호스트의 브로커 모델 프록시만 공급자 키를 읽는다. VM에는 세션 토큰이 전달된다. | 같은 기억·예약·위임 도구와, 읽기 격리가 보증된 VM에서 프로필이 허용한 `read`. |
+| `anthropic-api` · `openai-api` | Linux · macOS | 워커가 상류 API에 직접 요청한다. 모델 실행용 프로세스와 VM 없이 동작한다. | 워커가 전송 직전 `SecretStore`에서 읽어 상류 요청 헤더에 넣는다. 루프백 주소에서만 키를 생략할 수 있다. | 스코프 상한에 따른 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`, 슈퍼 관리자 전용 `skill.inspect`·`skill.create`·`skill.update`·`skill.delete`·`mcp.add`·`mcp.remove`, 직계 자식에 대한 `delegate`. 파일 도구 선언은 실행 시 `unsupported_builtin` 영구 실패로 끝난다. |
+| `claude-cli` | Apple `container`를 실행할 수 있는 macOS | 실행별 VM에서 Claude Code를 띄우고 브로커 릴레이로 연결한다. | 호스트의 브로커 모델 프록시만 공급자 키를 읽는다. VM에는 세션 토큰이 전달된다. | 같은 기억·예약·슈퍼 관리자 관리·위임 도구와, 읽기 격리가 보증된 VM에서 프로필이 허용한 `read`. |
 
 호스트는 발화별 전송 승인에 `schedule.deliver`를 쓴다. [모델 실행기가 받는 내장 도구](plugins.md#모델-실행기가-받는-내장-도구)
 

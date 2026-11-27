@@ -293,6 +293,7 @@ pub(super) fn snapshot(members: &[&str], with_binding: bool) -> Arc<Snapshot> {
                 )
             })
             .collect(),
+        super_admins: BTreeSet::new(),
         policy: Policy {
             scopes: scopes(&["run", "calendar.read"]),
             agents: BTreeMap::new(),

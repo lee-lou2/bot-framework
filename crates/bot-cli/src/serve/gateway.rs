@@ -9,7 +9,6 @@
 use super::{runner, watched::Watched};
 use crate::{
     host::HostFile,
-    install::Installs,
     settings::Settings,
     validate::{
         entrance_secrets, has_private_triggers, missing_named, weak_http_keys, weak_openai_keys,
@@ -24,16 +23,15 @@ use bot_broker::{
 use bot_core::{
     api::ApiRuns,
     cards::CardOutbox,
-    id::Revision,
     intake::{Outbox, PrivateCall, PrivateDecision, PrivateIntake},
     ledger::{CallLedger, PrivateLedger},
     port::{Broker, EffectJournal, Error, Reply, RunAdmin, RunStore},
-    profile::{ActiveRevisions, Adapter, ProfileBundles, ProfileCatalog},
+    profile::{Adapter, ProfileBundles, ProfileCatalog},
     slack::BotThreads,
     trace::Tracer,
 };
 use bot_gateway::{
-    active::{ActiveCheck, ActiveSet},
+    active::ActiveCheck,
     cli::{CliGateway, socket},
     delivery::Deliverer,
     http::HttpGateway,
@@ -55,15 +53,13 @@ pub struct Deps {
     pub secrets: Arc<Watched>,
     pub uid: u32,
     pub stop: CancellationToken,
-    /// 시작할 때 검증한 활성화 판본(프로필 집합 + 입구 매핑). 저장소의 활성 판본과 견주는 기준이다.
-    pub set_revision: Revision,
     /// 승인 결정을 맡길 브로커(설치 판본을 알면 실제 브로커, 모르면 결정을 맡기지 않는 것)
     pub decisions: Arc<dyn Broker>,
     /// 접수·회신·승인 스팬을 보낼 곳(호스트에 설정한 수집기, 없으면 아무것도 내보내지 않는다)
     pub tracer: Arc<dyn Tracer>,
     /// 가짜 Slack 서버 주소(시험 전용, 제품은 `None`)
     pub slack_base: Option<String>,
-    /// 이 프로세스의 활성화 판본 확인(민감 DM 접수가 쓰는 원격 도구 서버 요청 직전에 다시 확인한다)
+    /// 이 프로세스의 활성화 판본 확인(접수·결과·민감 DM 원격 도구 요청 직전에 다시 확인한다)
     pub active: Arc<dyn ActiveCheck>,
 }
 
@@ -88,7 +84,7 @@ async fn private_intake(deps: &Deps) -> Result<Arc<dyn PrivateIntake>, String> {
     {
         return Ok(Arc::new(UnwiredPrivate));
     }
-    let (runner, installs) = runner::build(
+    let live_runner = runner::build(
         &deps.host,
         &deps.settings,
         &deps.secrets,
@@ -103,7 +99,7 @@ async fn private_intake(deps: &Deps) -> Result<Arc<dyn PrivateIntake>, String> {
             ledger: deps.store.clone() as Arc<dyn PrivateLedger>,
             secrets: deps.secrets.clone(),
             sealer: Arc::new(JcsSealer::new(Arc::new(SchemaValidator::new()))),
-            runner,
+            runner: live_runner.tool_runner(),
             tracer: deps.tracer.clone(),
             clock: Arc::new(SystemClock),
         },
@@ -111,7 +107,7 @@ async fn private_intake(deps: &Deps) -> Result<Arc<dyn PrivateIntake>, String> {
     );
     Ok(Arc::new(Held {
         gate,
-        _installs: installs,
+        _runner: live_runner,
     }))
 }
 
@@ -119,7 +115,7 @@ async fn private_intake(deps: &Deps) -> Result<Arc<dyn PrivateIntake>, String> {
 /// 어긋난 설치본을 복구하려는 다른 기동이 실행 중인 도구의 파일을 지우지 못한다.
 struct Held {
     gate: PrivateGate,
-    _installs: Installs,
+    _runner: runner::LiveRunner,
 }
 
 impl PrivateIntake for Held {
@@ -150,10 +146,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
             private,
         )
         .with_tracer(deps.tracer.clone())
-        .with_active(Arc::new(ActiveSet::new(
-            deps.store.clone() as Arc<dyn ActiveRevisions>,
-            deps.set_revision.clone(),
-        ))),
+        .with_active(deps.active.clone()),
     );
     let routes = ingress.routes().map_err(|e| e.to_string())?;
     let (mut cli, mut http, mut slack) = (false, false, false);

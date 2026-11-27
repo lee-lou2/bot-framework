@@ -354,16 +354,19 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
     };
 
     let effective = effective_scopes(snapshot, agent, run);
+    let super_admin = snapshot.is_super_admin(&run.principal);
     let visible = visible_tools(agent, &effective);
     let mut tools: Vec<ToolSpec> = visible.iter().map(|(_, spec)| spec.clone()).collect();
     tools.extend(
-        bot_core::builtin::model_tools(&agent.scopes).map(|spec| ToolSpec {
-            id: ToolId(spec.id.into()),
-            kind: ToolKind::Skill,
-            class: spec.class,
-            description: spec.description.into(),
-            input: JsonPayload(spec.schema.into()),
-        }),
+        bot_core::builtin::model_tools_for(&agent.scopes, super_admin)
+            .filter(|spec| !spec.super_admin || effective.contains(spec.id))
+            .map(|spec| ToolSpec {
+                id: ToolId(spec.id.into()),
+                kind: ToolKind::Skill,
+                class: spec.class,
+                description: spec.description.into(),
+                input: JsonPayload(spec.schema.into()),
+            }),
     );
     let children: Vec<(AgentId, String)> = snapshot
         .agents

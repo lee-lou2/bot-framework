@@ -23,6 +23,8 @@ pub struct Snapshot {
     pub bindings: BTreeMap<BindingId, Binding>,
     pub roles: BTreeMap<String, Scopes>,
     pub members: BTreeMap<PrincipalId, BTreeSet<String>>,
+    /// 런타임 스킬·MCP 관리 도구(`skill.*`·`mcp.*`)를 쓸 수 있는 슈퍼 관리자 집합(반드시 members의 비-서비스 주체).
+    pub super_admins: BTreeSet<PrincipalId>,
     pub policy: Policy,
     pub secrets: Vec<SecretName>,
 }
@@ -203,6 +205,11 @@ impl ApprovalRoute {
 }
 
 impl Snapshot {
+    /// 요청자가 이 프로필의 슈퍼 관리자인가.
+    pub fn is_super_admin(&self, principal: &PrincipalId) -> bool {
+        self.super_admins.contains(principal)
+    }
+
     /// OpenAI 모델 바인딩 `binding`을 통해 인증된 HTTP 주체 `requester`의 일반 도구 승인 경로. 한 스냅숏 안에서만 정한다.
     /// 다음이 모두 맞을 때만 돌려준다 — 바인딩이 OpenAI 모델이고, 요청자가 이 프로필의 HTTP 멤버이고, 매핑이 있고,
     /// 승인할 사람이 이 프로필의 인간 멤버이고, Slack이면 전달 바인딩이 같은 프로필의 같은 워크스페이스 채널 바인딩이다.
@@ -364,6 +371,19 @@ pub trait ActiveRevisions: Send + Sync {
         }
         let done = self.replace_prepared(expected, next, profiles, seeds, schedules, plan.prepared);
         Box::pin(async move { done.await.map(|()| Vec::new()) })
+    }
+
+    /// 실행 중 스킬·MCP 편집의 즉시 활성화: `replace_prepared`와 같되 기존 사전 승인(`bot_grants`)을 철회하거나 새로 발급하지 않는다.
+    fn replace_live(
+        &self,
+        expected: Option<Revision>,
+        next: Revision,
+        profiles: BTreeMap<ProfileId, Revision>,
+        seeds: Vec<crate::command::MemorySeed>,
+        schedules: BTreeMap<ProfileId, Vec<crate::command::TriggerSpec>>,
+        prepared: BTreeSet<(ProfileId, Revision)>,
+    ) -> crate::port::Reply<'_, ()> {
+        self.replace_prepared(expected, next, profiles, seeds, schedules, prepared)
     }
 }
 

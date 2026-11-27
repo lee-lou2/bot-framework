@@ -118,6 +118,7 @@ pub fn snapshot(profile: &str, revision: &str) -> SnapshotBuilder {
         bindings: BTreeMap::new(),
         roles: BTreeMap::new(),
         members: BTreeMap::new(),
+        super_admins: BTreeSet::new(),
         policy: Policy {
             scopes: BTreeSet::new(),
             agents: BTreeMap::new(),
@@ -141,6 +142,13 @@ impl SnapshotBuilder {
         self.snapshot
             .members
             .insert(PrincipalId(identity.into()), set(roles));
+        self
+    }
+
+    pub fn super_admin(mut self, identity: &str) -> Self {
+        self.snapshot
+            .super_admins
+            .insert(PrincipalId(identity.into()));
         self
     }
 

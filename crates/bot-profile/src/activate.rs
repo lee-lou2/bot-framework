@@ -161,6 +161,21 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
             issues.error_at("model-not-allowed", &place, "/model", message.clone());
         }
     }
+    for admin in snap
+        .super_admins
+        .iter()
+        .filter(|id| !host.allows_super_admin(profile, &id.0))
+    {
+        issues.error_at(
+            "super-admin-not-allowed",
+            "profile.yaml",
+            "/super_admins",
+            format!(
+                "슈퍼 관리자 `{}`는 호스트 설정(`super_admins.{profile}`)에 허용되지 않았어요",
+                admin.0
+            ),
+        );
+    }
     for (id, binding) in &snap.bindings {
         let at = format!("바인딩 {}", id.0);
         match &binding.source {

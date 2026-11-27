@@ -40,12 +40,62 @@ pub fn agent_md(leaf: &str) -> String {
 }
 
 pub fn skill_md(name: &str) -> String {
+    if name == "skill-creator" {
+        return SKILL_CREATOR.to_owned();
+    }
     format!(
         "---\nname: \"{name}\"\ndescription: 이 스킬을 언제 쓰는지 한 줄로 적어 주세요\n---\n\
          # {name}\n\n이 스킬이 하는 일과 쓰는 때를 두세 문장으로 적는다.\n\n\
          ## 순서\n1. 먼저 확인할 것\n2. 그다음 할 일\n3. 답에 넣을 것\n"
     )
 }
+
+/// 슈퍼 관리자 전용 스킬·MCP 생성·수정·삭제 스킬(`bot add skill skill-creator`).
+/// Claude·Codex skill-creator의 핵심 원칙(간결·명확·판단을 바꾸는 규칙 중심)과 `bot-framework`의
+/// 32 KiB 한도·SOPS 암호화 비밀·즉시 활성화 구조를 함께 담는다.
+pub const SKILL_CREATOR: &str = r##"---
+name: "skill-creator"
+description: "슈퍼 관리자의 자연어 요청으로 에이전트 스킬을 생성·수정·삭제하거나 MCP 서버를 추가·제거하고 즉시 활성화한다. '스킬 만들어줘', '스킬 수정/삭제해줘', 'MCP 추가/제거해줘' 요청에 사용한다."
+---
+# skill-creator
+
+슈퍼 관리자의 자연어 요청을 받아 프로필의 스킬과 MCP 서버를 설계·적용하고 즉시 활성화한다.
+
+## 1. 권한 확인
+- 이 작업은 프로필의 `super_admins`에 등록된 슈퍼 관리자만 요청할 수 있다.
+- 관리 도구(`skill.inspect`·`skill.create`·`skill.update`·`skill.delete`·`mcp.add`·`mcp.remove`)가 보이지 않거나 거절되면 권한이 없음을 분명히 알리고 작업을 진행하지 않는다.
+
+## 2. 현황 먼저 조회
+- 스킬을 만들거나 고치기 전에 항상 `skill.inspect({})`를 호출해 에이전트 목록(`id`·`description`), 기존 스킬과 이름 충돌 여부, 에이전트별 스킬 본문 용량(32 KiB 한도), 등록된 MCP 서버, 비밀 보관소 종류(`sops`·`keychain`·`env`)와 비밀 **이름**을 확인한다.
+- 기존 스킬을 수정할 때는 `skill.inspect({"skill": "<이름>"})`으로 현재 본문을 먼저 읽는다.
+
+## 3. 대상 에이전트 고르기
+- 사용자가 에이전트를 명시하면 그 에이전트에 둔다.
+- 명시하지 않으면 `skill.inspect`로 읽은 각 에이전트의 `description`과 역할을 비교해 가장 알맞은 에이전트 하나를 고른다.
+- 모든 에이전트가 공통으로 지켜야 하는 규칙·형식만 프로필 공용(`agent: null`)으로 둔다.
+
+## 4. 심플하고 명확한 스킬 작성 원칙
+- **이름(`name`)**: 소문자 kebab-case(예: `pr-review`, `weekly-summary`).
+- **설명(`description`)**: 언제 발동하고 무엇을 하는지 1~2문장으로 구체적으로 적는다(포괄적 설명 금지).
+- **본문(`body`)**:
+  - 모델이 이미 아는 일반 설명·군더더기는 빼고, 실제 판단과 출력을 바꾸는 핵심 절차·출력 형식·제약·예외 처리만 명령형으로 짧게 적는다.
+  - YAML front matter(`---`)는 본문에 넣지 않는다(`skill.create`·`skill.update`가 자동 생성한다).
+  - `allowed-tools`는 쓸 수 없으며, 대상 에이전트의 전체 스킬 본문 합계가 32 KiB를 넘지 않게 유지한다.
+- 생성·수정·삭제 후에는 자동으로 검증과 즉시 활성화가 끝나 다음 요청부터 바로 동작한다.
+
+## 5. MCP 추가·제거와 암호화 파일(SOPS) 처리
+- **원격 Streamable HTTP MCP**: `mcp.add(transport: "http", alias, url, ...)`를 호출하면 서버의 `tools/list`를 검증해 `tools.lock.yaml`·`tools.yaml`·`SKILL.md`·`host.json`·`profile.yaml`을 갱신하고 즉시 활성화한다.
+- **로컬 stdio MCP**: `mcp.add(transport: "stdio", alias, root, command, stdio_tools, ...)`로 등록한다.
+- **위험도(`tool_classes` · `default_class`)**: 읽기 전용 도구는 `"read"`, 삭제·발송 등 되돌릴 수 없는 도구는 `"irreversible"`, 그 밖의 변경 도구는 `"write"`로 지정한다.
+- **비밀·암호화 파일 규칙**:
+  - 토큰·API 키 **값**은 절대 `SKILL.md`·`tools.yaml`·`tools.lock.yaml`·`profile.yaml`·`host.json`·답변에 적지 않는다.
+  - SOPS 암호화 파일(`BOT_SECRETS=sops:<파일>`)이나 키체인에 이미 저장된 비밀이 있으면 `auth_secret: "<비밀 이름>"`처럼 이름만 연결한다(SOPS 캐시는 자동으로 갱신된다).
+  - 슈퍼 관리자가 새 비밀 값을 함께 전달했을 때만 `secret_value`(또는 `secret_values`)로 넘겨 암호화 보관소(`bot.<profile>.<name>`)에 바로 저장하고, 답변에는 값을 되풀이하지 않는다.
+- **MCP 제거**: `mcp.remove(alias, ...)`로 서버와 스킬 바인딩을 제거한다. 미사용 비밀까지 암호화 보관소에서 지우려면 사용자가 명시적으로 요청했을 때만 `remove_secrets: true`를 준다.
+
+## 6. 완료 보고
+- 적용 범위(에이전트 ID 또는 프로필 공용), 생성·수정·삭제한 스킬·도구 이름, 새 판본(앞 12자), 바로 사용 가능 여부를 짧게 보고한다.
+"##;
 
 const RULES: &str = r##"- 답은 한국어로 짧게 쓴다. 결론을 먼저 말하고 근거와 다음 행동을 뒤에 붙인다.
 - 모르는 것은 모른다고 답한다. 확인하지 못한 내용을 사실처럼 쓰지 않는다.

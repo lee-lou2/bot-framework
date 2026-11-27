@@ -33,6 +33,79 @@ impl KeychainStore {
     pub fn with_program(program: PathBuf) -> Self {
         Self { program }
     }
+
+    /// macOS 키체인에 `bot/<profile>` / `<name>` 항목을 저장(또는 갱신)한다.
+    pub async fn set_secret(
+        &self,
+        profile: &ProfileId,
+        name: &SecretName,
+        value: &str,
+    ) -> Result<(), Error> {
+        let profile = checked_profile(profile)?;
+        if value.is_empty() || value.len() > MAX_VALUE || value.contains(['\0', '\r', '\n']) {
+            return Err(Error::Invalid);
+        }
+        let service = format!("bot/{profile}");
+        let account = name.as_str().to_owned();
+        let secret = value.to_owned();
+        let program = self.program.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut command = Command::new(&program);
+            command
+                .args([
+                    "add-generic-password",
+                    "-U",
+                    "-s",
+                    &service,
+                    "-a",
+                    &account,
+                    "-w",
+                    &secret,
+                ])
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if let Some(home) = std::env::var_os("HOME") {
+                command.env("HOME", home);
+            }
+            let status = command.status().map_err(|_| Error::Unavailable)?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(Error::Unavailable)
+            }
+        })
+        .await
+        .map_err(|_| Error::Unavailable)?
+    }
+
+    /// macOS 키체인에서 `bot/<profile>` / `<name>` 항목을 삭제한다(이미 없으면 성공).
+    pub async fn unset_secret(&self, profile: &ProfileId, name: &SecretName) -> Result<(), Error> {
+        let profile = checked_profile(profile)?;
+        let service = format!("bot/{profile}");
+        let account = name.as_str().to_owned();
+        let program = self.program.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut command = Command::new(&program);
+            command
+                .args(["delete-generic-password", "-s", &service, "-a", &account])
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if let Some(home) = std::env::var_os("HOME") {
+                command.env("HOME", home);
+            }
+            let status = command.status().map_err(|_| Error::Unavailable)?;
+            match status.code() {
+                Some(0) | Some(NOT_FOUND) => Ok(()),
+                _ => Err(Error::Unavailable),
+            }
+        })
+        .await
+        .map_err(|_| Error::Unavailable)?
+    }
 }
 
 struct Profile {

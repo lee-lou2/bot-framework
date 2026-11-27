@@ -74,6 +74,7 @@ pub fn parse(
     let role_scopes: BTreeSet<String> = roles.values().flatten().cloned().collect();
     let policy = parse_policy(root.get("policy"), &role_scopes);
     let members = parse_members(root.get("members"), &roles, &policy, limits, issues);
+    let super_admins = parse_super_admins(root.get("super_admins"), &members, issues);
     let bindings = parse_bindings(root.get("bindings"), limits, issues);
     (issues.error_count() == before).then(|| ProfileParts {
         id: id.to_owned(),
@@ -81,10 +82,58 @@ pub fn parse(
         model: text(root, "model").to_owned(),
         roles,
         members,
+        super_admins,
         bindings,
         secrets: strings(root.get("secrets")),
         policy,
     })
+}
+
+fn parse_super_admins(
+    value: Option<&Value>,
+    members: &BTreeMap<PrincipalId, Member>,
+    issues: &mut Issues,
+) -> BTreeSet<PrincipalId> {
+    let list = value
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut out = BTreeSet::new();
+    for (i, item) in list.iter().enumerate() {
+        let Some(identity) = item.as_str() else {
+            continue;
+        };
+        let at = format!("/super_admins/{i}");
+        let Some(kind) = names::identity_kind(identity) else {
+            issues.error_at(
+                "bad-identity",
+                "profile.yaml",
+                at,
+                format!("신원은 `<종류>:<이름>` 모양이어야 해요: {identity}"),
+            );
+            continue;
+        };
+        if kind == names::IdentityKind::Service {
+            issues.error_at(
+                "super-admin-service",
+                "profile.yaml",
+                at,
+                format!("서비스 주체는 슈퍼 관리자가 될 수 없어요: {identity}"),
+            );
+            continue;
+        }
+        let principal = PrincipalId(identity.to_owned());
+        if !members.contains_key(&principal) {
+            issues.error_at(
+                "super-admin-not-member",
+                "profile.yaml",
+                at,
+                format!("슈퍼 관리자 `{identity}`가 members에 없어요"),
+            );
+            continue;
+        }
+        out.insert(principal);
+    }
+    out
 }
 
 fn parse_policy(value: Option<&Value>, role_scopes: &BTreeSet<String>) -> Policy {
