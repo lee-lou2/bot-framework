@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 688" width="1120" height="688" role="img" aria-labelledby="t-mem-l d-mem-l">
+  <title id="t-mem-l">Bot Framework Hybrid Memory &amp; System One Auto-Capture Architecture</title>
+  <desc id="d-mem-l">Three-stage memory architecture over stock PostgreSQL: turn-start hybrid recall (3072d IEEE-754 f16 embeddings plus Unicode trigram/token scoring and z-score anti-false-taint gating), central bot_memories storage and broker-gated memory tools, and optional post-turn System One decision-model auto-capture (d1.2-ultra / jev-latest).</desc>
+  <style>
+    .bg { fill: #f5f5f5; }
+    .hdr-rule { stroke: rgba(45,49,66,0.14); stroke-width: 1; }
+    .dot { fill: rgba(45,49,66,0.11); }
+    .zone { fill: rgba(45,49,66,0.025); stroke: rgba(45,49,66,0.18); stroke-width: 0.9; }
+    .zone-dash { fill: rgba(45,49,66,0.025); stroke: #4f5d75; stroke-width: 0.9; stroke-dasharray: 5,3; }
+    .node { fill: #f5f5f5; stroke: #2d3142; stroke-width: 1.1; }
+    .node-focal { fill: rgba(191,69,32,0.075); stroke: #bf4520; stroke-width: 1.5; }
+    .node-link { fill: rgba(46,90,168,0.07); stroke: #2e5aa8; stroke-width: 1.1; }
+    .div { stroke: rgba(45,49,66,0.14); stroke-width: 0.9; }
+    .div-acc { stroke: rgba(191,69,32,0.28); stroke-width: 0.9; }
+    .lbl-bg { fill: #f5f5f5; }
+    .h-eye { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 9.5px; font-weight: 600; letter-spacing: 0.14em; fill: #bf4520; }
+    .h-title { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 18px; font-weight: 700; fill: #2d3142; }
+    .h-sub { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 11.5px; fill: #4f5d75; }
+    .eye { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.10em; fill: #5a6580; }
+    .eye-acc { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.10em; fill: #bf4520; }
+    .eye-lnk { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.10em; fill: #2e5aa8; }
+    .ttl-sm { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 12.5px; font-weight: 700; fill: #2d3142; }
+    .ttl-acc { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 13.5px; font-weight: 700; fill: #bf4520; }
+    .sub { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 10px; fill: #4f5d75; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8.8px; fill: #4f5d75; }
+    .mono-ink { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 9px; font-weight: 500; fill: #2d3142; }
+    .zlbl { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.12em; fill: #5a6580; }
+    .zlbl-acc { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; letter-spacing: 0.12em; fill: #bf4520; }
+    .edge { fill: none; stroke: #4f5d75; stroke-width: 1.2; }
+    .edge-dash { fill: none; stroke: #4f5d75; stroke-width: 1; stroke-dasharray: 4,3; }
+    .edge-acc { fill: none; stroke: #bf4520; stroke-width: 1.5; }
+    .edge-lnk { fill: none; stroke: #2e5aa8; stroke-width: 1.3; }
+    .elbl { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 500; fill: #4f5d75; }
+    .elbl-acc { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; fill: #bf4520; }
+    .elbl-lnk { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8px; font-weight: 600; fill: #2e5aa8; }
+    .ar-m { fill: #4f5d75; }
+    .ar-a { fill: #bf4520; }
+    .ar-l { fill: #2e5aa8; }
+    .bar { stroke: #bfc0c0; stroke-width: 2; }
+    .bar-acc { stroke: #bf4520; stroke-width: 2; }
+    .fk { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8.5px; font-weight: 600; letter-spacing: 0.08em; fill: #5a6580; }
+    .fk-acc { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 8.5px; font-weight: 600; letter-spacing: 0.08em; fill: #bf4520; }
+    .fv { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', 'Segoe UI', sans-serif; font-size: 10px; fill: #2d3142; }
+  </style>
+  <defs>
+    <clipPath id="clip-mem-l"><rect x="0.5" y="0.5" width="1119" height="687" rx="10"/></clipPath>
+    <pattern id="dots-mem-l" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.85" class="dot"/>
+    </pattern>
+    <marker id="ar-m-mem-l" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
+      <polygon points="0 0, 7 3, 0 6" class="ar-m"/>
+    </marker>
+    <marker id="ar-mr-mem-l" markerWidth="7" markerHeight="6" refX="0.5" refY="3" orient="auto">
+      <polygon points="7 0, 0 3, 7 6" class="ar-m"/>
+    </marker>
+    <marker id="ar-a-mem-l" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
+      <polygon points="0 0, 7 3, 0 6" class="ar-a"/>
+    </marker>
+    <marker id="ar-ar-mem-l" markerWidth="7" markerHeight="6" refX="0.5" refY="3" orient="auto">
+      <polygon points="7 0, 0 3, 7 6" class="ar-a"/>
+    </marker>
+    <marker id="ar-l-mem-l" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
+      <polygon points="0 0, 7 3, 0 6" class="ar-l"/>
+    </marker>
+    <marker id="ar-lr-mem-l" markerWidth="7" markerHeight="6" refX="0.5" refY="3" orient="auto">
+      <polygon points="7 0, 0 3, 7 6" class="ar-l"/>
+    </marker>
+  </defs>
+  <g clip-path="url(#clip-mem-l)">
+    <rect width="1120" height="688" class="bg"/>
+    <rect x="0" y="76" width="1120" height="532" fill="url(#dots-mem-l)" opacity="0.6"/>
+    <!-- Header -->
+    <text x="24" y="28" class="h-eye">MEMORY · HYBRID RECALL · SYSTEM ONE AUTO-CAPTURE</text>
+    <text x="24" y="51" class="h-title">Hybrid Memory &amp; Automatic Capture Pipeline</text>
+    <text x="24" y="67" class="h-sub">Stock PostgreSQL (zero extensions) · 3072d IEEE-754 f16 embeddings · System One decision judge · Broker-gated memory tools</text>
+    <line x1="0" y1="76" x2="1120" y2="76" class="hdr-rule"/>
+
+    <g transform="translate(0,68)">
+      <!-- ZONES -->
+      <rect x="20" y="24" width="340" height="492" rx="8" class="zone"/>
+      <rect x="78" y="18" width="224" height="14" rx="2" class="lbl-bg"/>
+      <text x="190" y="28" text-anchor="middle" class="zlbl">TURN-START HYBRID RECALL</text>
+
+      <rect x="396" y="24" width="328" height="492" rx="8" class="zone"/>
+      <rect x="444" y="18" width="232" height="14" rx="2" class="lbl-bg"/>
+      <text x="560" y="28" text-anchor="middle" class="zlbl-acc">POSTGRESQL · BROKER GATE</text>
+
+      <rect x="760" y="24" width="340" height="492" rx="8" class="zone-dash"/>
+      <rect x="812" y="18" width="236" height="14" rx="2" class="lbl-bg"/>
+      <text x="930" y="28" text-anchor="middle" class="zlbl">POST-TURN SYSTEM ONE CAPTURE</text>
+
+      <!-- INTRA-ZONE ARROWS -->
+      <line x1="190" y1="168" x2="190" y2="204" class="edge-lnk" marker-end="url(#ar-l-mem-l)"/>
+      <line x1="190" y1="344" x2="190" y2="380" class="edge" marker-end="url(#ar-m-mem-l)"/>
+      <line x1="560" y1="280" x2="560" y2="324" class="edge-acc" marker-start="url(#ar-ar-mem-l)" marker-end="url(#ar-a-mem-l)"/>
+      <line x1="930" y1="168" x2="930" y2="204" class="edge-lnk" marker-end="url(#ar-l-mem-l)"/>
+      <line x1="930" y1="352" x2="930" y2="388" class="edge-acc" marker-end="url(#ar-a-mem-l)"/>
+
+      <!-- CROSS-ZONE ARROWS -->
+      <line x1="344" y1="112" x2="412" y2="112" class="edge-dash" marker-start="url(#ar-mr-mem-l)" marker-end="url(#ar-m-mem-l)"/>
+      <line x1="412" y1="244" x2="344" y2="244" class="edge" marker-end="url(#ar-m-mem-l)"/>
+      <line x1="708" y1="112" x2="776" y2="112" class="edge" marker-end="url(#ar-m-mem-l)"/>
+      <path d="M 776,440 H 746 Q 738,440 738,432 V 252 Q 738,244 730,244 H 708" class="edge-acc" marker-end="url(#ar-a-mem-l)"/>
+
+      <!-- EDGE LABELS -->
+      <rect x="134" y="179" width="112" height="13" rx="2" class="lbl-bg"/>
+      <text x="190" y="189" text-anchor="middle" class="elbl-lnk">3072d query vec</text>
+      <rect x="132" y="355" width="116" height="13" rx="2" class="lbl-bg"/>
+      <text x="190" y="365" text-anchor="middle" class="elbl">Top hits + taint</text>
+      <rect x="518" y="295" width="84" height="14" rx="2" class="lbl-bg"/>
+      <text x="560" y="305" text-anchor="middle" class="elbl-acc">Atomic TX</text>
+      <rect x="876" y="179" width="108" height="13" rx="2" class="lbl-bg"/>
+      <text x="930" y="189" text-anchor="middle" class="elbl-lnk">JSON state</text>
+      <rect x="870" y="363" width="120" height="13" rx="2" class="lbl-bg"/>
+      <text x="930" y="373" text-anchor="middle" class="elbl-acc">Typed decision</text>
+      <rect x="352" y="96" width="52" height="13" rx="2" class="lbl-bg"/>
+      <text x="378" y="106" text-anchor="middle" class="elbl">Backfill</text>
+      <rect x="350" y="228" width="56" height="13" rx="2" class="lbl-bg"/>
+      <text x="378" y="238" text-anchor="middle" class="elbl">f16 rows</text>
+      <rect x="716" y="96" width="52" height="13" rx="2" class="lbl-bg"/>
+      <text x="742" y="106" text-anchor="middle" class="elbl">Private</text>
+      <rect x="712" y="328" width="52" height="14" rx="2" class="lbl-bg"/>
+      <text x="738" y="338" text-anchor="middle" class="elbl-acc">auto_save</text>
+
+      <!-- ZONE 1 NODES -->
+      <g id="mem-embed">
+        <rect x="36" y="52" width="308" height="116" rx="6" class="node-link"/>
+        <text x="48" y="72" class="eye-lnk">EMBEDDINGS · host.json embeddings</text>
+        <text x="48" y="94" class="ttl-sm">EmbeddingClient (bot-runtime)</text>
+        <line x1="48" y1="104" x2="332" y2="104" class="div"/>
+        <text x="48" y="122" class="mono">POST /embeddings (gemini-embedding-2)</text>
+        <text x="48" y="138" class="sub">Default 3072d · L2 unit norm · IEEE-754 f16</text>
+        <text x="48" y="154" class="mono">Lazy backfill (≤16 rows) · Lexical fallback</text>
+      </g>
+      <g id="mem-rank">
+        <rect x="36" y="204" width="308" height="140" rx="6" class="node"/>
+        <text x="48" y="224" class="eye">HYBRID RANKER · bot-store</text>
+        <text x="48" y="246" class="ttl-sm">Lexical + Dense RRF Scoring</text>
+        <line x1="48" y1="256" x2="332" y2="256" class="div"/>
+        <text x="48" y="274" class="sub">Unicode trigram · Korean particles · Code IDs</text>
+        <text x="48" y="292" class="sub">Zero-alloc f16 dot product + z-score gate</text>
+        <text x="48" y="310" class="mono">RRF (k=30) + 30-day recency decay</text>
+        <text x="48" y="328" class="mono">Abstains cleanly → zero false private taint</text>
+      </g>
+      <g id="mem-ctx">
+        <rect x="36" y="380" width="308" height="116" rx="6" class="node"/>
+        <text x="48" y="400" class="eye">PROMPT BOUNDARY · bot-runtime</text>
+        <text x="48" y="422" class="ttl-sm">Untrusted Reference Block</text>
+        <line x1="48" y1="432" x2="332" y2="432" class="div"/>
+        <text x="48" y="450" class="mono">[Untrusted reference data] (user role)</text>
+        <text x="48" y="468" class="sub">Never placed in trusted system prompt</text>
+        <text x="48" y="484" class="mono">## Memory guidance when memory.save scoped</text>
+      </g>
+
+      <!-- ZONE 2 NODES -->
+      <g id="mem-pg">
+        <rect x="412" y="52" width="296" height="228" rx="6" class="node-focal"/>
+        <text x="424" y="72" class="eye-acc">FOCAL · bot-store · MIGRATION 0029</text>
+        <text x="424" y="96" class="ttl-acc">bot_memories (PostgreSQL)</text>
+        <text x="424" y="112" class="sub">Stock PG 16 · Zero extensions required</text>
+        <line x1="424" y1="124" x2="696" y2="124" class="div-acc"/>
+        <text x="424" y="144" class="mono-ink">· kind: fact | core · private | profile</text>
+        <text x="424" y="164" class="mono-ink">· embedding_f16 bytea (dim × 2 check)</text>
+        <text x="424" y="184" class="mono-ink">· superseded_by / valid_until_ms</text>
+        <text x="424" y="204" class="mono-ink">· 500 active / owner advisory quota</text>
+        <text x="424" y="224" class="mono-ink">· Exact + cos ≥ 0.94 deduplication</text>
+        <text x="424" y="244" class="mono-ink">· SHA-256 race-safe embedding backfill</text>
+        <text x="424" y="264" class="mono">Audit chain records SHA-256 digest only</text>
+      </g>
+      <g id="mem-broker">
+        <rect x="412" y="324" width="296" height="172" rx="6" class="node-focal"/>
+        <text x="424" y="344" class="eye-acc">FOCAL · bot-broker · BUILT-IN TOOLS</text>
+        <text x="424" y="368" class="ttl-acc">Broker Memory Gate</text>
+        <line x1="424" y1="378" x2="696" y2="378" class="div-acc"/>
+        <text x="424" y="398" class="mono-ink">· memory.search  (hybrid recall + taint)</text>
+        <text x="424" y="418" class="mono-ink">· memory.save    (1:1 DM/CLI, private)</text>
+        <text x="424" y="438" class="mono-ink">· memory.forget  (soft-delete + wipe)</text>
+        <text x="424" y="458" class="mono-ink">· memory.share   (owner approval card)</text>
+        <text x="424" y="480" class="mono">Default scopes enabled in bot init</text>
+      </g>
+
+      <!-- ZONE 3 NODES -->
+      <g id="mem-filter">
+        <rect x="776" y="52" width="308" height="116" rx="6" class="node"/>
+        <text x="788" y="72" class="eye">ELIGIBILITY · bot-runtime</text>
+        <text x="788" y="94" class="ttl-sm">1:1 Human Message Filter</text>
+        <line x1="788" y1="104" x2="1072" y2="104" class="div"/>
+        <text x="788" y="122" class="sub">Root RunOrigin::Message · Direct / CLI only</text>
+        <text x="788" y="138" class="sub">User raw text + own recalled private hits</text>
+        <text x="788" y="154" class="mono">Local credential filter blocks secret egress</text>
+      </g>
+      <g id="mem-judge">
+        <rect x="776" y="204" width="308" height="148" rx="6" class="node-link"/>
+        <text x="788" y="224" class="eye-lnk">SYSTEM ONE · host.json memory_judge</text>
+        <text x="788" y="246" class="ttl-sm">MemoryJudgeClient (0 output tok)</text>
+        <line x1="788" y1="256" x2="1072" y2="256" class="div"/>
+        <text x="788" y="274" class="mono">POST /v1/systemone (d1.2-ultra / jev)</text>
+        <text x="788" y="292" class="sub">action: save | forget | none + contains_secret</text>
+        <text x="788" y="310" class="sub">kind (core/fact) + target_memory (supersede)</text>
+        <text x="788" y="328" class="mono">Sentence-expanded spans · 422 Jev fallback</text>
+      </g>
+      <g id="mem-auto">
+        <rect x="776" y="388" width="308" height="108" rx="6" class="node"/>
+        <text x="788" y="408" class="eye-acc">HOST-OWNED · bot-store</text>
+        <text x="788" y="430" class="ttl-sm">Auto-Save &amp; Auto-Forget</text>
+        <line x1="788" y1="440" x2="1072" y2="440" class="div"/>
+        <text x="788" y="458" class="sub">Skips if model already called memory.save/forget</text>
+        <text x="788" y="476" class="mono">3072d embed → private owner row · Fail-open</text>
+      </g>
+    </g>
+
+    <!-- Footer Invariants Ledger -->
+    <line x1="1" y1="608" x2="1119" y2="608" class="hdr-rule"/>
+    <line x1="24" y1="624" x2="24" y2="672" class="bar-acc"/>
+    <text x="34" y="634" class="fk-acc">ZERO EXTENSIONS</text>
+    <text x="34" y="653" class="fv">Stock PostgreSQL 16 (bytea f16) — works</text>
+    <text x="34" y="669" class="fv">across any schema, DB role, and locale</text>
+    <line x1="296" y1="624" x2="296" y2="672" class="bar"/>
+    <text x="306" y="634" class="fk">ANTI-FALSE-TAINT GATE</text>
+    <text x="306" y="653" class="fv">Z-score + cosine + word-boundary filters</text>
+    <text x="306" y="669" class="fv">prevent unrelated queries from tainting runs</text>
+    <line x1="568" y1="624" x2="568" y2="672" class="bar-acc"/>
+    <text x="578" y="634" class="fk-acc">INJECTION-RESISTANT CAPTURE</text>
+    <text x="578" y="653" class="fv">memory_judge inspects only the human's own</text>
+    <text x="578" y="669" class="fv">1:1 message — never tool outputs or channels</text>
+    <line x1="840" y1="624" x2="840" y2="672" class="bar"/>
+    <text x="850" y="634" class="fk">HOST-ONLY CREDENTIALS</text>
+    <text x="850" y="653" class="fv">Double active-revision check, SecretStore</text>
+    <text x="850" y="669" class="fv">Bearer headers, and response leak scanning</text>
+  </g>
+  <rect x="0.5" y="0.5" width="1119" height="687" rx="10" fill="none" stroke="#cfd5dd" stroke-width="1"/>
+</svg>

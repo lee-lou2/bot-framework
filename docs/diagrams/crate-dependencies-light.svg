@@ -123,7 +123,7 @@
         <text x="260" y="74" class="eye-acc">CRATE 08 · DEPENDS ON ALL 7 CRATES</text>
         <text x="260" y="96" class="ttl-acc">bot-cli</text>
         <text x="326" y="96" class="mono-ink">(bin: bot)</text>
-        <text x="260" y="114" class="sub">Host config (host.json) · Activation fingerprint · SecretStore · Scaffolding (init/add) · Role runner (serve)</text>
+        <text x="260" y="114" class="sub">Host config (embeddings, memory_judge) · Fingerprint · SecretStore · Scaffolding · Role runner</text>
       </g>
       <g id="cr-profile">
         <rect x="40" y="228" width="160" height="120" rx="6" class="node"/>
@@ -148,9 +148,9 @@
         <text x="404" y="248" class="eye">CRATE 04</text>
         <text x="404" y="270" class="ttl-sm">bot-store</text>
         <line x1="404" y1="280" x2="540" y2="280" class="div"/>
-        <text x="404" y="298" class="sub">PostgreSQL adapter</text>
+        <text x="404" y="298" class="sub">PostgreSQL (zero ext.)</text>
         <text x="404" y="314" class="sub">Queue · Ledger · Audit</text>
-        <text x="404" y="334" class="mono">Single public Store</text>
+        <text x="404" y="334" class="mono">Hybrid f16 memory</text>
       </g>
       <g id="cr-runtime">
         <rect x="568" y="228" width="160" height="120" rx="6" class="node"/>
@@ -158,8 +158,8 @@
         <text x="580" y="270" class="ttl-sm">bot-runtime</text>
         <line x1="580" y1="280" x2="716" y2="280" class="div"/>
         <text x="580" y="298" class="sub">Worker · Cron · Delegate</text>
-        <text x="580" y="314" class="sub">Model runners (API/VM)</text>
-        <text x="580" y="334" class="mono">ContainerSandbox</text>
+        <text x="580" y="314" class="sub">Runners · Embed · Judge</text>
+        <text x="580" y="334" class="mono">API / VM / System One</text>
       </g>
       <g id="cr-broker">
         <rect x="744" y="228" width="160" height="120" rx="6" class="node"/>
@@ -183,7 +183,7 @@
         <rect x="180" y="440" width="760" height="64" rx="6" class="node-focal"/>
         <text x="200" y="462" class="eye-acc">CRATE 01 · ZERO INTERNAL DEPENDENCIES</text>
         <text x="200" y="484" class="ttl-acc">bot-core</text>
-        <text x="288" y="484" class="sub">Shared IDs &amp; states · Port traits (RunStore, SecretStore, Sandbox) · Built-in tool table · Bit-exact cron/JSON/hashing</text>
+        <text x="288" y="484" class="sub">IDs &amp; states · Ports (RunStore, Embedder, MemoryJudge, Sandbox) · Built-in table · f16/cron/JSON</text>
       </g>
     </g>
 

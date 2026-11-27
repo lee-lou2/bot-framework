@@ -33,6 +33,7 @@
 | **Admin & Obs** | `bot-admin` | 승인·보류(hold)·실행 재개/취소용 웹 UI/API, OTLP 트레이스/로그 및 Sentry 호환 이슈 내보내기 |
 
 - **8개 크레이트 단방향 그래프:** `bot-core` ◄ {`bot-profile`, `bot-gateway`, `bot-store`, `bot-runtime`, `bot-broker`, `bot-admin`} ◄ `bot-cli`. 중간 6개 크레이트는 서로 의존하지 않으며 `bot-core` 포트 트레이트를 통해서만 통신합니다. ([아키텍처 및 다이어그램](docs/ko/architecture.md))
+- **하이브리드 메모리 및 자동 저장:** 추가 확장 없는 PostgreSQL 하이브리드 회상(3072차원 IEEE-754 `f16` 임베딩 + 유니코드 어휘/트라이그램 + z-score 오탐 방지 게이트 + RRF), 내장 `memory.search`/`save`/`forget`/`share` 도구, 그리고 1:1 DM/CLI 대화에서 생성 토큰 없이 저장·갱신·삭제를 자동 판단하는 선택적 System One(`memory_judge`: `d1.2-ultra`/`jev-latest`) 연동. ([메모리 아키텍처](docs/ko/architecture.md#하이브리드-메모리와-자동-저장))
 - **OpenAI 호환 엔드포인트:** 공식 Python 또는 Node SDK의 `base_url`을 `http://127.0.0.1:8788/v1`로 지정하고 발급된 키를 넣으면 `models.list()`와 `chat.completions.create()`를 호출할 수 있습니다. ([SDK 예제](docs/ko/gateway.md) · [모델 바인딩](docs/ko/profile-spec.md))
 - **프로필 단위 격리:** 개인·팀·조직 봇을 별도 프로필 디렉터리로 분리하고 활성화 전에 `bot validate`로 검증합니다. ([개인 예제](examples/profiles/personal) · [팀 템플릿](examples/profiles/team))
 
