@@ -520,3 +520,63 @@ async fn the_run_loop_delivers_and_a_deliver_signal_wakes_it() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn trailing_note_lines_render_in_a_context_block_without_truncation() {
+    let rig = rig().await;
+    let reply =
+        "**Done.**\n- Item one\n\n※ Based on **docs** (`v2`), [guide](https://example.com) <!here>";
+    to_channel(&rig, 1, json!({"text": reply}));
+    rig.deliverer.tick().await.unwrap();
+    let body = &posts(&rig)[0].body;
+    let blocks = body["blocks"].as_array().unwrap();
+    let types: Vec<_> = blocks.iter().map(|b| b["type"].as_str().unwrap()).collect();
+    assert_eq!(types, ["markdown", "context"]);
+    assert_eq!(blocks[0]["text"], "**Done.**\n- Item one");
+    assert_eq!(blocks[1]["elements"][0]["type"], "mrkdwn");
+    assert_eq!(
+        blocks[1]["elements"][0]["text"],
+        "※ Based on *docs* (`v2`), <https://example.com|guide> &lt;!here>"
+    );
+    assert_eq!(
+        body["text"],
+        "**Done.**\n- Item one\n\n※ Based on **docs** (`v2`), [guide](https://example.com) &lt;!here>"
+    );
+
+    // Approval cards follow the text and its trailing note block.
+    let card = json!({"nonce": "n-note", "title": "Approve", "lines": ["Target: A"]});
+    to_channel(
+        &rig,
+        2,
+        json!({"text": "Please review.\n\n※ Caveat", "approval": card}),
+    );
+    rig.deliverer.tick().await.unwrap();
+    let card_posts = posts(&rig);
+    let card_types: Vec<_> = card_posts[1].body["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        card_types,
+        ["markdown", "context", "header", "section", "actions"]
+    );
+
+    // Oversized notes stay intact inside the main markdown block; format rejections still fall back whole.
+    let long_note = format!("Summary.\n\n※ {}", "€".repeat(3_000));
+    to_channel(&rig, 3, json!({"text": long_note}));
+    rig.deliverer.tick().await.unwrap();
+    assert_eq!(posts(&rig)[2].body["blocks"].as_array().unwrap().len(), 1);
+    assert_eq!(posts(&rig)[2].body["blocks"][0]["text"], long_note);
+
+    rig.slack.script(
+        "chat.postMessage",
+        Scripted::Json(json!({"ok": false, "error": "invalid_blocks"})),
+    );
+    to_channel(&rig, 4, json!({"text": "Body.\n\n※ Note"}));
+    rig.deliverer.tick().await.unwrap();
+    let all = posts(&rig);
+    assert!(all[4].body.get("blocks").is_none());
+    assert_eq!(all[4].body["text"], "Body.\n\n※ Note");
+}
