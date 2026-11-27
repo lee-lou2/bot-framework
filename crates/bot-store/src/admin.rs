@@ -2,7 +2,7 @@
 //! 같은 명령의 재전송은 전이와 함께 기록한 감사 행으로 확인한다.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, Entry, OwnedEntry},
     codec::{ids_ok, target_from},
     db::{R, Store, Tx},
     finish::*,
@@ -115,6 +115,7 @@ impl Store {
         if tree_has_open_hold(&mut tx, profile, run).await? {
             return Ok(RunCommandOutcome::Held);
         }
+        let mut audits = Vec::new();
         match command.action {
             RunAction::Resume => {
                 if !move_dead_run(&mut tx, profile, run).await? {
@@ -122,13 +123,14 @@ impl Store {
                 }
             }
             RunAction::Cancel => {
-                cancel_locked(&mut tx, &tree, actor).await?;
+                cancel_locked(&mut tx, &tree, actor, &mut audits).await?;
             }
         }
-        let mut entry = Entry::new(&actor.0, action, run, "operator_requested");
+        let mut entry = OwnedEntry::new(profile, &actor.0, action, run, "operator_requested");
         entry.args = Some(digest);
-        entry.run_command_id = Some(&command.id);
-        audit::append(&mut tx, profile, &entry).await?;
+        entry.run_command_id = Some(command.id.clone());
+        audits.push(entry);
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(RunCommandOutcome::Applied)
     }
@@ -190,18 +192,21 @@ impl Store {
         )
         .await?;
         let nodes = lock_subtree(&mut tx, &profile.0, &run.0).await?;
-        let touched = cancel_locked(&mut tx, &nodes, actor).await?;
+        let mut audits = Vec::new();
+        let touched = cancel_locked(&mut tx, &nodes, actor, &mut audits).await?;
         let verdict = if touched == 0 {
             "no_effect".to_owned()
         } else {
             short(reason)
         };
-        audit::append(
-            &mut tx,
+        audits.push(OwnedEntry::new(
             &profile.0,
-            &Entry::new(&actor.0, "run.cancel", &run.0, &verdict),
-        )
-        .await?;
+            &actor.0,
+            "run.cancel",
+            &run.0,
+            verdict,
+        ));
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -264,7 +269,12 @@ async fn lock_subtree(tx: &mut Tx<'_>, profile: &str, run: &str) -> R<Vec<PgRow>
     }
 }
 
-async fn cancel_locked(tx: &mut Tx<'_>, nodes: &[PgRow], actor: &PrincipalId) -> R<usize> {
+async fn cancel_locked(
+    tx: &mut Tx<'_>,
+    nodes: &[PgRow],
+    actor: &PrincipalId,
+    audits: &mut Vec<OwnedEntry>,
+) -> R<usize> {
     let mut touched = 0;
     for node in nodes {
         let state: String = node.get("state");
@@ -279,7 +289,7 @@ async fn cancel_locked(tx: &mut Tx<'_>, nodes: &[PgRow], actor: &PrincipalId) ->
         };
         match state.as_str() {
             "ready" | "retry" | "waiting" => {
-                end_run(tx, &row, End::Cancelled("cancelled"), &actor.0).await?;
+                end_run_into(tx, &row, End::Cancelled("cancelled"), &actor.0, audits).await?;
                 touched += 1;
             }
             "leased" => {

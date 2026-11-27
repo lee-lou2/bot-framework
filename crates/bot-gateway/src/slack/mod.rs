@@ -61,6 +61,8 @@ pub struct SlackGateway {
     threads: Option<Arc<dyn BotThreads>>,
     /// 진행 상태(👀/✅ · `chat.startStream`)와 스레드 중단 제어기(생략하면 장식 호출 없음)
     ux: Option<Arc<ux::SlackUx>>,
+    /// `on_frame` 직접 호출용 종료 신호(`serve`가 끝나면 함께 취소된다)
+    shutdown: CancellationToken,
 }
 
 impl SlackGateway {
@@ -85,6 +87,7 @@ impl SlackGateway {
             api,
             threads: None,
             ux: None,
+            shutdown: CancellationToken::new(),
         }
     }
 
@@ -99,6 +102,23 @@ impl SlackGateway {
     #[must_use]
     pub fn with_ux(mut self, runs: Arc<dyn RunStore>, admin: Arc<dyn RunAdmin>) -> Self {
         self.ux = Some(Arc::new(ux::SlackUx::new(self.creds.clone(), runs, admin)));
+        self
+    }
+
+    /// 시험 전용: 상태 감시 주기와 상한을 지정해 `SlackUx`를 붙인다.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_ux_timing(
+        mut self,
+        runs: Arc<dyn RunStore>,
+        admin: Arc<dyn RunAdmin>,
+        poll_every: Duration,
+        watch_limit: Duration,
+    ) -> Self {
+        self.ux = Some(Arc::new(
+            ux::SlackUx::new(self.creds.clone(), runs, admin)
+                .with_watch_timing(poll_every, watch_limit),
+        ));
         self
     }
 
@@ -232,6 +252,7 @@ impl SlackGateway {
                 }
             }
         }
+        self.shutdown.cancel();
         for running in running.into_values() {
             running.stop.cancel();
             let _ = running.task.await;
@@ -271,10 +292,10 @@ impl SlackGateway {
     ) -> Running {
         let stop = parent.child_token();
         let handler: socket::Handler = {
-            let (gateway, install) = (self.clone(), install.clone());
+            let (gateway, install, stop) = (self.clone(), install.clone(), stop.clone());
             Arc::new(move |frame| {
-                let (gateway, install) = (gateway.clone(), install.clone());
-                Box::pin(async move { gateway.on_frame(&install, frame).await })
+                let (gateway, install, stop) = (gateway.clone(), install.clone(), stop.clone());
+                Box::pin(async move { gateway.on_frame_with_stop(&install, frame, &stop).await })
             })
         };
         let task = tokio::spawn({

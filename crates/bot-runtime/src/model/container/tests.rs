@@ -414,7 +414,12 @@ async fn a_spawned_vm_streams_lines_takes_the_request_on_stdin_and_keeps_the_sec
             "__CF_USER_TEXT_ENCODING",
             "PWD",
             "SHLVL",
-            "_"
+            "_",
+            // macOS Xcode CLT `/usr/bin/python3` 심(shim)이 실행 시 스스로 주입하는 SDK·경로 변수
+            "CPATH",
+            "LIBRARY_PATH",
+            "MANPATH",
+            "SDKROOT"
         ]
         .contains(&k.as_str())),
         "{keys:?}"

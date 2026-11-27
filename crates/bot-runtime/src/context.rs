@@ -263,15 +263,20 @@ fn hint(agent: &Agent) -> String {
     line.trim().to_owned()
 }
 
-/// 이 run이 쓸 수 있는 범위: 요청 범위 ∩ 에이전트 상한 ∩ 정책 상한
+/// 이 run이 쓸 수 있는 범위: 요청 범위 ∩ 에이전트 상한 ∩ 정책 상한(에이전트별 상한 포함)
 pub(crate) fn effective_scopes(
     snapshot: &Snapshot,
     agent: &Agent,
     run: &RunContext,
 ) -> BTreeSet<String> {
+    let ceiling = bot_core::scope::agent_ceiling(&snapshot.policy.agents, &run.agent);
     run.scopes
         .iter()
-        .filter(|s| agent.scopes.contains(*s) && snapshot.policy.scopes.contains(*s))
+        .filter(|s| {
+            agent.scopes.contains(*s)
+                && snapshot.policy.scopes.contains(*s)
+                && ceiling.as_ref().is_none_or(|upper| upper.contains(*s))
+        })
         .cloned()
         .collect()
 }
@@ -358,15 +363,13 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
     let visible = visible_tools(agent, &effective);
     let mut tools: Vec<ToolSpec> = visible.iter().map(|(_, spec)| spec.clone()).collect();
     tools.extend(
-        bot_core::builtin::model_tools_for(&agent.scopes, super_admin)
-            .filter(|spec| !spec.super_admin || effective.contains(spec.id))
-            .map(|spec| ToolSpec {
-                id: ToolId(spec.id.into()),
-                kind: ToolKind::Skill,
-                class: spec.class,
-                description: spec.description.into(),
-                input: JsonPayload(spec.schema.into()),
-            }),
+        bot_core::builtin::model_tools_for(&effective, super_admin).map(|spec| ToolSpec {
+            id: ToolId(spec.id.into()),
+            kind: ToolKind::Skill,
+            class: spec.class,
+            description: spec.description.into(),
+            input: JsonPayload(spec.schema.into()),
+        }),
     );
     let children: Vec<(AgentId, String)> = snapshot
         .agents

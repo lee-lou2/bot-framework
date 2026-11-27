@@ -355,7 +355,11 @@ fn skill_with_mode(
     };
     let tools = match files.tools.as_deref() {
         Some(path) => {
-            let value = yaml_of(tree, path, &bundled().tools, limits, issues)?;
+            let schema = match mode {
+                SkillMode::Strict => &bundled().tools,
+                SkillMode::Legacy => &bundled().tools_legacy,
+            };
+            let value = yaml_of(tree, path, schema, limits, issues)?;
             tools::parse(&value, &files.name, path, limits, lock.as_ref(), issues)?
         }
         None => Vec::new(),

@@ -27,9 +27,7 @@ mod relay;
 mod sandbox;
 pub mod session;
 
-pub use api::{
-    ApiClient, ApiEndpoint, ApiKind, ApiRunner, ApiSettings, Effort, LimitField, SendGate,
-};
+pub use api::{ApiClient, ApiEndpoint, ApiKind, ApiRunner, ApiSettings, Effort, LimitField};
 pub use claude_code::ClaudeCodeRunner;
 pub use cli::{CliConfig, CliModel};
 pub use demo::DemoModel;

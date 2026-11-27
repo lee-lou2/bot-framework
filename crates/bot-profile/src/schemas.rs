@@ -13,6 +13,8 @@ const SKILL: &str = include_str!("../../../schemas/v1/skill.schema.json");
 pub struct Bundled {
     pub profile: Schema,
     pub tools: Schema,
+    /// 구판(`BOTPROFILE1`) 복원 전용 `tools.yaml` 스키마: 과거에 허용했던 128자 초과 `secrets` 키를 거절하지 않는다.
+    pub tools_legacy: Schema,
     pub triggers: Schema,
     pub env: Schema,
     /// AGENT.md 맨 위 front matter
@@ -26,10 +28,22 @@ fn load(name: &str, text: &str) -> Result<Schema, String> {
     Schema::compile_bundled(doc).map_err(|e| format!("{name}: {}", e.join("; ")))
 }
 
+fn load_tools_legacy() -> Result<Schema, String> {
+    let mut doc: Value = serde_json::from_str(TOOLS).map_err(|e| format!("tools_legacy: {e}"))?;
+    if let Some(names) = doc
+        .pointer_mut("/$defs/tool/properties/secrets/propertyNames")
+        .and_then(Value::as_object_mut)
+    {
+        names.remove("maxLength");
+    }
+    Schema::compile_bundled(doc).map_err(|e| format!("tools_legacy: {}", e.join("; ")))
+}
+
 fn build() -> Result<Bundled, String> {
     Ok(Bundled {
         profile: load("profile", PROFILE)?,
         tools: load("tools", TOOLS)?,
+        tools_legacy: load_tools_legacy()?,
         triggers: load("triggers", TRIGGERS)?,
         env: load("env", ENV)?,
         agent: load("agent", AGENT)?,
@@ -75,6 +89,7 @@ mod tests {
                 for schema in [
                     &b.profile,
                     &b.tools,
+                    &b.tools_legacy,
                     &b.triggers,
                     &b.env,
                     &b.agent,

@@ -3,6 +3,7 @@
 //! - 값은 HTTP 머리에 안전한 글(보이는 ASCII·공백·탭, 앞뒤 공백 없음)이 아니면 `=?base64?<UTF-8 Base64>?=`로 쓴다. 이 모양과 같은 평문 값도 Base64로 쓴다.
 //! - `x-mcp-header`는 루트에서 `properties` 사슬로만 닿는 곳의 `string`·`integer`·`boolean` 속성에만 둘 수 있다(그 밖의 자리·이름 중복·토큰이 아닌 이름은 정의가
 //!   잘못된 것이라 이 도구는 호출하지 않는다). 인자에 값이 없거나 `null`이면 머리를 만들지 않는다.
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
 
 const SENTINEL: (&str, &str) = ("=?base64?", "?=");
@@ -10,22 +11,7 @@ const SENTINEL: (&str, &str) = ("=?base64?", "?=");
 const SAFE_INT: i64 = (1 << 53) - 1;
 
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |acc, (i, b)| acc | (u32::from(*b) << (16 - 8 * i)));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ALPHABET[((n >> (18 - 6 * i)) & 0x3f) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    STANDARD.encode(bytes)
 }
 
 /// 머리 값으로 쓸 글. 평문으로 안전하면 그대로, 아니면 Base64 표기.

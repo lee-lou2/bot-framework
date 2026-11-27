@@ -13,9 +13,7 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::lock;
 
 #[derive(Default)]
 pub struct FakeResolver {

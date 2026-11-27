@@ -84,6 +84,38 @@ fn providers_are_demo_or_a_claude_cli_with_an_https_upstream_and_a_secret_name()
             claude(json!({"endpoint": "https://[::1]:443/v1"})),
             "https://",
         ),
+        (
+            claude(json!({"endpoint": "https://h.example/v1\r\nX-Evil: 1"})),
+            "https://",
+        ),
+        (
+            claude(json!({"endpoint": "https://h.example/v1\t"})),
+            "https://",
+        ),
+        (
+            claude(json!({"endpoint": "https://h.example/%2e%2e/x"})),
+            "https://",
+        ),
+        (
+            claude(json!({"endpoint": "https://0x7f000001/v1"})),
+            "https://",
+        ),
+        (
+            claude(json!({"endpoint": "https://127.0x1/v1"})),
+            "https://",
+        ),
+        (
+            claude(json!({"endpoint": "https://example.0x1/v1"})),
+            "https://",
+        ),
+        (
+            claude(json!({"endpoint": "https://2130706433/v1"})),
+            "https://",
+        ),
+        (
+            claude(json!({"endpoint": "https://0177.0.0.1/v1"})),
+            "https://",
+        ),
         (claude(json!({"secret": "Bad Name"})), "자격 이름"),
         (claude(json!({"model": ""})), "model"),
         (claude(json!({"extra": 1})), "알 수 없는 키"),

@@ -136,7 +136,7 @@ impl Worker {
                     self.report(ctx, control, Failure::Permanent("finish_conflict"))
                         .await
                 }
-                Err(Error::Unavailable) => {
+                Err(Error::Unavailable | Error::RateLimited) => {
                     self.report(ctx, control, Failure::Transient("finish_unavailable"))
                         .await
                 }

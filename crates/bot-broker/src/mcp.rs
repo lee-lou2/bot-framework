@@ -171,21 +171,6 @@ impl Session {
             .await
     }
 
-    /// 서버가 내세우는 도구 `name`의 입력 스키마. 없으면 `None`, 같은 이름이 둘이면 모호하므로 오류다.
-    pub async fn tool_schema(
-        &mut self,
-        name: &str,
-        limit: Duration,
-    ) -> Result<Option<Value>, McpError> {
-        let found = self.find_tool(name, limit).await?;
-        match found {
-            None => Ok(None),
-            Some(tool) => Ok(Some(
-                tool.get("inputSchema").cloned().ok_or(McpError::Protocol)?,
-            )),
-        }
-    }
-
     /// 서버가 내세우는 도구 `name`의 정의 한 건(`name`·`description`·`inputSchema` …). 없으면 `None`, 같은 이름이 둘이면 모호하므로 오류다.
     pub async fn find_tool(
         &mut self,

@@ -13,12 +13,7 @@ use super::{
     park::ParkReason,
     refuse,
 };
-use crate::{
-    canon::canonicalize,
-    json::parse,
-    service::{preflight::noting_limit, schedule},
-    text::json_quote,
-};
+use crate::{canon::canonicalize, json::parse, service::schedule, text::json_quote};
 use bot_core::{
     cli::{ToolOutput, error_word},
     command::{CallResult, JsonPayload, ToolCall},
@@ -126,10 +121,19 @@ async fn tools_list(shared: &Shared, session: &Session, id: &Value) -> Vec<u8> {
     if let Some(snapshot) = shared.parts.catalog.current(&session.attempt.profile)
         && let Some(agent) = snapshot.agents.get(&session.agent)
     {
+        // 요청자 고정 스코프 ∩ 현재 판본의 역할·에이전트·프로필·에이전트 상한 스코프
+        let effective: bot_core::profile::Scopes =
+            bot_core::scope::effective(&snapshot, &ctx.principal, &session.agent)
+                .map(|allowed| {
+                    ctx.scopes
+                        .iter()
+                        .filter(|s| allowed.contains(*s))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
         let super_admin = snapshot.is_super_admin(&ctx.principal);
-        for spec in bot_core::builtin::model_tools_for(&agent.scopes, super_admin)
-            .filter(|spec| !spec.super_admin || ctx.scopes.contains(spec.id))
-        {
+        for spec in bot_core::builtin::model_tools_for(&effective, super_admin) {
             let name = ToolId(spec.id.into()).mcp_name();
             tools.push((
                 name.clone(),
@@ -148,7 +152,11 @@ async fn tools_list(shared: &Shared, session: &Session, id: &Value) -> Vec<u8> {
         for skill in agent.skills.values() {
             for (tool_id, tool) in &skill.tools {
                 // 내장 도구 이름은 예약돼 있다: 같은 이름의 선언이 있어도 목록에는 내장 하나만 나온다.
-                if bot_core::builtin::reserved(&tool_id.0) {
+                // 실효 스코프가 도구의 요구 스코프를 모두 덮을 때만 목록에 보인다(최종 판정은 브로커가 호출마다 다시 한다).
+                if bot_core::builtin::reserved(&tool_id.0)
+                    || tool.scopes.is_empty()
+                    || !tool.scopes.iter().all(|s| effective.contains(s))
+                {
                     continue;
                 }
                 let Some(schema) = parse(&tool.input.0).and_then(|v| canonicalize(&v)) else {
@@ -273,7 +281,7 @@ async fn tools_call(
     // 호스트 전용 ID는 모델이 부를 수 없다(존재도 알리지 않는다). 검증된 위치에서 `unknown_tool`로 닫는다.
     if tool.0 == schedule::DELIVER_TOOL {
         let asked = (call, tool, JsonPayload(args));
-        let word = refuse::word(shared, session, asked, &Error::Missing, false).await;
+        let word = refuse::word(shared, session, asked, &Error::Missing).await;
         return rpc_result(id, &notice(if revoked(gone) { "stale" } else { word }));
     }
     if delegating {
@@ -289,7 +297,7 @@ async fn tools_call(
                     ToolId(delegate::NAME.to_owned()),
                     JsonPayload(args),
                 );
-                let word = refuse::word(shared, session, asked, &error, false).await;
+                let word = refuse::word(shared, session, asked, &error).await;
                 (notice(if revoked(gone) { "stale" } else { word }), None)
             }
         };
@@ -304,8 +312,7 @@ async fn tools_call(
         tool,
         args: JsonPayload(args),
     };
-    // 이 호출만의 표지로 «한도가 거절했는가»를 결과와 함께 받는다(저장소 장애의 `Unavailable`과 구별하는 원인이다).
-    let (outcome, limited) = noting_limit(shared.parts.broker.call(call)).await;
+    let outcome = shared.parts.broker.call(call).await;
     let (result, parked) = match outcome {
         // 기다리는 동안 세션이 회수됐으면 결과를 돌려주지 않는다. 이미 시작한 효과의 영수증은 원장에 남아 있다.
         _ if revoked(gone) => (notice("stale"), None),
@@ -315,7 +322,7 @@ async fn tools_call(
         // 넘김(`bot/pass`)은 호스트가 직접 시작한 호출에서만 일어난다 — 모델의 호출에는 오지 않는다
         Ok(CallResult::Passed) => (notice("unavailable"), None),
         Err(error) => {
-            let word = refuse::word(shared, session, asked, &error, limited).await;
+            let word = refuse::word(shared, session, asked, &error).await;
             // 표식을 쓰는 동안 세션이 회수됐으면 결과를 돌려주지 않는다(표식은 멱등이라 남아도 된다).
             (notice(if revoked(gone) { "stale" } else { word }), None)
         }

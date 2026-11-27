@@ -340,3 +340,15 @@ fn an_input_whose_top_level_is_a_reference_is_checked_after_expansion() {
     assert!(!tools[0].schema.validate(&json!({"to": 1})).is_empty());
     assert!(tools[0].input.0.contains("$defs"));
 }
+
+#[test]
+fn float_integer_timeout_secs_is_preserved_not_silently_dropped() {
+    let (int_parsed, codes) = parse_text(doc(tool(json!({"timeout_secs": 300}))));
+    assert!(codes.is_empty(), "{codes:?}");
+    let (float_parsed, codes) = parse_text(doc(tool(json!({"timeout_secs": 300.0}))));
+    assert!(codes.is_empty(), "{codes:?}");
+    let int_tool = &int_parsed.unwrap()[0];
+    let float_tool = &float_parsed.unwrap()[0];
+    assert_eq!(float_tool.timeout_secs, Some(300));
+    assert_eq!(float_tool.revision, int_tool.revision);
+}

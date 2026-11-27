@@ -34,9 +34,7 @@ pub struct MemMemory {
     before_preview: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::lock;
 
 impl MemMemory {
     pub fn new(ledger: Arc<MemLedger>) -> Self {

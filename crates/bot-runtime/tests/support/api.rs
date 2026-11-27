@@ -3,10 +3,11 @@
 
 use super::upstream::{FakeApi, Reply, Seen};
 use bot_core::{
+    active::ActiveCheck,
     id::{ProfileId, SecretName},
     port::{Error, ProfileSecrets, Reply as Port, SecretStore, SecretValue},
 };
-use bot_runtime::model::{ApiEndpoint, ApiKind, ApiRunner, ApiSettings, SendGate};
+use bot_runtime::model::{ApiEndpoint, ApiKind, ApiRunner, ApiSettings};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -138,7 +139,7 @@ pub enum Gate {
     Unreadable,
 }
 
-impl SendGate for Gate {
+impl ActiveCheck for Gate {
     fn verify(&self) -> Port<'_, ()> {
         let verdict = match self {
             Gate::Open => Ok(()),
@@ -152,7 +153,7 @@ impl SendGate for Gate {
 /// 키를 읽는 사이에 활성 판본이 바뀌는 확인: 키를 읽기 전에는 같은 판본이고 읽은 뒤에는 구판이다.
 pub struct RevokedByKeyRead(pub Arc<Keys>);
 
-impl SendGate for RevokedByKeyRead {
+impl ActiveCheck for RevokedByKeyRead {
     fn verify(&self) -> Port<'_, ()> {
         let verdict = if self.0.reads() == 0 {
             Ok(())

@@ -10,6 +10,11 @@ pub struct CreateSeal {
     pub sha256: [u8; 32],
 }
 
+/// IANA 시간대 정식 이름 여부(프로필 검증·승인 봉인·저장소가 같은 목록을 쓰도록 단일화).
+pub fn valid_iana_timezone(name: &str) -> bool {
+    jiff_tzdb::get(name).is_some_and(|(canon, _)| canon == name)
+}
+
 impl ScheduleSpec {
     /// 현재 시각을 읽지 않는다. 완료 호출의 재전달에서도 같은 지문을 만든다.
     /// 호출자는 생략된 시간대를 요청이 고정한 프로필 판본의 값으로 먼저 채운다.
@@ -32,7 +37,7 @@ impl ScheduleSpec {
                 expression,
                 timezone,
             } => {
-                if jiff_tzdb::get(timezone).is_none_or(|(name, _)| name != timezone) {
+                if !valid_iana_timezone(timezone) {
                     return Err(Error::Invalid);
                 }
                 json!({"cron": expression.as_str(), "timezone": timezone})

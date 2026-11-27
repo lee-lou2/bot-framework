@@ -3,7 +3,7 @@
 //! begin 뒤(sending)에 응답을 잃으면 held로 둔다. settle은 영수증·감사와 한 커밋이다. 같은 발송 키(profile, run, seq)는 끝까지 유지된다.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, Entry, OwnedEntry},
     codec::*,
     db::{R, Store},
 };
@@ -45,21 +45,25 @@ impl Store {
                 (Some(profile.0.as_str()), Some(binding.0.as_str()))
             });
         let mut tx = self.begin_authorized().await?;
-        let lost = sqlx::query(
-            "update bot_outbox set state = 'held', reason = 'owner_lost', updated_ms = bot_now_ms()
-             where state = 'sending' and lease_until_ms < (select bot_now_ms()) returning profile, call",
+        let mut lost: Vec<(String, String, i32, String)> = sqlx::query_as(
+            "with lost as (
+                 select profile, run, seq from bot_outbox
+                 where state = 'sending' and lease_until_ms < (select bot_now_ms())
+                 order by profile, run, seq for update skip locked
+             )
+             update bot_outbox o set state = 'held', reason = 'owner_lost', updated_ms = bot_now_ms()
+             from lost where o.profile = lost.profile and o.run = lost.run and o.seq = lost.seq
+             returning o.profile, o.run, o.seq, o.call",
         )
         .fetch_all(&mut *tx)
         .await?;
-        for row in &lost {
-            let (profile, call): (String, String) = (row.get("profile"), row.get("call"));
-            audit::append(
-                &mut tx,
-                &profile,
-                &Entry::new("system", "outbox.held", &call, "owner_lost"),
-            )
-            .await?;
-        }
+        lost.sort_by(|a, b| (&a.0, &a.1, a.2).cmp(&(&b.0, &b.1, b.2)));
+        let audits: Vec<OwnedEntry> = lost
+            .into_iter()
+            .map(|(profile, _, _, call)| {
+                OwnedEntry::new(profile, "system", "outbox.held", call, "owner_lost")
+            })
+            .collect();
         // 같은 run의 앞선 회신이 아직 나가는 중이면 뒤의 것을 잡지 않는다(순서 유지)
         let rows = sqlx::query(
             "select o.profile, o.run, o.seq from bot_outbox o
@@ -113,6 +117,8 @@ impl Store {
                 body: JsonPayload(claimed.get("body")),
             });
         }
+        // 감사 head 잠금은 모든 점유 쓰기가 끝난 커밋 직전에 한 번만 잡는다
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(out)
     }

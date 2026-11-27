@@ -19,36 +19,18 @@ use bot_core::{
     ledger::CallLedger,
     port::{Error, Reply},
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-
-tokio::task_local! {
-    /// 한 번의 `Broker::call`(`noting_limit`이 감싼 호출)만의 표지: 속도·동시성 한도가 그 호출을 거절하면 켜진다.
-    static LIMITED: Arc<AtomicBool>;
-}
-
-/// `call`(한 번의 `Broker::call`)을 돌리고, 그 안에서 속도·동시성 **한도**가 이 호출을 거절했는지 함께 돌려준다. 거절의 원인은 이 호출만의 표지에만 적힌다 —
-/// 호출 위치나 요청이 같아도 다른 호출의 거절·읽히지 않은 표시가 섞이지 않는다(공유 목록이 없다). 오류는 늘 `Unavailable`이라 저장소 장애 같은 다른 이유의
-/// `Unavailable`과는 이 표지로만 구별한다. 호출이 일을 다른 태스크로 넘기면 그 안의 거절은 보이지 않는다(한도로 확정하지 않는 쪽이다).
-pub(crate) async fn noting_limit<T>(call: impl Future<Output = T>) -> (T, bool) {
-    let flag = Arc::new(AtomicBool::new(false));
-    let output = LIMITED.scope(flag.clone(), call).await;
-    (output, flag.load(Ordering::SeqCst))
-}
 
 /// 모델이 부르는 내장 위임 도구의 이름(MCP에서 보이는 그대로). 카탈로그에 없고 프런트가 입력·인가를 직접 판정한다.
 pub use bot_core::builtin::DELEGATE_TOOL;
 
-pub(crate) fn expected(error: &Error, limited: bool) -> Option<CliRefusal> {
+pub(crate) fn expected(error: &Error) -> Option<CliRefusal> {
     Some(match error {
         Error::Missing => CliRefusal::UnknownTool,
         Error::Invalid => CliRefusal::Invalid,
         Error::Denied => CliRefusal::Denied,
         Error::Conflict => CliRefusal::Conflict,
         Error::Stale => CliRefusal::Stale,
-        Error::Unavailable if limited => CliRefusal::RateLimited,
+        Error::RateLimited => CliRefusal::RateLimited,
         Error::Unavailable => return None,
     })
 }
@@ -83,15 +65,6 @@ pub trait Preflight: Send + Sync {
         tool: ToolId,
         args: JsonPayload,
     ) -> Reply<'_, Option<CliRefusal>>;
-}
-
-impl BrokerService {
-    /// 속도·동시성 한도가 이 호출을 거절했다: 오류는 늘 `Unavailable`이다(모델에 가는 단어는 그대로). 이 호출을 감싼 `noting_limit`의 표지를 켜
-    /// 호출한 쪽이 그 `Unavailable`이 **한도 때문인지** 알 수 있게 한다(감싸지 않은 호출은 아무도 묻지 않는다).
-    pub(super) fn limited() -> Error {
-        let _ = LIMITED.try_with(|flag| flag.store(true, Ordering::SeqCst));
-        Error::Unavailable
-    }
 }
 
 impl Preflight for BrokerService {

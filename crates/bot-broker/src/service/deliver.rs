@@ -86,11 +86,25 @@ enum Drafted {
 pub(super) struct NoReplies;
 
 impl ScheduledReplies for NoReplies {
+    fn receipt(&self, _: Attempt) -> Reply<'_, Option<JsonPayload>> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
     fn draft(
         &self,
         _: Attempt,
         _: Option<bot_core::command::Finish>,
     ) -> Reply<'_, Option<bot_core::schedule::DeliveryDraft>> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
+    fn target(&self, _: Attempt) -> Reply<'_, Option<bot_core::schedule::DeliveryTarget>> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
+    fn finish_unsent(
+        &self,
+        _: bot_core::schedule::DeliveryFence,
+        _: bot_core::schedule::DeliveryTarget,
+        _: bot_core::schedule::UnsentReason,
+    ) -> Reply<'_, JsonPayload> {
         Box::pin(async { Err(Error::Unavailable) })
     }
     fn enqueue(&self, _: StartCall) -> Reply<'_, ()> {

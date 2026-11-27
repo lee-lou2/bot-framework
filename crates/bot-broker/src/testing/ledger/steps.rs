@@ -27,9 +27,7 @@ pub(super) struct Taken {
     after: Option<Hook>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::super::lock;
 
 /// 키가 접두사로 시작할 때만 갈고리를 꺼낸다(한 번 쓰면 없어진다).
 fn take_if<T>(slot: &Mutex<Option<(String, T)>>, key: &str) -> Option<T> {

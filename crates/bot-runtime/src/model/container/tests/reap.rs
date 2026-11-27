@@ -219,3 +219,45 @@ async fn reap_and_shutdown_end_only_this_instances_matching_vms() {
         fake.read()["killed"]
     );
 }
+
+#[tokio::test]
+async fn reap_clamps_stuck_subcommands_to_the_shared_deadline_budget() {
+    let fake = Fake::new("reap-budget");
+    let hooks = Hooks {
+        host_has: Arc::new(address_while_anchored(&fake)),
+        relay_up: Arc::new(|_| true),
+        ready_within: Duration::from_secs(5),
+        reap_pause: Duration::from_millis(10),
+        reap_within: Duration::from_millis(350),
+        address_poll: Duration::from_secs(3600),
+        ready_check: Duration::from_secs(5),
+    };
+    let sandbox = ContainerSandbox::start_with(fake.config(), hooks)
+        .await
+        .expect("시작")
+        .relay(8787)
+        .await
+        .expect("릴레이");
+    let owner = "personal.run-budget.g1.c1";
+    let mut containers = fake.read()["containers"].as_array().unwrap().clone();
+    containers.push(fake.vm(
+        "botvm-999999999999-1",
+        json!({
+            "bot.managed": "1",
+            "bot.instance": "botvm",
+            "bot.owner": label_value(owner),
+            "bot.incarnation": "other"
+        }),
+    ));
+    fake.set(json!({"containers": containers, "kill_hangs": true}));
+    let started = std::time::Instant::now();
+    let result = sandbox.reap(owner).await;
+    let elapsed = started.elapsed();
+    assert!(matches!(result, Err(Error::Unavailable)), "{result:?}");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "공유 마감(350ms) 안에 끝나야 한다: {elapsed:?}"
+    );
+    fake.set(json!({"kill_hangs": false}));
+    sandbox.shutdown().await;
+}

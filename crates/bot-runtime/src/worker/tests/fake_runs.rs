@@ -2,8 +2,8 @@
 use super::fakes::lock;
 use bot_core::{
     command::*,
-    id::{Attempt, RunId},
-    intake::{RequestKey, RequestState},
+    id::{Attempt, ProfileId, RunId},
+    intake::{RequestKey, RequestState, RunProgress},
     port::{Error, Reply, RunStore},
     state::RunContext,
 };
@@ -59,9 +59,15 @@ impl RunStore for FakeRuns {
     fn status(&self, _: RequestKey) -> Reply<'_, Option<RequestState>> {
         Box::pin(async { Err(Error::Unavailable) })
     }
+    fn progress(&self, _: ProfileId, _: RunId) -> Reply<'_, Option<RunProgress>> {
+        Box::pin(async { Ok(None) })
+    }
     fn claim(&self) -> Reply<'_, Option<RunContext>> {
         let next = lock(&self.state).queue.pop_front();
         Box::pin(async move { Ok(next) })
+    }
+    fn release_for_shutdown(&self, _: Attempt) -> Reply<'_, ()> {
+        Box::pin(async { Err(Error::Unavailable) })
     }
     fn renew(&self, _: Attempt) -> Reply<'_, Beat> {
         let mut state = lock(&self.state);

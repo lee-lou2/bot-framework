@@ -502,7 +502,7 @@ async fn a_requester_who_is_no_longer_a_member_cannot_delegate_or_read_a_stored_
 
 #[test]
 fn delegation_scopes_is_one_function_for_every_entry_point() {
-    use crate::scope::{Denial, delegation_scopes};
+    use bot_core::scope::{Denial, delegation_scopes};
     let full = family("r1").build();
     let ctx = run_context("personal", "r1", 1, "local:owner", "main", &SCOPES);
     let child = AgentId("main/research".into());

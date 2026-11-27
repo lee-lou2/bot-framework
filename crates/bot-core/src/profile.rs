@@ -340,7 +340,7 @@ pub trait ActiveRevisions: Send + Sync {
 
     /// `replace`와 같되, 같은 트랜잭션에서 활성 행 잠금 아래 `profiles`의 ID들이 고정한 판본(`ProfileBundles::pinned_revisions`의 정의)을 다시 읽어
     /// 모두 `prepared`(호출한 쪽이 번들을 검증·보관하고 복원해 둔 집합)에 있는지 대조한다. 하나라도 없으면 — 준비 뒤 게시 전에 옛 프로세스가 새 고정 참조를 커밋했다 —
-    /// 아무것도 쓰지 않고 `Stale`이다(호출한 쪽이 목록을 다시 준비한다). 기본 구현은 대조 없이 `replace`와 같다(대조가 필요한 저장소만 덮는다).
+    /// 아무것도 쓰지 않고 `Stale`이다(호출한 쪽이 목록을 다시 준비한다).
     fn replace_prepared(
         &self,
         expected: Option<Revision>,
@@ -349,14 +349,11 @@ pub trait ActiveRevisions: Send + Sync {
         seeds: Vec<crate::command::MemorySeed>,
         schedules: BTreeMap<ProfileId, Vec<crate::command::TriggerSpec>>,
         prepared: BTreeSet<(ProfileId, Revision)>,
-    ) -> crate::port::Reply<'_, ()> {
-        let _ = prepared;
-        self.replace(expected, next, profiles, seeds, schedules)
-    }
+    ) -> crate::port::Reply<'_, ()>;
 
     /// `replace_prepared`와 같되 같은 트랜잭션에서 사전 승인을 동기화한다: 새 집합에 선언된 승인(`grants`)은 지문이 같으면 기존 ID를 유지하고
     /// 다르거나 처음이면 새 ID를 발급하며, 선언이 사라지거나 바뀐 기존 승인은 철회한다(철회된 ID는 되살아나지 않는다). `grants`가 비어 있으면
-    /// 모든 승인을 철회한다. 돌려주는 값은 이번에 발급한 승인(운영자에게 범위를 보여 준다). 기본 구현은 승인이 없을 때만 `replace_prepared`와 같다.
+    /// 모든 승인을 철회한다. 돌려주는 값은 이번에 발급한 승인(운영자에게 범위를 보여 준다).
     fn replace_granted(
         &self,
         expected: Option<Revision>,
@@ -365,13 +362,7 @@ pub trait ActiveRevisions: Send + Sync {
         seeds: Vec<crate::command::MemorySeed>,
         schedules: BTreeMap<ProfileId, Vec<crate::command::TriggerSpec>>,
         plan: crate::grant::GrantPlan,
-    ) -> crate::port::Reply<'_, Vec<(crate::grant::GrantId, crate::grant::GrantSpec)>> {
-        if !plan.grants.is_empty() {
-            return Box::pin(async { Err(crate::port::Error::Unavailable) });
-        }
-        let done = self.replace_prepared(expected, next, profiles, seeds, schedules, plan.prepared);
-        Box::pin(async move { done.await.map(|()| Vec::new()) })
-    }
+    ) -> crate::port::Reply<'_, Vec<(crate::grant::GrantId, crate::grant::GrantSpec)>>;
 
     /// 실행 중 스킬·MCP 편집의 즉시 활성화: `replace_prepared`와 같되 기존 사전 승인(`bot_grants`)을 철회하거나 새로 발급하지 않는다.
     fn replace_live(
@@ -382,9 +373,7 @@ pub trait ActiveRevisions: Send + Sync {
         seeds: Vec<crate::command::MemorySeed>,
         schedules: BTreeMap<ProfileId, Vec<crate::command::TriggerSpec>>,
         prepared: BTreeSet<(ProfileId, Revision)>,
-    ) -> crate::port::Reply<'_, ()> {
-        self.replace_prepared(expected, next, profiles, seeds, schedules, prepared)
-    }
+    ) -> crate::port::Reply<'_, ()>;
 }
 
 /// 프로필 판본의 검증한 바이트 묶음을 저장소에 불변으로 보관한다. 재배포 뒤 새 프로세스가 옛 판본을 복원하는 근거다.
@@ -405,15 +394,11 @@ pub trait ProfileBundles: Send + Sync {
         revision: &Revision,
     ) -> crate::port::Reply<'_, Option<Vec<u8>>>;
     /// 이 묶음을 처음 보관한 시각(Unix 밀리초). 보관한 적이 없으면 None이다. `/v1/models`의 `created`처럼 요청마다 바뀌면 안 되는 값에 쓴다.
-    /// 기본 구현은 모른다고 답한다(기록을 가진 저장소가 덮는다). 값을 지어내지 않는다.
     fn created_ms(
         &self,
         profile: &ProfileId,
         revision: &Revision,
-    ) -> crate::port::Reply<'_, Option<i64>> {
-        let _ = (profile, revision);
-        Box::pin(async { Ok(None) })
-    }
+    ) -> crate::port::Reply<'_, Option<i64>>;
     /// 이번에 게시·합류할 집합(`target`: 프로필 → 판본)의 프로필 ID들이 고정한 (프로필, 판본) 전체를 한 스냅숏에서 읽는다 — `target`의 현재 쌍과,
     /// 그 ID들의 살아 있는 참조: 끝나지 않은 실행, 재개할 수 있는 dead letter, 대기·승인 미소비 카드의 실행, 정적 cron의 열린 구간과 커서가 끝에 이르지 않은 닫힌 구간,
     /// 활성 사용자 예약의 생성 실행. 집합에서 빠진 프로필의 참조는 읽지 않고, 아무 작업도 참조하지 않는 옛 판본은 «지금 DB의 활성 판본»이라는 이유만으로 넣지 않는다.

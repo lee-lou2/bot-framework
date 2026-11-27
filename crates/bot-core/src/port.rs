@@ -16,6 +16,7 @@ pub enum Error {
     Stale,
     Missing,
     Unavailable,
+    RateLimited,
 }
 
 pub type Reply<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
@@ -35,25 +36,26 @@ pub trait RunStore: Send + Sync {
     /// 접수 저장소는 `accept_with`를 구현해야 한다.
     ///
     /// ```compile_fail,E0046
-    /// # use bot_core::{command::*, id::*, intake::{RequestKey, RequestState}, port::{Reply, RunStore}, state::RunContext};
+    /// # use bot_core::{command::*, id::*, intake::{RequestKey, RequestState, RunProgress}, port::{Reply, RunStore}, state::RunContext};
     /// # struct Store;
     /// impl RunStore for Store {
     ///     fn accept(&self, command: Accept) -> Reply<'_, RunId> { unimplemented!() }
     /// #   fn status(&self, _: RequestKey) -> Reply<'_, Option<RequestState>> { unimplemented!() }
+    /// #   fn progress(&self, _: ProfileId, _: RunId) -> Reply<'_, Option<RunProgress>> { unimplemented!() }
     /// #   fn claim(&self) -> Reply<'_, Option<RunContext>> { unimplemented!() }
+    /// #   fn release_for_shutdown(&self, _: Attempt) -> Reply<'_, ()> { unimplemented!() }
     /// #   fn renew(&self, _: Attempt) -> Reply<'_, Beat> { unimplemented!() }
     /// #   fn checkpoint_batch(&self, _: Attempt, _: Vec<Step>) -> Reply<'_, ()> { unimplemented!() }
     /// #   fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, Completion> { unimplemented!() }
+    /// #   fn finish_with(&self, _: Attempt, _: Finish, _: RunOutcome) -> Reply<'_, Completion> { unimplemented!() }
     /// #   fn fail(&self, _: Attempt, _: Failure) -> Reply<'_, Retry> { unimplemented!() }
     /// #   fn history(&self, _: Attempt, _: u32) -> Reply<'_, Vec<Turn>> { unimplemented!() }
     /// }
     /// ```
     fn accept_with(&self, command: Accept, extras: AcceptExtras) -> Reply<'_, RunId>;
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>>;
-    /// run 트리의 현재 진행 요약(하위 에이전트·실행 중인 도구·승인 대기 여부). 기본 구현은 `None`.
-    fn progress(&self, _profile: ProfileId, _run: RunId) -> Reply<'_, Option<RunProgress>> {
-        Box::pin(async { Ok(None) })
-    }
+    /// run 트리의 현재 진행 요약(하위 에이전트·실행 중인 도구·승인 대기 여부).
+    fn progress(&self, profile: ProfileId, run: RunId) -> Reply<'_, Option<RunProgress>>;
     /// 준비된 작업을 점유할 때 같은 트랜잭션에 현재 호스트 활성 집합을 기록한다.
     /// 리스 만료 인계 시 이전·현재 집합이 모두 있고 다를 때만 시도 횟수를 유지한다.
     /// 같은 집합 또는 이전 기록 부재는 한 번 차감한다. 집합 조회 오류는 쓰기 없이 실패한다.
@@ -63,9 +65,7 @@ pub trait RunStore: Send + Sync {
     /// 미취소 run의 유효한 리스·세대·claim_epoch 소유자만 ready로 돌린다. 시도 횟수는 유지한다.
     /// 세대 증가와 옛 승인 무효화는 한 커밋이며 바로 다음 점유는 세대를 보존한다.
     /// 이미 반납했거나 소유권을 잃은 시도는 Stale이며 이후 소유자에게 영향을 주지 않는다.
-    fn release_for_shutdown(&self, _attempt: Attempt) -> Reply<'_, ()> {
-        Box::pin(async { Err(Error::Unavailable) })
-    }
+    fn release_for_shutdown(&self, attempt: Attempt) -> Reply<'_, ()>;
     /// 현재 소유자·세대·만료를 대조하고 리스를 늘린다. 옛 세대·만료 뒤는 Stale.
     fn renew(&self, attempt: Attempt) -> Reply<'_, Beat>;
     /// 모델 step·도구 결과 체크포인트. 같은 key는 멱등.
@@ -77,15 +77,13 @@ pub trait RunStore: Send + Sync {
     fn checkpoint_batch(&self, attempt: Attempt, steps: Vec<Step>) -> Reply<'_, ()>;
     /// 결과·답(outbox)·부모 깨우기를 한 커밋으로 기록한다. 취소가 먼저면 답을 버리고 취소로 종결해 실제 상태를 돌려준다.
     fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, Completion>;
-    /// `finish`와 같되 실행 계량(잘림·사용량)도 같은 커밋에 기록한다. 계량을 저장하지 않는 구현은 계량을 버리고 `finish`로 끝낸다(기본 구현).
+    /// `finish`와 같되 실행 계량(잘림·사용량)도 같은 커밋에 기록한다.
     fn finish_with(
         &self,
         attempt: Attempt,
         done: Finish,
-        _outcome: RunOutcome,
-    ) -> Reply<'_, Completion> {
-        self.finish(attempt, done)
-    }
+        outcome: RunOutcome,
+    ) -> Reply<'_, Completion>;
     /// 일시 오류는 백오프 재시도, 영구 오류·시도 한도 초과는 dead letter.
     fn fail(&self, attempt: Attempt, failure: Failure) -> Reply<'_, Retry>;
     /// 같은 대화의 최근 차례(오래된 순). 요청자에게 보이는 것만.
@@ -177,9 +175,7 @@ pub trait EffectJournal: Send + Sync {
     /// 유효한 호출에 단계가 없으면 None, 같은 단계의 지문이 다르면 Conflict다.
     /// 조회는 단계·영수증·감사를 쓰거나 전송을 허가하지 않는다.
     /// 보류 단계의 미소비 운영자 판정은 resolution에 담는다. 반복 조회해도 소비되지 않는다.
-    fn lookup(&self, _request: EffectRequest, _tool: ToolId) -> Reply<'_, Option<EffectStatus>> {
-        Box::pin(async { Err(Error::Unavailable) })
-    }
+    fn lookup(&self, request: EffectRequest, tool: ToolId) -> Reply<'_, Option<EffectStatus>>;
     fn status(&self, attempt: Attempt, call: CallId, effect: EffectId) -> Reply<'_, EffectStatus>;
     fn unresolved(&self, attempt: Attempt, call: CallId) -> Reply<'_, Vec<EffectStatus>>;
     fn record(&self, attempt: Attempt, call: CallId, status: EffectStatus) -> Reply<'_, ()>;

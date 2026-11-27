@@ -62,7 +62,7 @@ mod tests {
     use super::*;
 
     fn hex(bytes: [u8; 32]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        bot_core::random::hex(&bytes)
     }
 
     #[test]

@@ -192,7 +192,32 @@ impl CallLedger for MemoryLedger {
         unavailable()
     }
 
+    fn start_with(
+        &self,
+        _: StartCall,
+        _: bot_core::grant::Authority,
+    ) -> Reply<'_, bot_core::grant::Granted> {
+        Box::pin(std::future::ready(Err(Error::Denied)))
+    }
+
+    fn evidence(&self, _: Attempt) -> Reply<'_, Option<bot_core::grant::Evidence>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
+
     fn finish(&self, _: FinishCall) -> Reply<'_, ()> {
+        unavailable()
+    }
+
+    fn finish_blocked(&self, finish: FinishCall, _: bot_core::api::ApprovalBlock) -> Reply<'_, ()> {
+        self.finish(finish)
+    }
+
+    fn finish_pass(
+        &self,
+        _: FinishCall,
+        _: u32,
+        _: std::collections::BTreeSet<AgentId>,
+    ) -> Reply<'_, bot_core::pass::PassNext> {
         unavailable()
     }
 }
@@ -383,6 +408,46 @@ impl ActiveRevisions for MemoryActive {
             Err(Error::Conflict)
         };
         Box::pin(std::future::ready(result))
+    }
+
+    fn replace_prepared(
+        &self,
+        expected: Option<Revision>,
+        next: Revision,
+        profiles: BTreeMap<ProfileId, Revision>,
+        seeds: Vec<MemorySeed>,
+        schedules: BTreeMap<ProfileId, Vec<TriggerSpec>>,
+        _: std::collections::BTreeSet<(ProfileId, Revision)>,
+    ) -> Reply<'_, ()> {
+        self.replace(expected, next, profiles, seeds, schedules)
+    }
+
+    fn replace_granted(
+        &self,
+        expected: Option<Revision>,
+        next: Revision,
+        profiles: BTreeMap<ProfileId, Revision>,
+        seeds: Vec<MemorySeed>,
+        schedules: BTreeMap<ProfileId, Vec<TriggerSpec>>,
+        plan: bot_core::grant::GrantPlan,
+    ) -> Reply<'_, Vec<(bot_core::grant::GrantId, bot_core::grant::GrantSpec)>> {
+        if !plan.grants.is_empty() {
+            return unavailable();
+        }
+        let done = self.replace_prepared(expected, next, profiles, seeds, schedules, plan.prepared);
+        Box::pin(async move { done.await.map(|()| Vec::new()) })
+    }
+
+    fn replace_live(
+        &self,
+        expected: Option<Revision>,
+        next: Revision,
+        profiles: BTreeMap<ProfileId, Revision>,
+        seeds: Vec<MemorySeed>,
+        schedules: BTreeMap<ProfileId, Vec<TriggerSpec>>,
+        prepared: std::collections::BTreeSet<(ProfileId, Revision)>,
+    ) -> Reply<'_, ()> {
+        self.replace_prepared(expected, next, profiles, seeds, schedules, prepared)
     }
 }
 

@@ -4,8 +4,8 @@
 //! (`ModelProxy`). 호스트 `providers`의 `claude-cli` 항목(상류 `model`·HTTPS `endpoint`·프로필 자격 이름 `secret`)이 프록시의 제공자
 //! 표가 되고, 프로필이 허용한 별칭만 그 제공자를 쓴다.
 //!
-//! **운영 어댑터가 아직 없는 두 조각**은 호출하는 쪽이 `ClaudeParts`로 준다 — 모델 샌드박스(Apple VM 어댑터)와 상류 HTTPS 전송이다.
-//! 주지 않으면 `claude-cli`는 시작을 거절한다(srt 등으로 대신하지 않는다). 시험은 합성 샌드박스·가짜 상류를 넣는다.
+//! 운영은 호스트 설정(`sandbox.apple`)으로 `operational`이 Apple VM 어댑터(`ContainerSandbox`)와 상류 HTTPS 전송(`HttpsUpstream`)을
+//! 조립하고(`sandbox.apple`이 없으면 거절, srt 등으로 대신하지 않는다), 시험은 `testing` 기능 뒤에서 합성 샌드박스·가짜 상류를 넣는다.
 use super::{guard::GuardedUpstream, watched::Watched};
 use crate::{
     execution::Provider,
@@ -26,13 +26,13 @@ use bot_broker::{
     sys::{OsEntropy, SystemClock},
 };
 use bot_core::{
+    active::ActiveCheck,
     id::{AgentId, Attempt, ProfileId, SecretName},
     ledger::CallLedger,
     port::{Broker, DelegationStore, RunStore, SecretStore},
     profile::ProfileCatalog,
     sandbox::ModelSandbox,
 };
-use bot_gateway::active::ActiveCheck;
 use bot_profile::Registry;
 use bot_runtime::{
     Relays,
@@ -95,8 +95,8 @@ pub struct Input<'a> {
     pub active: Arc<dyn ActiveCheck>,
 }
 
-/// 프로필이 허용한 `claude-cli` 별칭의 서비스 키가 보관소에 모두 있는지 본다(값은 읽어 보되 남기지 않는다). 없거나 읽지 못한 것의 안내
-/// 문구들 — 비어 있으면 모두 있다. worker는 활성 판본을 게시하기 **전에** 부른다(키 없이 모든 모델 요청이 런타임에 실패하는 채로 열지 않는다).
+/// 프로필이 허용한 모델 별칭(`claude-cli`·`anthropic-api`·`openai-api`, 키 없는 loopback 제외)의 서비스 키가 보관소에 모두 있는지 본다(값은 읽어 보되 남기지 않는다).
+/// 없거나 읽지 못한 것의 안내 문구들 — 비어 있으면 모두 있다. worker는 활성 판본을 게시하기 **전에** 부른다(키 없이 모든 모델 요청이 런타임에 실패하는 채로 열지 않는다).
 pub async fn missing_keys(
     host: &HostFile,
     registry: &Registry,

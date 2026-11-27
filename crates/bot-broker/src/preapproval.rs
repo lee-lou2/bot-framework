@@ -6,7 +6,7 @@
 use crate::resolve::find_tool;
 use bot_core::{
     canon::{canonicalize, sha256},
-    grant::{Authority, GrantInputs, GrantSpec, Preapproval},
+    grant::{GrantInputs, GrantSpec, Preapproval},
     id::*,
     json::parse,
     profile::{Destination, Snapshot, Tool, Trigger, TriggerSource, TriggerTarget},
@@ -81,13 +81,4 @@ pub fn grant_spec(
         preapproval: pre,
         mapping: mapping_fingerprint(tool, env),
     }))
-}
-
-/// 호출을 시작할 때 쓸 수 있는 권한 선언의 종류.
-#[derive(Debug, Eq, PartialEq)]
-pub enum Claim {
-    /// 사전 승인된 정적 직접 호출(지문은 지금 선언·설치 판본에서 다시 계산한 값).
-    Grant(Authority),
-    /// 지정한 사람의 증거로 승인을 대신할 수 있는 직접 호출(승인자 확인은 호출자가 한다).
-    Human,
 }

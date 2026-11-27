@@ -371,7 +371,8 @@ class Gate(unittest.TestCase):
         wanted = skip_capable(ROOT)
         for key in (("bot-cli", "serve_restore"), ("bot-runtime", "container_cancel"), ("bot-cli", "claude_card_dm"), ("bot-broker", "srt_canary")):
             self.assertIn(key, wanted, "the analysis stopped seeing a file that can skip")
-        for key in (("bot-cli", "serve_activation"), ("bot-store", "audit"), ("bot-admin", "trace_gate")):
+        for key in (("bot-cli", "suite"), ("bot-store", "suite"), ("bot-admin", "suite")):
+            self.assertTrue((ROOT / "crates" / key[0] / "tests" / f"{key[1]}.rs").is_file(), key)
             self.assertNotIn(key, wanted, "a file that cannot skip for a tool is flagged")
 
     def test_every_listed_file_exists(self):

@@ -3,8 +3,7 @@
 //! 운영자 전용 조회는 거절하며, 보이지 않는 대상은 존재 여부를 숨기려고 `Missing`으로 답한다.
 //! 감사는 판정과 같은 락 안에서 해시 체인에 잇는다.
 
-use crate::port::*;
-use bot_core::{id::*, port::Error, state::*};
+use bot_core::{admin::*, id::*, port::Error, state::*};
 use sha2::{Digest, Sha256};
 use std::{
     ops::{Deref, DerefMut},

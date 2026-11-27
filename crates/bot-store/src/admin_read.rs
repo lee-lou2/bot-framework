@@ -12,7 +12,9 @@ use bot_core::{admin::*, id::*, port::Error};
 use sqlx::{PgExecutor, Row, postgres::PgRow};
 use std::collections::BTreeMap;
 
-const RUN_COLUMNS: &str = "r.*,
+const RUN_COLUMNS: &str = "r.profile, r.id, r.root, r.parent, r.parent_step, r.agent, r.principal,
+    r.conv_kind, r.trigger, r.state, r.wait_kind, r.wait_child, r.generation, r.claim_epoch,
+    r.attempts, r.cancel_requested, r.private, r.error, r.created_ms, r.updated_ms,
     (select x.private_memory_read from bot_runs x where x.profile = r.profile and x.id = r.root) as tree_private,
     (select c.call from bot_calls c where c.profile = r.profile and c.run = r.id and c.state = 'held' and c.resolution is null
       order by c.updated_ms limit 1) as held_call";
@@ -144,44 +146,21 @@ fn effect_view(row: &PgRow, holds: &BTreeMap<String, HoldId>) -> R<EffectView> {
     })
 }
 
-/// 열린 단계 보류의 발생 ID(단계 ID별). `call`이 있으면 그 호출의 것만.
+/// 열린 단계 보류의 발생 ID(단계 ID별).
 async fn step_holds<'e>(
     ex: impl PgExecutor<'e>,
     profile: &str,
     run: &str,
-    call: Option<&str>,
 ) -> R<BTreeMap<String, HoldId>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         "select effect, id from bot_holds
-         where profile = $1 and run = $2 and ($3::text is null or call = $3) and kind = 'tool' and effect is not null and closed_ms is null",
+         where profile = $1 and run = $2 and kind = 'tool' and effect is not null and closed_ms is null",
     )
     .bind(profile)
     .bind(run)
-    .bind(call)
     .fetch_all(ex)
     .await?;
     Ok(rows.into_iter().map(|(e, id)| (e, HoldId(id))).collect())
-}
-
-/// 호출 단위(단계 없는) 열린 발생 ID. 종류가 같은 호출 ID를 가른다(도구 호출·회신 발송).
-async fn call_hold<'e>(
-    ex: impl PgExecutor<'e>,
-    profile: &str,
-    run: &str,
-    call: &str,
-    kind: &str,
-) -> R<Option<HoldId>> {
-    let id: Option<String> = sqlx::query_scalar(
-        "select id from bot_holds
-         where profile = $1 and run = $2 and call = $3 and kind = $4 and effect is null and closed_ms is null",
-    )
-    .bind(profile)
-    .bind(run)
-    .bind(call)
-    .bind(kind)
-    .fetch_optional(ex)
-    .await?;
-    Ok(id.map(HoldId))
 }
 
 impl Store {
@@ -290,7 +269,7 @@ impl Store {
         .bind(&run.0)
         .fetch_all(&mut *tx)
         .await?;
-        let holds = step_holds(&mut *tx, &profile.0, &run.0, None).await?;
+        let holds = step_holds(&mut *tx, &profile.0, &run.0).await?;
         tx.rollback().await?;
         Ok(RunDetail {
             run: run_view(&row)?,
@@ -331,36 +310,6 @@ impl Store {
         .bind(profile)
         .fetch_all(&mut *tx)
         .await?;
-        let mut out = Vec::new();
-        for c in &calls {
-            let steps = sqlx::query(&format!("select {} from bot_effects where profile = $1 and run = $2 and call = $3 order by created_ms, id", crate::cols::EFFECTS))
-                .bind(c.get::<String, _>("profile"))
-                .bind(c.get::<String, _>("run"))
-                .bind(c.get::<String, _>("call"))
-                .fetch_all(&mut *tx)
-                .await?;
-            let (profile, run, call) = (
-                c.get::<String, _>("profile"),
-                c.get::<String, _>("run"),
-                c.get::<String, _>("call"),
-            );
-            let holds = step_holds(&mut *tx, &profile, &run, Some(&call)).await?;
-            let hold_id = call_hold(&mut *tx, &profile, &run, &call, "tool").await?;
-            out.push(HoldView {
-                kind: HoldKind::Tool,
-                hold_id,
-                profile: ProfileId(profile),
-                run: RunId(run),
-                call: CallId(call),
-                tool: ToolId(c.get("tool")),
-                reason: c.get::<Option<String>, _>("reason").unwrap_or_default(),
-                since: ms_to_time(c.get("updated_ms")),
-                steps: steps
-                    .iter()
-                    .map(|e| effect_view(e, &holds))
-                    .collect::<R<_>>()?,
-            });
-        }
         let replies = sqlx::query(
             "select profile, run, call, coalesce(reason, 'unknown_outcome') as reason, updated_ms from bot_outbox
              where state = 'held' and ($1::text is null or profile = $1) order by updated_ms, run, seq",
@@ -375,13 +324,103 @@ impl Store {
         .bind(profile)
         .fetch_all(&mut *tx)
         .await?;
+        // 열린 호출의 단계와 모든 열린 보류 발생을 각각 한 번씩 묶어 조회한다(N+1 방지)
+        let mut effects_by_call: BTreeMap<(String, String, String), Vec<PgRow>> = BTreeMap::new();
+        if !calls.is_empty() {
+            let ep: Vec<String> = calls.iter().map(|c| c.get("profile")).collect();
+            let er: Vec<String> = calls.iter().map(|c| c.get("run")).collect();
+            let ec: Vec<String> = calls.iter().map(|c| c.get("call")).collect();
+            let all_effects = sqlx::query(&format!(
+                "select {} from bot_effects e
+                 join unnest($1::text[], $2::text[], $3::text[]) as k(profile, run, call)
+                   on e.profile = k.profile and e.run = k.run and e.call = k.call
+                 order by e.created_ms, e.id",
+                crate::cols::prefixed(crate::cols::EFFECTS, "e")
+            ))
+            .bind(&ep)
+            .bind(&er)
+            .bind(&ec)
+            .fetch_all(&mut *tx)
+            .await?;
+            for e in all_effects {
+                effects_by_call
+                    .entry((e.get("profile"), e.get("run"), e.get("call")))
+                    .or_default()
+                    .push(e);
+            }
+        }
+        let mut call_holds: BTreeMap<(String, String, String, String), HoldId> = BTreeMap::new();
+        let mut step_holds_map: BTreeMap<(String, String, String), BTreeMap<String, HoldId>> =
+            BTreeMap::new();
+        if !calls.is_empty() || !replies.is_empty() || !privates.is_empty() {
+            let open_holds = sqlx::query(
+                "select profile, run, call, kind, effect, id from bot_holds
+                 where closed_ms is null and ($1::text is null or profile = $1)",
+            )
+            .bind(profile)
+            .fetch_all(&mut *tx)
+            .await?;
+            for h in open_holds {
+                let (p, r, c, k, id): (String, String, String, String, String) = (
+                    h.get("profile"),
+                    h.get("run"),
+                    h.get("call"),
+                    h.get("kind"),
+                    h.get("id"),
+                );
+                match h.get::<Option<String>, _>("effect") {
+                    Some(effect) if k == "tool" => {
+                        step_holds_map
+                            .entry((p, r, c))
+                            .or_default()
+                            .insert(effect, HoldId(id));
+                    }
+                    None => {
+                        call_holds.insert((p, r, c, k), HoldId(id));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        tx.rollback().await?;
+        let empty_steps = BTreeMap::new();
+        let mut out = Vec::with_capacity(calls.len() + replies.len() + privates.len());
+        for c in &calls {
+            let (profile, run, call): (String, String, String) =
+                (c.get("profile"), c.get("run"), c.get("call"));
+            let key = (profile.clone(), run.clone(), call.clone());
+            let holds = step_holds_map.get(&key).unwrap_or(&empty_steps);
+            let steps = effects_by_call
+                .get(&key)
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .map(|e| effect_view(e, holds))
+                .collect::<R<_>>()?;
+            let hold_id = call_holds
+                .get(&(profile.clone(), run.clone(), call.clone(), "tool".into()))
+                .cloned();
+            out.push(HoldView {
+                kind: HoldKind::Tool,
+                hold_id,
+                profile: ProfileId(profile),
+                run: RunId(run),
+                call: CallId(call),
+                tool: ToolId(c.get("tool")),
+                reason: c.get::<Option<String>, _>("reason").unwrap_or_default(),
+                since: ms_to_time(c.get("updated_ms")),
+                steps,
+            });
+        }
         // 회신 발송·민감 DM은 단계가 없는 호출 단위 보류다: 열린 발생 ID가 곧 판정 ID다
         for r in &replies {
             let (profile, run, call): (String, String, String) =
                 (r.get("profile"), r.get("run"), r.get("call"));
+            let hold_id = call_holds
+                .get(&(profile.clone(), run.clone(), call.clone(), "reply".into()))
+                .cloned();
             out.push(HoldView {
                 kind: HoldKind::Reply,
-                hold_id: call_hold(&mut *tx, &profile, &run, &call, "reply").await?,
+                hold_id,
                 profile: ProfileId(profile),
                 run: RunId(run),
                 call: CallId(call),
@@ -394,9 +433,12 @@ impl Store {
         for r in &privates {
             let (profile, run): (String, String) = (r.get("profile"), r.get("id"));
             let call = format!("private:{run}");
+            let hold_id = call_holds
+                .get(&(profile.clone(), run.clone(), call.clone(), "private".into()))
+                .cloned();
             out.push(HoldView {
                 kind: HoldKind::Private,
-                hold_id: call_hold(&mut *tx, &profile, &run, &call, "private").await?,
+                hold_id,
                 profile: ProfileId(profile),
                 run: RunId(run),
                 call: CallId(call),
@@ -406,7 +448,6 @@ impl Store {
                 steps: vec![],
             });
         }
-        tx.rollback().await?;
         Ok(out)
     }
 
@@ -454,48 +495,81 @@ impl Store {
 
     pub(crate) async fn admin_status(&self, viewer: &Viewer) -> R<Vec<ProfileStatus>> {
         operator(viewer)?;
-        let holds = self.admin_holds(viewer, None).await?;
-        let profiles: Vec<String> = sqlx::query_scalar(
-            "select profile from bot_runs union select profile from bot_approvals order by 1",
+        self.sweep_private().await?; // 리스가 끝난 민감 DM 접수를 집계 전에 보류로 옮긴다
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("set transaction isolation level repeatable read read only")
+            .execute(&mut *tx)
+            .await?;
+        let counts = sqlx::query(
+            "select profile, state, count(*) as n from bot_runs group by profile, state order by profile, state",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
-        let mut out = Vec::new();
-        for profile in profiles {
-            let counts = sqlx::query("select state, count(*) as n from bot_runs where profile = $1 group by state order by state")
-                .bind(&profile)
-                .fetch_all(&self.pool)
-                .await?;
-            let oldest: Option<i64> = sqlx::query_scalar(
-                "select (bot_now_ms() - min(greatest(created_ms, not_before_ms))) / 1000 from bot_runs
-                 where profile = $1 and state in ('ready', 'retry') and not private and not_before_ms <= bot_now_ms()",
-            )
-            .bind(&profile)
-            .fetch_one(&self.pool)
-            .await?;
-            let pending: i64 = sqlx::query_scalar(
-                "select count(*) from bot_approvals a where a.profile = $1 and a.state = 'pending'
-                   and not exists (select 1 from bot_card_jobs j where j.nonce = a.nonce and j.state <> 'posted')",
-            )
-            .bind(&profile)
-            .fetch_one(&self.pool)
-            .await?;
-            out.push(ProfileStatus {
-                runs: counts
-                    .iter()
-                    .map(|r| {
-                        Ok((
-                            state_from(&r.get::<String, _>("state"))?,
-                            r.get::<i64, _>("n") as u64,
-                        ))
-                    })
-                    .collect::<R<_>>()?,
-                oldest_ready_secs: oldest.map(|s| s.max(0) as u64),
-                approvals_pending: pending as u64,
-                holds: holds.iter().filter(|h| h.profile.0 == profile).count() as u64,
-                profile: ProfileId(profile),
-            });
+        if counts.is_empty() {
+            tx.rollback().await?;
+            return Ok(vec![]);
         }
-        Ok(out)
+        let mut by_profile: Vec<(String, Vec<(bot_core::state::RunState, u64)>)> = Vec::new();
+        for row in &counts {
+            let profile: String = row.get("profile");
+            let pair = (
+                state_from(&row.get::<String, _>("state"))?,
+                row.get::<i64, _>("n") as u64,
+            );
+            match by_profile.last_mut() {
+                Some((last, runs)) if *last == profile => runs.push(pair),
+                _ => by_profile.push((profile, vec![pair])),
+            }
+        }
+        let oldest: BTreeMap<String, i64> = sqlx::query_as(
+            "with clock(ms) as (select bot_now_ms())
+             select profile, ((select ms from clock) - min(greatest(created_ms, not_before_ms))) / 1000
+             from bot_runs
+             where state in ('ready', 'retry') and not private and not_before_ms <= (select ms from clock)
+             group by profile",
+        )
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        let pending: BTreeMap<String, i64> = sqlx::query_as(
+            "select a.profile, count(*) from bot_approvals a
+             where a.state = 'pending'
+               and not exists (select 1 from bot_card_jobs j where j.nonce = a.nonce and j.state <> 'posted')
+             group by a.profile",
+        )
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        let holds: BTreeMap<String, i64> = sqlx::query_as(
+            "select profile, sum(n)::bigint from (
+                 select c.profile, count(*) as n from bot_calls c
+                 where c.state = 'held' and c.resolution is null
+                   and not exists (select 1 from bot_runs r where r.profile = c.profile and r.id = c.run and r.private)
+                   and exists (select 1 from bot_holds h where h.profile = c.profile and h.run = c.run and h.call = c.call
+                               and h.kind = 'tool' and h.closed_ms is null)
+                 group by c.profile
+                 union all
+                 select profile, count(*) as n from bot_outbox where state = 'held' group by profile
+                 union all
+                 select profile, count(*) as n from bot_runs where private and state = 'waiting' and wait_kind = 'hold' group by profile
+             ) t group by profile",
+        )
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        tx.rollback().await?;
+        Ok(by_profile
+            .into_iter()
+            .map(|(profile, runs)| ProfileStatus {
+                oldest_ready_secs: oldest.get(&profile).map(|&s| s.max(0) as u64),
+                approvals_pending: pending.get(&profile).copied().unwrap_or(0) as u64,
+                holds: holds.get(&profile).copied().unwrap_or(0) as u64,
+                runs,
+                profile: ProfileId(profile),
+            })
+            .collect())
     }
 }

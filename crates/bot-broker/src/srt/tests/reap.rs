@@ -46,12 +46,13 @@ async fn reap_refuses_to_touch_a_group_whose_leader_is_not_ours() {
         .unwrap();
     let meta = tmp.path().join("work/.srt");
     std::fs::create_dir_all(&meta).unwrap();
+    let stem = format!("{}-{}", owner_prefix("r1.1.c1"), "0".repeat(32));
     std::fs::write(
-        meta.join("r1.1.c1-abcd.pid"),
+        meta.join(format!("{stem}.pid")),
         format!(
             "{}\n{}\n",
             stranger.id(),
-            tmp.path().join("work/r1.1.c1-abcd").display()
+            tmp.path().join("work").join(&stem).display()
         ),
     )
     .unwrap();
@@ -100,17 +101,22 @@ async fn reap_refuses_to_vouch_without_a_record_or_with_a_broken_one() {
         Err(Error::Unavailable)
     ));
     // 띄우다 죽은 기록(그룹 번호가 없다), 깨진 기록
+    let broken_pid = meta.join(format!(
+        "{}-{}.pid",
+        owner_prefix("r2.1.c1"),
+        "a".repeat(32)
+    ));
     for (text, case) in [
         ("pending\n/w\n", "pending"),
         ("not-a-number\n/w\n", "garbage"),
         ("123\n", "no work path"),
     ] {
-        std::fs::write(meta.join("r2.1.c1-aaaa.pid"), text).unwrap();
+        std::fs::write(&broken_pid, text).unwrap();
         assert!(
             matches!(sandbox.reap("r2.1.c1").await, Err(Error::Unavailable)),
             "{case}"
         );
-        std::fs::remove_file(meta.join("r2.1.c1-aaaa.pid")).unwrap();
+        std::fs::remove_file(&broken_pid).unwrap();
     }
     // 메타 폴더를 읽지 못한다
     std::fs::remove_dir_all(&meta).unwrap();
@@ -165,4 +171,53 @@ async fn a_failing_group_lookup_is_unknown_not_gone() {
         .unwrap();
     let process = sandbox.spawn(spec("r2.1.c1", false)).await.unwrap();
     Box::new(process.handle).terminate().await.unwrap();
+}
+
+#[tokio::test]
+async fn reap_never_matches_another_owner_with_a_shared_prefix_or_invalid_nonce() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sandbox = open(tmp.path()).await;
+    let process = sandbox.spawn(spec("cli-1-0-extra", false)).await.unwrap();
+    let work = work_dir(tmp.path());
+    let bg: u32 = wait_for(&work.join("bg.pid")).await.trim().parse().unwrap();
+
+    // 다른 소유자(`cli-1-0`)의 reap은 `cli-1-0-extra`의 살아 있는 프로세스를 건드리지 않는다.
+    let restarted = open(tmp.path()).await;
+    assert!(matches!(
+        restarted.reap("cli-1-0").await,
+        Err(Error::Unavailable)
+    ));
+    let still_alive = std::process::Command::new("/bin/kill")
+        .args(["-s", "0", &bg.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        still_alive,
+        "접두어가 같은 다른 소유자의 프로세스가 살아 있어야 한다"
+    );
+
+    // `cli-1-0-extra`를 정상 종료해 `.done` 표식을 남겨도 `cli-1-0`은 그 표식을 읽지 않는다.
+    Box::new(process.handle).terminate().await.unwrap();
+    restarted.reap("cli-1-0-extra").await.unwrap();
+    assert!(matches!(
+        restarted.reap("cli-1-0").await,
+        Err(Error::Unavailable)
+    ));
+
+    // nonce 길이나 대소문자 모양이 틀린 위조 `.done` 파일도 표식으로 인정하지 않는다.
+    let meta = tmp.path().join("work/.srt");
+    let hash = owner_prefix("cli-1-0");
+    for bogus in [
+        format!("{hash}-abcd.done"),
+        format!("{hash}-{}.done", "A".repeat(32)),
+        format!("{hash}-{}-extra.done", "0".repeat(32)),
+    ] {
+        std::fs::write(meta.join(&bogus), "done\n").unwrap();
+    }
+    assert!(matches!(
+        restarted.reap("cli-1-0").await,
+        Err(Error::Unavailable)
+    ));
 }

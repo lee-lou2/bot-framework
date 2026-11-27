@@ -2,12 +2,12 @@
 //! 연쇄는 `MAX_WAKE_DEPTH`에서 멈춘다. 목록은 본인 활성 예약의 ID·시각·조용함만 싣는다(지시문·수신자·원래 대화는 없다).
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     calls::{fence, lock_call, lock_root_shared, phase_of},
     codec::*,
     db::{R, Store},
     user_schedule::{
-        New, audit_done, insert, instruction_ok, origin_of, summary_of, timed, within_limit,
+        New, done_entry, insert, instruction_ok, origin_of, summary_of, timed, within_limit,
     },
 };
 use bot_core::{command::JsonPayload, id::*, ledger::CallPhase, port::Error, schedule::*};
@@ -111,14 +111,15 @@ impl Store {
         .bind(&result_text)
         .execute(&mut *tx)
         .await?;
-        audit::append(
+        let hash = to32(row.get("args_sha256"))?;
+        audit::append_many(
             &mut tx,
-            &at.profile.0,
-            &Entry::new(&origin.principal, "schedule.wake", &id, "at"),
+            &[
+                OwnedEntry::new(&at.profile.0, &origin.principal, "schedule.wake", &id, "at"),
+                done_entry(&at.profile.0, &origin.principal, &call.0, hash),
+            ],
         )
         .await?;
-        let hash: Vec<u8> = row.get("args_sha256");
-        audit_done(&mut tx, &at.profile.0, &origin.principal, &call.0, hash).await?;
         tx.commit().await?;
         Ok(ScheduleId(id))
     }

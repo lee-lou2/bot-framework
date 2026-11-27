@@ -4,6 +4,7 @@
 //! - `BOT_PROFILES` — 프로필 루트 폴더
 //! - `BOT_HOST_CONFIG` — 호스트 등록부(JSON) 경로. 없으면 내장 데모 호스트(README 5분 시작용)
 //! - `BOT_DATABASE_URL` — PostgreSQL 접속 주소(저장소를 쓰는 역할)
+//! - `BOT_DB_MAX_CONNECTIONS` — PostgreSQL 연결 풀 최대 개수(1~200, 생략하면 기본 10)
 //! - `BOT_SOCKET` — CLI 소켓 경로(생략하면 호스트 설정 또는 기본 위치)
 //! - `BOT_SECRETS` — 자격 보관소: `env`(기본, 개발용) · `keychain`(macOS) · `sops:<파일>`
 //! - `BOT_SECRETS_REREAD_SECS` — 선언된 비밀 이름 전체를 다시 읽어 가림 목록에 더하는 주기(초, 기본 60, 0이면 끈다). 읽을 때마다 키체인은
@@ -16,6 +17,8 @@ use std::{path::PathBuf, time::Duration};
 const DEFAULT_REREAD_SECS: u64 = 60;
 /// 주기의 상한(초): 하루
 const MAX_REREAD_SECS: u64 = 86_400;
+/// DB 풀 최대 연결 수 상한
+const MAX_DB_CONNECTIONS: u32 = 200;
 
 /// 자격 보관소 종류. 종류마다 달라지는 사실(보호할 파일·누락 힌트·복호화 여부)은 `secrets/mod.rs`의 `impl SecretsKind`에 있다.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,6 +33,8 @@ pub struct Settings {
     pub profiles: Option<PathBuf>,
     pub host_config: Option<PathBuf>,
     pub database_url: Option<String>,
+    /// DB 풀 최대 연결 수(None이면 저장소 기본값 10)
+    pub db_max_connections: Option<u32>,
     pub socket: Option<String>,
     pub secrets: SecretsKind,
     /// 선언된 비밀 이름 전체를 다시 읽는 주기. `None`이면 다시 읽지 않는다(시작 때와 쓰는 순간에만 읽는다).
@@ -48,6 +53,7 @@ impl std::fmt::Debug for Settings {
                 "database_url",
                 &self.database_url.as_ref().map(|_| "<설정됨>"),
             )
+            .field("db_max_connections", &self.db_max_connections)
             .field("socket", &self.socket)
             .field("secrets", &self.secrets)
             .field("secrets_reread", &self.secrets_reread)
@@ -79,6 +85,16 @@ fn parse_reread(text: &str) -> Result<Option<Duration>, String> {
     }
 }
 
+/// DB 풀 최대 연결 수: 1~200 정수만 받는다.
+fn parse_db_max_connections(text: &str) -> Result<u32, String> {
+    match text.parse::<u32>() {
+        Ok(n) if (1..=MAX_DB_CONNECTIONS).contains(&n) => Ok(n),
+        _ => Err(format!(
+            "BOT_DB_MAX_CONNECTIONS는 1~{MAX_DB_CONNECTIONS} 사이의 정수여야 해요"
+        )),
+    }
+}
+
 impl Settings {
     /// `get`으로 환경을 읽는다(시험에서는 가짜를 준다). 빈 값은 없는 것으로 본다.
     pub fn read(get: &dyn Fn(&str) -> Option<String>) -> Result<Self, String> {
@@ -87,6 +103,10 @@ impl Settings {
             profiles: pick("BOT_PROFILES").map(PathBuf::from),
             host_config: pick("BOT_HOST_CONFIG").map(PathBuf::from),
             database_url: pick("BOT_DATABASE_URL"),
+            db_max_connections: match pick("BOT_DB_MAX_CONNECTIONS") {
+                Some(text) => Some(parse_db_max_connections(&text)?),
+                None => None,
+            },
             socket: pick("BOT_SOCKET"),
             installs: pick("BOT_INSTALLS").map(PathBuf::from),
             admin_token_file: pick("BOT_ADMIN_TOKEN_FILE").map(PathBuf::from),
@@ -175,6 +195,23 @@ mod tests {
         for bad in ["abc", "-1", "1.5", "86401", "60s", " 5"] {
             let error = period(bad).unwrap_err();
             assert!(error.contains("BOT_SECRETS_REREAD_SECS"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn db_max_connections_accepts_bounded_integers_only() {
+        let pool = |text: &'static str| {
+            Settings::read(&|name| (name == "BOT_DB_MAX_CONNECTIONS").then(|| text.to_string()))
+                .map(|settings| settings.db_max_connections)
+        };
+        assert_eq!(read(&[]).unwrap().db_max_connections, None);
+        assert_eq!(pool("").unwrap(), None);
+        assert_eq!(pool("1").unwrap(), Some(1));
+        assert_eq!(pool("32").unwrap(), Some(32));
+        assert_eq!(pool("200").unwrap(), Some(200));
+        for bad in ["0", "201", "-1", "abc", " 10"] {
+            let error = pool(bad).unwrap_err();
+            assert!(error.contains("BOT_DB_MAX_CONNECTIONS"), "{bad}: {error}");
         }
     }
 }

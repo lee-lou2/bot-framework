@@ -2,9 +2,8 @@
 //! 표식(`bot_core::cli::CliRefusal`)으로 먼저 남기고, 남긴 **뒤에만** 단어를 돌려준다. 재전달·재개는 호출을 다시 판정하지 않고 같은 단어를 재생한다
 //! (정상 거절은 시도 횟수를 쓰지 않는다). 표식은 판정 사유(감사 낱말)를 싣지 않는다.
 //!
-//! - 오류 → 단어: `Missing`=`unknown_tool`, `Invalid`=`invalid`, `Denied`=`denied`, `Conflict`=`conflict`, `Stale`=`stale`, 속도·동시성 한도=`unavailable`.
-//!   `Missing`·`Invalid`는 저장소 오류가 섞여 나올 수 있어 브로커의 사전 판정이 가리고, 한도는 **그 호출의 결과와 함께** 한도가 거절했다고 확인된
-//!   호출만 확정이다(`service::preflight::noting_limit`: 호출마다 따로인 표지라 다른 요청이나 읽히지 않은 표시와 섞이지 않는다). 저장소·소유권 장애의
+//! - 오류 → 단어: `Missing`=`unknown_tool`, `Invalid`=`invalid`, `Denied`=`denied`, `Conflict`=`conflict`, `Stale`=`stale`, 속도·동시성 한도(`RateLimited`)=`unavailable`.
+//!   `Missing`·`Invalid`는 저장소 오류가 섞여 나올 수 있어 브로커의 사전 판정이 가리고, 한도는 브로커가 직접 `Error::RateLimited`로 구분해 돌려준다. 저장소·소유권 장애의
 //!   `Unavailable`과 `Stale`(claim을 잃으면 표식을 쓸 수 없다)은 거절로 봉인하지 않는다.
 //! - 원장이 이미 이 호출을 시작·보류·완료·거절로 말하면 표식이 아니라 원장을 따른다(`CallBook::confirm`). 계획과 대조하지 않은 위치는 표식이 없다.
 //! - 표식을 쓰지 못했으면 거절 단어를 돌려주지 않고 그 쓰기 실패의 단어(`unavailable`·`stale`)를 돌려준다. 표식이 없는 그 위치는 재개가 다시 판정한다.
@@ -23,9 +22,8 @@ pub(super) async fn word(
     session: &Session,
     (call, tool, args): (CallId, ToolId, JsonPayload),
     error: &Error,
-    limited: bool,
 ) -> &'static str {
-    let Some(refusal) = crate::service::preflight::expected(error, limited) else {
+    let Some(refusal) = crate::service::preflight::expected(error) else {
         return error_word(error);
     };
     let attempt = session.attempt.clone();

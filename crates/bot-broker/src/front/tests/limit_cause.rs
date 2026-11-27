@@ -1,5 +1,5 @@
-//! 한도 거절의 원인은 **이 호출의 결과와 함께** 온다(`noting_limit`): 호출마다 따로인 표지라, 앞 요청이 한도 거절을 받고 아무도 읽지 않은 채 사라져도(접속이
-//! 끊겨도) 같은 위치에서 나중에 난 저장소 장애를 한도로 확정해 봉인하지 않는다. 진짜 한도 거절만 `unavailable` 표식이 된다.
+//! 한도 거절은 브로커가 `Error::RateLimited`로 직접 알린다: 앞 요청이 한도 거절을 받고 아무도 읽지 않은 채 사라져도(접속이
+//! 끊겨도) 같은 위치에서 나중에 난 저장소 장애(`Unavailable`)를 한도로 확정해 봉인하지 않는다. 진짜 한도 거절만 `unavailable` 표식이 된다.
 
 use super::{
     cli::{call, record},
@@ -33,7 +33,7 @@ async fn a_limit_refusal_nobody_read_cannot_seal_a_later_storage_failure_at_the_
             args: JsonPayload(SAY.into()),
         })
         .await;
-    assert!(matches!(abandoned, Err(bot_core::port::Error::Unavailable)));
+    assert!(matches!(abandoned, Err(bot_core::port::Error::RateLimited)));
     // 한도가 회복된 뒤 같은 자리에 진짜 저장소 오류가 났다: 거절이 아니므로 표식이 없다
     r.clock.advance(Duration::from_secs(60));
     wrapped.fail_with(Some(Inject::Unavailable));

@@ -2,7 +2,7 @@
 //! 키: (profile, binding, principal, request). 같은 키·같은 입력 해시는 기존 run, 다른 해시는 충돌.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     codec::*,
     db::{R, Store, Tx},
 };
@@ -239,22 +239,19 @@ impl Store {
             crate::pass::store_chain(&mut tx, &a, &run, chain).await?;
         }
         crate::evidence::bind_in(&mut tx, &a, &run, &extras).await?;
-        let mut entry = Entry::new(&e.principal.0, "run.accept", &run, "accepted");
+        let mut entry = OwnedEntry::new(profile, &e.principal.0, "run.accept", &run, "accepted");
         entry.args = Some(c.digest);
-        audit::append(&mut tx, profile, &entry).await?;
+        let mut audits = vec![entry];
         if let Some(first) = chain.and_then(|chain| chain.candidates.first()) {
-            audit::append(
-                &mut tx,
+            audits.push(OwnedEntry::new(
                 profile,
-                &Entry::new(
-                    &e.principal.0,
-                    "trigger.select",
-                    &run,
-                    &format!("{}@0", first.trigger),
-                ),
-            )
-            .await?;
+                &e.principal.0,
+                "trigger.select",
+                &run,
+                format!("{}@0", first.trigger),
+            ));
         }
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(RunId(run))
     }
@@ -312,7 +309,7 @@ impl Store {
             "select id, agent, state, wait_kind, cancel_requested, depth
              from bot_runs
              where profile = $1 and root = $2
-             order by depth asc, updated_ms desc",
+             order by depth desc, updated_ms desc",
         )
         .bind(&profile.0)
         .bind(&run.0)
@@ -335,8 +332,8 @@ impl Store {
         let mut waiting_approval =
             root.get::<Option<String>, _>("wait_kind").as_deref() == Some("approval");
         if !terminal {
-            // 가장 깊은 활성 자식 에이전트
-            for r in rows.iter().rev() {
+            // 가장 깊은 활성 자식 에이전트(같은 깊이면 가장 최근에 갱신된 자식)
+            for r in &rows {
                 if text(r, "id") == run.0 {
                     continue;
                 }
@@ -350,12 +347,14 @@ impl Store {
                 }
             }
             let call = sqlx::query(
-                "select c.tool, c.state
+                "select c.tool, (c.state = 'open' and a.nonce is not null) as pending_approval
                  from bot_calls c
                  join bot_runs r on r.profile = c.profile and r.id = c.run
+                 left join bot_approvals a
+                   on a.profile = c.profile and a.nonce = c.approval and a.state = 'pending'
                  where c.profile = $1 and r.root = $2
-                   and c.state in ('started', 'pending', 'approved')
-                 order by case c.state when 'pending' then 0 when 'started' then 1 else 2 end, c.updated_ms desc
+                   and (c.state = 'started' or (c.state = 'open' and a.nonce is not null))
+                 order by case when c.state = 'open' and a.nonce is not null then 0 else 1 end, c.updated_ms desc
                  limit 1",
             )
             .bind(&profile.0)
@@ -364,7 +363,7 @@ impl Store {
             .await?;
             if let Some(call) = call {
                 active_tool = Some(text(&call, "tool"));
-                if text(&call, "state") == "pending" {
+                if call.get::<bool, _>("pending_approval") {
                     waiting_approval = true;
                 }
             }

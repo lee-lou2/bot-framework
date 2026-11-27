@@ -109,7 +109,8 @@
           },
           "propertyNames": {
             "type": "string",
-            "pattern": "^[A-Z_][A-Z0-9_]*$"
+            "pattern": "^[A-Z_][A-Z0-9_]*$",
+            "maxLength": 128
           }
         },
         "egress": {

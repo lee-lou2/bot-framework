@@ -162,13 +162,7 @@ pub fn render(result: &Value) -> String {
 
 /// 재시도에도 같은 값을 쓰도록 호출자가 한 번 만들어 들고 있는 요청 ID(무작위 128비트).
 pub fn new_request_id() -> io::Result<String> {
-    use std::io::Read;
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(format!(
-        "cli-{}",
-        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    ))
+    Ok(format!("cli-{}", bot_core::random::random_hex(16)))
 }
 
 #[cfg(test)]

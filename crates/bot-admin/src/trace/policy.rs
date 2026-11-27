@@ -38,26 +38,6 @@ impl std::fmt::Debug for Redactor {
     }
 }
 
-const PREFIXES: [&str; 17] = [
-    "xoxb-",
-    "xoxp-",
-    "xoxa-",
-    "xoxs-",
-    "xapp-",
-    "sk-",
-    "sk_live_",
-    "pk_live_",
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "github_pat_",
-    "AKIA",
-    "ASIA",
-    "AIza",
-    "ya29.",
-];
-
 fn word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | '/' | '=')
 }
@@ -65,10 +45,10 @@ fn word_char(c: char) -> bool {
 /// 토큰처럼 생긴 낱말인가: 알려진 접두사, JWT 모양. `strict`면 길고 무작위처럼 보이는 문자열도 포함한다
 /// (자유 글인 내용에만 쓴다: 메타데이터의 판본·해시 같은 긴 16진 값을 비밀로 오인하지 않으려는 구분이다).
 fn shaped(w: &str, strict: bool) -> bool {
-    if w.len() >= 16 && PREFIXES.iter().any(|p| w.starts_with(p)) {
+    if w.len() >= 16 && bot_core::redact::has_secret_prefix(w) {
         return true;
     }
-    if w.starts_with("eyJ") && w.len() >= 30 && w.matches('.').count() >= 2 {
+    if bot_core::redact::looks_like_jwt(w) {
         return true;
     }
     strict

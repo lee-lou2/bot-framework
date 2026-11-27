@@ -3,7 +3,7 @@
 
 use crate::memory::{check_seed, seed_audit, seed_in};
 use crate::{
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     codec::*,
     db::{R, Store},
     schedule::{sync_in, validate_set},
@@ -156,31 +156,35 @@ impl Store {
                 fresh.push(seed);
             }
         }
+        let mut audits = Vec::new();
         for (profile, revision) in &profiles {
-            audit::append(
-                &mut tx,
+            audits.push(OwnedEntry::new(
                 &profile.0,
-                &Entry::new("system", "active.replace", &next.0, &revision.0),
-            )
-            .await?;
+                "system",
+                "active.replace",
+                &next.0,
+                &revision.0,
+            ));
         }
         for seed in fresh {
-            audit::append(&mut tx, &seed.profile.0, &seed_audit(seed)).await?;
+            audits.push(OwnedEntry::from_entry(&seed.profile.0, &seed_audit(seed)));
         }
-        for note in &grant_notes {
-            note.write(&mut tx).await?;
+        for note in grant_notes {
+            audits.push(note.into_audit());
         }
         for gone in removed
             .iter()
             .filter(|p| !profiles.contains_key(&ProfileId((*p).clone())))
         {
-            audit::append(
-                &mut tx,
+            audits.push(OwnedEntry::new(
                 gone,
-                &Entry::new("system", "active.replace", &next.0, "removed"),
-            )
-            .await?;
+                "system",
+                "active.replace",
+                &next.0,
+                "removed",
+            ));
         }
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(issued)
     }

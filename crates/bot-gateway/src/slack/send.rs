@@ -473,6 +473,7 @@ impl Sender for SlackSender {
                     workspace,
                     channel,
                     thread,
+                    &item.key.run,
                     body.approval.is_none(),
                 )
                 .await;

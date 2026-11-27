@@ -10,6 +10,7 @@ publish.workspace = true
 testing = []
 
 [dependencies]
+base64.workspace = true
 bot-core.workspace = true
 hmac.workspace = true
 serde.workspace = true

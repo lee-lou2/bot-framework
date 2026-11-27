@@ -1,8 +1,8 @@
 //! 상류로 나가는 POST 전송. `serve/upstream.rs`의 원칙 그대로다: 리다이렉트·숨은 재시도·연결 재사용을 모두 끄고, 연결 시간 한도와 본문 크기 상한을 둔다. 못 보냈거나 응답을 못 받았으면 실패로
 //! 분류만 하고 다시 보낼지는 위(워커 정책)가 정한다. 머리 값(서비스 키)은 `sensitive`로 표시해 어떤 진단 출력에도 값이 나가지 않게 한다. 실패는 분류만 남기고 요청·응답 내용은 남기지 않는다.
 //!
-//! 응답 본문은 2xx일 때만 끝까지 읽는다. 오류 본문은 쌓지 않는다 — 429만 쿼터 소진(`insufficient_quota`)과 일시적인 속도 제한을 가르려고 작은 상한(`ERROR_BODY_MAX`) 안에서 읽고, 상한을
-//! 넘는 나머지는 읽지 않고 연결을 닫는다. 전체 시간 한도(`Limits::total`)와 취소는 부르는 쪽(`runner.rs`)이 이 호출 전체를 감싸 지킨다.
+//! 응답 본문은 2xx일 때만 끝까지 읽는다. 2xx가 아닌 오류 응답 본문은 분류(`insufficient_quota`·허용 목록 오류 종류)에만 쓰려고 작은 상한(`ERROR_BODY_MAX`) 안에서만 읽고,
+//! 상한을 넘는 나머지는 읽지 않고 연결을 닫는다. 원문은 어디에도 남기지 않는다. 전체 시간 한도(`Limits::total`)와 취소는 부르는 쪽(`runner.rs`)이 이 호출 전체를 감싸 지킨다.
 
 use crate::model::ModelError;
 use reqwest::{
@@ -18,8 +18,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const KEEPALIVE: Duration = Duration::from_secs(30);
 /// 응답 본문의 읽기 상한(넘으면 받지 않는다)
 pub(crate) const MAX_BODY: usize = 8 << 20;
-/// 429 오류 본문을 읽는 상한(넘는 부분은 읽지 않는다)
-const ERROR_BODY_MAX: usize = 16 << 10;
+/// 오류 응답 본문을 읽는 상한(넘는 부분은 읽지 않는다)
+pub(crate) const ERROR_BODY_MAX: usize = 16 << 10;
 
 /// 요청 머리 하나: 이름(소문자)·값·값이 비밀인가
 pub(crate) type Header = (&'static str, String, bool);
@@ -54,7 +54,7 @@ impl Fault {
     }
 }
 
-/// 받은 응답: 상태와 본문(2xx는 전부, 429는 상한 안의 앞부분, 그 밖의 상태는 비어 있다)
+/// 받은 응답: 상태와 본문(2xx는 전부, 그 밖의 상태는 상한 `ERROR_BODY_MAX` 안의 앞부분)
 pub(crate) struct Answer {
     pub status: u16,
     pub body: Vec<u8>,
@@ -87,7 +87,7 @@ impl ApiClient {
         Ok(Self { client })
     }
 
-    /// `url`로 본문을 POST한다. `idle`은 본문 조각 하나를 기다리는 한도다. 2xx가 아닌 응답은 본문을 쌓지 않는다(429만 상한 안의 앞부분을 읽는다).
+    /// `url`로 본문을 POST한다. `idle`은 본문 조각 하나를 기다리는 한도다. 2xx가 아닌 응답은 분류용으로 `ERROR_BODY_MAX` 앞부분만 읽는다.
     pub(crate) async fn post(
         &self,
         url: &str,
@@ -112,11 +112,7 @@ impl ApiClient {
             .map_err(|e| fault(&e))?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = if status == 429 {
-                read_prefix(&mut response, idle, ERROR_BODY_MAX).await
-            } else {
-                Vec::new()
-            };
+            let body = read_prefix(&mut response, idle, ERROR_BODY_MAX).await;
             return Ok(Answer { status, body });
         }
         let mut out = Vec::new();

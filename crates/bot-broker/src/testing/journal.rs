@@ -104,9 +104,7 @@ impl MemJournal {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::lock;
 
 fn fence(state: &State, attempt: &Attempt) -> Result<(), Error> {
     match state.generations.get(&attempt.run) {

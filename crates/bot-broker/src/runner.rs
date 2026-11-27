@@ -238,8 +238,10 @@ impl McpRunner {
                 return Ran::NotSent;
             };
             for (var, name) in &tool.secrets {
-                // 호스트 전용 자격(비공개 접수의 지문 키)은 도구에 주지 않는다.
-                if crate::private::reserved_secret(name) {
+                // 로더·셸·프록시·호스트 예약 이름과 호스트 전용 자격(비공개 접수의 지문 키)은 자격을 풀기 전에 거절한다.
+                if bot_core::profile::forbidden_env_name(var)
+                    || crate::private::reserved_secret(name)
+                {
                     return Ran::NotSent;
                 }
                 let Ok(value) = store.resolve(name.clone()).await else {

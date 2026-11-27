@@ -248,10 +248,10 @@ impl Store {
             // 같은 (프로필, 바인딩, 주체, 키) 행이 다른 입구에 이미 있다: 이 입구의 접수가 아니다
             return Ok(ApiAdmission::Conflict);
         }
+        let created = find(&mut tx, &key).await?.ok_or(Error::Unavailable)?;
         let mut entry = Entry::new(&e.principal.0, "run.accept", &run, "accepted");
         entry.args = Some(req.digest);
         audit::append(&mut tx, profile, &entry).await?;
-        let created = find(&mut tx, &key).await?.ok_or(Error::Unavailable)?;
         match tx.commit().await {
             Ok(()) => Ok(ApiAdmission::Accepted(created)),
             Err(error) if commit_unknown(&error) => Ok(ApiAdmission::Unknown),

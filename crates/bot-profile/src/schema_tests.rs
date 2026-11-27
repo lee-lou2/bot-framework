@@ -292,3 +292,55 @@ fn bundled_patterns_are_explained_in_plain_words_and_other_patterns_keep_their_r
         "{found:?}"
     );
 }
+
+#[test]
+fn json_schema_equality_treats_integer_and_float_values_and_object_keys_semantically() {
+    // const·enum: 1 == 1.0, 객체 키 순서와 숫자 표기를 의미로 비교한다
+    let c = schema(json!({"const": 1}));
+    assert!(messages(&c, json!(1)).is_empty());
+    assert!(messages(&c, json!(1.0)).is_empty());
+    assert!(!messages(&c, json!(1.5)).is_empty());
+
+    let e = schema(json!({"enum": [1, {"a": 1, "b": [2]}]}));
+    assert!(messages(&e, json!(1.0)).is_empty());
+    assert!(messages(&e, json!({"b": [2.0], "a": 1.0})).is_empty());
+    assert!(!messages(&e, json!({"a": 2, "b": [2]})).is_empty());
+
+    // uniqueItems: 1과 1.0, 그리고 내부 숫자 표기가 다른 같은 객체도 중복으로 잡는다
+    let u = schema(json!({"type": "array", "uniqueItems": true}));
+    assert!(!messages(&u, json!([1, 1.0])).is_empty());
+    assert!(!messages(&u, json!([{"a": 1, "b": 2}, {"b": 2.0, "a": 1.0}])).is_empty());
+    assert!(messages(&u, json!([1, 2, {"a": 1}, {"a": 2}])).is_empty());
+}
+
+#[test]
+fn exact_integer_bounds_do_not_lose_precision_above_two_to_the_53() {
+    // 2^53 + 1(9007199254740993)은 f64로 반올림하면 2^53(9007199254740992)과 같아진다
+    let min = schema(json!({"type": "integer", "minimum": 9007199254740993_i64}));
+    assert!(!messages(&min, json!(9007199254740992_i64)).is_empty());
+    assert!(messages(&min, json!(9007199254740993_i64)).is_empty());
+
+    let max = schema(json!({"type": "integer", "maximum": 9007199254740992_i64}));
+    assert!(!messages(&max, json!(9007199254740993_i64)).is_empty());
+    assert!(messages(&max, json!(9007199254740992_i64)).is_empty());
+    // 정수 상한과 실수 인스턴스 비교(2^53+2.0은 초과, 10.5는 소수 초과)
+    assert!(!messages(&max, json!(9007199254740994.0_f64)).is_empty());
+    let num_max = schema(json!({"type": "number", "maximum": 10}));
+    assert!(!messages(&num_max, json!(10.5_f64)).is_empty());
+    assert!(messages(&num_max, json!(10.0_f64)).is_empty());
+}
+
+#[test]
+fn exact_integer_extractors_accept_float_integers_and_reject_fractions_or_overflow() {
+    assert_eq!(as_exact_u64(&json!(300)), Some(300));
+    assert_eq!(as_exact_u64(&json!(300.0)), Some(300));
+    assert_eq!(as_exact_u64(&json!(0.0)), Some(0));
+    assert_eq!(as_exact_u64(&json!(300.5)), None);
+    assert_eq!(as_exact_u64(&json!(-1.0)), None);
+    assert_eq!(as_exact_u64(&json!(1e20)), None);
+
+    assert_eq!(as_exact_i64(&json!(5.0)), Some(5));
+    assert_eq!(as_exact_i64(&json!(-5.0)), Some(-5));
+    assert_eq!(as_exact_i64(&json!(5.5)), None);
+    assert_eq!(as_exact_i64(&json!(1e20)), None);
+}

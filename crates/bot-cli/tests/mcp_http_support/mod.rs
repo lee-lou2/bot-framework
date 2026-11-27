@@ -209,6 +209,7 @@ pub fn settings(root: &std::path::Path, host: &std::path::Path) -> bot_cli::sett
         profiles: Some(root.to_owned()),
         host_config: Some(host.to_owned()),
         database_url: None,
+        db_max_connections: None,
         socket: None,
         secrets: bot_cli::settings::SecretsKind::Env,
         secrets_reread: None,

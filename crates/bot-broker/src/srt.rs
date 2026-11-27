@@ -28,9 +28,12 @@ use bot_core::{
     install::ServerState,
     port::{Error, Reply},
 };
+use env::carry_script;
 pub use env::forbidden_env_name;
-use env::{carry_script, safe};
+#[cfg(test)]
+use env::safe;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
@@ -44,6 +47,23 @@ use tokio::{
     time::timeout,
 };
 use tools::{Group, Tools, find_tool, private_dir, write_private};
+
+/// 소유자 문자열을 고정 길이 64자 소문자 SHA-256 16진 접두어로 바꾼다.
+/// 임의 접두어 충돌(`cli-1-0` vs `cli-1-0-extra`)과 문자 치환 충돌을 막는다.
+fn owner_prefix(owner: &str) -> String {
+    hex(&Sha256::digest(owner.as_bytes()))
+}
+
+/// 메타 파일 줄기가 `{owner_prefix}-<정확히 32자 소문자 16진 nonce>` 모양인가.
+fn is_owner_stem(stem: &str, prefix: &str) -> bool {
+    let Some(nonce) = stem.strip_prefix(prefix) else {
+        return false;
+    };
+    nonce.len() == 32
+        && nonce
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
 
 /// 시험한 srt 판본. 계약이 바뀔 수 있어 고정한다. 설정으로 바꿀 수 없다.
 pub const PINNED_VERSION: &str = "0.0.83";
@@ -288,7 +308,7 @@ impl SrtSandbox {
         if !self.entropy.fill(&mut random) {
             return Err(Error::Unavailable);
         }
-        let name = format!("{}-{}", safe(&spec.owner), hex(&random));
+        let name = format!("{}-{}", owner_prefix(&spec.owner), hex(&random));
         let (work, meta_dir) = (self.cfg.work_root.join(&name), self.meta_dir());
         let (settings_path, meta) = (
             meta_dir.join(format!("{name}.json")),
@@ -462,7 +482,7 @@ impl Sandbox for SrtSandbox {
                 }
                 let _ = std::fs::remove_dir_all(&live.work);
             }
-            let prefix = format!("{}-", safe(&owner));
+            let prefix = format!("{}-", owner_prefix(&owner));
             let entries = match std::fs::read_dir(self.meta_dir()) {
                 Ok(entries) => entries,
                 Err(_) => return Err(Error::Unavailable),
@@ -475,7 +495,7 @@ impl Sandbox for SrtSandbox {
                     .and_then(|s| s.to_str())
                     .unwrap_or_default()
                     .to_owned();
-                if !stem.starts_with(&prefix) {
+                if !is_owner_stem(&stem, &prefix) {
                     continue;
                 }
                 match path.extension().and_then(|e| e.to_str()) {

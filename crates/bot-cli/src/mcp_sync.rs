@@ -203,23 +203,33 @@ pub(crate) fn entries_of(
 
 /// 같은 폴더의 임시 파일에 쓰고 바꿔 넣는다. 기존 파일이 일반 파일이 아니면(링크 등) 쓰지 않는다.
 fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    write_atomic_with(path, text, || bot_core::random::random_hex(8))
+}
+
+fn write_atomic_with(
+    path: &Path,
+    text: &str,
+    suffix: impl FnOnce() -> String,
+) -> Result<(), String> {
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && !meta.is_file()
     {
         return Err(format!("{}이(가) 일반 파일이 아니에요", path.display()));
     }
-    let tmp = path.with_file_name(format!(".tools.lock.yaml.tmp{}", std::process::id()));
-    let write = || -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o644)
-            .open(&tmp)?;
+    let tmp = path.with_file_name(format!(".tools.lock.yaml.tmp-{}", suffix()));
+    // `create_new`가 실패한 경우(예: `AlreadyExists`)에는 남이 만든 파일일 수 있으므로 지우지 않는다.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&tmp)
+        .map_err(|e| format!("{}을(를) 쓰지 못했어요: {e}", path.display()))?;
+    let finish = (|| -> std::io::Result<()> {
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
-    };
-    write().map_err(|e| {
+    })();
+    finish.map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("{}을(를) 쓰지 못했어요: {e}", path.display())
     })

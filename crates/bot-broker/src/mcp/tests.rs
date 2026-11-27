@@ -35,10 +35,13 @@ async fn negotiates_a_supported_version_then_lists_and_calls() {
     let (mut s, rec) = connect(Server::new(&[("delete", schema())]));
     s.initialize(SHORT).await.unwrap();
     assert_eq!(
-        s.tool_schema("delete", SHORT).await.unwrap(),
+        s.find_tool("delete", SHORT)
+            .await
+            .unwrap()
+            .and_then(|t| t.get("inputSchema").cloned()),
         Some(schema())
     );
-    assert_eq!(s.tool_schema("missing", SHORT).await.unwrap(), None);
+    assert_eq!(s.find_tool("missing", SHORT).await.unwrap(), None);
     let id = s
         .send_call("delete", r#"{"event":"x"}"#, r#"{"bot/call-id":"c1"}"#)
         .await
@@ -68,7 +71,7 @@ async fn an_unsupported_protocol_version_is_refused() {
 async fn a_tool_listed_twice_is_ambiguous() {
     let (mut s, _) = connect(Server::new(&[("t", schema()), ("t", json!({}))]));
     s.initialize(SHORT).await.unwrap();
-    assert_eq!(s.tool_schema("t", SHORT).await, Err(McpError::Protocol));
+    assert_eq!(s.find_tool("t", SHORT).await, Err(McpError::Protocol));
 }
 
 #[tokio::test]

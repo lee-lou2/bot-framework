@@ -437,7 +437,12 @@ fn agent_session_stopped_parses_channel_thread_and_user() {
             user: "U8".into(),
         })
     );
-    // 잘못된 thread_ts는 버린다
-    let bad = events(r#"{"type":"agent_session_stopped","channel":"C1","thread_ts":"bad"}"#);
-    assert_eq!(parse_socket(&bad).0, Frame::Ignored);
+    // 잘못된 thread_ts나 누락·빈 user는 버린다(닫힌 쪽으로 실패)
+    for bad in [
+        r#"{"type":"agent_session_stopped","channel":"C1","thread_ts":"bad","user":"U9"}"#,
+        r#"{"type":"agent_session_stopped","channel":"C1","thread_ts":"1700000000.000100"}"#,
+        r#"{"type":"agent_session_stopped","channel":"C1","thread_ts":"1700000000.000100","user":""}"#,
+    ] {
+        assert_eq!(parse_socket(&events(bad)).0, Frame::Ignored, "{bad}");
+    }
 }

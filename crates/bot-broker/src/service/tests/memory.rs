@@ -426,9 +426,9 @@ fn the_limit_in_the_share_flow_is_noted_with_that_very_call() {
         .add_run(run_context("personal", "r1", 1, OWNER, "main", &WITH_SHARE));
     w.memory.add("m1", OWNER, Visibility::Private, NOTE);
     // 첫 호출이 한도의 유일한 자리를 쓰고 승인 카드를 만든다
-    let (first, limited) = w.call_noted("c1", "memory.share", r#"{"id":"m1"}"#);
-    assert!(matches!(first, Ok(CallResult::Awaiting(_))) && !limited);
-    // 두 번째 호출은 한도에 걸린다: 이 호출의 결과와 함께 한도 거절로 알린다
-    let (refused, limited) = w.call_noted("c2", "memory.share", r#"{"id":"m1"}"#);
-    assert!(matches!(refused, Err(Error::Unavailable)) && limited);
+    let first = w.call("c1", "memory.share", r#"{"id":"m1"}"#);
+    assert!(matches!(first, Ok(CallResult::Awaiting(_))));
+    // 두 번째 호출은 한도에 걸린다: 브로커가 직접 `Error::RateLimited`를 돌려준다
+    let refused = w.call("c2", "memory.share", r#"{"id":"m1"}"#);
+    assert!(matches!(refused, Err(Error::RateLimited)));
 }

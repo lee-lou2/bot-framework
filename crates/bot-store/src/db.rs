@@ -66,6 +66,8 @@ pub struct Config {
     pub backoff_cap: Duration,
     /// 회신 발송 점유 시간. begin 전에 끝나면 재점유되고, sending에서 끝나면 보류된다.
     pub delivery_lease: Duration,
+    /// 저장소 연결 풀의 최대 연결 수(기본 10, 1 미만은 1로 올린다).
+    pub max_connections: u32,
 }
 
 impl Default for Config {
@@ -77,6 +79,7 @@ impl Default for Config {
             backoff_base: Duration::from_secs(5),
             backoff_cap: Duration::from_secs(300),
             delivery_lease: Duration::from_secs(300),
+            max_connections: 10,
         }
     }
 }
@@ -196,6 +199,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "run command receipt",
         include_str!("../migrations/0027_run_command_receipt.sql"),
     ),
+    (
+        28,
+        "hot path indexes",
+        include_str!("../migrations/0028_hot_path_indexes.sql"),
+    ),
 ];
 
 fn migrator() -> Migrator {
@@ -221,11 +229,11 @@ fn migrator() -> Migrator {
 }
 
 impl Store {
-    /// 저장소가 쓰는 풀 설정. 반납되는 연결은 `ping`으로 마저 보내지 못한 ROLLBACK을 끝낸다 —
-    /// 오류로 버려진 트랜잭션이 연결 안에서 행 잠금을 쥔 채 남지 않게 한다. 밖에서 풀을 만들 때도 이 설정을 쓴다.
-    pub fn pool_options() -> PgPoolOptions {
+    /// 저장소가 쓰는 풀 설정(최대 연결 수 지정, 1 미만은 1로 올린다). 반납되는 연결은 `ping`으로 마저 보내지 못한 ROLLBACK을 끝낸다 —
+    /// 오류로 버려진 트랜잭션이 연결 안에서 행 잠금을 쥔 채 남지 않게 한다.
+    pub fn pool_options_with(max_connections: u32) -> PgPoolOptions {
         PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(max_connections.max(1))
             .after_release(|conn, _| {
                 Box::pin(async move {
                     use sqlx::Connection;
@@ -234,8 +242,15 @@ impl Store {
             })
     }
 
+    /// 저장소가 쓰는 기본 풀 설정(최대 10 연결). 밖에서 풀을 만들 때도 이 설정을 쓴다.
+    pub fn pool_options() -> PgPoolOptions {
+        Self::pool_options_with(10)
+    }
+
     pub async fn connect(url: &str, cfg: Config) -> R<Store> {
-        let pool = Store::pool_options().connect(url).await?;
+        let pool = Store::pool_options_with(cfg.max_connections)
+            .connect(url)
+            .await?;
         Ok(Store::from_pool(pool, cfg))
     }
 

@@ -4,14 +4,15 @@
 //!
 //! | 분류 | 모듈 |
 //! |---|---|
-//! | 데이터 어휘(타입·값) | `id` · `command` · `state` · `profile` · `identity` · `grant` · `pass` · `mcp` · `install` · `attachments` |
-//! | 포트(트레이트) | `port`(핵심) · `ledger` · `intake` · `schedule` · `manage` · `admin` · `trace` · `issue` · `sandbox`(모델 VM) |
+//! | 데이터 어휘(타입·값) | `id` · `command` · `state` · `profile` · `identity` · `grant` · `pass` · `mcp` · `install` · `attachments` · `builtin` |
+//! | 포트(트레이트) | `port`(핵심) · `active`(활성 집합 확인) · `ledger` · `intake` · `schedule` · `manage` · `admin` · `trace` · `issue` · `sandbox`(모델 VM) |
 //! | 어댑터 고유 계약 | `slack` · `cards`(소유자 DM 승인 카드) · `api`(OpenAI 호환 입구) · `cli`(Claude CLI 호출 위치, CLI 입구가 아니다) |
-//! | 비트가 같아야 하는 알고리즘 | `cron` · `canon`(RFC 8785) · `json`(엄격한 읽기) · `scope`(인가 교집합) |
+//! | 비트가 같아야 하는 알고리즘 | `cron` · `canon`(RFC 8785) · `json`(엄격한 읽기) · `scope`(인가 교집합) · `random`(무작위 바이트·16진수) · `redact`(비밀 모양 탐지) |
 //!
 //! `tool_env`는 비공개 모듈이라 표에 없다. 도구 환경 이름 검사(`forbidden_env_name`)는 `profile`에서 다시 내보낸다.
 //!
 //! 같은 말이 다른 뜻으로 쓰이는 곳은 `docs/glossary.md`에 모았다(예: `port::Reply<'a, T>`는 회신이 아니라 비동기 반환형 별칭).
+pub mod active;
 pub mod admin;
 pub mod api;
 pub mod attachments;
@@ -34,6 +35,8 @@ pub mod mcp;
 pub mod pass;
 pub mod port;
 pub mod profile;
+pub mod random;
+pub mod redact;
 pub mod sandbox;
 pub mod schedule;
 pub mod scope;

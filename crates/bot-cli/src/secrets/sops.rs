@@ -34,10 +34,16 @@ pub struct SopsStore {
 
 impl SopsStore {
     pub fn new(file: PathBuf) -> Self {
-        Self::with_program(file, "sops".into())
+        Self {
+            file,
+            program: "sops".into(),
+            cache: Mutex::new(HashMap::new()),
+            write_lock: Arc::new(Mutex::new(())),
+        }
     }
 
-    /// 시험용: 다른 실행 파일을 쓴다.
+    /// 시험용: 다른 실행 파일을 쓴다. 운영 빌드에는 포함하지 않는다.
+    #[cfg(any(test, feature = "testing"))]
     pub fn with_program(file: PathBuf, program: PathBuf) -> Self {
         Self {
             file,

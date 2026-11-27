@@ -12,9 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::lock;
 
 /// 프로필 판본을 손으로 게시하는 카탈로그. 게시하면 그 판본이 활성이 된다.
 #[derive(Default)]
@@ -286,6 +284,10 @@ impl FakeEffects {
 
 impl EffectJournal for FakeEffects {
     fn request(&self, _: EffectRequest) -> Reply<'_, EffectPermit> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
+
+    fn lookup(&self, _: EffectRequest, _: ToolId) -> Reply<'_, Option<EffectStatus>> {
         Box::pin(async { Err(Error::Unavailable) })
     }
 

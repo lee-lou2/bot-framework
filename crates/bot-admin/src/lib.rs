@@ -1,6 +1,6 @@
 //! 관리 API와 UI, OTLP 관측(`bot serve --role admin`).
 //!
-//! - 조회·판정 계약은 `bot_core::admin`(`port`로 다시 내보낸다)이고 저장소가 구현한다. 이 크레이트는 DB를 모른다.
+//! - 조회·판정 계약은 `bot_core::admin`이고 저장소가 구현한다. 이 크레이트는 DB를 모른다.
 //! - 인증은 `auth`(Host 확인·실패 한도·상수 시간 비교·루프백 기본·CSRF)가 모든 길에 같은 순서로 건다.
 //! - 승인은 `Broker::decide`, 보류 판정은 `AdminAct`로만 한다. 감사 행은 그쪽이 상태 변경과 같은 커밋에 쓴다.
 //!
@@ -15,7 +15,6 @@ pub mod json;
 pub mod logs;
 pub mod map;
 pub mod obs;
-pub mod port;
 pub mod preapproval;
 pub mod resp;
 mod run_control;
@@ -31,8 +30,12 @@ use axum::{
     middleware::from_fn_with_state,
     routing::{get, post},
 };
-use bot_core::{id::ProfileId, port::Broker, profile::ProfileCatalog};
-use port::{AdminAct, AdminRead};
+use bot_core::{
+    admin::{AdminAct, AdminRead},
+    id::ProfileId,
+    port::Broker,
+    profile::ProfileCatalog,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{

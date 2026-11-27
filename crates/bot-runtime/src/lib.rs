@@ -5,7 +5,6 @@ pub mod cron;
 pub mod host;
 pub mod model;
 pub mod scheduler;
-mod scope;
 pub mod worker;
 
 pub use host::{

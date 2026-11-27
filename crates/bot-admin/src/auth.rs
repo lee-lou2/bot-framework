@@ -2,14 +2,14 @@
 //! 비밀은 해시로만 쥐고 모든 항목을 상수 시간으로 견주며 값은 어디에도 싣지 않는다.
 //! 바꾸는 요청(POST)은 추가로 CSRF 방어를 거친다: 교차 출처 거절, 서버가 발급한 토큰 헤더, JSON 본문.
 
-use crate::{port::Viewer, resp::reply};
+use crate::resp::reply;
 use axum::{
     extract::{ConnectInfo, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::Next,
     response::Response,
 };
-use bot_core::id::PrincipalId;
+use bot_core::{admin::Viewer, id::PrincipalId};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -200,20 +200,7 @@ pub struct Guard {
 }
 
 fn random_key() -> [u8; 32] {
-    use std::{hash::BuildHasher, io::Read};
-    let mut key = [0u8; 32];
-    if std::fs::File::open("/dev/urandom").is_ok_and(|mut f| f.read_exact(&mut key).is_ok())
-        && key != [0; 32]
-    {
-        return key;
-    }
-    // 운영체제가 무작위 씨앗을 준 `RandomState`를 섞어 쓴다.
-    for (i, chunk) in key.chunks_mut(8).enumerate() {
-        let state = std::collections::hash_map::RandomState::new();
-        let word = state.hash_one((i, std::process::id(), Instant::now()));
-        chunk.copy_from_slice(&word.to_be_bytes());
-    }
-    key
+    bot_core::random::bytes::<32>()
 }
 
 /// 새 운영자 비밀: 무작위 32바이트의 16진 64자(운영체제 난수). 시작할 때 만들어 메모리에만 두고 안내한다.

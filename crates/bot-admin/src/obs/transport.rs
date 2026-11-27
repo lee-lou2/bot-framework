@@ -372,9 +372,7 @@ async fn post_plain_http(
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
             }
         }
-        let line = String::from_utf8_lossy(&buf);
-        let code = line.split(' ').nth(1).and_then(|c| c.trim().parse::<u16>().ok());
-        match code {
+        match parse_status_line(&buf) {
             Some(200..=299) => Ok(()),
             Some(_) => Err("status"),
             None => Err("io"),
@@ -382,6 +380,19 @@ async fn post_plain_http(
     })
     .await
     .unwrap_or(Err("timeout"))
+}
+
+/// RFC 9112 상태 줄(`HTTP/1.x <코드>[ 사유]\r\n`)에서 상태 코드를 읽는다. 사유 문구가 비어 있어도 받아들인다.
+fn parse_status_line(buf: &[u8]) -> Option<u16> {
+    let end = buf.windows(2).position(|w| w == b"\r\n")?;
+    let line = String::from_utf8_lossy(&buf[..end]);
+    if !line.starts_with("HTTP/1.") {
+        return None;
+    }
+    let code = line.split_ascii_whitespace().nth(1)?;
+    (code.len() == 3 && code.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| code.parse::<u16>().ok())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -512,5 +523,41 @@ mod tests {
         ] {
             assert!(!header_ok(n, v), "{n:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn plain_http_accepts_status_line_without_reason_phrase_and_rejects_non_http() {
+        use tokio::net::TcpListener;
+
+        async fn send(raw_reply: &'static [u8]) -> Result<(), &'static str> {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                if let Ok((mut s, _)) = listener.accept().await {
+                    let mut req = [0u8; 1024];
+                    let _ = s.read(&mut req).await;
+                    let _ = s.write_all(raw_reply).await;
+                }
+            });
+            let t = Target::parse_with_default(&format!("http://{addr}/v1/traces"), "/v1/traces")
+                .unwrap();
+            post_plain_http(&t, "application/json", &[], b"{}", Duration::from_secs(5)).await
+        }
+
+        // RFC 9112: 사유 문구가 없는 상태 줄(`HTTP/1.1 200\r\n`)도 정상 응답으로 읽는다
+        assert_eq!(
+            send(b"HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n").await,
+            Ok(())
+        );
+        assert_eq!(
+            send(b"HTTP/1.1 204 \r\nContent-Length: 0\r\n\r\n").await,
+            Ok(())
+        );
+        assert_eq!(
+            send(b"HTTP/1.1 503\r\nContent-Length: 0\r\n\r\n").await,
+            Err("status")
+        );
+        assert_eq!(send(b"GARBAGE 200 OK\r\n\r\n").await, Err("io"));
+        assert_eq!(send(b"HTTP/2 200\r\n\r\n").await, Err("io"));
     }
 }

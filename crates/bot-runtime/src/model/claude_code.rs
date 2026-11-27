@@ -53,15 +53,21 @@ pub enum Mode {
     Resume(String),
 }
 
-/// 필수가 아닌 통신(자동 업데이트·원격 측정·오류 보고)을 끄고, 이 봇에 필요 없는 것을 뺀다: 자동 메모리(호출마다 새로 시작한다), claude 번들 스킬.
-/// 공식 환경변수다: https://code.claude.com/docs/en/env-vars
-const FIXED_ENV: [(&str, &str); 6] = [
+/// 필수가 아닌 통신(자동 업데이트·원격 측정·오류 보고·피드백·기능 플래그·공식 마켓 자동 설치)을 끄고, 이 봇에 필요 없는 것을 뺀다: 자동 메모리(호출마다 새로 시작한다), claude 번들 스킬.
+/// 공식 환경변수이며 `images/model/Containerfile`의 기본 ENV와 같은 목록이다: https://code.claude.com/docs/en/env-vars
+const FIXED_ENV: [(&str, &str); 12] = [
     ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
     ("DISABLE_TELEMETRY", "1"),
     ("DISABLE_AUTOUPDATER", "1"),
     ("DISABLE_ERROR_REPORTING", "1"),
     ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
     ("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1"),
+    ("DISABLE_UPDATES", "1"),
+    ("DO_NOT_TRACK", "1"),
+    ("DISABLE_FEEDBACK_COMMAND", "1"),
+    ("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", "1"),
+    ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),
+    ("CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1"),
 ];
 
 /// 도구 서버 설정 파일의 쓰기 공간(`/work`) 안 위치. 모델이 읽는 입력 폴더(`/bot`) 밖이다.

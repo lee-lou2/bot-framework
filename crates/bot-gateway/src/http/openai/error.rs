@@ -3,7 +3,6 @@
 //! SDK의 자동 재시도(연결 오류, 408·409·429·5xx)는 **아직 아무것도 접수하지 않았을 때만** 일어나게 한다: 접수 뒤의 실패·불명은 422에
 //! `x-should-retry: false`를 붙여 같은 요청이 새 실행으로 되풀이되지 않게 하고, 429는 접수 전 속도·실행 한도에만 쓴다.
 use axum::{
-    body::Body,
     http::{HeaderName, HeaderValue, StatusCode, header},
     response::Response,
 };
@@ -286,22 +285,11 @@ impl Failure {
     }
 
     pub fn response(&self) -> Response {
-        let mut response = Response::new(Body::from(self.body().to_string()));
-        *response.status_mut() = self.status;
-        let headers = response.headers_mut();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        headers.insert(
-            header::X_CONTENT_TYPE_OPTIONS,
-            HeaderValue::from_static("nosniff"),
-        );
+        let mut response = crate::http::reply::json_response(self.status, &self.body());
         if let Some(wait) = self.retry_after {
-            let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
-            headers.insert(header::RETRY_AFTER, HeaderValue::from(secs.max(1)));
+            response = crate::http::reply::retry_after(response, wait);
         }
+        let headers = response.headers_mut();
         if self.no_retry {
             headers.insert(
                 HeaderName::from_static("x-should-retry"),

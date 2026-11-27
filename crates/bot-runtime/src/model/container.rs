@@ -23,7 +23,8 @@ pub use process::ContainerProcess;
 
 use anchor::Anchor;
 use args::{
-    INCARNATION_LABEL, INSTANCE_LABEL, MANAGED_LABEL, OWNER_LABEL, Plan, Role, is_ours, label_value,
+    INCARNATION_LABEL, INSTANCE_LABEL, MANAGED_LABEL, OWNER_LABEL, Plan, Role, is_ours,
+    label_value, pin,
 };
 use bot_core::{
     id::Attempt,
@@ -32,7 +33,6 @@ use bot_core::{
 };
 use lock::{Identity, lock_instance};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     net::{Ipv4Addr, SocketAddr},
     process::Stdio,
@@ -40,9 +40,14 @@ use std::{
         Arc, Mutex, OnceLock, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
-use tokio::{io::AsyncWriteExt, process::Command, sync::watch, time::timeout};
+use tokio::{
+    io::AsyncWriteExt,
+    process::Command,
+    sync::watch,
+    time::{Instant, timeout},
+};
 
 /// `container` 명령 하나를 기다리는 시간
 const COMMAND_WITHIN: Duration = Duration::from_secs(30);
@@ -50,6 +55,8 @@ const COMMAND_WITHIN: Duration = Duration::from_secs(30);
 const RELAY_UP_WITHIN: Duration = Duration::from_secs(2);
 /// 정리가 사라진 것을 확인할 때까지 다시 시도하는 횟수(뜨는 중인 VM은 `kill`·`delete`가 거절될 수 있다)
 const REAP_ROUNDS: usize = 12;
+/// `reap_matching` 전체 마감(`WorkerConfig::cleanup` 기본값 10초에 맞춰 정리 명령들이 이를 넘기지 않게 자른다)
+const REAP_WITHIN: Duration = Duration::from_secs(10);
 
 /// 시작하지 못한 이유(고정 낱말). 호스트는 프런트도 모델 실행도 열지 않는다.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +88,8 @@ struct Hooks {
     ready_within: Duration,
     /// 정리를 다시 시도하기 전에 쉬는 시간
     reap_pause: Duration,
+    /// `reap_matching` 한 번이 쓸 수 있는 전체 마감(하위 명령 한도를 이 남은 시간에 맞춰 자른다)
+    reap_within: Duration,
     /// 닻이 살아 있는 동안 호스트에 게이트웨이 주소가 아직 있는지 보는 간격
     address_poll: Duration,
     /// 모델 VM을 띄우기 전 확인(`ready`)에 줄 시간. `spawn`은 워커의 취소 신호 밖에서 기다리므로 컨테이너 서비스가 멈춰도 이 안에 끝난다(넘기면 닫힌 채 실패).
@@ -94,6 +103,7 @@ impl Hooks {
             relay_up: Arc::new(relay_listening),
             ready_within: Duration::from_secs(60),
             reap_pause: Duration::from_millis(500),
+            reap_within: REAP_WITHIN,
             address_poll: Duration::from_secs(1),
             ready_check: Duration::from_secs(5),
         }
@@ -102,36 +112,7 @@ impl Hooks {
 
 /// 이번 프로세스 실행의 표지(재시작마다 다르다). 같은 인스턴스의 이전 실행이 남긴 VM과 구별한다.
 fn new_incarnation() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let seed = format!("{}:{now}:{:p}", std::process::id(), &now);
-    Sha256::digest(seed.as_bytes())
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// 이름이 가리키는 이미지를 다이제스트로 고정한다(`이름:태그` → `이름@sha256:…`). 이미 다이제스트면 같아야 한다.
-fn pin(image: &str, digest: &str) -> Option<String> {
-    let hex = digest.strip_prefix("sha256:")?;
-    if hex.len() != 64
-        || !hex
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return None;
-    }
-    if let Some((_, given)) = image.split_once('@') {
-        return (given == digest).then(|| image.to_owned());
-    }
-    let name = match image.rfind(':') {
-        Some(at) if !image[at..].contains('/') => &image[..at],
-        _ => image,
-    };
-    Some(format!("{name}@{digest}"))
+    bot_core::random::random_hex(8)
 }
 
 /// 정리할 VM의 종류. 어느 것이든 이 인스턴스의 라벨·이름 모양이 정확히 같은 것만 본다.
@@ -188,9 +169,9 @@ impl Inner {
     }
 
     /// 명령을 돌려 표준 출력을 JSON으로 읽는다. 실패(실행·종료 코드·시간·JSON)는 모두 `None`이다.
-    async fn json(&self, args: &[&str]) -> Option<Value> {
+    async fn json(&self, args: &[&str], within: Duration) -> Option<Value> {
         let output = timeout(
-            COMMAND_WITHIN,
+            within,
             self.client()
                 .args(args)
                 .stdout(Stdio::piped())
@@ -207,9 +188,9 @@ impl Inner {
             .flatten()
     }
 
-    async fn ok(&self, args: &[&str]) -> bool {
+    async fn ok(&self, args: &[&str], within: Duration) -> bool {
         timeout(
-            COMMAND_WITHIN,
+            within,
             self.client()
                 .args(args)
                 .stdout(Stdio::null())
@@ -225,7 +206,10 @@ impl Inner {
     /// 망 한 개의 `inspect` 첫 항목(호스트 전용인지·게이트웨이를 읽는다).
     async fn network(&self) -> Option<Value> {
         let found = self
-            .json(&["network", "inspect", &self.config.network])
+            .json(
+                &["network", "inspect", &self.config.network],
+                COMMAND_WITHIN,
+            )
             .await?;
         found.as_array()?.first().cloned()
     }
@@ -241,7 +225,7 @@ impl Inner {
                 create.extend(["--subnet", subnet]);
             }
             create.push(&self.config.network);
-            let created = self.ok(&create).await;
+            let created = self.ok(&create, COMMAND_WITHIN).await;
             if !created {
                 return Err(StartError("network_create_failed"));
             }
@@ -257,7 +241,7 @@ impl Inner {
             .ok_or(StartError("network_no_gateway"))?
             .to_owned();
         let inspected = self
-            .json(&["image", "inspect", &self.config.image])
+            .json(&["image", "inspect", &self.config.image], COMMAND_WITHIN)
             .await
             .ok_or(StartError("image_missing"))?;
         let item = inspected
@@ -294,7 +278,7 @@ impl Inner {
             return false;
         }
         let inspect = ["image", "inspect", image];
-        let (network, present) = tokio::join!(self.network(), self.ok(&inspect));
+        let (network, present) = tokio::join!(self.network(), self.ok(&inspect, COMMAND_WITHIN));
         present
             && network.is_some_and(|n| {
                 n["configuration"]["mode"] == "hostOnly"
@@ -304,8 +288,10 @@ impl Inner {
 
     /// 이 인스턴스의 VM ID들(관리 라벨·인스턴스 라벨·이름 모양이 정확히 맞는 것만). 조회가 실패하면 `None`(모름).
     /// 라벨이 없거나 다르면 우리 것이 아니므로 보존한다.
-    async fn listed(&self, filter: &Filter<'_>) -> Option<Vec<String>> {
-        let all = self.json(&["ls", "--all", "--format", "json"]).await?;
+    async fn listed(&self, filter: &Filter<'_>, within: Duration) -> Option<Vec<String>> {
+        let all = self
+            .json(&["ls", "--all", "--format", "json"], within)
+            .await?;
         let instance = label_value(&self.config.instance);
         Some(
             all.as_array()?
@@ -334,22 +320,35 @@ impl Inner {
         )
     }
 
-    /// 걸리는 VM을 모두 끝내고 사라진 것을 확인한다. 끝낸 수. 뜨는 중인 VM은 한 번에 안 지워질 수 있어 사라질 때까지 몇 번 다시 하고,
-    /// 조회·삭제를 끝내 확인하지 못하면 `Unavailable`이다.
+    /// 걸리는 VM을 모두 끝내고 사라진 것을 확인한다. 끝낸 수. 공유 마감(`reap_within`) 안에서 각 명령의 시간 한도를 남은 시간에 맞춰 자른다.
+    /// 뜨는 중인 VM은 한 번에 안 지워질 수 있어 사라질 때까지 몇 번 다시 하고, 마감 안에 확인하지 못하면 `Unavailable`이다.
     async fn reap_matching(&self, filter: Filter<'_>) -> Result<usize, Error> {
-        let found = self.listed(&filter).await.ok_or(Error::Unavailable)?;
+        let deadline = Instant::now() + self.hooks.reap_within;
+        let within = process::budget(deadline, COMMAND_WITHIN).ok_or(Error::Unavailable)?;
+        let found = self
+            .listed(&filter, within)
+            .await
+            .ok_or(Error::Unavailable)?;
+        if found.is_empty() {
+            return Ok(0);
+        }
         let mut left = found.clone();
         for round in 0..REAP_ROUNDS {
             if round > 0 {
-                tokio::time::sleep(self.hooks.reap_pause).await;
+                let pause =
+                    process::budget(deadline, self.hooks.reap_pause).ok_or(Error::Unavailable)?;
+                tokio::time::sleep(pause).await;
             }
             for id in &left {
-                let _ = self.ok(&["kill", id]).await;
-                let _ = self.ok(&["delete", "--force", id]).await;
+                let within = process::budget(deadline, COMMAND_WITHIN).ok_or(Error::Unavailable)?;
+                let _ = self.ok(&["kill", id], within).await;
+                let within = process::budget(deadline, COMMAND_WITHIN).ok_or(Error::Unavailable)?;
+                let _ = self.ok(&["delete", "--force", id], within).await;
             }
             // 사라진 것을 확인해야 성공한다. 다시 읽지 못하면 "모름"이다
+            let within = process::budget(deadline, COMMAND_WITHIN).ok_or(Error::Unavailable)?;
             left = self
-                .listed(&filter)
+                .listed(&filter, within)
                 .await
                 .ok_or(Error::Unavailable)?
                 .into_iter()
@@ -515,6 +514,7 @@ impl ContainerSandbox {
             relay_up: Arc::new(relay_up),
             ready_within,
             reap_pause: Duration::from_millis(1),
+            reap_within: REAP_WITHIN,
             address_poll: Duration::from_millis(20),
             ready_check: Duration::from_secs(5),
         };

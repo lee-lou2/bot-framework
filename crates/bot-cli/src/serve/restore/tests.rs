@@ -51,6 +51,10 @@ impl ProfileBundles for Mem {
         Box::pin(async move { Ok(found) })
     }
 
+    fn created_ms(&self, _: &ProfileId, _: &Revision) -> Reply<'_, Option<i64>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn pinned_revisions<'a>(
         &'a self,
         target: &'a BTreeMap<ProfileId, Revision>,

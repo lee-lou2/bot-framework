@@ -53,7 +53,7 @@
 | 접수(멱등·커밋) | `crates/bot-gateway/src/ingress.rs` → `crates/bot-store/src/accept.rs` |
 | 큐·리스·세대·재시도 | `crates/bot-store/src/{queue,finish,handover,shutdown}.rs`, 포트 `crates/bot-core/src/port.rs`의 `RunStore` |
 | 워커 루프·위임 | `crates/bot-runtime/src/worker/`, `crates/bot-store/src/delegate.rs`, `crates/bot-broker/src/front/delegate.rs` |
-| 도구 호출 관문 | `crates/bot-broker/src/service/call.rs`(호출 순서), `crates/bot-broker/src/{classify,scope,rate,recovery}.rs` |
+| 도구 호출 관문 | `crates/bot-broker/src/service/call.rs`(호출 순서), `crates/bot-broker/src/{classify,rate,recovery}.rs`, `crates/bot-core/src/scope.rs` |
 | 모델 내장 도구 단일 표 | `crates/bot-core/src/builtin.rs`(`model_tools`·`model_tools_for`·`reserved`·`card_body`), API 실행기 `crates/bot-runtime/src/context.rs`·`crates/bot-runtime/src/worker/calls.rs`, VM 릴레이 `crates/bot-broker/src/front/{mcp,delegate}.rs` |
 | 런타임 스킬·MCP 관리(슈퍼 관리자) | 포트 `crates/bot-core/src/manage.rs`, 브로커 관문 `crates/bot-broker/src/service/manage.rs`, 실행·즉시 활성화 `crates/bot-cli/src/serve/manage/`, SOPS·키체인 관리 `crates/bot-cli/src/secrets/admin.rs`, 스킬 템플릿 `crates/bot-cli/src/scaffold/templates.rs`(`SKILL_CREATOR`) |
 | 넘김(`bot/pass`) | `crates/bot-core/src/pass.rs`(어휘) → `crates/bot-broker/src/service/pass.rs`(표식 해석) → `crates/bot-store/src/pass.rs`(사슬·커서를 한 커밋으로) |

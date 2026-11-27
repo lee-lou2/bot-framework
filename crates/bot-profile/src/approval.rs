@@ -65,7 +65,7 @@ fn preapproved(value: &Value, path: &str, at: &str, issues: &mut Issues) -> Opti
     }
     let Some(max) = map
         .get("max_per_day")
-        .and_then(Value::as_u64)
+        .and_then(crate::schema::as_exact_u64)
         .filter(|n| (1..=u64::from(MAX_PER_DAY)).contains(n))
     else {
         return bad(

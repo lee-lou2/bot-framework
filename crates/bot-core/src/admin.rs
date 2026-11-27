@@ -302,11 +302,8 @@ pub trait AdminRead: Send + Sync {
     fn verify_audit(&self, viewer: &Viewer) -> Reply<'_, AuditCheck>;
     /// 운영자 전용.
     fn status(&self, viewer: &Viewer) -> Reply<'_, Vec<ProfileStatus>>;
-    /// 운영자 전용. 활성 사전 승인과 정지 상태·오늘(UTC) 사용량을 한 스냅숏으로 읽는다. 기본 구현은 지원하지 않는다.
-    fn preapprovals(&self, viewer: &Viewer) -> Reply<'_, Vec<crate::grant::PreapprovalRow>> {
-        let _ = viewer;
-        Box::pin(async { Err(crate::port::Error::Unavailable) })
-    }
+    /// 운영자 전용. 활성 사전 승인과 정지 상태·오늘(UTC) 사용량을 한 스냅숏으로 읽는다.
+    fn preapprovals(&self, viewer: &Viewer) -> Reply<'_, Vec<crate::grant::PreapprovalRow>>;
 }
 
 /// 보류 대상. `effect`가 없으면 호출 전체의 판정이다.
@@ -335,13 +332,7 @@ pub enum HoldDecision {
 
 pub trait AdminAct: Send + Sync {
     /// 인증된 운영자가 본 일반 루트의 상태·세대·claim으로 명령한다. 성공한 같은 명령은 재전송에도 성공 결과만 돌려준다.
-    fn control_run(
-        &self,
-        _actor: PrincipalId,
-        _command: RunCommand,
-    ) -> Reply<'_, RunCommandOutcome> {
-        Box::pin(async { Err(crate::port::Error::Unavailable) })
-    }
+    fn control_run(&self, actor: PrincipalId, command: RunCommand) -> Reply<'_, RunCommandOutcome>;
 
     /// 발생 ID와 대상을 함께 대조하고 판정·감사를 한 번만 커밋한다. 같은 운영자가
     /// 같은 판정과 증거로 재요청하면 새 보류가 있어도 Repeated다. 불일치는 Conflict다.
@@ -354,15 +345,12 @@ pub trait AdminAct: Send + Sync {
 
     /// 트리거의 사전 승인을 정지(`pause`)하거나 재개한다. `cas`의 승인 ID·정지 세대를 현재와 대조해 상태 변경과 감사를 한 커밋에 쓴다.
     /// 이미 그 상태인 같은 세대의 요청과 직전 성공 명령의 재전달은 `repeated`다(변경·감사 0). 승인이 교체됐거나 세대가 어긋나면 `Stale`,
-    /// 대상이 없으면 `Missing`. 기본 구현은 지원하지 않는다.
+    /// 대상이 없으면 `Missing`.
     fn set_pause(
         &self,
         actor: PrincipalId,
         key: crate::grant::TriggerKey,
         cas: crate::grant::GrantCas,
         pause: bool,
-    ) -> Reply<'_, crate::grant::PauseOutcome> {
-        let _ = (actor, key, cas, pause);
-        Box::pin(async { Err(crate::port::Error::Unavailable) })
-    }
+    ) -> Reply<'_, crate::grant::PauseOutcome>;
 }

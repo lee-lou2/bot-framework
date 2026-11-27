@@ -131,7 +131,7 @@ mod tests {
     }
 
     fn hex(bytes: [u8; 32]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        bot_core::random::hex(&bytes)
     }
 
     /// 웹훅 입구만 있는 호스트의 지문 바이트는 OpenAI 입구가 생기기 전과 같다(이미 활성화된 호스트가 재활성화를 요구받지 않는다).

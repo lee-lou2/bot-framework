@@ -15,6 +15,7 @@ use bot_broker::{
     sys::{OsEntropy, SystemClock},
 };
 use bot_core::{
+    active::ActiveCheck,
     id::Revision,
     ledger::CallLedger,
     manage::ProfileManager,
@@ -23,7 +24,6 @@ use bot_core::{
     schedule::{ScheduleDelivery, ScheduleRoutes, ScheduledReplies, UserSchedules},
     trace::Tracer,
 };
-use bot_gateway::active::ActiveCheck;
 use bot_profile::{Registry, SchemaValidator};
 use bot_store::Store;
 use std::sync::{Arc, RwLock};

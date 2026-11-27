@@ -1,24 +1,22 @@
 //! 완료한 모델 응답의 도구 목록을 받는 가짜(`TurnSink`)와, 체크포인트만 되는 가짜 `RunStore`.
 
-use crate::front::{
-    observe::{Observed, TurnSink},
-    park::{Park, ParkReason},
-};
+use super::lock;
+#[cfg(test)]
+use crate::front::observe::{Observed, TurnSink};
+use crate::front::park::{Park, ParkReason};
+#[cfg(test)]
+use bot_core::cli::CliRefusal;
 use bot_core::{
-    cli::CliRefusal,
     command::*,
     id::*,
-    intake::{RequestKey, RequestState},
+    intake::{RequestKey, RequestState, RunProgress},
     port::{DelegationStore, Error, Reply, RunStore},
     state::RunContext,
 };
 use std::sync::{Arc, Mutex};
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// 받은 응답을 기록한다. `fail_with`로 쓰기 실패를 흉내 낸다.
+#[cfg(test)]
 #[derive(Default)]
 pub struct RecordingTurns {
     seen: Mutex<Vec<(Attempt, Observed)>>,
@@ -41,6 +39,7 @@ pub struct RecordingTurns {
     refusal_entered: tokio::sync::Notify,
 }
 
+#[cfg(test)]
 impl RecordingTurns {
     pub fn new() -> Self {
         Self::default()
@@ -96,6 +95,7 @@ impl RecordingTurns {
     }
 }
 
+#[cfg(test)]
 impl TurnSink for RecordingTurns {
     fn completed(&self, attempt: Attempt, turn: Observed) -> Reply<'_, ()> {
         let delay = *lock(&self.delay);
@@ -181,7 +181,13 @@ impl RunStore for FakeRuns {
     fn status(&self, _: RequestKey) -> Reply<'_, Option<RequestState>> {
         Box::pin(async { Err(Error::Unavailable) })
     }
+    fn progress(&self, _: ProfileId, _: RunId) -> Reply<'_, Option<RunProgress>> {
+        Box::pin(async { Ok(None) })
+    }
     fn claim(&self) -> Reply<'_, Option<RunContext>> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
+    fn release_for_shutdown(&self, _: Attempt) -> Reply<'_, ()> {
         Box::pin(async { Err(Error::Unavailable) })
     }
     fn renew(&self, _: Attempt) -> Reply<'_, Beat> {
@@ -206,6 +212,9 @@ impl RunStore for FakeRuns {
     }
     fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, Completion> {
         Box::pin(async { Err(Error::Unavailable) })
+    }
+    fn finish_with(&self, a: Attempt, done: Finish, _: RunOutcome) -> Reply<'_, Completion> {
+        self.finish(a, done)
     }
     fn fail(&self, _: Attempt, _: Failure) -> Reply<'_, Retry> {
         Box::pin(async { Err(Error::Unavailable) })
@@ -367,7 +376,13 @@ impl RunStore for PlanningRuns {
     fn status(&self, _: RequestKey) -> Reply<'_, Option<RequestState>> {
         Box::pin(async { Err(Error::Unavailable) })
     }
+    fn progress(&self, _: ProfileId, _: RunId) -> Reply<'_, Option<RunProgress>> {
+        Box::pin(async { Ok(None) })
+    }
     fn claim(&self) -> Reply<'_, Option<RunContext>> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
+    fn release_for_shutdown(&self, _: Attempt) -> Reply<'_, ()> {
         Box::pin(async { Err(Error::Unavailable) })
     }
     fn renew(&self, _: Attempt) -> Reply<'_, Beat> {
@@ -426,6 +441,9 @@ impl RunStore for PlanningRuns {
     }
     fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, Completion> {
         Box::pin(async { Err(Error::Unavailable) })
+    }
+    fn finish_with(&self, a: Attempt, done: Finish, _: RunOutcome) -> Reply<'_, Completion> {
+        self.finish(a, done)
     }
     fn fail(&self, _: Attempt, _: Failure) -> Reply<'_, Retry> {
         Box::pin(async { Err(Error::Unavailable) })

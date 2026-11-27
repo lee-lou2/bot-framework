@@ -109,26 +109,9 @@ pub fn render_card(
 }
 
 /// 승인 카드의 `label` 행 값(첫 줄은 `라벨: 값 조각`, 이어지는 줄은 공백 두 칸으로 시작해 이어 붙인 것). 카드는 브로커가 연 승인에 저장된 것이라
-/// 판정 때 그 안의 문서를 다시 읽을 수 있다(문서의 해시는 승인에 묶여 있다). 행이 없거나 카드를 읽을 수 없으면 `None`이다.
+/// 판정 때 그 안의 문서를 다시 읽을 수 있다(문서의 해시는 승인에 묶여 있다). 행이 없거나 둘 이상이거나 카드를 읽을 수 없으면 `None`이다.
 pub fn card_value(card: &JsonPayload, label: &str) -> Option<String> {
-    let value = crate::json::parse(&card.0)?;
-    let lines: Vec<&str> = value
-        .get("approval")?
-        .get("lines")?
-        .as_array()?
-        .iter()
-        .map(|line| line.as_str())
-        .collect::<Option<_>>()?;
-    let prefix = format!("{label}: ");
-    let first = lines.iter().position(|line| line.starts_with(&prefix))?;
-    let mut out = lines[first][prefix.len()..].to_owned();
-    for line in &lines[first + 1..] {
-        match line.strip_prefix("  ") {
-            Some(rest) => out.push_str(rest),
-            None => break,
-        }
-    }
-    Some(out)
+    bot_core::cards::extract_line(&card.0, label)
 }
 
 /// 기억 공유 카드. 소유자가 승인으로 보는 본문 전체를 담는다(자르거나 요약하지 않는다). 다 담을 수 없으면 `Invalid`다.

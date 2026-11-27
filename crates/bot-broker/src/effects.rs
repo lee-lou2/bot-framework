@@ -69,7 +69,7 @@ fn error_name(error: &Error) -> &'static str {
         Error::Denied => "denied",
         Error::Conflict => "conflict",
         Error::Stale => "stale",
-        Error::Unavailable => "unavailable",
+        Error::Unavailable | Error::RateLimited => "unavailable",
         Error::Invalid | Error::Missing => "invalid",
     }
 }

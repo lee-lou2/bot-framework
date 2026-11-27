@@ -357,7 +357,7 @@ impl Worker {
             Err(Error::Stale | Error::Denied | Error::Missing) => Err(Flow::Lost),
             Err(Error::Conflict) => Err(Flow::Fail(Failure::Permanent("checkpoint_conflict"))),
             Err(Error::Invalid) => Err(Flow::Fail(Failure::Permanent("invalid_checkpoint"))),
-            Err(Error::Unavailable) => {
+            Err(Error::Unavailable | Error::RateLimited) => {
                 Err(Flow::Fail(Failure::Transient("checkpoint_unavailable")))
             }
         }

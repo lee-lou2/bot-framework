@@ -25,15 +25,7 @@ pub fn labeled_lines(label: &str, value: &str, max_bytes: usize) -> Option<Vec<S
     }
 }
 
-pub fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(DIGITS[(byte >> 4) as usize] as char);
-        out.push(DIGITS[(byte & 15) as usize] as char);
-    }
-    out
-}
+pub use bot_core::random::hex;
 
 #[cfg(test)]
 mod tests {

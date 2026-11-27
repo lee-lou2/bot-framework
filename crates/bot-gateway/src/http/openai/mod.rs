@@ -24,7 +24,6 @@ pub use stream::{Passed, Probe};
 use super::HttpGateway;
 use auth::AuthError;
 use axum::{
-    body::Body,
     extract::{ConnectInfo, Request},
     http::{HeaderValue, StatusCode, header},
     response::Response,
@@ -32,7 +31,6 @@ use axum::{
 use error::Failure;
 use serde_json::Value;
 use std::{
-    io::Read,
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Instant,
@@ -88,22 +86,9 @@ fn route<'a>(method: &str, path: &'a str) -> Result<Route<'a>, Failure> {
     }
 }
 
-/// 운영용 불투명 ID(비밀이 아니다). 운영체제 난수를 못 읽으면 시각으로 대신한다.
+/// 운영용 불투명 ID(비밀이 아니다).
 fn request_id() -> String {
-    let id = random_hex(16).unwrap_or_else(|_| {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        format!("{nanos:032x}")
-    });
-    format!("req_{id}")
-}
-
-/// 운영체제 난수에서 `bytes`바이트를 읽어 16진수로 낸다(멱등 키·대화 ID용: 128비트 이상).
-fn random_hex(bytes: usize) -> std::io::Result<String> {
-    let mut buffer = vec![0u8; bytes];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut buffer)?;
-    Ok(buffer.iter().map(|b| format!("{b:02x}")).collect())
+    format!("req_{}", bot_core::random::random_hex(16))
 }
 
 /// 모든 OpenAI 응답에 운영 ID를, 멱등 키가 정해졌으면 적용한 키를 단다.
@@ -119,19 +104,7 @@ fn stamp(mut response: Response, request_id: &str, key: Option<&str>) -> Respons
 }
 
 fn json(value: &Value) -> Response {
-    let mut response = Response::new(Body::from(value.to_string()));
-    *response.status_mut() = StatusCode::OK;
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    response
+    super::reply::json_response(StatusCode::OK, value)
 }
 
 impl HttpGateway {

@@ -169,6 +169,27 @@ class StrictRunsCargoTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertIn("cargo-called require= url=set", done.stdout)
 
+    def test_clippy_checks_both_workspace_targets_and_the_bot_binary(self):
+        repo = committed(self)
+        shim = Path(tempfile.mkdtemp(prefix="gate-clippy-"))
+        self.addCleanup(lambda: shutil.rmtree(shim, ignore_errors=True))
+        cargo = shim / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\n"
+            'echo "clippy-call $*"\n'
+            'case "$*" in *"$FAIL_ON"*) [ -n "$FAIL_ON" ] && exit 101 ;; esac\n'
+            "exit 0\n"
+        )
+        cargo.chmod(0o755)
+        base_env = {"PATH": f"{shim}:{os.environ['PATH']}"}
+        done = repo.gate("--only", "clippy", env=base_env)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertIn("clippy-call clippy --workspace --all-targets --locked -- -D warnings", done.stdout)
+        self.assertIn("clippy-call clippy -p bot-cli --bin bot --locked -- -D warnings", done.stdout)
+        for fail_on in ("--all-targets", "--bin bot"):
+            failed = repo.gate("--only", "clippy", env={**base_env, "FAIL_ON": fail_on})
+            self.assertEqual(failed.returncode, 1, (fail_on, failed.stdout))
+
 
 class PinnedCommit(unittest.TestCase):
     """공개할 커밋을 시작할 때 고정하고, 같은 커밋에서 시험·이력 확인을 하며, 검사한 해시를 출력한다."""

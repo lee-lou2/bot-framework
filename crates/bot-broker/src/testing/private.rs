@@ -61,9 +61,7 @@ pub struct MemPrivateLedger {
     before_start: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::lock;
 
 fn conversation_key(c: &Conversation) -> (String, String, Option<String>) {
     (format!("{:?}", c.kind), c.id.clone(), c.thread.clone())

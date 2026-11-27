@@ -13,52 +13,9 @@ pub const MASK: &str = "<가림>";
 /// 로그 가림과 일반 부분 일치의 하한. 호스트가 선언한 자격의 출력 검사에는 적용하지 않는다.
 const MIN_SECRET_LEN: usize = 12;
 
-/// 토큰 모양: (접두사, 접두사 뒤로 이어져야 하는 영숫자·`-`의 최소 길이)
-const SHAPES: [(&str, usize); 12] = [
-    ("xoxb-", 10),
-    ("xoxp-", 10),
-    ("xoxa-", 10),
-    ("xoxs-", 10),
-    ("xapp-", 10),
-    // `github_pat_` 본문은 `_`로 끊겨 첫 마디(22자)만 센다.
-    ("ghp_", 30),
-    ("gho_", 30),
-    ("ghu_", 30),
-    ("ghs_", 30),
-    ("ghr_", 30),
-    ("github_pat_", 20),
-    ("sk-", 20),
-];
-
-/// `prefix` 뒤에 영숫자·`-`가 `min`자 이상 이어진 자리를 앞에서부터 찾는다(접두사 포함, 이어진 끝까지).
-fn shapes<'a>(
-    text: &'a str,
-    prefix: &'a str,
-    min: usize,
-) -> impl Iterator<Item = Range<usize>> + 'a {
-    let mut from = 0;
-    std::iter::from_fn(move || {
-        while let Some(i) = text[from..].find(prefix) {
-            let begin = from + i;
-            let start = begin + prefix.len();
-            let run = text[start..]
-                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-                .unwrap_or(text.len() - start);
-            if run >= min {
-                from = start + run;
-                return Some(begin..from);
-            }
-            from = start;
-        }
-        None
-    })
-}
-
-/// 토큰 모양 또는 12바이트 이상인 비밀 값을 찾는다.
+/// 토큰 모양(공통 접두사·JWT) 또는 12바이트 이상인 비밀 값을 찾는다.
 pub fn leaks_secret(text: &str, secrets: &[String]) -> bool {
-    SHAPES
-        .iter()
-        .any(|(prefix, min)| shapes(text, prefix, *min).next().is_some())
+    !bot_core::redact::secret_spans(text).is_empty()
         || secrets
             .iter()
             .any(|s| s.len() >= MIN_SECRET_LEN && text.contains(s.as_str()))
@@ -112,9 +69,8 @@ pub fn scrub(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for word in text.split_inclusive(char::is_whitespace) {
         let w = word.trim_end();
-        let hit = ["xoxb-", "xapp-", "xoxp-", "sk-"]
-            .iter()
-            .any(|p| w.contains(p));
+        let hit = bot_core::redact::has_delimited_secret_prefix(w)
+            || !bot_core::redact::secret_spans(w).is_empty();
         if hit {
             out.push_str(MASK);
             out.push_str(&word[w.len()..]);
@@ -128,17 +84,7 @@ pub fn scrub(text: &str) -> String {
 /// 로그·추적·오류에 싣기 전에 비밀을 가린다. 프로필 비밀 값과 토큰 모양인 자리만 `<가림>`으로 바꾸고
 /// 같은 문장의 나머지 글은 그대로 둔다. 가린 뒤에도 `leaks_secret`에 걸리면 글 전체를 가린다(마지막 안전장치).
 pub fn redact(text: &str, secrets: &[String]) -> String {
-    // 검사는 영숫자·`-`만 세지만(`github_pat_`은 첫 마디), 가릴 때는 `_`로 이어진 본문 끝까지 지워 꼬리가 남지 않게 한다.
-    let mut spans: Vec<Range<usize>> = SHAPES
-        .iter()
-        .flat_map(|(prefix, min)| shapes(text, prefix, *min))
-        .map(|r| {
-            let tail = text[r.end..]
-                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-                .unwrap_or(text.len() - r.end);
-            r.start..r.end + tail
-        })
-        .collect();
+    let mut spans: Vec<Range<usize>> = bot_core::redact::secret_spans(text);
     for secret in secrets.iter().filter(|s| s.len() >= MIN_SECRET_LEN) {
         spans.extend(
             text.match_indices(secret.as_str())
@@ -254,9 +200,12 @@ mod tests {
     #[test]
     fn scrub_hides_token_shapes() {
         let (bot, key) = (["xoxb", "-123-abc"].concat(), ["sk", "-3dabc"].concat());
-        let s = scrub(&format!("fail {bot} end {key} more"));
+        let s = scrub(&format!("fail {bot} end key={key} more"));
         assert!(!s.contains(&bot) && !s.contains(&key));
         assert!(s.contains("fail") && s.contains("end"));
+        // 지역명·일반 식별자(`ASIA`, `EASTASIA`, `task-123`)는 오탐해 가리지 않는다.
+        let safe = "region=ASIA-northeast1 EASTASIA ASIA task-123";
+        assert_eq!(scrub(safe), safe);
     }
 
     #[test]
@@ -326,5 +275,25 @@ mod tests {
         );
         // 검사는 첫 마디만 세지만 가릴 때는 `_`로 이어진 나머지 본문까지 지운다
         assert_eq!(redact(&format!("a {pat} b"), &[]), "a <가림> b");
+    }
+
+    #[test]
+    fn blocks_output_and_redact_catch_cloud_stripe_and_jwt_shapes() {
+        let aws = ["AKIA", "IOSFODNN7EXAMPLE"].concat();
+        let gcp = ["AIza", "SyA_1234567890-abcdef"].concat();
+        let stripe = ["sk_live_", "1234567890abcdef"].concat();
+        let jwt = format!(
+            "{}.{}.{}",
+            "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJhYmMifQ", "c2lnbmF0dXJlLXZhbHVl"
+        );
+        for secret in [&aws, &gcp, &stripe, &jwt] {
+            let line = format!("키={secret} 끝");
+            assert!(blocks_output(&line, &[]), "{secret}");
+            assert_eq!(redact(&line, &[]), "키=<가림> 끝", "{secret}");
+            assert!(
+                !scrub(&format!("err {secret} ok")).contains(secret),
+                "{secret}"
+            );
+        }
     }
 }

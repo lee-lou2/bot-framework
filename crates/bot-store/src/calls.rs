@@ -3,7 +3,7 @@
 //! 보류(held)가 되면 run은 같은 커밋으로 보류 대기로 넘어가 워커 리스를 놓는다(시도 횟수는 쓰지 않는다).
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, Entry, OwnedEntry},
     codec::*,
     db::{Fail, R, Store, Tx},
     finish::*,
@@ -45,20 +45,23 @@ pub(crate) async fn fence(tx: &mut Tx<'_>, at: &Attempt) -> R<RunRow> {
         Ok(run) if run.cancel_requested => Err(Error::Stale.into()),
         Ok(run) => Ok(run),
         Err(Fail::Core(Error::Stale)) => {
-            // (자기 프로필에 있는 수, 어느 프로필에든 있는 수): 자기 것이 하나라도 있으면 Stale, 남의 것뿐이면 Denied, 아무 데도 없으면 Missing
-            let (mine, any): (i64, i64) = sqlx::query_as(
-                "select count(*) filter (where profile = $2), count(*) from bot_runs where id = $1",
+            // 자기 프로필 기본키 조회를 먼저 본다(정상 만료·옛 세대에서 전체 테이블 스캔을 피한다)
+            let mine: bool = sqlx::query_scalar(
+                "select exists (select 1 from bot_runs where profile = $1 and id = $2)",
             )
-            .bind(&at.run.0)
             .bind(&at.profile.0)
+            .bind(&at.run.0)
             .fetch_one(&mut **tx)
             .await?;
-            Err(match (mine, any) {
-                (0, 0) => Error::Missing,
-                (0, _) => Error::Denied,
-                _ => Error::Stale,
+            if mine {
+                return Err(Error::Stale.into());
             }
-            .into())
+            let other: bool =
+                sqlx::query_scalar("select exists (select 1 from bot_runs where id = $1)")
+                    .bind(&at.run.0)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            Err(if other { Error::Denied } else { Error::Missing }.into())
         }
         Err(other) => Err(other),
     }
@@ -548,18 +551,22 @@ impl Store {
                 .bind(&run.id)
                 .fetch_one(&mut *tx)
                 .await?;
-        let mut entry = Entry::new(&principal, label, &f.call.0, &verdict);
-        entry.args = Some(to32(row.get("args_sha256"))?);
-        audit::append(&mut tx, &run.profile, &entry).await?;
         if state == "held" {
             park(&mut tx, &run, &Wait::Hold).await?;
-            audit::append(
-                &mut tx,
-                &run.profile,
-                &Entry::new("system", "run.wait", &run.id, &format!("hold:{}", f.call.0)),
-            )
-            .await?;
         }
+        let mut entry = OwnedEntry::new(&run.profile, &principal, label, &f.call.0, &verdict);
+        entry.args = Some(to32(row.get("args_sha256"))?);
+        let mut audits = vec![entry];
+        if state == "held" {
+            audits.push(OwnedEntry::new(
+                &run.profile,
+                "system",
+                "run.wait",
+                &run.id,
+                format!("hold:{}", f.call.0),
+            ));
+        }
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(())
     }

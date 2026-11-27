@@ -178,6 +178,7 @@ fn build<'a>(
 
 const FULL: [&str; 3] = ["run", "calendar.read", "calendar.delete"];
 
+mod builtin;
 mod chat;
 
 #[test]
@@ -470,89 +471,4 @@ fn bad_runs_are_rejected_and_into_request_wires_every_field() {
     );
     assert!(request.exchanges.is_empty() && request.relay.is_none() && !*request.cancel.borrow());
     drop(tx);
-}
-
-#[test]
-fn only_builtin_tools_inside_the_agent_ceiling_are_listed_once() {
-    let mut snap = snapshot();
-    let agent = snap.agents.get_mut(&AgentId("main".into())).unwrap();
-    agent.scopes.insert("schedule.list".into());
-    agent.scopes.insert("schedule.deliver".into());
-    // 호스트에서 잘못 만든 판본이 예약 이름을 스킬 도구로 넣어도 내장 선언 하나만 쓴다.
-    let skill = agent.skills.get_mut("agenda").unwrap();
-    for id in ["schedule.list", "schedule.deliver"] {
-        skill
-            .tools
-            .insert(ToolId(id.into()), tool(Risk::Read, &["run"], "{}"));
-    }
-    let input = build(&snap, &run_context("main", &FULL, "x"), &[], &[]);
-    let builtins: Vec<_> = input
-        .tools
-        .iter()
-        .filter(|t| t.id.0.starts_with("schedule."))
-        .collect();
-    assert_eq!(builtins.len(), 1);
-    assert_eq!(builtins[0].id.0, "schedule.list");
-    assert_eq!(builtins[0].input.0, bot_core::builtin::LIST.schema);
-}
-
-#[test]
-fn super_admin_manage_tools_are_only_exposed_to_super_admins_with_scopes() {
-    use bot_core::builtin::{MCP_ADD_TOOL, SKILL_CREATE_TOOL, SKILL_INSPECT_TOOL};
-
-    let mut snap = snapshot();
-    let manage_scopes = [
-        "run",
-        "calendar.read",
-        SKILL_INSPECT_TOOL,
-        SKILL_CREATE_TOOL,
-        MCP_ADD_TOOL,
-    ];
-    snap.policy.scopes = scopes(&manage_scopes);
-    snap.agents.get_mut(&AgentId("main".into())).unwrap().scopes = scopes(&manage_scopes);
-
-    // 일반 멤버는 스코프가 있어도 슈퍼 관리자 전용 도구를 보지 못한다
-    let regular = build(
-        &snap,
-        &run_context("main", &manage_scopes, "스킬 만들어줘"),
-        &[],
-        &[],
-    );
-    let regular_ids: Vec<&str> = regular.tools.iter().map(|t| t.id.0.as_str()).collect();
-    for id in [SKILL_INSPECT_TOOL, SKILL_CREATE_TOOL, MCP_ADD_TOOL] {
-        assert!(
-            !regular_ids.contains(&id),
-            "일반 사용자에게 `{id}`가 노출되면 안 돼요: {regular_ids:?}"
-        );
-    }
-
-    // 슈퍼 관리자는 허용된 관리 도구를 본다
-    snap.super_admins.insert(PrincipalId("local:owner".into()));
-    let admin = build(
-        &snap,
-        &run_context("main", &manage_scopes, "스킬 만들어줘"),
-        &[],
-        &[],
-    );
-    let admin_ids: Vec<&str> = admin.tools.iter().map(|t| t.id.0.as_str()).collect();
-    for id in [SKILL_INSPECT_TOOL, SKILL_CREATE_TOOL, MCP_ADD_TOOL] {
-        assert!(
-            admin_ids.contains(&id),
-            "슈퍼 관리자에게 `{id}`가 보여야 해요: {admin_ids:?}"
-        );
-    }
-    let mcp_add = admin.tools.iter().find(|t| t.id.0 == MCP_ADD_TOOL).unwrap();
-    assert_eq!(mcp_add.class, Risk::Write);
-
-    // 스코프 상한에 없는 관리 도구는 슈퍼 관리자여도 보이지 않는다
-    let narrow = build(
-        &snap,
-        &run_context("main", &["run", SKILL_INSPECT_TOOL], "조회"),
-        &[],
-        &[],
-    );
-    let narrow_ids: Vec<&str> = narrow.tools.iter().map(|t| t.id.0.as_str()).collect();
-    assert!(narrow_ids.contains(&SKILL_INSPECT_TOOL));
-    assert!(!narrow_ids.contains(&SKILL_CREATE_TOOL));
-    assert!(!narrow_ids.contains(&MCP_ADD_TOOL));
 }

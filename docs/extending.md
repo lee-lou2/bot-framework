@@ -53,7 +53,7 @@ Rust를 고치지 않는다. 도구는 MCP 서버로 만들고 설정 네 곳을
 - 채널 고유 표가 필요하면 마이그레이션(이벤트 중복 제거는 `crates/bot-store/migrations/0022_slack_events.sql`을 본다).
 - 문서: [게이트웨이 운영](gateway.md)의 호스트 설정 표, [프로필 명세](profile-spec.md)의 바인딩.
 
-**새 대화 종류(`ConversationKind`)** 가 필요하면 컴파일러는 `crates/bot-store/src/codec.rs`, `crates/bot-runtime/src/worker/span.rs`, `crates/bot-gateway/src/inbound.rs`, `crates/bot-broker/src/runner.rs`, `crates/bot-admin/src/json.rs`를 가리킨다. 조용한 곳은 DB의 `conv_kind` 열 CHECK(`crates/bot-store/migrations/0001_runs.sql`)다. 새 마이그레이션으로 목록을 넓혀야 한다.
+**새 대화 종류(`ConversationKind`)** 가 필요하면 컴파일러는 `crates/bot-store/src/codec.rs`, `crates/bot-store/src/delivery.rs`, `crates/bot-store/src/user_schedule.rs`, `crates/bot-runtime/src/worker/span.rs`, `crates/bot-gateway/src/inbound.rs`, `crates/bot-gateway/src/schedule_routes.rs`, `crates/bot-broker/src/runner.rs`, `crates/bot-admin/src/json.rs`를 가리킨다. 조용한 곳은 DB의 `conv_kind` 열 CHECK(`crates/bot-store/migrations/0001_runs.sql`)다. 새 마이그레이션으로 목록을 넓혀야 한다.
 
 **새 신원 종류(`IdentityKind`)** 는 컴파일러가 아무 곳도 가리키지 않는다(모두 `==`·`matches!`로 쓰고 `RunOrigin::from_ingress`는 `_ =>`로 끝난다). 직접 찾아야 한다: `crates/bot-core/src/identity.rs`, `crates/bot-core/src/state.rs`, `crates/bot-profile/src/approval.rs`, `crates/bot-store/src/api.rs`(`grep -rn IdentityKind crates/*/src`).
 

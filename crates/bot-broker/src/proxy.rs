@@ -11,6 +11,7 @@
 //! 같은 호출 전용 자격으로 보낸다. 이 주소는 허용 목록과 무관하게 바깥으로 나가지 않고 `LocalService`가 처리한다.
 
 use crate::egress::{EgressPolicy, parse_target, vet_resolved};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bot_core::port::{Error, Reply};
 use std::{
     io,
@@ -449,52 +450,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 pub fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(TABLE[((n >> (18 - 6 * i)) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    STANDARD.encode(bytes)
 }
 
 fn base64_decode(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(4) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(text.len() / 4 * 3);
-    let bytes = text.as_bytes();
-    for (index, quad) in bytes.chunks(4).enumerate() {
-        let last = (index + 1) * 4 == bytes.len();
-        let pad = quad.iter().rev().take_while(|b| **b == b'=').count();
-        if pad > 2 || (pad > 0 && !last) {
-            return None;
-        }
-        let mut n = 0u32;
-        for byte in &quad[..4 - pad] {
-            let v = match byte {
-                b'A'..=b'Z' => byte - b'A',
-                b'a'..=b'z' => byte - b'a' + 26,
-                b'0'..=b'9' => byte - b'0' + 52,
-                b'+' => 62,
-                b'/' => 63,
-                _ => return None,
-            };
-            n = (n << 6) | u32::from(v);
-        }
-        n <<= 6 * pad as u32;
-        out.extend_from_slice(&n.to_be_bytes()[1..4 - pad]);
-    }
-    Some(out)
+    STANDARD.decode(text).ok()
 }
 
 #[cfg(test)]

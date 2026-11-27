@@ -47,10 +47,15 @@ struct Bucket {
 /// 주체 수가 늘어도 메모리가 무한히 자라지 않게 쓰지 않는 항목을 치우는 기준.
 const SWEEP_AT: usize = 10_000;
 
+struct State {
+    buckets: HashMap<Key, Bucket>,
+    next_sweep_at: usize,
+}
+
 pub struct Limiter {
     cfg: RateConfig,
     clock: Arc<dyn Clock>,
-    state: Mutex<HashMap<Key, Bucket>>,
+    state: Mutex<State>,
 }
 
 /// 동시성 자리. 놓으면(drop) 반환된다.
@@ -61,7 +66,7 @@ pub struct Slot {
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        if let Some(bucket) = self.limiter.lock().get_mut(&self.key) {
+        if let Some(bucket) = self.limiter.lock().buckets.get_mut(&self.key) {
             bucket.in_flight = bucket.in_flight.saturating_sub(1);
         }
     }
@@ -72,11 +77,14 @@ impl Limiter {
         Arc::new(Self {
             cfg,
             clock,
-            state: Mutex::new(HashMap::new()),
+            state: Mutex::new(State {
+                buckets: HashMap::new(),
+                next_sweep_at: SWEEP_AT,
+            }),
         })
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<Key, Bucket>> {
+    fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -89,12 +97,21 @@ impl Limiter {
         let now = self.clock.now();
         let key = (profile.clone(), principal.clone());
         let mut state = self.lock();
-        if state.len() >= SWEEP_AT {
-            let burst = f64::from(self.cfg.burst);
-            state.retain(|_, b| b.in_flight > 0 || b.tokens < burst);
+        let burst = f64::from(self.cfg.burst);
+        let rate = f64::from(self.cfg.per_minute) / 60.0;
+        if state.buckets.len() >= state.next_sweep_at {
+            state.buckets.retain(|_, b| {
+                if b.in_flight > 0 {
+                    return true;
+                }
+                let elapsed = now.duration_since(b.at).unwrap_or_default().as_secs_f64();
+                let effective = (b.tokens + elapsed * rate).min(burst);
+                effective < burst
+            });
+            state.next_sweep_at = state.buckets.len().saturating_mul(2).max(SWEEP_AT);
         }
-        let bucket = state.entry(key.clone()).or_insert(Bucket {
-            tokens: f64::from(self.cfg.burst),
+        let bucket = state.buckets.entry(key.clone()).or_insert(Bucket {
+            tokens: burst,
             at: now,
             in_flight: 0,
         });
@@ -104,8 +121,7 @@ impl Limiter {
             .unwrap_or_default()
             .as_secs_f64();
         bucket.at = now.max(bucket.at);
-        bucket.tokens = (bucket.tokens + elapsed * f64::from(self.cfg.per_minute) / 60.0)
-            .min(f64::from(self.cfg.burst));
+        bucket.tokens = (bucket.tokens + elapsed * rate).min(burst);
         if bucket.in_flight >= self.cfg.concurrent {
             return Err(Limit::Concurrency);
         }
@@ -206,5 +222,44 @@ mod tests {
         drop(limiter.admit(&p, &a).unwrap());
         clock.set(500);
         assert_eq!(limiter.admit(&p, &a).err(), Some(Limit::Rate));
+    }
+
+    #[test]
+    fn idle_buckets_are_evicted_after_refill_and_sweep_threshold_scales_for_active_buckets() {
+        let (limiter, clock) = limiter(60, 2, 10);
+        let p = ProfileId("personal".into());
+        // SWEEP_AT개의 주체가 호출을 끝낸 뒤 유휴 상태로 남는다.
+        for i in 0..SWEEP_AT {
+            let principal = PrincipalId(format!("local:u{i}"));
+            drop(limiter.admit(&p, &principal).unwrap());
+        }
+        assert_eq!(limiter.lock().buckets.len(), SWEEP_AT);
+        // 아직 보충되지 않았으면 유지되고, 다음 정리 기준이 2배로 늘어나 호출마다 O(N) 스캔하지 않는다.
+        let extra = PrincipalId("local:extra".into());
+        let held = limiter.admit(&p, &extra).unwrap();
+        {
+            let st = limiter.lock();
+            assert_eq!(st.buckets.len(), SWEEP_AT + 1);
+            assert_eq!(st.next_sweep_at, SWEEP_AT * 2);
+        }
+        // 동시성 자리를 잡고 있는 동안에는 시간이 지나도 치우지 않는다.
+        let mut st_count_before = limiter.lock().buckets.len();
+        // next_sweep_at까지 채운 뒤 충분히 시간이 흐르면 완료된 유휴 버킷은 모두 정리되고, 진행 중인 버킷만 남는다.
+        for i in st_count_before..(SWEEP_AT * 2) {
+            let principal = PrincipalId(format!("local:u{i}"));
+            drop(limiter.admit(&p, &principal).unwrap());
+        }
+        st_count_before = limiter.lock().buckets.len();
+        assert_eq!(st_count_before, SWEEP_AT * 2);
+        clock.advance(Duration::from_secs(60));
+        let fresh = PrincipalId("local:fresh".into());
+        drop(limiter.admit(&p, &fresh).unwrap());
+        {
+            let st = limiter.lock();
+            // 진행 중인 `extra`와 방금 추가된 `fresh` 두 개만 남고 유휴 버킷은 모두 제거된다.
+            assert_eq!(st.buckets.len(), 2);
+            assert_eq!(st.next_sweep_at, SWEEP_AT);
+        }
+        drop(held);
     }
 }

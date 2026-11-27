@@ -27,7 +27,8 @@ use std::{
 /// 모델 샌드박스를 얻는 방법
 #[derive(Clone)]
 pub enum Launch {
-    /// 이미 열린 샌드박스와 프런트가 듣는 주소(시험의 합성 샌드박스)
+    /// 이미 열린 샌드박스와 프런트가 듣는 주소(시험의 합성 샌드박스, 운영 빌드에는 포함하지 않는다)
+    #[cfg(any(test, feature = "testing"))]
     Ready {
         sandbox: Arc<ModelSandbox>,
         bind: SocketAddr,
@@ -133,6 +134,7 @@ impl Vm {
 
 /// 프런트가 열릴 주소를 정한 상태: 아직 릴레이를 알리지 않았다
 pub(super) enum Pending {
+    #[cfg(any(test, feature = "testing"))]
     Ready(Arc<ModelSandbox>),
     Anchored(Anchored),
 }
@@ -141,6 +143,7 @@ impl Launch {
     /// 프런트가 들을 주소와 `confined_reads`를 정한다. VM이면 여기서 닻을 띄운다 — 실패하면 아무것도 남지 않는다.
     pub(super) async fn prepare(self) -> Result<(SocketAddr, bool, Pending), String> {
         match self {
+            #[cfg(any(test, feature = "testing"))]
             Self::Ready {
                 sandbox,
                 bind,
@@ -169,14 +172,17 @@ impl Launch {
 impl Pending {
     /// 프런트를 열지 못했다: 닻과 이번 실행의 VM을 치운다.
     pub(super) async fn abort(self) {
-        if let Self::Anchored(anchored) = self {
-            anchored.abort().await;
+        match self {
+            #[cfg(any(test, feature = "testing"))]
+            Self::Ready(_) => {}
+            Self::Anchored(anchored) => anchored.abort().await,
         }
     }
 
     /// 프런트가 실제로 연 포트를 알려 실행 가능한 샌드박스를 얻는다(어댑터가 받고 있는지 확인한다). 실패하면 닻을 치우고 Err.
     pub(super) async fn open(self, port: u16) -> Result<(Arc<ModelSandbox>, Option<Vm>), String> {
         match self {
+            #[cfg(any(test, feature = "testing"))]
             Self::Ready(sandbox) => Ok((sandbox, None)),
             Self::Anchored(anchored) => {
                 let vm = anchored.relay(port).await.map_err(|e| {

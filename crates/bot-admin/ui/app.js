@@ -66,6 +66,7 @@
     if (p && state.profiles.indexOf(p) < 0) noteProfiles([p]);
     sel.value = p;
     resetData();
+    if (!quiet && state.tab && views[state.tab] && views[state.tab].hash) setHash(views[state.tab].hash());
     if (!quiet) refresh(true);
   }
 
@@ -117,7 +118,8 @@
   }
   // 주소 조각(#실행/프로필/실행ID)을 바꾼다. 기록은 쌓지 않는다.
   function setHash(s) {
-    if (window.history && history.replaceState) history.replaceState(null, "", "#" + s);
+    const next = "#" + s;
+    if (window.history && history.replaceState && location.hash !== next) history.replaceState(null, "", next);
   }
   function showTab(id, opts) {
     opts = opts || {};
@@ -141,9 +143,9 @@
       panel.classList.add("enter");
     }
     if (prev && prev !== id && views[prev] && views[prev].hide) views[prev].hide();
-    setHash(id);
     const v = views[id];
-    if (v.apply && opts.arg !== undefined) v.apply(opts.arg);
+    if (v.apply) v.apply(opts.arg);
+    setHash(v.hash ? v.hash() : id);
     if (v.show) v.show();
     refresh(true);
   }
@@ -189,8 +191,9 @@
   function routeFromHash(first) {
     const at = parseHash();
     if (!available(at.id)) { if (first) showTab(visibleTabs()[0].id); return; }
-    const arg = at.id === "runs" && at.rest.length >= 2 ? { profile: at.rest[0], run: at.rest[1] } : undefined;
-    if (!first && at.id === state.tab && !arg) return;
+    const arg = at.id === "runs" && at.rest.length >= 2 && at.rest[0] && at.rest[1] ? { profile: at.rest[0], run: at.rest[1] } : undefined;
+    const hasSel = !!(views[at.id] && views[at.id].selected && views[at.id].selected());
+    if (!first && at.id === state.tab && !arg && !hasSel) return;
     if (arg && state.profile && state.profile !== arg.profile) setProfile(arg.profile, true);
     showTab(at.id, { arg });
   }

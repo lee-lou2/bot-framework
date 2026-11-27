@@ -16,6 +16,7 @@ async fn mcp_lists_tool_descriptions_from_the_snapshot() {
     drop.input = JsonPayload(r#"{"type":"object","description":"메시지를 지웁니다."}"#.into());
     let locked = tools.get_mut(&ToolId("echo.locked".into())).unwrap();
     locked.input = JsonPayload(r#"{"type":"object","description":""}"#.into());
+    locked.scopes = ["echo.use".into()].into();
     r.catalog.publish(Arc::new(source));
 
     let reply = rpc(&r, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;
@@ -60,13 +61,13 @@ async fn mcp_negotiates_and_lists_only_the_agents_declared_tools_with_safe_names
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["echo_drop", "echo_locked", "echo_say"]);
+    assert_eq!(names, ["echo_drop", "echo_say"]);
     assert!(names.iter().all(|n| {
         n.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     }));
     assert_eq!(
-        value["result"]["tools"][2]["inputSchema"],
+        value["result"]["tools"][1]["inputSchema"],
         serde_json::json!({"type": "object"})
     );
     // 알림은 202, 모르는 메서드는 -32601, 깨진 본문은 400
@@ -237,11 +238,11 @@ async fn a_call_without_a_stable_tool_use_id_is_refused_before_anything_runs() {
 }
 
 #[tokio::test]
-async fn the_builtin_memory_share_tool_is_listed_only_when_the_agent_scopes_include_it() {
+async fn the_builtin_memory_share_tool_is_listed_only_when_effective_scopes_include_it() {
     let r = plain().await;
     let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
     assert!(!rpc(&r, list).await.body.contains("memory_share"));
-    // 에이전트 상한에 `memory.share`가 들어오면 보인다(스키마는 기억 ID 하나)
+    // 에이전트 상한에는 `memory.share`가 들어왔지만 이 실행의 고정 권한(`ctx.scopes`)에는 없다: 목록에 나오지 않고 호출도 거절된다
     let scopes = ["run", "echo.use", "echo.drop", "memory.share"];
     r.catalog.publish(
         snapshot("personal", "r1")
@@ -253,6 +254,28 @@ async fn the_builtin_memory_share_tool_is_listed_only_when_the_agent_scopes_incl
             .tool("main", "memory.share", tool(Risk::Read, &["echo.use"]))
             .build(),
     );
+    assert!(
+        !tool_names(&rpc(&r, list).await.body).contains(&"memory_share".to_owned()),
+        "실행의 고정 스코프에 없으면 내장 도구도 목록에 나오지 않는다"
+    );
+    // 호출은 브로커의 기억 공유 경로로 간다: 이 실행의 고정 권한에는 스코프가 없어 거절되고, 도구 서버는 부르지 않는다
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_share","arguments":{"id":"m1"},"_meta":{"claudecode/toolUseId":"toolu_share1"}}}"#;
+    let reply = rpc(&r, call).await;
+    assert!(
+        reply.body.contains(r#"\"text\":\"denied\""#) || reply.body.contains(r#""text":"denied""#),
+        "{}",
+        reply.body
+    );
+    assert!(r.runner.jobs().is_empty());
+    // 실행의 고정 권한에도 `memory.share`가 들어오면 목록에 한 번만 보인다(스키마는 기억 ID 하나)
+    r.ledger.add_run(run_context(
+        "personal",
+        "r1",
+        1,
+        "local:owner",
+        "main",
+        &scopes,
+    ));
     let reply = rpc(&r, list).await;
     let value: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
     let tools = value["result"]["tools"].as_array().unwrap();
@@ -268,15 +291,6 @@ async fn the_builtin_memory_share_tool_is_listed_only_when_the_agent_scopes_incl
         .expect("memory_share");
     assert_eq!(share["inputSchema"]["required"], serde_json::json!(["id"]));
     assert_eq!(share["inputSchema"]["additionalProperties"], false);
-    // 호출은 브로커의 기억 공유 경로로 간다: 이 실행의 고정 권한에는 스코프가 없어 거절되고, 도구 서버는 부르지 않는다
-    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_share","arguments":{"id":"m1"},"_meta":{"claudecode/toolUseId":"toolu_share1"}}}"#;
-    let reply = rpc(&r, call).await;
-    assert!(
-        reply.body.contains(r#"\"text\":\"denied\""#) || reply.body.contains(r#""text":"denied""#),
-        "{}",
-        reply.body
-    );
-    assert!(r.runner.jobs().is_empty());
 }
 
 /// 도구 사용마다 처음 보는 순서대로 `c-<번호>`를 주는 원천(런타임이 체크포인트에 남기는 매핑을 흉내 낸다).
@@ -407,7 +421,7 @@ async fn the_schedule_tools_are_listed_only_for_the_scopes_the_agent_holds_and_t
             .iter()
             .any(|n| n.starts_with("schedule_"))
     );
-    // 에이전트 스코프에 create·list만 있다: 그 둘만 보이고 cancel·deliver는 보이지 않는다
+    // 에이전트·실행 스코프에 create·list만 있다: 그 둘만 보이고 cancel·deliver는 보이지 않는다
     let scopes = ["run", "echo.use", "schedule.create", "schedule.list"];
     r.catalog.publish(
         snapshot("personal", "r1")
@@ -419,6 +433,14 @@ async fn the_schedule_tools_are_listed_only_for_the_scopes_the_agent_holds_and_t
             .tool("main", "schedule.create", tool(Risk::Read, &["echo.use"]))
             .build(),
     );
+    r.ledger.add_run(run_context(
+        "personal",
+        "r1",
+        1,
+        "local:owner",
+        "main",
+        &scopes,
+    ));
     let names = tool_names(&rpc(&r, list).await.body);
     assert_eq!(
         names.iter().filter(|n| n.starts_with("schedule_")).count(),
@@ -483,4 +505,96 @@ async fn a_schedule_created_through_the_relay_goes_through_the_broker() {
     let cancel = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"schedule_cancel","arguments":{"id":"sched-001"},"_meta":{"claudecode/toolUseId":"toolu_sc3"}}}"#;
     assert!(rpc(&r, cancel).await.body.contains("denied"));
     assert!(r.runner.jobs().is_empty(), "도구 서버를 거치지 않는다");
+}
+
+#[tokio::test]
+async fn tools_list_filters_skills_and_builtins_by_effective_scopes_and_agent_ceiling() {
+    let r = plain().await;
+    let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let all = ["run", "echo.use", "echo.drop", "memory.share"];
+    // 에이전트 정책 상한(`policy.agents["main"]`)이 `echo.drop`·`memory.share`를 제외한다
+    r.catalog.publish(
+        snapshot("personal", "r1")
+            .role("owner", &all)
+            .member("local:owner", &["owner"])
+            .policy_scopes(&all)
+            .agent_limit("main", &["run", "echo.use"])
+            .tool("main", "echo.say", tool(Risk::Read, &["echo.use"]))
+            .tool(
+                "main",
+                "echo.drop",
+                tool(Risk::Irreversible, &["echo.drop"]),
+            )
+            .build(),
+    );
+    r.ledger.add_run(run_context(
+        "personal",
+        "r1",
+        1,
+        "local:owner",
+        "main",
+        &all,
+    ));
+    assert_eq!(tool_names(&rpc(&r, list).await.body), ["echo_say"]);
+    // 상한을 풀고 대신 `ctx.scopes`를 좁혀도 같은 결과다
+    r.catalog.publish(
+        snapshot("personal", "r1")
+            .role("owner", &all)
+            .member("local:owner", &["owner"])
+            .policy_scopes(&all)
+            .tool("main", "echo.say", tool(Risk::Read, &["echo.use"]))
+            .tool(
+                "main",
+                "echo.drop",
+                tool(Risk::Irreversible, &["echo.drop"]),
+            )
+            .build(),
+    );
+    r.ledger.add_run(run_context(
+        "personal",
+        "r1",
+        1,
+        "local:owner",
+        "main",
+        &["run", "echo.use"],
+    ));
+    assert_eq!(tool_names(&rpc(&r, list).await.body), ["echo_say"]);
+    // 멤버에서 제거되면 어떤 도구도 목록에 나오지 않는다
+    r.catalog.publish(
+        snapshot("personal", "r1")
+            .role("owner", &all)
+            .policy_scopes(&all)
+            .tool("main", "echo.say", tool(Risk::Read, &["echo.use"]))
+            .build(),
+    );
+    assert!(tool_names(&rpc(&r, list).await.body).is_empty());
+    // 슈퍼 관리자 전용 도구는 슈퍼 관리자이면서 실효 스코프(에이전트 상한 포함)에 들 때만 보인다
+    let manage = ["run", "echo.use", "skill.inspect", "skill.create"];
+    let with_manage = |admin: bool| {
+        let mut b = snapshot("personal", "r1")
+            .role("owner", &manage)
+            .member("local:owner", &["owner"])
+            .policy_scopes(&manage)
+            .agent_limit("main", &["run", "echo.use", "skill.inspect"])
+            .tool("main", "echo.say", tool(Risk::Read, &["echo.use"]));
+        if admin {
+            b = b.super_admin("local:owner");
+        }
+        b.build()
+    };
+    r.ledger.add_run(run_context(
+        "personal",
+        "r1",
+        1,
+        "local:owner",
+        "main",
+        &manage,
+    ));
+    r.catalog.publish(with_manage(false));
+    assert_eq!(tool_names(&rpc(&r, list).await.body), ["echo_say"]);
+    r.catalog.publish(with_manage(true));
+    assert_eq!(
+        tool_names(&rpc(&r, list).await.body),
+        ["echo_say", "skill_inspect"]
+    );
 }

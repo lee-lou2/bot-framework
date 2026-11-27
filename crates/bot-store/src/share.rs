@@ -4,7 +4,7 @@
 //! 일반 `CallLedger::start`는 이 도구를 거절한다.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     calls::{fence, lock_call, lock_root_shared, phase_of, risk_str, tree_flagged},
     codec::*,
     db::{R, Store},
@@ -124,17 +124,17 @@ impl Store {
         .bind(&expected.nonce.0)
         .execute(&mut *tx)
         .await?;
-        let mut entry = Entry::new(
+        let mut entry = OwnedEntry::new(
+            &run.profile,
             &principal,
             "memory.share",
             &id.0,
             if shared { "shared" } else { "already_shared" },
         );
         entry.args = Some(fingerprint);
-        audit::append(&mut tx, &run.profile, &entry).await?;
-        let mut done = Entry::new(&principal, "call.done", &s.call.0, "done");
+        let mut done = OwnedEntry::new(&run.profile, &principal, "call.done", &s.call.0, "done");
         done.args = Some(to32(call_hash)?);
-        audit::append(&mut tx, &run.profile, &done).await?;
+        audit::append_many(&mut tx, &[entry, done]).await?;
         tx.commit().await?;
         Ok(id)
     }

@@ -250,3 +250,28 @@ fn missing_manager_fails_closed_with_unavailable() {
     let res = w.call_on(&bare, "r-admin", 1, "c1", SKILL_INSPECT_TOOL, "{}");
     assert!(matches!(res, Err(Error::Unavailable)), "{res:?}");
 }
+
+#[test]
+fn rate_limited_manage_call_returns_rate_limited() {
+    let w = World::with(cfg_with_rate(60, 1, 4));
+    w.publish(
+        base("r1")
+            .role("owner", &MANAGE_SCOPES)
+            .policy_scopes(&MANAGE_SCOPES)
+            .super_admin("local:owner")
+            .build(),
+    );
+    w.ledger.add_run(run_context(
+        "personal",
+        "r-admin",
+        1,
+        "local:owner",
+        "main",
+        &MANAGE_SCOPES,
+    ));
+    let manager = Arc::new(FakeManager::new());
+    let broker = w.reboot().with_manager(manager);
+    done(w.call_on(&broker, "r-admin", 1, "c1", SKILL_INSPECT_TOOL, "{}"));
+    let limited = w.call_on(&broker, "r-admin", 1, "c2", SKILL_INSPECT_TOOL, "{}");
+    assert!(matches!(limited, Err(Error::RateLimited)), "{limited:?}");
+}

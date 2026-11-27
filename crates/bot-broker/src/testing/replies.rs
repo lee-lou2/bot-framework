@@ -110,9 +110,7 @@ pub struct MemReplies {
     notices: Mutex<Vec<(RunId, String)>>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::lock;
 
 impl MemReplies {
     /// 소유자가 이 run의 전송 카드를 이미 거절했거나 소비 전에 철회했는가(저장된 결정).

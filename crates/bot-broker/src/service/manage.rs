@@ -16,7 +16,6 @@ use crate::{
     classify::classify,
     json::parse,
     resolve::Resolved,
-    scope::authorize,
     text::json_quote,
 };
 use bot_core::{
@@ -26,6 +25,7 @@ use bot_core::{
     ledger::{CallPhase, Outcome, StartCall},
     manage::{ManageCall, ManageError},
     port::Error,
+    scope::authorize,
     state::Risk,
 };
 use serde_json::Value;
@@ -196,7 +196,7 @@ impl BrokerService {
         let _slot = self
             .limiter
             .admit(&flow.attempt.profile, &flow.ctx.principal)
-            .map_err(|_| Self::limited())?;
+            .map_err(|_| Error::RateLimited)?;
         let class = classify(
             &flow.resolved.tool,
             &flow.snapshot.policy.approve,

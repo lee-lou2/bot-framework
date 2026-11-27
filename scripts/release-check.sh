@@ -215,7 +215,10 @@ step_clean() {
 
 step_fmt() { x cargo fmt --all -- --check; }
 
-step_clippy() { x cargo clippy --workspace --all-targets --locked -- -D warnings; }
+step_clippy() {
+  x cargo clippy --workspace --all-targets --locked -- -D warnings &&
+    x cargo clippy -p bot-cli --bin bot --locked -- -D warnings
+}
 
 # 공개 직전에는 PostgreSQL 시험을 건너뛰고 통과할 수 없다: DB가 없거나 연결할 수 없으면 실패한다. 주소는 출력하지 않는다. 통과하면 시험이 DB를 필수로 쓰게 한다.
 require_database() {

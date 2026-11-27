@@ -1,6 +1,7 @@
 //! Slack 시험 공용 조립: 가짜 Slack 서버·메모리 포트·합성 프로필.
 #![allow(dead_code)]
 pub mod events;
+pub mod ux;
 
 use bot_core::profile::Adapter;
 use bot_gateway::{

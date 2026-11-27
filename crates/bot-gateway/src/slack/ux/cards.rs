@@ -198,16 +198,13 @@ pub(super) fn can_stop(
     actor: &PrincipalId,
     requester: &PrincipalId,
 ) -> bool {
-    if actor == requester {
-        return true;
-    }
-    snapshot
-        .and_then(|s| s.members.get(actor))
-        .is_some_and(|roles| {
-            roles
-                .iter()
-                .any(|r| matches!(r.as_str(), "admin" | "owner"))
-        })
+    let Some(roles) = snapshot.and_then(|s| s.members.get(actor)) else {
+        return false;
+    };
+    actor == requester
+        || roles
+            .iter()
+            .any(|r| matches!(r.as_str(), "admin" | "owner"))
 }
 
 #[cfg(test)]
@@ -295,5 +292,27 @@ mod tests {
             describe_progress(&cancelling, 5).1.as_deref(),
             Some("중단하고 있어요")
         );
+    }
+
+    #[test]
+    fn can_stop_requires_current_membership_even_for_the_requester() {
+        let mut snap = crate::testing::profile("personal")
+            .member("slack:home/U1", &["member"])
+            .member("slack:home/U2", &["admin"])
+            .member("slack:home/U3", &["owner"])
+            .member("slack:home/U4", &["member"])
+            .build();
+        let u1 = PrincipalId("slack:home/U1".into());
+        let u2 = PrincipalId("slack:home/U2".into());
+        let u3 = PrincipalId("slack:home/U3".into());
+        let u4 = PrincipalId("slack:home/U4".into());
+        assert!(can_stop(Some(&snap), &u1, &u1));
+        assert!(can_stop(Some(&snap), &u2, &u1));
+        assert!(can_stop(Some(&snap), &u3, &u1));
+        assert!(!can_stop(Some(&snap), &u4, &u1));
+        // 스냅숏이 없거나 요청자가 멤버에서 철회되면 본인이어도 중단할 수 없다
+        assert!(!can_stop(None, &u1, &u1));
+        std::sync::Arc::make_mut(&mut snap).members.remove(&u1);
+        assert!(!can_stop(Some(&snap), &u1, &u1));
     }
 }

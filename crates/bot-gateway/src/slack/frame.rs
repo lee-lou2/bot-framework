@@ -286,19 +286,17 @@ fn parse_reaction(payload: &Value) -> Frame {
 
 fn parse_stop_requested(payload: &Value) -> Frame {
     let event = &payload["event"];
-    let (Some(team), Some(channel), Some(thread_ts)) = (
+    let (Some(team), Some(channel), Some(thread_ts), Some(user)) = (
         text(&payload["team_id"]),
         text(&event["channel"]).or_else(|| text(&event["channel_id"])),
         text(&event["thread_ts"]),
+        text(&event["user"]).or_else(|| text(&event["user_id"])),
     ) else {
         return Frame::Ignored;
     };
     if !ts_ok(&thread_ts) {
         return Frame::Ignored;
     }
-    let user = text(&event["user"])
-        .or_else(|| text(&event["user_id"]))
-        .unwrap_or_default();
     Frame::StopRequested(StopRequested {
         team,
         channel,

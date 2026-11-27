@@ -6,7 +6,7 @@
 //! 잠금 순서: run → 호출 → 승인 → 감사 head(늘 마지막). 만료 청소(`expire_approvals`)도 run마다 이 순서다(승인을 먼저 잠그거나 감사 head를 쥔 채 다음 run을 잠그지 않는다).
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, Entry, OwnedEntry},
     calls::{lock_call, risk_from},
     codec::*,
     db::{R, Store, Tx, ms_to_time},
@@ -286,15 +286,16 @@ impl Store {
             tx.rollback().await?;
             return Ok(());
         }
+        // 잠금 순서: run → 호출 → 승인 → 감사 head
         lock_run_for(&mut tx, &seen).await?;
-        let row = lock_approval(&mut tx, &nonce.0).await?;
         let call_at = Attempt {
-            profile: ProfileId(row.get("profile")),
-            run: RunId(row.get("run")),
+            profile: ProfileId(seen.get("profile")),
+            run: RunId(seen.get("run")),
             claim: None,
-            generation: Generation(row.get::<i64, _>("generation") as u64),
+            generation: Generation(seen.get::<i64, _>("generation") as u64),
         };
-        let call = lock_call(&mut tx, &call_at, &CallId(row.get("call"))).await?;
+        let call = lock_call(&mut tx, &call_at, &CallId(seen.get("call"))).await?;
+        let row = lock_approval(&mut tx, &nonce.0).await?;
         let pointed = matches!(crate::calls::record_of(&call)?.phase,
             bot_core::ledger::CallPhase::Open { approval: Some(ref n) } if n == nonce);
         match state_of(&row.get::<String, _>("state"))? {
@@ -414,27 +415,26 @@ impl Store {
         }
         gone.sort();
         wake_waiters(&mut tx, profile, run).await?;
-        for nonce in &gone {
-            audit::append(
-                &mut tx,
-                profile,
-                &Entry::new("system", "approval.expire", nonce, "expired"),
-            )
-            .await?;
-        }
+        let audits: Vec<OwnedEntry> = gone
+            .into_iter()
+            .map(|nonce| OwnedEntry::new(profile, "system", "approval.expire", nonce, "expired"))
+            .collect();
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(())
     }
 }
 
 /// 리스 만료 인계: 옛 세대가 연 승인은 모두 무효다(옛 버튼 거절). 호출자가 run을 잠갔다.
-pub(crate) async fn supersede_generation(
+/// 감사 항목은 `audits`에 모아 호출자가 커밋 직전에 한 번에 잇는다.
+pub(crate) async fn supersede_generation_into(
     tx: &mut Tx<'_>,
     profile: &str,
     run: &str,
     generation: i64,
+    audits: &mut Vec<OwnedEntry>,
 ) -> R<()> {
-    let gone = sqlx::query(
+    let mut gone: Vec<String> = sqlx::query_scalar(
         "update bot_approvals set state = 'superseded'
          where profile = $1 and run = $2 and generation <= $3 and state in ('pending', 'approved') returning nonce",
     )
@@ -443,18 +443,15 @@ pub(crate) async fn supersede_generation(
     .bind(generation)
     .fetch_all(&mut **tx)
     .await?;
-    for row in gone {
-        audit::append(
-            tx,
+    gone.sort();
+    for nonce in gone {
+        audits.push(OwnedEntry::new(
             profile,
-            &Entry::new(
-                "system",
-                "approval.supersede",
-                &row.get::<String, _>("nonce"),
-                "owner_lost",
-            ),
-        )
-        .await?;
+            "system",
+            "approval.supersede",
+            nonce,
+            "owner_lost",
+        ));
     }
     Ok(())
 }

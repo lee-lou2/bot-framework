@@ -32,7 +32,8 @@ impl HttpsUpstream {
         Self::build("https", MAX_BODY)
     }
 
-    /// 시험 전용: 로컬 가짜 서버(`http`)로 보낸다. 운영 조립은 이 길을 쓰지 않는다.
+    /// 시험 전용: 로컬 가짜 서버(`http`)로 보낸다. 운영 빌드에는 포함하지 않는다.
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn over_http(max_body: usize) -> Result<Self, String> {
         Self::build("http", max_body)

@@ -144,7 +144,7 @@ fn session_error(error: Error) -> SessionError {
         Error::Stale | Error::Denied | Error::Missing => SessionError::Lost,
         Error::Conflict => SessionError::Permanent("checkpoint_conflict"),
         Error::Invalid => SessionError::Permanent("invalid_checkpoint"),
-        Error::Unavailable => SessionError::Unavailable,
+        Error::Unavailable | Error::RateLimited => SessionError::Unavailable,
     }
 }
 
