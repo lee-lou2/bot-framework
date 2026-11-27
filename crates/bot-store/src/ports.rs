@@ -189,6 +189,7 @@ impl ActiveRevisions for Store {
             let extra = Extra {
                 prepared: None,
                 grants: &[],
+                sync_grants: true,
             };
             self.replace_active(expected, next, profiles, seeds, schedules, extra)
                 .await
@@ -209,6 +210,7 @@ impl ActiveRevisions for Store {
             let extra = Extra {
                 prepared: Some(&prepared),
                 grants: &[],
+                sync_grants: true,
             };
             self.replace_active(expected, next, profiles, seeds, schedules, extra)
                 .await
@@ -229,9 +231,31 @@ impl ActiveRevisions for Store {
             let extra = Extra {
                 prepared: Some(&plan.prepared),
                 grants: &plan.grants,
+                sync_grants: true,
             };
             self.replace_active(expected, next, profiles, seeds, schedules, extra)
                 .await
+        })
+    }
+
+    fn replace_live(
+        &self,
+        expected: Option<Revision>,
+        next: Revision,
+        profiles: BTreeMap<ProfileId, Revision>,
+        seeds: Vec<MemorySeed>,
+        schedules: BTreeMap<ProfileId, Vec<TriggerSpec>>,
+        prepared: std::collections::BTreeSet<(ProfileId, Revision)>,
+    ) -> Reply<'_, ()> {
+        reply!(async move {
+            let extra = Extra {
+                prepared: Some(&prepared),
+                grants: &[],
+                sync_grants: false,
+            };
+            self.replace_active(expected, next, profiles, seeds, schedules, extra)
+                .await
+                .map(|_| ())
         })
     }
 }

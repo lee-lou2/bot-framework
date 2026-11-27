@@ -243,6 +243,7 @@ impl BrokerService {
             memory: Some((id.clone(), preview.text)),
             delivery: None,
             route: None,
+            card_args: None,
         };
         let pointer = match &record.phase {
             CallPhase::Done(_) => {

@@ -1,8 +1,8 @@
 //! 명령이 함께 쓰는 로딩: 호스트 등록부 → 프로필 집합 검증 → 입구 표 검사. 어느 단계든 실패하면 아무것도 시작하지 않는다.
 use crate::{
     host::{self, HostFile},
-    secrets::{env::EnvStore, keychain::KeychainStore, sops::SopsStore},
-    settings::{SecretsKind, Settings},
+    secrets::admin::SecretAdmin,
+    settings::Settings,
 };
 use bot_core::port::SecretStore;
 use bot_gateway::{
@@ -60,11 +60,12 @@ pub fn check_entrances(active: Active, host: &HostFile) -> Result<Routes, String
     Routes::build(active, &host.gateway, &resolve_uid).map_err(|e| e.to_string())
 }
 
+/// 설정한 보관소로 SecretAdmin(읽기·관리 쓰기·캐시 무효화 공유 핸들)을 만든다.
+pub fn secret_admin(settings: &Settings) -> Result<Arc<SecretAdmin>, String> {
+    SecretAdmin::from_settings(settings).map(Arc::new)
+}
+
 /// 설정한 보관소로 SecretStore를 만든다.
 pub fn secret_store(settings: &Settings) -> Result<Arc<dyn SecretStore>, String> {
-    Ok(match &settings.secrets {
-        SecretsKind::Env => Arc::new(EnvStore::from_process()),
-        SecretsKind::Keychain => Arc::new(KeychainStore::new()?),
-        SecretsKind::Sops(file) => Arc::new(SopsStore::new(file.clone())),
-    })
+    Ok(secret_admin(settings)?)
 }

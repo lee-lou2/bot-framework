@@ -314,6 +314,29 @@ impl Registry {
         Ok(next)
     }
 
+    /// 이미 검증한 새 집합을 통째로 바꿔 끼운다. 교체로 물러난 옛 스냅숏의 강한 참조를 돌려주므로,
+    /// 실행 중 런타임이 진행 중인 실행이 끝날 때까지 쥐고 있으면 `lookup`으로 계속 찾을 수 있다.
+    pub fn apply(&self, mut next: ProfileSet) -> (Arc<ProfileSet>, Vec<Arc<Snapshot>>) {
+        let _serial = lock(&self.reloads);
+        let mut current = self.current.write().unwrap_or_else(PoisonError::into_inner);
+        if next.revision == current.revision {
+            return (current.clone(), Vec::new());
+        }
+        let mut retired = lock(&self.retired);
+        retired.retain(|_, weak| weak.strong_count() > 0);
+        let mut displaced = Vec::new();
+        for old in current.active.values() {
+            if next.active.get(&old.id).map(|n| &n.revision) != Some(&old.revision) {
+                retired.insert((old.id.clone(), old.revision.clone()), Arc::downgrade(old));
+                displaced.push(old.clone());
+            }
+        }
+        next.generation = current.generation + 1;
+        let next = Arc::new(next);
+        *current = next.clone();
+        (next, displaced)
+    }
+
     /// 저장해 둔 묶음에서 다시 만든 옛 판본을 등록한다(재시작 뒤 진행 중 실행의 재개).
     /// 등록은 약한 참조라, 이 `Arc`를 쥔 동안만 `lookup`에 보인다.
     pub fn adopt(&self, snapshot: &Arc<Snapshot>) {

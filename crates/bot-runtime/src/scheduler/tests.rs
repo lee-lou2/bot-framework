@@ -542,6 +542,7 @@ fn the_schedule_set_comes_from_the_snapshots_cron_triggers() {
             PrincipalId("service:morning".into()),
             BTreeSet::from(["reader".to_owned()]),
         )]),
+        super_admins: BTreeSet::new(),
         policy: Policy {
             scopes: scopes(&["run", "calendar.read", "calendar.delete"]),
             agents: BTreeMap::new(),

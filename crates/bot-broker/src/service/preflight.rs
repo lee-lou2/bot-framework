@@ -129,6 +129,14 @@ impl Preflight for BrokerService {
                     self.parts.clock.now(),
                 ));
             }
+            if let Some(spec) = bot_core::builtin::manage_tool(&tool.0) {
+                let decl = spec.declaration();
+                return match self.parts.sealer.seal(&decl, &args) {
+                    Ok(_) => Ok(None),
+                    Err(Error::Invalid) => Ok(Some(CliRefusal::Invalid)),
+                    Err(error) => Err(error),
+                };
+            }
             let Some(declared) = find_tool(&pinned, &ctx.agent, &tool) else {
                 return Ok(Some(CliRefusal::UnknownTool));
             };

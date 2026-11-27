@@ -251,6 +251,7 @@ pub struct ProfileParts {
     pub model: String,
     pub roles: BTreeMap<String, BTreeSet<String>>,
     pub members: BTreeMap<PrincipalId, Member>,
+    pub super_admins: BTreeSet<PrincipalId>,
     pub bindings: BTreeMap<BindingId, Binding>,
     pub secrets: BTreeSet<String>,
     pub policy: Policy,

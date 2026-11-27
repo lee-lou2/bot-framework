@@ -26,7 +26,6 @@ use bot_broker::mcp::remote::Remote;
 use bot_gateway::host::{CliAccount, HostConfig};
 use bot_profile::{HostCatalog, SlackWorkspace};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -35,7 +34,10 @@ use std::{
 
 mod lists;
 
-use lists::{is_egress, private_egress_map, profile_map};
+use lists::{
+    bind_private_egress, bind_super_admins, is_egress, is_super_admin, private_egress_map,
+    profile_map,
+};
 
 const MAX_BYTES: u64 = 1024 * 1024;
 
@@ -102,6 +104,10 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         Some(value) => profile_map(&value, "egress", is_egress)?,
         None => BTreeMap::new(),
     };
+    let super_admins = match top.remove("super_admins") {
+        Some(value) => profile_map(&value, "super_admins", is_super_admin)?,
+        None => BTreeMap::new(),
+    };
     let private_egress = match top.remove("private_egress") {
         Some(value) => private_egress_map(&value)?,
         None => BTreeMap::new(),
@@ -128,6 +134,7 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
     Ok(HostFile {
         catalog: HostCatalog {
             tool_call_max_secs: Some(limits.tool_call_max_secs),
+            super_admins,
             ..catalog(
                 &gateway,
                 servers
@@ -170,21 +177,8 @@ impl HostFile {
         );
         // 도구 호출 시간 한도의 천장도 권한이다(천장을 바꾸면 활성화 사건). 기본 천장이면 지문이 그대로다.
         let base = crate::tool_limits::bind(base, &self.limits);
-        let base = if self.private_egress.is_empty() {
-            base
-        } else {
-            let mut hash = Sha256::new();
-            hash.update(b"bot-authority-private-egress-v1\0");
-            hash.update(base);
-            for (profile, routes) in &self.private_egress {
-                hash.update(profile.as_bytes());
-                hash.update(b"\0");
-                for ((host, port), addr) in routes {
-                    hash.update(format!("{host}:{port}={addr}\0").as_bytes());
-                }
-            }
-            hash.finalize().into()
-        };
+        let base = bind_private_egress(base, &self.private_egress);
+        let base = bind_super_admins(base, &self.catalog.super_admins);
         // 관측(OTLP 추적·로그·이슈 트래커) 설정도 권한이다: 어디로 무엇을 내보내는지가 바뀌거나 거두어지면 활성화 사건이라, 옛 설정으로 남은
         // 프로세스가 구판이 되어 내보내기 문이 닫힌다. 관측을 쓰지 않는 호스트는 지문이 그대로다.
         Ok(bot_admin::obs_fingerprint(base, &self.admin))
@@ -289,6 +283,7 @@ fn catalog(
             .collect(),
         egress,
         tool_call_max_secs: None,
+        super_admins: BTreeMap::new(),
     }
 }
 

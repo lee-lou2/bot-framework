@@ -2,7 +2,7 @@
 //!
 //! 호스트에서 계산하는 값: srt 실행 파일(`sandbox.srt.binary`, 내장 데모는 PATH의 `srt`)·작업 루트(`sandbox.srt.work_root`, 기본은
 //! 설치 폴더 옆 `work`)·srt가 쓰는 PATH(srt 폴더 + 시스템 기본)·도구가 읽지 못하는 곳(홈·프로필 루트·호스트 설정·비밀 파일·소켓·설치 기준).
-use super::{decide::InstalledOnly, guard::GuardedWire, watched::Watched};
+use super::{guard::GuardedWire, watched::Watched};
 use crate::{
     host::HostFile,
     install::{self, Installs},
@@ -25,7 +25,7 @@ use bot_gateway::active::ActiveCheck;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
@@ -87,50 +87,161 @@ pub(super) fn default_work(base: &Path) -> PathBuf {
     base.parent().unwrap_or(base).join("work")
 }
 
-/// 로컬 서버가 없는 호스트(원격 서버만)의 샌드박스: 아무것도 띄우지 않는다. 원격 서버는 샌드박스 없이 브로커가 직접 연결한다.
-struct NoSandbox;
+/// 로컬 서버가 처음에 없어도 실행 중 추가되면 `SrtSandbox`를 나중에 연결할 수 있는 동적 샌드박스 래퍼.
+/// 열기 전에는 아무것도 띄우지 않고(`Unavailable`), 열리면 기존 `SrtSandbox`에 그대로 위임한다.
+pub(super) struct DynamicSandbox {
+    inner: RwLock<Option<Arc<SrtSandbox>>>,
+}
 
-impl Sandbox for NoSandbox {
-    fn spawn(&self, _: SandboxSpec) -> Reply<'_, Process> {
-        Box::pin(std::future::ready(Err(Error::Unavailable)))
+impl DynamicSandbox {
+    fn empty() -> Self {
+        Self {
+            inner: RwLock::new(None),
+        }
     }
 
-    fn reap(&self, _: &str) -> Reply<'_, ()> {
-        Box::pin(std::future::ready(Ok(())))
+    fn new(srt: SrtSandbox) -> Self {
+        Self {
+            inner: RwLock::new(Some(Arc::new(srt))),
+        }
+    }
+
+    fn current(&self) -> Option<Arc<SrtSandbox>> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub(super) fn set(&self, srt: Arc<SrtSandbox>) {
+        *self.inner.write().unwrap_or_else(|e| e.into_inner()) = Some(srt);
+    }
+
+    pub(super) fn update_servers(&self, next: BTreeMap<String, ServerCommand>) {
+        if let Some(srt) = self.current() {
+            srt.update_servers(next);
+        }
     }
 }
 
-/// 도구 실행기와 그 설치본(쓰는 동안 설치본 사용 잠금을 쥔다). 서버가 없는 호스트는 실행기 없이(설치 판본 조회만) 만든다.
-/// `active`는 이 프로세스의 활성화 판본 확인이다: 원격 서버로 나가는 모든 요청 직전에 다시 확인한다(`GuardedWire`).
-/// 호스트 설정에서 만드는 실행기 설정. 호출 시간 한도의 천장은 `limits.tool_call_max_secs`다: 활성화 때 도구 선언을 대조했고, 복원한 옛 선언은 실행기가 보내기 전에 다시 대조한다.
-/// 선언하지 않은 도구의 호출 한도(60초)는 천장과 상관없다.
-fn runner_config(host: &HostFile) -> RunnerConfig {
-    RunnerConfig {
-        max_call_timeout: Duration::from_secs(u64::from(host.limits.tool_call_max_secs)),
-        ..RunnerConfig::default()
+impl Sandbox for DynamicSandbox {
+    fn spawn(&self, spec: SandboxSpec) -> Reply<'_, Process> {
+        let srt = self.current();
+        Box::pin(async move {
+            match srt {
+                Some(srt) => srt.spawn(spec).await,
+                None => Err(Error::Unavailable),
+            }
+        })
+    }
+
+    fn effects_via_proxy(&self) -> bool {
+        self.current().is_some_and(|srt| srt.effects_via_proxy())
+    }
+
+    fn admit(&self, server: &str, image: &str) -> Result<(), Error> {
+        match self.current() {
+            Some(srt) => srt.admit(server, image),
+            None => Err(Error::Denied),
+        }
+    }
+
+    fn reap(&self, owner: &str) -> Reply<'_, ()> {
+        let srt = self.current();
+        let owner = owner.to_owned();
+        Box::pin(async move {
+            match srt {
+                Some(srt) => srt.reap(&owner).await,
+                None => Ok(()),
+            }
+        })
     }
 }
 
-pub(super) async fn build(
-    host: &HostFile,
-    settings: &Settings,
-    secrets: &Arc<Watched>,
-    effects: Arc<dyn EffectJournal>,
-    uid: u32,
-    active: Arc<dyn ActiveCheck>,
-) -> Result<(Arc<dyn ToolRunner>, Installs), String> {
-    if host.servers.is_empty() && host.remote_servers.is_empty() {
-        return Ok((
-            Arc::new(InstalledOnly(BTreeMap::new())),
-            Installs::default(),
-        ));
+/// 실행 중 MCP 추가·제거 뒤 호스트 등록부·샌드박스 서버 표·설치 잠금을 함께 갱신하는 핸들.
+#[derive(Clone)]
+pub(super) struct LiveRunner {
+    runner: Arc<McpRunner>,
+    sandbox: Arc<DynamicSandbox>,
+    installs: Arc<Mutex<Vec<Installs>>>,
+}
+
+impl LiveRunner {
+    pub(super) fn tool_runner(&self) -> Arc<dyn ToolRunner> {
+        self.runner.clone()
     }
-    let (installs, sandbox): (Installs, Arc<dyn Sandbox>) = if host.servers.is_empty() {
-        (Installs::default(), Arc::new(NoSandbox))
-    } else {
-        let (installs, sandbox) = local_sandbox(host, settings, uid).await?;
-        (installs, Arc::new(sandbox))
-    };
+
+    /// 새 호스트 설정에 맞춰 로컬 서버 설치·샌드박스 갱신까지 준비한다(실패해도 기존 실행 상태는 바뀌지 않는다).
+    pub(super) async fn prepare_update(
+        &self,
+        host: &HostFile,
+        settings: &Settings,
+        uid: u32,
+    ) -> Result<PreparedUpdate, String> {
+        let (installs, new_sandbox, commands) = if host.servers.is_empty() {
+            (Installs::default(), None, BTreeMap::new())
+        } else if self.sandbox.current().is_some() {
+            refuse_required_state(&host.servers)?;
+            let base = install::default_base(
+                settings.installs.as_deref(),
+                std::env::var("HOME").ok().as_deref(),
+            )?;
+            let installs = install::install(&host.servers, &base, uid)?;
+            let commands = server_commands(host, &installs);
+            (installs, None, commands)
+        } else {
+            let (installs, srt) = local_sandbox(host, settings, uid).await?;
+            let commands = server_commands(host, &installs);
+            (installs, Some(Arc::new(srt)), commands)
+        };
+        let registry = host_registry(host, &installs)?;
+        Ok(PreparedUpdate {
+            registry,
+            commands,
+            new_sandbox,
+            installs,
+        })
+    }
+
+    /// 준비된 갱신을 즉시 적용한다(비동기 경계 없이 원자적으로 교체).
+    pub(super) fn apply(&self, update: PreparedUpdate) {
+        if let Some(srt) = update.new_sandbox {
+            self.sandbox.set(srt);
+        } else {
+            self.sandbox.update_servers(update.commands);
+        }
+        self.runner.update_host(update.registry);
+        self.installs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(update.installs);
+    }
+}
+
+pub(super) struct PreparedUpdate {
+    registry: HostRegistry,
+    commands: BTreeMap<String, ServerCommand>,
+    new_sandbox: Option<Arc<SrtSandbox>>,
+    installs: Installs,
+}
+
+fn server_commands(host: &HostFile, installs: &Installs) -> BTreeMap<String, ServerCommand> {
+    host.servers
+        .keys()
+        .filter_map(|alias| {
+            installs.get(alias).map(|installed| {
+                (
+                    alias.clone(),
+                    ServerCommand {
+                        argv: installed.argv.clone(),
+                        revision: installed.revision.0.clone(),
+                        install_dir: installed.dir.clone(),
+                        state: installed.state,
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+fn host_registry(host: &HostFile, installs: &Installs) -> Result<HostRegistry, String> {
     let egress_caps: BTreeMap<ProfileId, Vec<HostPort>> = host
         .catalog
         .egress
@@ -156,33 +267,61 @@ pub(super) async fn build(
             .iter()
             .map(|(alias, remote)| (alias.clone(), remote.revision())),
     );
-    let mut runner = McpRunner::new(
+    Ok(HostRegistry {
+        servers,
+        egress_caps,
+        private_egress: host
+            .private_egress
+            .iter()
+            .map(|(profile, routes)| (ProfileId(profile.clone()), routes.clone()))
+            .collect(),
+        remote: host.remote_servers.clone(),
+    })
+}
+
+/// 호스트 설정에서 만드는 실행기 설정. 호출 시간 한도의 천장은 `limits.tool_call_max_secs`다: 활성화 때 도구 선언을 대조했고, 복원한 옛 선언은 실행기가 보내기 전에 다시 대조한다.
+/// 선언하지 않은 도구의 호출 한도(60초)는 천장과 상관없다.
+fn runner_config(host: &HostFile) -> RunnerConfig {
+    RunnerConfig {
+        max_call_timeout: Duration::from_secs(u64::from(host.limits.tool_call_max_secs)),
+        ..RunnerConfig::default()
+    }
+}
+
+pub(super) async fn build(
+    host: &HostFile,
+    settings: &Settings,
+    secrets: &Arc<Watched>,
+    effects: Arc<dyn EffectJournal>,
+    uid: u32,
+    active: Arc<dyn ActiveCheck>,
+) -> Result<LiveRunner, String> {
+    let (installs, sandbox) = if host.servers.is_empty() {
+        (Installs::default(), Arc::new(DynamicSandbox::empty()))
+    } else {
+        let (installs, srt) = local_sandbox(host, settings, uid).await?;
+        (installs, Arc::new(DynamicSandbox::new(srt)))
+    };
+    let registry = host_registry(host, &installs)?;
+    let wire = super::remote::ReqwestWire::new(Arc::new(SystemResolver))?;
+    let runner = McpRunner::new(
         RunnerDeps {
-            sandbox,
+            sandbox: sandbox.clone(),
             secrets: secrets.clone(),
             effects,
             resolver: Arc::new(SystemResolver),
             connector: Arc::new(TcpConnector),
             entropy: Arc::new(OsEntropy),
         },
-        HostRegistry {
-            servers,
-            egress_caps,
-            private_egress: host
-                .private_egress
-                .iter()
-                .map(|(profile, routes)| (ProfileId(profile.clone()), routes.clone()))
-                .collect(),
-            remote: host.remote_servers.clone(),
-        },
+        registry,
         runner_config(host),
-    );
-    // 원격 서버가 있으면 전송을 붙인다(연결마다 이름 풀이 결과 전체를 검사하고, 요청마다 활성 판본을 다시 확인한다)
-    if !host.remote_servers.is_empty() {
-        let wire = super::remote::ReqwestWire::new(Arc::new(SystemResolver))?;
-        runner = runner.with_wire(Arc::new(GuardedWire::new(Arc::new(wire), active)));
-    }
-    Ok((Arc::new(runner), installs))
+    )
+    .with_wire(Arc::new(GuardedWire::new(Arc::new(wire), active)));
+    Ok(LiveRunner {
+        runner: Arc::new(runner),
+        sandbox,
+        installs: Arc::new(Mutex::new(vec![installs])),
+    })
 }
 
 /// 로컬 서버의 읽기 전용 설치본과 srt 샌드박스.

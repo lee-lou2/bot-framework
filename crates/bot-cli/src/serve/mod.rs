@@ -10,6 +10,7 @@ mod decide;
 mod gateway;
 mod grants;
 mod guard;
+mod manage;
 mod models;
 mod quiesce;
 pub mod remote;
@@ -32,7 +33,8 @@ pub(crate) use self::runner::refuse_required_state;
 use crate::{
     cli::Role,
     host::HostFile,
-    load::{check_entrances, load, secret_store},
+    load::{check_entrances, load, secret_admin},
+    secrets::admin::SecretAdmin,
     settings::Settings,
 };
 use bot_core::{
@@ -50,7 +52,11 @@ use bot_profile::ProfileSet;
 use bot_runtime::schedule_set;
 use bot_store::{Config, Store};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, io::IsTerminal, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io::IsTerminal,
+    sync::{Arc, RwLock},
+};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -198,6 +204,8 @@ fn watch_signals(stop: CancellationToken) {
 pub struct Overrides {
     pub claude: Option<claude::ClaudeParts>,
     pub secrets: Option<Arc<dyn SecretStore>>,
+    /// 시험 전용: 가짜 SOPS 실행 파일을 붙인 `SecretAdmin`을 직접 넘길 때 쓴다.
+    pub secret_admin: Option<Arc<SecretAdmin>>,
     pub stop: Option<CancellationToken>,
     /// 가짜 Slack 서버 주소(시험 전용). 제품 `run`은 항상 `None`이라 실제 Slack으로 간다.
     pub slack_base: Option<String>,
@@ -251,11 +259,19 @@ pub async fn run_with(
     // 그쪽이 `install::install`로 읽기 전용 설치본을 만들어 같은 판본으로 실행한다.
     let revisions = crate::install::measure_all(&loaded.host.servers, &loaded.host.remote_servers)?;
     // 자격 보관소와 관측: 모든 역할이 같은 수집기(Exporter)를 쓴다(단독 gateway도). 잘못된 수집기 설정이면 여기서 멈춘다.
-    let secrets = match overrides.secrets {
-        Some(secrets) => secrets,
-        None => secret_store(settings)?,
+    let secrets_admin = match (overrides.secret_admin, overrides.secrets) {
+        (Some(admin), _) => admin,
+        (None, Some(secrets)) => Arc::new(SecretAdmin::custom(secrets)),
+        (None, None) => secret_admin(settings)?,
     };
-    let observe = Arc::new(trace::start(&loaded.host, &loaded.registry, secrets).await?);
+    let observe = Arc::new(
+        trace::start(
+            &loaded.host,
+            &loaded.registry,
+            secrets_admin.clone() as Arc<dyn SecretStore>,
+        )
+        .await?,
+    );
     // 이후 모든 역할은 값을 가림 장치에 더해 주는 보관소를 쓴다(키를 교체해도 새 값이 쓰이기 전에 가려진다)
     let secrets = observe.secrets.clone();
     // 2) 저장소: 접속·마이그레이션, 그리고 활성 판본 결정(읽기만 — 거절이면 여기서 끝난다)
@@ -291,14 +307,15 @@ pub async fn run_with(
         &bot_profile::Limits::default(),
     )
     .await?;
-    // 외부 요청을 받는 역할(gateway·admin)과 승인 결정 브로커는 이 활성화 판본에 묶은 저장소 핸들을 쓴다 —
-    // 새 접수·승인·발송·관리 판정이 DB 커밋까지 같은 판본인지 확인받는다(교체와 같은 잠금). 판본 게시는 원래 핸들로 한다.
-    let fenced = Arc::new(store.for_activation(publication.revision.clone()));
+    // 외부 요청을 받는 역할(gateway·admin)과 승인 결정 브로커는 공유 활성 집합 판본에 묶은 저장소 핸들을 쓴다 —
+    // 실행 중 스킬·MCP 즉시 활성화가 일어나면 같은 프로세스의 모든 역할이 새 활성화 판본을 함께 본다. 판본 게시는 원래 핸들로 한다.
+    let live_revision = Arc::new(RwLock::new(publication.revision.clone()));
+    let fenced = Arc::new(store.for_live_activation(live_revision.clone()));
     let store = Arc::new(store);
     // 이 프로세스의 활성화 판본이 저장소의 활성 판본과 같은지 확인한다(구판 관리 응답·구판 워커를 닫는 근거)
-    let active: Arc<dyn ActiveCheck> = Arc::new(ActiveSet::new(
+    let active: Arc<dyn ActiveCheck> = Arc::new(ActiveSet::live(
         fenced.clone() as Arc<dyn ActiveRevisions>,
-        publication.revision.clone(),
+        live_revision.clone(),
     ));
     // 관측(OTLP 추적·로그·이슈 트래커)을 거두거나 바꾸면(설정이 활성화 지문에 든다) 옛 프로세스는 구판이 된다:
     // 구판의 내보내기 문을 닫아 큐에 남은 스팬·로그·이슈까지 옛 허락으로 더 내보내지 않는다.
@@ -318,10 +335,11 @@ pub async fn run_with(
         loaded.registry.clone() as Arc<dyn ProfileCatalog>,
         Arc::new(loaded.host.gateway.clone()),
     ));
+    let live_installed = decide::LiveInstalled::from_revisions(&revisions);
     let decisions = decide::broker(
         loaded.registry.clone(),
         fenced.clone(),
-        &revisions,
+        live_installed.clone(),
         observe.tracer(),
         routes.clone(),
     );
@@ -337,7 +355,6 @@ pub async fn run_with(
             secrets: secrets.clone(),
             uid: loaded.uid,
             stop: stop.clone(),
-            set_revision: publication.revision.clone(),
             decisions: decisions.clone(),
             tracer: observe.tracer(),
             slack_base: overrides.slack_base.clone(),
@@ -381,7 +398,11 @@ pub async fn run_with(
             registry: loaded.registry.clone(),
             // 활성화 판본에 묶은 핸들: 먼저 확인한 뒤 DB의 claim·도구 시작까지의 틈에 권한 설정이 바뀌어도 같은 DB 잠금 안에서 대조한다
             store: fenced.clone(),
+            raw_store: store.clone(),
+            live_revision: live_revision.clone(),
+            live_installed: live_installed.clone(),
             secrets: secrets.clone(),
+            secrets_admin: secrets_admin.clone(),
             observe: observe.clone(),
             uid: loaded.uid,
             stop: stop.clone(),

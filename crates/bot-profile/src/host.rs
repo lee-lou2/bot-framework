@@ -30,6 +30,8 @@ pub struct HostCatalog {
     pub remote_servers: BTreeMap<String, String>,
     /// 도구 호출 시간 한도의 천장(초, 호스트 `limits.tool_call_max_secs`). 없으면 기본 60초다. 도구의 실효 한도(선언 또는 기본 60초)가 이 값을 넘으면 활성화를 거절한다.
     pub tool_call_max_secs: Option<u32>,
+    /// 프로필 → 호스트가 허용하는 슈퍼 관리자 상한(신원 집합). 항목이 없으면 프로필 선언(`super_admins`)을 그대로 따른다.
+    pub super_admins: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl HostCatalog {
@@ -77,6 +79,14 @@ impl HostCatalog {
             Some(cap) => declared.intersection(cap).cloned().collect(),
             None => declared.clone(),
         }
+    }
+
+    /// 호스트가 이 프로필에 `super_admins` 상한을 둔 경우, 주어진 주체가 그 상한에 포함되는가.
+    /// 상한이 없는 프로필은 프로필 선언을 그대로 허용한다.
+    pub fn allows_super_admin(&self, profile: &str, principal: &str) -> bool {
+        self.super_admins
+            .get(profile)
+            .is_none_or(|allowed| allowed.contains(principal))
     }
 }
 

@@ -165,7 +165,7 @@ impl BrokerService {
                 class,
                 &flow.ctx.principal,
                 approver,
-                &flow.sealed.canonical,
+                flow.card_args.as_deref().unwrap_or(&flow.sealed.canonical),
                 flow.sealed.destination.as_ref(),
             ),
         };

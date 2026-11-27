@@ -120,6 +120,7 @@ struct Live {
 
 pub struct SrtSandbox {
     cfg: Arc<SrtConfig>,
+    servers: std::sync::RwLock<BTreeMap<String, ServerCommand>>,
     tools: Tools,
     entropy: Arc<dyn Entropy>,
     live: Arc<Mutex<HashMap<String, Live>>>,
@@ -193,8 +194,10 @@ impl SrtSandbox {
         }
         private_dir(&cfg.work_root).map_err(|_| Error::Unavailable)?;
         let real_bwrap = overlay::locate(std::env::consts::OS, &cfg.path);
+        let servers = std::sync::RwLock::new(cfg.servers.clone());
         let sandbox = Self {
             cfg: Arc::new(cfg),
+            servers,
             tools,
             entropy,
             live: Arc::default(),
@@ -237,18 +240,22 @@ impl SrtSandbox {
         let _ = std::fs::remove_file(meta_dir.join(format!("{name}.pid")));
     }
 
+    /// 실행 중 로컬 stdio MCP 서버 추가·제거 뒤 설치 명령 표를 원자적으로 교체한다.
+    pub fn update_servers(&self, next: BTreeMap<String, ServerCommand>) {
+        *self.servers.write().unwrap_or_else(|e| e.into_inner()) = next;
+    }
+
     /// 설치한 서버와 승인에 묶인 판본이 같고 srt가 실행할 수 있는 서버인가(상태 볼륨을 요구하면 거절).
-    fn admitted(&self, server: &str, image: &str) -> Result<&ServerCommand, Error> {
-        let found = self
-            .cfg
-            .servers
+    fn admitted(&self, server: &str, image: &str) -> Result<ServerCommand, Error> {
+        let servers = self.servers.read().unwrap_or_else(|e| e.into_inner());
+        let found = servers
             .get(server)
             .filter(|s| s.revision == image)
             .ok_or(Error::Denied)?;
         if !supports_state(found.state) {
             return Err(Error::Denied);
         }
-        Ok(found)
+        Ok(found.clone())
     }
 
     async fn start(&self, spec: SandboxSpec) -> Result<Process, Error> {

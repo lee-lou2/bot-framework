@@ -12,6 +12,7 @@ mod decide;
 mod deliver;
 mod exec;
 mod gate;
+mod manage;
 pub(crate) mod pass;
 pub mod preflight;
 mod route;
@@ -31,6 +32,7 @@ use bot_core::{
     command::*,
     id::*,
     ledger::CallLedger,
+    manage::ProfileManager,
     port::{AuditLog, Broker, EffectJournal, Error, MemoryStore, ModelCall, Reply},
     profile::ProfileCatalog,
     schedule::{ScheduleRoutes, ScheduledReplies, UserSchedules},
@@ -78,6 +80,8 @@ pub struct BrokerService {
     replies: Arc<dyn ScheduledReplies>,
     /// 같은 프로필의 호스트 등록부(명시 목적지를 정규 전송 경로로 확정한다). 붙이지 않으면 다른 수신자는 지정할 수 없고 전송하지도 않는다.
     routes: Option<Arc<dyn ScheduleRoutes>>,
+    /// 슈퍼 관리자 전용 런타임 스킬·MCP 관리기. 붙이지 않으면 `skill.*`·`mcp.*`는 `Unavailable`로 닫힌다.
+    manager: Option<Arc<dyn ProfileManager>>,
 }
 
 impl BrokerService {
@@ -90,7 +94,14 @@ impl BrokerService {
             schedules: Arc::new(schedule::NoSchedules),
             replies: Arc::new(deliver::NoReplies),
             routes: None,
+            manager: None,
         }
+    }
+
+    /// 슈퍼 관리자 전용 스킬·MCP 관리기를 붙인다. 붙이지 않으면 `skill.*`·`mcp.*`는 `Unavailable`이다.
+    pub fn with_manager(mut self, manager: Arc<dyn ProfileManager>) -> Self {
+        self.manager = Some(manager);
+        self
     }
 
     /// 대화에서 만든 예약 저장소를 붙인다. 붙이지 않으면 `schedule.create`·`schedule.list`·`schedule.cancel`은 `Unavailable`이고,

@@ -31,6 +31,11 @@ impl Watched {
         Self { inner, redactor }
     }
 
+    /// 런타임 관리기가 새 비밀을 암호화 저장하기 전에 가림 목록에 즉시 더한다.
+    pub fn register(&self, secret: &str) {
+        add_forms(&self.redactor, secret);
+    }
+
     /// 시험용: 가림 목록을 따로 보지 않는 역할 시험이 날 보관소 대신 넘긴다.
     #[cfg(test)]
     pub(super) fn plain(inner: Arc<dyn SecretStore>) -> Arc<Self> {

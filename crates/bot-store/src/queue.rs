@@ -149,7 +149,8 @@ impl Store {
             };
             let run = c.run;
             let reclaimed = c.state == "leased";
-            let pinned = self.activation.as_ref().map(|set| set.0.as_str());
+            let pinned_rev = self.pinned_revision();
+            let pinned = pinned_rev.as_ref().map(|set| set.0.as_str());
             let forgiven = reclaimed && !handover::spends_attempt(c.claim_set.as_deref(), pinned);
             let attempts = run.attempts + i32::from(reclaimed && !forgiven);
             let end = if run.cancel_requested {
@@ -226,7 +227,7 @@ impl Store {
         .bind(&self.cfg.worker)
         .bind(self.cfg.lease.as_millis() as i64)
         .bind(attempts)
-        .bind(self.activation.as_ref().map(|set| &set.0))
+        .bind(self.pinned_revision().map(|set| set.0))
         .fetch_one(&mut **tx)
         .await?;
         at.generation = Generation(generation as u64);
@@ -396,7 +397,7 @@ impl Store {
     /// 판단하므로 교체가 진행 중이면 커밋 뒤의 집합으로 판정한다. 고정하지 않은 핸들·같은 집합·게시된 집합이 없음은 `false`다(구판이 아니다).
     /// 잠금 순서: bot_active → (부모) → run → 감사 head.
     async fn superseded(&self, tx: &mut Tx<'_>) -> R<bool> {
-        let Some(pinned) = &self.activation else {
+        let Some(pinned) = self.pinned_revision() else {
             return Ok(false);
         };
         let current: Option<String> =

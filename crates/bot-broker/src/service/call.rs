@@ -52,6 +52,8 @@ pub(super) struct Flow {
     pub delivery: Option<String>,
     /// 다른 수신자로 가는 호출(수신자를 지정한 생성·예약 회신 전송)이면 그 정규 수신자. 카드를 열기 직전에 현재 등록부로 다시 본다.
     pub route: Option<DeliveryTarget>,
+    /// 승인 카드에 표시할 가림 인자 JSON(`mcp.add`처럼 비밀 값을 포함할 수 있는 호출). `None`이면 `sealed.canonical`을 쓴다.
+    pub card_args: Option<String>,
 }
 
 /// 호출이 가리키는 도구와 판정에 쓰는 두 판본.
@@ -195,6 +197,10 @@ impl BrokerService {
         if super::schedule::is_builtin(&req.tool.0) {
             return self.schedule_flow(req, note).await;
         }
+        // 슈퍼 관리자 전용 스킬·MCP 관리 도구(`skill.*`·`mcp.*`).
+        if bot_core::builtin::manage_tool(&req.tool.0).is_some() {
+            return self.manage_flow(req, note).await;
+        }
         let ToolCall {
             attempt,
             call,
@@ -314,6 +320,7 @@ impl BrokerService {
             memory: None,
             delivery: None,
             route: None,
+            card_args: None,
         };
         // 현재 권한: 저장된 결과·영수증을 돌려주기 전에도, 복구보다 먼저 확인한다(역할 철회 뒤 재호출).
         if let Err(denial) = authorize(

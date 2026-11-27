@@ -88,6 +88,7 @@ async fn an_admin_only_process_masks_a_key_rotated_after_it_started_within_the_r
     let overrides = Overrides {
         claude: None,
         secrets: Some(Arc::new(Rotating(shared.clone()))),
+        secret_admin: None,
         stop: Some(stop.clone()),
         slack_base: None,
         upstream: None,

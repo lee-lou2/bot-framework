@@ -6,6 +6,7 @@
 //! 바뀜) 새 일을 집지 않고 도구를 시작하지 않는다(`guard`). 이미 집은 run은 끝까지 한다.
 use super::{
     claude::{self, Claude, ClaudeParts},
+    decide::LiveInstalled,
     guard::{GuardedBroker, GuardedRuns, StoreHandback},
     models,
     quiesce::{Quiescer, StartedCalls},
@@ -13,8 +14,9 @@ use super::{
     trace::Observe,
     watched::Watched,
 };
-use crate::{host::HostFile, settings::Settings};
+use crate::{host::HostFile, secrets::admin::SecretAdmin, settings::Settings};
 use bot_core::{
+    id::Revision,
     ledger::CallLedger,
     port::{Broker, DelegationStore, MemoryStore, RunStore},
     profile::ProfileCatalog,
@@ -24,7 +26,10 @@ use bot_gateway::active::ActiveCheck;
 use bot_profile::Registry;
 use bot_runtime::{Delivery, Deps as RuntimeDeps, NoRelays, Relays, Worker, WorkerConfig};
 use bot_store::Store;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 use tokio::{sync::watch, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -43,8 +48,16 @@ pub struct Deps {
     pub settings: Settings,
     pub registry: Arc<Registry>,
     pub store: Arc<Store>,
+    /// 판본 교체 커밋용 원본 저장소 핸들(런타임 스킬·MCP 즉시 활성화)
+    pub raw_store: Arc<Store>,
+    /// 프로세스 내 공유 활성 집합 판본
+    pub live_revision: Arc<RwLock<Revision>>,
+    /// 결정 브로커와 공유하는 설치 판본 표
+    pub live_installed: LiveInstalled,
     /// 가림 장치를 거치는 보관소(`Observe.secrets`)만 받는다 — 날 보관소는 넘길 수 없다
     pub secrets: Arc<Watched>,
+    /// 읽기·관리 쓰기·캐시 무효화를 공유하는 비밀 관리자
+    pub secrets_admin: Arc<SecretAdmin>,
     pub observe: Arc<Observe>,
     /// 이 프로세스를 실행한 OS 사용자
     pub uid: u32,
@@ -89,7 +102,11 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         settings: &deps.settings,
         registry: deps.registry.clone(),
         store: deps.store.clone(),
+        raw_store: deps.raw_store.clone(),
+        live_revision: deps.live_revision.clone(),
+        live_installed: deps.live_installed.clone(),
         secrets: deps.secrets.clone(),
+        secrets_admin: deps.secrets_admin.clone(),
         tracer: deps.observe.tracer(),
         uid: deps.uid,
         routes: deps.routes.clone(),

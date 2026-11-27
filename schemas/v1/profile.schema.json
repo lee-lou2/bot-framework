@@ -77,6 +77,14 @@
       },
       "uniqueItems": true
     },
+    "super_admins": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
     "policy": {
       "type": "object",
       "properties": {

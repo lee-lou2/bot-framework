@@ -9,7 +9,7 @@ use bot_core::{
     port::{Error, Reply},
     profile::ActiveRevisions,
 };
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 pub trait ActiveCheck: Send + Sync {
     /// 이 프로세스의 집합이 저장소의 활성 집합과 같으면 Ok, 다르거나 아직 게시되지 않았으면 `Stale`,
@@ -17,14 +17,19 @@ pub trait ActiveCheck: Send + Sync {
     fn verify(&self) -> Reply<'_, ()>;
 }
 
-/// 시작할 때 검증한 프로필 집합의 판본을 저장소의 활성 판본과 견준다.
+/// 이 프로세스가 쓰는 프로필 집합의 판본을 저장소의 활성 판본과 견준다.
 pub struct ActiveSet {
     store: Arc<dyn ActiveRevisions>,
-    expected: Revision,
+    expected: Arc<RwLock<Revision>>,
 }
 
 impl ActiveSet {
     pub fn new(store: Arc<dyn ActiveRevisions>, expected: Revision) -> Self {
+        Self::live(store, Arc::new(RwLock::new(expected)))
+    }
+
+    /// 실행 중 스킬·MCP 즉시 활성화로 갱신되는 공유 활성 집합 판본을 본다.
+    pub fn live(store: Arc<dyn ActiveRevisions>, expected: Arc<RwLock<Revision>>) -> Self {
         Self { store, expected }
     }
 }
@@ -32,8 +37,13 @@ impl ActiveSet {
 impl ActiveCheck for ActiveSet {
     fn verify(&self) -> Reply<'_, ()> {
         Box::pin(async move {
+            let expected = self
+                .expected
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             match self.store.current().await? {
-                Some(current) if current == self.expected => Ok(()),
+                Some(current) if current == expected => Ok(()),
                 _ => Err(Error::Stale),
             }
         })

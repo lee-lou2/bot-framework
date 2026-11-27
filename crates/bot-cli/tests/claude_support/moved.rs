@@ -68,6 +68,7 @@ impl Rig {
                 park: None,
             }),
             secrets: Some(model_key_store()),
+            secret_admin: None,
             stop: Some(stop.clone()),
             slack_base: None,
             upstream: None,

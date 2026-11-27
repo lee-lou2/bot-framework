@@ -15,6 +15,7 @@ impl Rig {
             }),
             upstream: self.launch.is_none().then(|| self.upstream.clone() as _),
             secrets: Some(self.secrets.clone()),
+            secret_admin: None,
             stop: Some(stop),
             slack_base: self.slack_base.clone(),
             store_config: self.store_config.clone(),

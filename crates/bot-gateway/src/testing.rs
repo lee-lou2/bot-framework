@@ -60,6 +60,7 @@ pub fn profile(id: &str) -> Fixture {
             bindings: BTreeMap::new(),
             roles: BTreeMap::new(),
             members: BTreeMap::new(),
+            super_admins: BTreeSet::new(),
             policy: Policy {
                 scopes: BTreeSet::new(),
                 agents: BTreeMap::new(),

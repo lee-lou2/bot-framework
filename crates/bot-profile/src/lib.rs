@@ -55,3 +55,4 @@ pub use snapshot::{from_bundle, revision_of};
 pub use source::FsProfiles;
 pub use validator::SchemaValidator;
 pub use vocab::Problem as SchemaProblem;
+pub use yaml::parse as parse_yaml;

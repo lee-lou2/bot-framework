@@ -119,7 +119,20 @@ bot mcp sync <BOT_PROFILES 아래 스킬 폴더>
 
 ## 모델 실행기가 받는 내장 도구
 
-`anthropic-api`, `openai-api`, `claude-cli`는 에이전트의 스코프 상한에 든 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`을 모델에 제공한다. 호스트는 발화별 전송 승인에 `schedule.deliver`를 쓴다. 이 다섯 이름과 `delegate`는 프레임워크에 예약돼 있다. 프로필 도구의 전체 ID가 예약 이름과 겹치면 검증이 실패한다. Claude CLI의 MCP 목록에는 `memory_share`처럼 점을 밑줄로 바꾼 이름이 나온다. API 실행기는 요청마다 별칭표를 만들어 응답의 도구 이름을 전체 ID로 되돌린다.
+`anthropic-api`, `openai-api`, `claude-cli`는 에이전트의 스코프 상한에 든 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`을 모델에 제공한다. 호스트는 발화별 전송 승인에 `schedule.deliver`를 쓴다. 또한 프로필의 `super_admins`에 등록된 슈퍼 관리자가 해당 스코프를 가질 때는 런타임 스킬·MCP 관리 도구 `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`도 모델에 노출된다(비-슈퍼 관리자에게는 목록에도 나오지 않고 호출 시 브로커가 `not_super_admin`으로 거절한다). 이 열한 이름과 `delegate`는 프레임워크에 예약돼 있다. 프로필 도구의 전체 ID가 예약 이름과 겹치면 검증이 실패한다. Claude CLI의 MCP 목록에는 `memory_share`·`skill_create`처럼 점을 밑줄로 바꾼 이름이 나온다. API 실행기는 요청마다 별칭표를 만들어 응답의 도구 이름을 전체 ID로 되돌린다.
+
+| 슈퍼 관리자 관리 도구 | 등급 | 역할 |
+|---|---|---|
+| `skill.inspect` | `read` | 에이전트 구조·설명·스킬 용량(32 KiB 한도), 스킬 목록(또는 지정 스킬 본문), MCP 서버 목록, 비밀 보관소 종류와 비밀 **이름**(값 제외) 조회 |
+| `skill.create` | `write` | 프로필 공용 또는 지정 에이전트에 `SKILL.md` 생성, 검증 및 즉시 활성화 |
+| `skill.update` | `write` | 기존 스킬의 `description`·본문 수정(기존 `tools.yaml`·`tools.lock.yaml` 보존), 검증 및 즉시 활성화 |
+| `skill.delete` | `write` | 스킬 폴더 삭제·미사용 도구 스코프 정리, 검증 및 즉시 활성화 |
+| `mcp.add` | `write` (`external`) | 원격 Streamable HTTP(`tools/list` 자동 잠금) 또는 로컬 stdio MCP 서버 추가, SOPS/키체인 비밀 암호화 저장·캐시 무효화, 검증 및 즉시 활성화 |
+| `mcp.remove` | `write` | MCP 서버·스킬 도구 바인딩·미사용 스코프 제거(`remove_secrets: true` 시 미사용 비밀도 암호화 보관소에서 제거), 검증 및 즉시 활성화 |
+
+- 모든 관리 변경은 트랜잭션으로 묶여 검증·설치·DB 커밋 중 하나라도 실패하면 디스크 변경을 원래대로 되돌린다.
+- 성공하면 기존 사전 승인(`bot_grants`)은 유지한 채 새 프로필 번들과 활성 판본을 PostgreSQL에 커밋하고, 같은 프로세스의 레지스트리·도구 실행기·샌드박스·승인 결정기를 즉시 갱신해 재기동 없이 다음 요청부터 바로 동작한다.
+- 비밀 **값**은 평문 파일(`SKILL.md`·`tools.yaml`·`tools.lock.yaml`·`profile.yaml`·`host.json`)이나 승인 카드에 기록하지 않는다. `mcp.add`에 `secret_value`·`secret_values`가 주어지면 먼저 가림 장치(`Redactor`)에 등록한 뒤 SOPS(`sops set`) 또는 키체인(`bot/<profile>/<name>`)에 암호화 저장하고 SOPS 캐시를 즉시 비운다.
 
 브로커는 각 호출에서 요청자와 에이전트의 권한을 고정 판본과 현재 판본에 대조한다. 기억을 공유하려면 소유자가 자신의 DM 또는 `bot chat`으로 시작한 CLI 대화에서 기억 한 건의 본문을 확인하고 승인해야 한다. 승인 대기 뒤에도 앞에서 확정한 거절은 같은 호출 ID로 재생한다. [거절 기록 계약](reliability.md#거절-기록-계약)
 

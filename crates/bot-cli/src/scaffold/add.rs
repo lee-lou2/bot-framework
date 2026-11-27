@@ -167,6 +167,11 @@ pub fn skill(dir: &Path, name: &str, agent: Option<&str>) -> Result<String, Stri
     }
     let rel = format!("{}/SKILL.md", target.join("/"));
     finish(writer, &rel, &templates::skill_md(name))?;
+    if name == "skill-creator" {
+        return Ok(format!(
+            "만들었어요: {rel}\n다음:\n  - 슈퍼 관리자 전용 런타임 스킬·MCP 관리 스킬을 채워 두었어요.\n  - profile.yaml의 `super_admins`에 슈퍼 관리자 신원을 적고, 해당 역할과 정책에 `skill.inspect`·`skill.create`·`skill.update`·`skill.delete`·`mcp.add`·`mcp.remove` 스코프를 허용해 주세요.\n  - `bot validate`로 확인해 주세요."
+        ));
+    }
     Ok(format!(
         "만들었어요: {rel}\n다음:\n  - SKILL.md의 description과 순서를 채워 주세요(맨 위 `---` front matter는 메타데이터로 검증하고 모델 프롬프트에는 본문만 전달돼요).\n  - 도구(tools.yaml)와 권한은 만들지 않았어요. 도구가 필요하면 `bot add tool {name}.<도구>`로 tools.yaml에 항목을 더하고, 필요한 스코프는 profile.yaml의 roles·policy에 직접 허용해 주세요 — 권한 상한은 자동으로 바꾸지 않아요.\n  - `bot validate`로 확인해 주세요."
     ))

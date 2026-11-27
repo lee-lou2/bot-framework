@@ -47,6 +47,7 @@ pub fn to_core(built: Built, revision: Revision, policy_revision: Revision) -> S
             .into_iter()
             .map(|(id, m)| (id, m.roles))
             .collect(),
+        super_admins: parts.super_admins,
         policy: parts.policy,
         secrets: parts
             .secrets

@@ -45,7 +45,7 @@ bindings: [{id: desk, adapter: cli, account: owner, agent: main}]
 |---|---|
 | version, id, model | 필수. model은 운영자가 이 프로필에 허용한 제공자의 모델 별칭 |
 | roles, members, bindings | 필수. 등록되지 않은 주체·입구는 거절 |
-| timezone, secrets | UTC, 빈 목록 |
+| timezone, secrets, super_admins | UTC, 빈 목록, 빈 목록(비어 있지 않으면 정책 판본에 포함) |
 | policy.scopes, policy.agents, policy.approve | 역할에 선언된 스코프의 합집합, 부모 상한 상속, 빈 목록 |
 
 ### 에이전트의 파일 읽기 도구
@@ -136,6 +136,7 @@ policy:
 - **거절하는 키**: `allowed-tools`는 전용 오류 `skill-allowed-tools`로 거절하고, 위 다섯 키 밖의 미지 키는 `schema`로 거절한다. 스킬 문서는 권한을 부여할 수 없으며([보안](security.md#보장-범위)), 모든 도구 선언과 권한 상한은 `tools.yaml`과 `profile.yaml`의 `roles`·`policy`에서만 정한다.
 - **프롬프트와 빈 본문**: 모델 프롬프트에는 front matter를 제거한 본문만 전달한다. front matter 뒤 본문이 비어 있으면 `empty-file`로 거절한다.
 - **크기 상한**: 에이전트 하나에게 보이는 스킬 본문(front matter 제외) 합계는 최대 **32 KiB(32,768바이트)**다(한 요청의 지식 문서 상한 32 KiB와 같은 수준). 단일 `SKILL.md` 본문이나 상속을 합친 에이전트별 합계가 이를 넘으면 실행 중 조용히 자르지 않고 검증·활성화 단계에서 `skill-too-large`로 거절한다. 긴 참고 자료는 `knowledge/`로 옮기거나 필요한 하위 에이전트 아래로 스킬을 나눈다.
+- **슈퍼 관리자와 `skill-creator`**: `profile.yaml`의 `super_admins`에 `members`의 비-서비스 주체(`local:*`·`slack:*/*`·`http:*/*`, `service:*`는 `super-admin-service`·미등록은 `super-admin-not-member`로 거절)를 지정하고 역할·정책에 `skill.inspect`·`skill.create`·`skill.update`·`skill.delete`·`mcp.add`·`mcp.remove` 스코프를 부여하면, 실행 중인 Slack·HTTP·CLI 대화에서 `skill-creator` 스킬(`bot add skill skill-creator`)로 스킬을 생성·수정·삭제하거나 MCP 서버를 추가·제거하고 즉시 활성화할 수 있다. 호스트 설정(`host.json`)에 `super_admins.<프로필>` 상한이 있으면 그 목록 밖 주체는 `super-admin-not-allowed`로 거절한다. [런타임 스킬·MCP 관리](plugins.md#모델-실행기가-받는-내장-도구)
 
 tools.yaml의 server는 운영자가 설치한 실행 파일 또는 이미지의 고정된 별칭이다. tools의 각 항목이 호출별 환경과 네트워크 상한을 정한다. 데모 서버는 합성 일정만 사용한다. 제3자에게 입력을 보내는 도구(검색 포함)는 external: true로 선언한다. 아래 로컬 도구의 기본값은 false다.
 

@@ -522,3 +522,37 @@ fn scaffolded_skills_validate_and_reach_model_prompts_without_front_matter() {
         }
     }
 }
+
+#[test]
+fn add_skill_creator_writes_ready_to_use_authoring_skill_that_validates() {
+    let work = tempfile::tempdir().unwrap();
+    assert!(init(work.path(), "demo", "team").status.success());
+    let profile = profile_dir(work.path(), "demo");
+
+    let out = add(&profile, &["skill", "skill-creator", "--agent", "main"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let skill_path = profile.join("agents/main/skills/skill-creator/SKILL.md");
+    assert!(skill_path.is_file());
+    let body = fs::read_to_string(&skill_path).unwrap();
+    assert!(
+        body.starts_with("---\nname: \"skill-creator\"\ndescription: "),
+        "{body}"
+    );
+    for needle in [
+        "skill.inspect",
+        "skill.create",
+        "skill.update",
+        "skill.delete",
+        "mcp.add",
+        "mcp.remove",
+        "SOPS",
+    ] {
+        assert!(
+            body.contains(needle),
+            "skill-creator에 `{needle}` 안내가 없어요"
+        );
+    }
+
+    let checked = validate(work.path(), "demo");
+    assert!(checked.status.success(), "{}", text(&checked));
+}

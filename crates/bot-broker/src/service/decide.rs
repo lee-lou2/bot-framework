@@ -224,6 +224,38 @@ impl BrokerService {
             let class = classify(&spec, &current.policy.approve, ctx.private_memory_read);
             let approver = approver_for(ctx, &current);
             (current, Revision(SCHEDULE_REVISION.into()), class, approver)
+        } else if let Some(spec) = bot_core::builtin::manage_tool(&approval.tool.0) {
+            let catalog = &self.parts.catalog;
+            let profile = &approval.attempt.profile;
+            let current = catalog.current(profile).ok_or(Error::Denied)?;
+            let pinned = catalog
+                .lookup(profile, &ctx.work.revision)
+                .ok_or(Error::Missing)?;
+            if !current.is_super_admin(&ctx.principal) || !pinned.is_super_admin(&ctx.principal) {
+                return Err(Error::Denied);
+            }
+            let decl = spec.declaration();
+            authorize(&decl.scopes, ctx, &current, &pinned).map_err(|_| Error::Denied)?;
+            let class = classify(&decl, &current.policy.approve, ctx.private_memory_read);
+            let approver = match openai::for_run(ctx, &pinned, &current) {
+                Some(Ok(found)) => {
+                    receipt_matches(stored, &found)?;
+                    match self.card_site(stored, &current, &found) {
+                        Route::Same => {}
+                        Route::Gone => return Ok(Check::Changed),
+                        Route::Unsure => return Err(Error::Unavailable),
+                    }
+                    Some(found.route.person().clone())
+                }
+                Some(Err(_)) => None,
+                None => approver_for(ctx, &current),
+            };
+            (
+                current,
+                Revision(bot_core::builtin::REVISION.into()),
+                class,
+                approver,
+            )
         } else {
             let Decl {
                 resolved,

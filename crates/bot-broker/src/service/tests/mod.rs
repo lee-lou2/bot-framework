@@ -10,6 +10,7 @@ mod env;
 mod ledger;
 mod legacy;
 mod limited;
+mod manage;
 mod memory;
 mod openai;
 mod owner_precedence;

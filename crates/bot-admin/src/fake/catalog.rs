@@ -101,6 +101,7 @@ fn snapshot(id: &str, agents: Vec<(&str, Agent)>, bindings: Vec<(&str, Binding)>
             .collect(),
         roles: BTreeMap::new(),
         members: BTreeMap::new(),
+        super_admins: BTreeSet::new(),
         policy: Policy {
             scopes: BTreeSet::new(),
             agents: BTreeMap::new(),
