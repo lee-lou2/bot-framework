@@ -5,7 +5,7 @@
 //! or claim cannot be verified.
 
 use super::{
-    BrokerService, schedule,
+    BrokerService, memory, schedule,
     share::{self, SHARE_TOOL},
 };
 use crate::resolve::find_tool;
@@ -89,6 +89,9 @@ impl Preflight for BrokerService {
             // Built-in tools are outside the catalog; only argument validation is deterministic here.
             if tool.0 == SHARE_TOOL {
                 return Ok(share::judged(&args));
+            }
+            if memory::is_builtin(&tool.0) {
+                return Ok(memory::judged(&tool.0, &args));
             }
             if schedule::is_builtin(&tool.0) {
                 return Ok(schedule::judged(

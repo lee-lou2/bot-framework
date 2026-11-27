@@ -1,5 +1,6 @@
 //! Host registry (`host.json`) parsing, demo defaults, UID pinning, and authority fingerprint.
 use crate::{
+    embeddings::EmbeddingConfig,
     execution::{self, Provider, Sandbox},
     install::{ServerSpec, Servers, parse_all},
     tool_limits::HostLimits,
@@ -49,6 +50,7 @@ pub struct HostFile {
     pub servers: BTreeMap<String, ServerSpec>,
     pub remote_servers: BTreeMap<String, Remote>,
     pub providers: BTreeMap<String, Provider>,
+    pub embeddings: Option<EmbeddingConfig>,
     pub sandbox: Sandbox,
     pub limits: HostLimits,
     pub private_egress: PrivateEgressMap,
@@ -90,6 +92,10 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         Some(value) => execution::parse_providers(&value).map_err(bad)?,
         None => BTreeMap::new(),
     };
+    let embeddings = match top.remove("embeddings") {
+        Some(value) => Some(crate::embeddings::parse(&value).map_err(bad)?),
+        None => None,
+    };
     let sandbox = match top.remove("sandbox") {
         Some(value) => execution::parse_sandbox(&value).map_err(bad)?,
         None => Sandbox::default(),
@@ -127,6 +133,7 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         servers: servers.local,
         remote_servers: servers.remote,
         providers,
+        embeddings,
         sandbox,
         limits,
         private_egress,
@@ -150,6 +157,7 @@ impl HostFile {
         );
         // Each optional binding leaves the base digest unchanged when at its default/empty state.
         let base = crate::tool_limits::bind(base, &self.limits);
+        let base = crate::embeddings::bind(base, self.embeddings.as_ref());
         let base = bind_private_egress(base, &self.private_egress);
         let base = bind_super_admins(base, &self.catalog.super_admins);
         Ok(bot_admin::obs_fingerprint(base, &self.admin))
@@ -282,6 +290,7 @@ pub fn demo(uid: u32) -> HostFile {
         servers: BTreeMap::new(),
         remote_servers: BTreeMap::new(),
         providers: BTreeMap::from([("assistant".to_owned(), Provider::Demo)]),
+        embeddings: None,
         sandbox: Sandbox::default(),
         limits: HostLimits::default(),
         private_egress: BTreeMap::new(),

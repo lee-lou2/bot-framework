@@ -14,7 +14,10 @@ mod tests;
 pub use delivery::Delivery;
 
 use crate::host::{Deps, Handback, Quiesce, WorkerConfig};
-use bot_core::command::{Failure, Finish, Retry, RunOutcome};
+use bot_core::{
+    command::{Failure, Finish, Retry, RunOutcome},
+    memory::Embedder,
+};
 use std::sync::Arc;
 use tokio::{sync::watch, task::JoinSet};
 
@@ -58,6 +61,7 @@ pub struct Worker {
     pub(crate) delivery: Option<Delivery>,
     pub(crate) handback: Option<Arc<dyn Handback>>,
     pub(crate) quiesce: Option<Arc<dyn Quiesce>>,
+    pub(crate) embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl Worker {
@@ -68,7 +72,14 @@ impl Worker {
             delivery: None,
             handback: None,
             quiesce: None,
+            embedder: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     #[must_use]

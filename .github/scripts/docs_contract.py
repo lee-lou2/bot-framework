@@ -163,7 +163,7 @@ def serde_fields(text):
 # The readers of the host settings: how a file lists the keys it accepts, and the files. A new reader is added here (its file by its idiom).
 HOST_READERS = (
     (removed_keys, ("crates/bot-cli/src/host.rs",)),
-    (only_lists, ("crates/bot-cli/src/execution.rs", "crates/bot-cli/src/execution/provider.rs", "crates/bot-admin/src/settings.rs")),
+    (only_lists, ("crates/bot-cli/src/execution.rs", "crates/bot-cli/src/execution/provider.rs", "crates/bot-cli/src/embeddings.rs", "crates/bot-admin/src/settings.rs")),
     (matched_keys, ("crates/bot-cli/src/install.rs",)),
     (match_arms, ("crates/bot-cli/src/tool_limits.rs",)),
     (serde_fields, ("crates/bot-gateway/src/host.rs", "crates/bot-gateway/src/host/openai.rs")),

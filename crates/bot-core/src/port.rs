@@ -108,9 +108,50 @@ pub trait RunAdmin: Send + Sync {
 /// Reads atomically record `private_memory_read` on the request tree before returning data to the model.
 pub trait MemoryStore: Send + Sync {
     fn search(&self, attempt: Attempt, query: String) -> Reply<'_, Vec<MemoryHit>>;
+    /// Hybrid semantic + lexical lookup with calibrated anti-false-taint gating; defaults to `search`.
+    fn search_hybrid(
+        &self,
+        attempt: Attempt,
+        query: crate::memory::MemoryQuery,
+    ) -> Reply<'_, Vec<MemoryHit>> {
+        self.search(attempt, query.text)
+    }
     /// Fetches one entry under `search` visibility rules, recording `private_memory_read` before returning private content.
     fn preview(&self, attempt: Attempt, id: MemoryId) -> Reply<'_, MemoryPreview>;
     fn change(&self, attempt: Attempt, change: MemoryChange) -> Reply<'_, MemoryId>;
+    /// Atomically verifies approval, owner, quota, and idempotency, then persists (or deduplicates/supersedes)
+    /// a private memory entry, completes the call, and audits in one commit.
+    fn save(
+        &self,
+        _start: crate::ledger::StartCall,
+        _spec: crate::memory::MemorySave,
+    ) -> Reply<'_, crate::memory::MemorySaved> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
+    /// Atomically verifies approval and owner, soft-deletes a memory entry, completes the call, and audits.
+    fn forget(&self, _start: crate::ledger::StartCall, _id: MemoryId) -> Reply<'_, MemoryId> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
+    /// Lists up to `limit` active rows in `profile` whose stored embedding does not match `(model, dim)`.
+    fn unembedded(
+        &self,
+        _profile: ProfileId,
+        _model: String,
+        _dim: u32,
+        _limit: u32,
+    ) -> Reply<'_, Vec<crate::memory::UnembeddedMemory>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Stores a freshly computed embedding if the row's body digest still matches `body_sha256`.
+    fn store_embedding(
+        &self,
+        _profile: ProfileId,
+        _id: MemoryId,
+        _body_sha256: [u8; 32],
+        _embedding: crate::memory::MemoryEmbedding,
+    ) -> Reply<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
     /// Atomically verifies approval, owner, and content digest, then consumes approval, shares, completes the call, and audits;
     /// digest mismatch returns `Conflict` and retries of completed calls do not alter visibility.
     fn share(&self, start: crate::ledger::StartCall, id: MemoryId) -> Reply<'_, MemoryId>;

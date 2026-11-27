@@ -204,6 +204,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "hot path indexes",
         include_str!("../migrations/0028_hot_path_indexes.sql"),
     ),
+    (
+        29,
+        "memory hybrid",
+        include_str!("../migrations/0029_memory_hybrid.sql"),
+    ),
 ];
 
 fn migrator() -> Migrator {

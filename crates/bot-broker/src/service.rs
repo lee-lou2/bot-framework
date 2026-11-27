@@ -13,6 +13,7 @@ mod deliver;
 mod exec;
 mod gate;
 mod manage;
+pub(crate) mod memory;
 pub(crate) mod pass;
 pub mod preflight;
 mod route;
@@ -33,6 +34,7 @@ use bot_core::{
     id::*,
     ledger::CallLedger,
     manage::ProfileManager,
+    memory::Embedder,
     port::{AuditLog, Broker, EffectJournal, Error, MemoryStore, ModelCall, Reply},
     profile::ProfileCatalog,
     schedule::{ScheduleRoutes, ScheduledReplies, UserSchedules},
@@ -80,6 +82,8 @@ pub struct BrokerService {
     routes: Option<Arc<dyn ScheduleRoutes>>,
     /// Super-admin runtime skill/MCP manager; when absent, `skill.*` and `mcp.*` return `Unavailable`.
     manager: Option<Arc<dyn ProfileManager>>,
+    /// Optional host embedding provider for `memory.search` and `memory.save`; absent falls back to lexical.
+    embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl BrokerService {
@@ -93,7 +97,13 @@ impl BrokerService {
             replies: Arc::new(deliver::NoReplies),
             routes: None,
             manager: None,
+            embedder: None,
         }
+    }
+
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     pub fn with_manager(mut self, manager: Arc<dyn ProfileManager>) -> Self {

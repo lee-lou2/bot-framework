@@ -3,6 +3,7 @@
 pub mod chat;
 pub mod cli;
 pub mod doctor;
+pub mod embeddings;
 pub mod execution;
 pub mod host;
 pub mod install;

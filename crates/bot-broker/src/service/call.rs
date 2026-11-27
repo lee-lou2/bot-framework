@@ -184,6 +184,9 @@ impl BrokerService {
         if req.tool.0 == super::share::SHARE_TOOL {
             return self.share_flow(req, note).await;
         }
+        if super::memory::is_builtin(&req.tool.0) {
+            return self.memory_flow(req, note).await;
+        }
         if super::schedule::is_builtin(&req.tool.0) {
             return self.schedule_flow(req, note).await;
         }

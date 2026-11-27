@@ -57,6 +57,36 @@ pub const SHARE: ModelTool = ModelTool {
 };
 pub const SHARE_TOOL: &str = SHARE.id;
 
+pub const MEMORY_SEARCH: ModelTool = ModelTool {
+    id: "memory.search",
+    class: Risk::Read,
+    external: false,
+    super_admin: false,
+    description: "Search visible stored memories (your private notes in DM/CLI plus profile-shared notes) by semantic meaning and keywords. Reading private memory marks the run as private-tainted.",
+    schema: r#"{"additionalProperties":false,"properties":{"limit":{"maximum":20,"minimum":1,"type":"integer"},"query":{"maxLength":1024,"minLength":1,"type":"string"}},"required":["query"],"type":"object"}"#,
+};
+pub const MEMORY_SEARCH_TOOL: &str = MEMORY_SEARCH.id;
+
+pub const MEMORY_SAVE: ModelTool = ModelTool {
+    id: "memory.save",
+    class: Risk::Write,
+    external: true,
+    super_admin: false,
+    description: "Save a concise private memory entry in your own 1:1 DM or CLI conversation. Optionally set kind ('fact' or 'core') and supersedes (existing memory ID replaced by this update). Requires owner approval when the run is private-tainted or policy-gated.",
+    schema: r#"{"additionalProperties":false,"properties":{"kind":{"enum":["fact","core"],"type":"string"},"supersedes":{"maxLength":128,"minLength":1,"type":"string"},"text":{"maxLength":8192,"minLength":1,"type":"string"}},"required":["text"],"type":"object"}"#,
+};
+pub const MEMORY_SAVE_TOOL: &str = MEMORY_SAVE.id;
+
+pub const MEMORY_FORGET: ModelTool = ModelTool {
+    id: "memory.forget",
+    class: Risk::Write,
+    external: false,
+    super_admin: false,
+    description: "Delete one of your own stored memory entries by ID in your own 1:1 DM or CLI conversation.",
+    schema: r#"{"additionalProperties":false,"properties":{"id":{"maxLength":128,"minLength":1,"type":"string"}},"required":["id"],"type":"object"}"#,
+};
+pub const MEMORY_FORGET_TOOL: &str = MEMORY_FORGET.id;
+
 pub const CREATE: ModelTool = ModelTool {
     id: "schedule.create",
     class: Risk::Write,
@@ -149,6 +179,9 @@ pub const MCP_REMOVE_TOOL: &str = MCP_REMOVE.id;
 
 const MODEL_TOOLS: &[ModelTool] = &[
     SHARE,
+    MEMORY_SEARCH,
+    MEMORY_SAVE,
+    MEMORY_FORGET,
     CREATE,
     LIST,
     CANCEL,
@@ -178,6 +211,15 @@ pub fn manage_tool(id: &str) -> Option<&'static ModelTool> {
     MODEL_TOOLS
         .iter()
         .find(|spec| spec.super_admin && spec.id == id)
+}
+
+pub fn memory_tool(id: &str) -> Option<&'static ModelTool> {
+    match id {
+        MEMORY_SEARCH_TOOL => Some(&MEMORY_SEARCH),
+        MEMORY_SAVE_TOOL => Some(&MEMORY_SAVE),
+        MEMORY_FORGET_TOOL => Some(&MEMORY_FORGET),
+        _ => None,
+    }
 }
 
 /// Host-only tool for owner approval of scheduled delivery drafts.

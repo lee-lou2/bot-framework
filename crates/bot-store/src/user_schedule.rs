@@ -38,7 +38,12 @@ pub(crate) fn cancel_hash(id: &ScheduleId) -> [u8; 32] {
 pub(crate) fn dedicated_tool(tool: &str) -> bool {
     matches!(
         tool,
-        crate::share::SHARE_TOOL | CREATE_TOOL | CANCEL_TOOL | DELIVER_TOOL
+        crate::share::SHARE_TOOL
+            | bot_core::builtin::MEMORY_SAVE_TOOL
+            | bot_core::builtin::MEMORY_FORGET_TOOL
+            | CREATE_TOOL
+            | CANCEL_TOOL
+            | DELIVER_TOOL
     )
 }
 

@@ -9,6 +9,7 @@ use super::{
     call::Decl,
     deliver::{deliver_approver, deliver_class, deliver_tool},
     gate::Binding,
+    memory,
     route::{Route, created_destination, delivery_destination},
     schedule::{self, CREATE_TOOL, REVISION as SCHEDULE_REVISION, create_tool_to},
     share::{SHARE_REVISION, SHARE_TOOL, share_approver, share_class, share_tool},
@@ -159,6 +160,22 @@ impl BrokerService {
                 current,
                 Revision(SHARE_REVISION.into()),
                 share_class(),
+                approver,
+            )
+        } else if let Some(spec) = memory::mutating_tool(&approval.tool.0) {
+            let catalog = &self.parts.catalog;
+            let profile = &approval.attempt.profile;
+            let current = catalog.current(profile).ok_or(Error::Denied)?;
+            let pinned = catalog
+                .lookup(profile, &ctx.work.revision)
+                .ok_or(Error::Missing)?;
+            authorize(&spec.scopes, ctx, &current, &pinned).map_err(|_| Error::Denied)?;
+            let approver = share_approver(ctx, &current);
+            let class = classify(&spec, &current.policy.approve, ctx.private_memory_read);
+            (
+                current,
+                Revision(bot_core::builtin::REVISION.into()),
+                class,
                 approver,
             )
         } else if approval.tool.0 == DELIVER_TOOL {

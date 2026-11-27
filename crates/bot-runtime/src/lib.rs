@@ -2,6 +2,7 @@
 
 pub mod context;
 pub mod cron;
+pub mod embeddings;
 pub mod host;
 pub mod model;
 pub mod scheduler;

@@ -24,7 +24,7 @@ mod trace;
 mod unusable;
 #[doc(hidden)]
 pub mod upstream;
-mod watched;
+pub(crate) mod watched;
 mod worker;
 
 use self::activation::{commit_with_refresh, plan_activation};

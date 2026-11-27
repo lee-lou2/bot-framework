@@ -81,7 +81,7 @@ VM CLI 모드(`claude-cli`, `codex-cli`, `agy-cli`)에서 워커는 공유 앵�
 
 | 러너 | 워커 호스트 | 모델 프로세스 | 프로바이더 키 처리 | 사용 가능한 내장 도구 |
 |---|---|---|---|---|
-| `anthropic-api`, `openai-api` | Linux, macOS | 없음 — 워커가 VM 없이 업스트림 HTTP API를 직접 호출합니다. | 요청 전송 직전에 `SecretStore`에서 읽어 요청 헤더에 첨부합니다. 루프백 엔드포인트에서만 생략할 수 있습니다. | 스코프 제한 `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`; 슈퍼 관리자 전용 `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`; 직계 자식용 `delegate`. 파일 내장 도구를 선언하면 `unsupported_builtin`으로 영구 실패합니다. |
+| `anthropic-api`, `openai-api` | Linux, macOS | 없음 — 워커가 VM 없이 업스트림 HTTP API를 직접 호출합니다. | 요청 전송 직전에 `SecretStore`에서 읽어 요청 헤더에 첨부합니다. 루프백 엔드포인트에서만 생략할 수 있습니다. | 스코프 제한 `memory.share`, `memory.search`, `memory.save`, `memory.forget`, `schedule.create`, `schedule.list`, `schedule.cancel`; 슈퍼 관리자 전용 `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`; 직계 자식용 `delegate`. 파일 내장 도구를 선언하면 `unsupported_builtin`으로 영구 실패합니다. |
 | `claude-cli` | Apple `container`가 설치된 macOS | 브로커 릴레이에 연결된 일회용 VM에서 Claude Code를 실행합니다. | 호스트 브로커의 모델 프록시만 읽으며, VM에는 세션 토큰만 전달합니다. | 위 모든 도구에 더해, 프로필이 허용한 경우 격리 기반 `read`를 사용할 수 있습니다. |
 | `codex-cli`, `agy-cli` | Apple `container`가 설치된 macOS | 브로커 릴레이에 연결된 일회용 VM에서 Codex CLI 또는 Antigravity CLI를 실행합니다. | 호스트 브로커의 모델 프록시만 읽으며, VM에는 세션 토큰만 전달합니다. | 위 모든 브로커 도구. 파일 내장 도구(`read`, `grep`, `glob`)를 선언하면 `unsupported_builtin`으로 실패합니다. |
 
@@ -116,6 +116,7 @@ VM CLI 모드(`claude-cli`, `codex-cli`, `agy-cli`)에서 워커는 공유 앵�
 |---|---|
 | `sandbox.srt.binary`, `work_root`, `extra_path` | `srt` 바이너리와 읽기 전용 도구 설치/작업 루트의 절대 경로. 선택적 `extra_path`는 최대 16개의 호스트 절대 디렉터리(예: `/opt/homebrew/bin`)를 샌드박스 도구의 `PATH`에 추가합니다. |
 | `limits.tool_call_max_secs` | 도구별 `timeout_secs`의 선택적 상한(초 단위; 기본 `60`, 최대 `900`). 상한을 높여도 `timeout_secs`를 생략한 도구의 기본값 60초는 올라가지 않습니다. 활성화 지문에 포함됩니다. ([MCP 도구](plugins.md)) |
+| `embeddings` (`endpoint`, `model`, `secret`, `dimensions`) | 하이브리드 메모리 회상(유니코드 어휘·트라이그램 + 정규화된 IEEE-754 `f16` 코사인 + RRF + 최신성 가중치, 추가 확장 없는 기본 PostgreSQL 사용)을 위한 선택적 OpenAI 호환 `/embeddings` API 설정. 예: `{"endpoint":"https://generativelanguage.googleapis.com/v1beta/openai","model":"gemini-embedding-2","secret":"gemini-api-key","dimensions":3072}`. `dimensions` 기본값은 `3072`(`1..=4096`)이며, `secret`은 루프백 IP 엔드포인트에서만 생략할 수 있고, 미설정 시 어휘 회상으로 폴백합니다. 설정 시 활성화 지문에 포함됩니다. |
 | `sandbox.apple.image`, `sandbox.apple.images`, `sandbox.apple.network` | CLI 워커용 다이제스트 고정 VM 이미지와 호스트 전용 네트워크 이름(공유 앵커 VM 1대가 호스트 인터페이스를 유지). `sandbox.apple.images`는 CLI별 키(`claude`, `codex`, `agy`)를 다이제스트 고정 참조에 매핑합니다(`claude`는 `sandbox.apple.image`로 폴백하며 `codex`와 `agy`는 명시적 키가 필요). 활성화 지문에 포함됩니다. |
 | `sandbox.apple.relay_bind` | 선택적 워커 로컬 릴레이 바인드 주소. 기본값은 앵커 VM 게이트웨이 IPv4 + OS 할당 포트이며, 지정 시 해당 게이트웨이 IP와 일치해야 합니다. |
 | `sandbox.apple.work_root` | 선택적 워커 로컬 모델 작업 디렉터리 절대 경로(`0700`). 기본값은 `<tool-root-parent>/work/models`입니다. |

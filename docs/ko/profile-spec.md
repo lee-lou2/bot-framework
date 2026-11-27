@@ -362,7 +362,7 @@ Slack 이벤트에 여러 직접 도구 트리거가 일치하면 접수 시점�
 | `triggers.yaml` 기타 | 필수 키, `on`/`target` 유니온, 기본 `cron`/`response`/`private` 배치. | `private_pass`는 `private: true` 필수, `http.path` 정규화(`..`/`//`/공백/256B), 이벤트 이름, 봉투 루트, `sync`+tool, ID/`order` 고유성, 바인딩/도구/주체/`args`/`input` 검사. |
 | `profile`/`tools`/`env`/`AGENT`/`SKILL` | 닫힌 객체, 버전, 네이밍/스코프/스키마 구문, `SKILL.md` 프런트매터 규칙. | `id`/스킬 `name` == 폴더명, 대소문자 정확한 IANA `timezone`, 역할/스코프/비밀/바인딩/에이전트/도구 참조, 예약 도구 ID 및 환경 변수, `skill-allowed-tools`, 64 KiB 스킬 합계, `tools.lock.yaml` 해시, 호스트 레지스트리 검사. |
 
-- **예약된 내장 도구 ID:** 프로필의 `tools.yaml`에는 프레임워크 예약 ID 12개(`delegate`, `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`, `schedule.deliver`, `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`)를 선언할 수 없습니다(해당 스킬 네임스페이스의 다른 도구 이름은 허용).
+- **예약된 내장 도구 ID:** 프로필의 `tools.yaml`에는 프레임워크 예약 ID 15개(`delegate`, `memory.share`, `memory.search`, `memory.save`, `memory.forget`, `schedule.create`, `schedule.list`, `schedule.cancel`, `schedule.deliver`, `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`)를 선언할 수 없습니다(해당 스킬 네임스페이스의 다른 도구 이름은 허용).
 - **참조, `env`, 권한:** `id != folder`, 정확하지 않은 IANA `timezone`, 미등록 역할/스코프, 중복 주체/바인딩 ID/입구, 누락된 `env.yaml` 키(`env-missing`), 예약된 로더/셸/프록시/호스트 환경 변수명(`env-reserved`), env와 비밀 이름 충돌(`env-secret-conflict`), 비서비스 cron 주체, 승인 필요 cron 도구의 사람 `approver` 누락, 일반 핸들러 뒤에 배치되거나 승인 필요/`effects: true` 도구를 호출하는 `private` 트리거, `input`/`args` 충돌, 비도구 `sync` 응답, 호스트 `limits.tool_call_max_secs`를 초과하는 `timeout_secs`(`tool-timeout-over-cap`)를 거부합니다.
 - **권한 공식 및 해시:**
   - 멤버 스코프 = `(역할 스코프 합집합) ∩ policy.scopes`; 실행 스코프 = `멤버 스코프 ∩ 에이전트 상한`(부모 상한 ∩ `policy.agents`).

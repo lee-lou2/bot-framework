@@ -97,7 +97,7 @@ API로 결정하려면 `GET /v1/admin/me`에서 받은 `X-Bot-Csrf`, `Content-Ty
 
 기본 `bot serve`는 로컬 운영자로 Admin UI에 로그인합니다. v2.0에서 Slack 소유자는 채널 원본 예약을 Slack 1:1 DM으로 승인하며, Admin UI는 Slack 로그인을 지원하지 않습니다([신뢰성](reliability.md)).
 
-메모리 공유 카드(`memory.share`)에는 비공개 메모리 본문이, 예약 전달 카드(`schedule.deliver`)에는 외부 발송 초안 전문이 담깁니다. 이 본문은 **뷰어 == 요청자 == 지정 승인자**일 때만(운영자 포함) 표시됩니다. 다른 모든 뷰어는 `render: []`와 `render_hidden: true`가 설정된 메타데이터만 받습니다. 실행 상세, 감사, 상태, 맵에는 카드 본문이 절대 포함되지 않습니다.
+메모리 공유/저장 카드(`memory.share`, `memory.save`)에는 비공개 메모리 본문이, 예약 전달 카드(`schedule.deliver`)에는 외부 발송 초안 전문이 담깁니다. 이 본문은 **뷰어 == 요청자 == 지정 승인자**일 때만(운영자 포함) 표시됩니다. 다른 모든 뷰어는 `render: []`와 `render_hidden: true`가 설정된 메타데이터만 받습니다. 실행 상세, 감사, 상태, 맵에는 카드 본문이 절대 포함되지 않습니다.
 
 - **메모리 공유 (`memory.share`)**: 정확히 하나의 `Memory ID` 행과 `Body` 행이 필요합니다(이어지는 줄 결합; 원문 텍스트 또는 JSON 문자열; 제목/범위 등 다른 행은 자유). 승인(`allow: true`)은 본문이 보이고 `memory_share_hash(memory_id, sha256(body))`가 `args_sha256`과 일치할 때만 허용됩니다. 누락·숨김·잘림·불일치 시 `approve_blocked: "no_body"`가 설정되고 UI의 **Approve** 버튼이 비활성화되며 `allow: true` 요청은 브로커나 감사에 닿기 전에 `403 no_body`를 반환합니다. **거부(`allow: false`)는 항상 허용됩니다**(미지정 뷰어는 권한 없음으로 먼저 거부).
 - **예약 전달 (`schedule.deliver`, `bot_core::schedule::DELIVERY_CARD_LABEL`, 위험도 `irreversible`)**: 정확히 하나의 `Delivery draft` 행이 필요하며, 결합된 값이 `DeliveryDraft::approval_json()`의 정확한 정규 JSON(JSON 문자열로 감싸지 않은 원시 문서)이고 SHA-256이 `args_sha256`(`DeliveryDraft::sha256()`)과 일치해야 합니다. 잘림·편집·불일치 시 `approve_blocked: "no_body"`와 `allow: true`에 대한 `403 no_body`가 반환됩니다(거부는 허용). UI는 이 행의 텍스트를 변형 없이 그대로 표시합니다.

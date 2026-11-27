@@ -8,10 +8,10 @@ use serde_json::Value;
 
 const MAX_NEST: usize = 4;
 
-pub(super) struct Needles(Vec<String>);
+pub(crate) struct Needles(Vec<String>);
 
 impl Needles {
-    pub(super) fn new(key: &str) -> Self {
+    pub(crate) fn new(key: &str) -> Self {
         let once = escaped(key);
         let twice = escaped(&once);
         let mut forms = vec![key.to_owned()];
@@ -49,7 +49,7 @@ impl Needles {
         }
     }
 
-    pub(super) fn in_body(&self, raw: &str) -> bool {
+    pub(crate) fn in_body(&self, raw: &str) -> bool {
         self.in_text(raw)
             || serde_json::from_str::<Value>(raw).is_ok_and(|value| self.in_value(&value, 0))
     }

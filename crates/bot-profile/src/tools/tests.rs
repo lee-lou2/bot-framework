@@ -117,7 +117,13 @@ fn only_the_exact_builtin_tool_id_is_reserved() {
             issues.items().iter().map(|i| i.code).collect::<Vec<_>>(),
         )
     };
-    assert_eq!(named("memory", "share"), (false, vec!["reserved-tool"]));
+    for tool in ["share", "search", "save", "forget"] {
+        assert_eq!(
+            named("memory", tool),
+            (false, vec!["reserved-tool"]),
+            "memory.{tool}"
+        );
+    }
     for tool in ["create", "list", "cancel", "deliver"] {
         assert_eq!(
             named("schedule", tool),
