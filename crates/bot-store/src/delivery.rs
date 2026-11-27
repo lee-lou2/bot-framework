@@ -7,12 +7,12 @@
 //! 잠금 순서: 활성 판본 → 루트 run(공유) → run → 호출 → 승인 → 초안 → 감사 head.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, Entry, OwnedEntry},
     codec::*,
     db::{Fail, R, Store, Tx},
-    finish::{End, end_run, final_text, has_attachments, lock_leased, parent_of},
+    finish::{End, end_run_into, final_text, has_attachments, lock_leased, parent_of},
     replies,
-    user_schedule::{Claimed, audit_done, claim, finish_call},
+    user_schedule::{Claimed, claim, done_entry, finish_call},
 };
 use bot_core::{
     command::{Finish, JsonPayload},
@@ -84,14 +84,19 @@ async fn lock(tx: &mut Tx<'_>, profile: &str, run: &str) -> R<Option<PgRow>> {
     .await?)
 }
 
-/// 지금 게시된 호스트 활성 집합의 판본. 게시한 적이 없으면 `Stale`이다. `for share`로 읽어 집합 교체(`for update`)와 직렬화한다: 읽은 값은 이 커밋이 끝날 때까지
-/// 바뀌지 않는다(호출자는 대개 이미 같은 잠금을 쥐고 있다 — 잠금 순서가 활성 집합이 먼저다).
-async fn current_activation(tx: &mut Tx<'_>) -> R<String> {
+/// 지금 게시된 호스트 활성 집합의 판본을 `FOR SHARE`로 먼저 잠가 읽는다(잠금 순서: 활성 집합 → run → …). 게시 전이면 `None`.
+async fn lock_activation(tx: &mut Tx<'_>) -> R<Option<String>> {
     let current: Option<String> =
         sqlx::query_scalar("select revision from bot_active where singleton for share")
             .fetch_optional(&mut **tx)
             .await?;
-    current.filter(|r| !r.is_empty()).ok_or(Error::Stale.into())
+    Ok(current.filter(|r| !r.is_empty()))
+}
+
+/// 지금 게시된 호스트 활성 집합의 판본. 게시한 적이 없으면 `Stale`이다. `for share`로 읽어 집합 교체(`for update`)와 직렬화한다: 읽은 값은 이 커밋이 끝날 때까지
+/// 바뀌지 않는다(호출자는 대개 이미 같은 잠금을 쥐고 있다 — 잠금 순서가 활성 집합이 먼저다).
+async fn current_activation(tx: &mut Tx<'_>) -> R<String> {
+    lock_activation(tx).await?.ok_or(Error::Stale.into())
 }
 
 /// `begin`이 DELIVER_TOOL 호출을 기록할 때 쓰는 확인: 동결한 초안이 있고 그 승인 지문과 같은 호출만 기록한다.
@@ -176,21 +181,7 @@ pub(crate) fn create_shown_args_sha256(card: &str) -> R<[u8; 32]> {
 
 /// 카드의 `label` 한 행(첫 줄 `라벨: `, 이어지는 줄은 공백 두 칸으로 시작)을 이어 붙인 값. 정확히 하나가 아니면 `None`이다.
 fn shown_row(card: &str, label: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(card).ok()?;
-    let lines = value.get("approval")?.get("lines")?.as_array()?;
-    let label = format!("{label}: ");
-    let mut shown: Vec<String> = Vec::new();
-    for line in lines.iter().filter_map(serde_json::Value::as_str) {
-        if let Some(first) = line.strip_prefix(&label) {
-            shown.push(first.to_owned());
-        } else if let (Some(chunk), Some(last)) = (line.strip_prefix("  "), shown.last_mut()) {
-            last.push_str(chunk);
-        }
-    }
-    match shown.as_slice() {
-        [one] => Some(one.clone()),
-        _ => None,
-    }
+    bot_core::cards::extract_line(card, label)
 }
 
 /// 목적지 대화로 회신 행을 쌓는다. 순번은 이 run의 기존 행 다음부터 잇는다(원래 대화로 간 승인 카드가 앞선 순번을 쓴다).
@@ -233,6 +224,8 @@ impl Store {
         completion: Option<Finish>,
     ) -> R<Option<DeliveryDraft>> {
         let mut tx = self.begin_authorized().await?;
+        // 잠금 순서: 활성 집합 → run → 초안 → 감사 head
+        let current_set = lock_activation(&mut tx).await?;
         if parent_of(&mut tx, at).await?.is_some() {
             tx.rollback().await?;
             return Ok(None); // 위임한 자식의 답은 부모만 보낸다
@@ -247,7 +240,8 @@ impl Store {
                 // 한 번 동결한 초안은 바뀌지 않는다: 저장된 바이트로 다시 계산해 같은 초안을 돌려준다
                 recomputed(&row)?;
                 let draft = draft_of(&row)?;
-                if current_activation(&mut tx).await? != draft.activation.0 {
+                let current = current_set.ok_or(Error::Stale)?;
+                if current != draft.activation.0 {
                     return Err(Error::Conflict.into());
                 }
                 tx.rollback().await?;
@@ -293,7 +287,7 @@ impl Store {
                 if active.is_none() {
                     return Err(Error::Denied.into()); // 비활성 프로필은 새 초안을 동결하지 못한다
                 }
-                let activation = current_activation(&mut tx).await?;
+                let activation = current_set.ok_or(Error::Stale)?;
                 let draft = DeliveryDraft {
                     activation: Revision(activation.clone()),
                     target: DeliveryTarget {
@@ -463,11 +457,26 @@ impl Store {
         let result: String = row
             .get::<Option<String>, _>("result")
             .ok_or(Error::Invalid)?;
-        end_run(&mut tx, &run, End::Succeeded(&result), "system").await?;
-        let mut entry = Entry::new(&owner, "delivery.enqueue", &at.run.0, "enqueued");
+        let mut audits = Vec::new();
+        end_run_into(
+            &mut tx,
+            &run,
+            End::Succeeded(&result),
+            "system",
+            &mut audits,
+        )
+        .await?;
+        let mut entry = OwnedEntry::new(
+            &at.profile.0,
+            &owner,
+            "delivery.enqueue",
+            &at.run.0,
+            "enqueued",
+        );
         entry.args = Some(sealed);
-        audit::append(&mut tx, &at.profile.0, &entry).await?;
-        audit_done(&mut tx, &at.profile.0, &owner, &s.call.0, sealed.to_vec()).await?;
+        audits.push(entry);
+        audits.push(done_entry(&at.profile.0, &owner, &s.call.0, sealed));
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(())
     }

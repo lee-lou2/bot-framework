@@ -251,7 +251,7 @@ fn http_error(error: &Error) -> (u16, &'static str, &'static str) {
         Error::Denied => (403, "permission_error", "denied"),
         Error::Stale => (403, "permission_error", "stale"),
         Error::Missing => (404, "not_found_error", "missing"),
-        Error::Unavailable => (503, "overloaded_error", "unavailable"),
+        Error::Unavailable | Error::RateLimited => (503, "overloaded_error", "unavailable"),
     }
 }
 

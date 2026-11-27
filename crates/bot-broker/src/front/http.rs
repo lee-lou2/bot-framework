@@ -118,14 +118,18 @@ pub async fn read_request(
         .filter(|(k, _)| k == "content-length")
         .map(|(_, v)| v.as_str())
         .collect();
-    let chunked = request
-        .header("transfer-encoding")
-        .is_some_and(|v| v.eq_ignore_ascii_case("chunked"));
+    let transfer_encodings: Vec<&str> = request
+        .headers
+        .iter()
+        .filter(|(k, _)| k == "transfer-encoding")
+        .map(|(_, v)| v.as_str())
+        .collect();
+    let chunked =
+        transfer_encodings.len() == 1 && transfer_encodings[0].eq_ignore_ascii_case("chunked");
     if lengths.len() > 1
+        || transfer_encodings.len() > 1
         || (chunked && !lengths.is_empty())
-        || request
-            .header("transfer-encoding")
-            .is_some_and(|_| !chunked)
+        || (!transfer_encodings.is_empty() && !chunked)
     {
         return Err(Status::Bad);
     }
@@ -196,6 +200,9 @@ async fn read_chunked(
             }
         };
         let size_text = std::str::from_utf8(&buf[..line_end]).map_err(|_| Status::Bad)?;
+        if size_text.is_empty() || !size_text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Status::Bad);
+        }
         let size = usize::from_str_radix(size_text, 16).map_err(|_| Status::Bad)?;
         buf.drain(..line_end + 2);
         if size == 0 {
@@ -212,20 +219,21 @@ async fn read_chunked(
                 Err(Status::Bad)
             };
         }
-        if body.len() + size > max_body {
+        if body.len().checked_add(size).is_none_or(|n| n > max_body) {
             return Err(Status::TooLarge);
         }
-        while buf.len() < size + 2 {
+        let need = size.checked_add(2).ok_or(Status::TooLarge)?;
+        while buf.len() < need {
             match stream.read(&mut chunk).await {
                 Ok(0) | Err(_) => return Err(Status::Bad),
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
             }
         }
-        if &buf[size..size + 2] != b"\r\n" {
+        if &buf[size..need] != b"\r\n" {
             return Err(Status::Bad);
         }
         body.extend_from_slice(&buf[..size]);
-        buf.drain(..size + 2);
+        buf.drain(..need);
     }
 }
 
@@ -292,5 +300,60 @@ pub async fn closed(stream: &mut (impl AsyncRead + Unpin)) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    async fn feed(raw: &[u8], max_body: usize) -> Result<Request, Status> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let data = raw.to_vec();
+        let writer = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let _ = client.write_all(&data).await;
+            let _ = client.shutdown().await;
+        });
+        let (mut server, _) = listener.accept().await.unwrap();
+        let res = read_request(
+            &mut server,
+            max_body,
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .await;
+        let _ = writer.await;
+        res
+    }
+
+    #[tokio::test]
+    async fn duplicate_transfer_encoding_headers_are_rejected() {
+        for raw in [
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n0\r\n\r\n".as_slice(),
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".as_slice(),
+        ] {
+            assert_eq!(feed(raw, 1024).await.err(), Some(Status::Bad));
+        }
+    }
+
+    #[tokio::test]
+    async fn overflowing_chunk_size_returns_too_large_without_wrapping() {
+        for raw in [
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n"
+                .as_slice(),
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\nffffffffffffffff\r\n"
+                .as_slice(),
+            b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nfffffffffffffffe\r\n"
+                .as_slice(),
+        ] {
+            assert_eq!(feed(raw, 1024).await.err(), Some(Status::TooLarge));
+        }
+        // 선행 `+`가 붙은 청크 크기는 16진수 규격이 아니다
+        let plus = b"POST /mcp HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n+1\r\na\r\n0\r\n\r\n";
+        assert_eq!(feed(plus, 1024).await.err(), Some(Status::Bad));
     }
 }

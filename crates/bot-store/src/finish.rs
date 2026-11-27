@@ -1,7 +1,7 @@
 //! 종료·대기·깨움: 결과·outbox·부모 깨우기를 한 커밋으로. 잠금 순서는 부모 run → 자식 run → 감사 head.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     codec::*,
     db::{R, Store, Tx},
     replies,
@@ -168,8 +168,14 @@ pub(crate) async fn park(tx: &mut Tx<'_>, run: &RunRow, wait: &Wait) -> R<()> {
 }
 
 /// run을 끝내고(성공·dead·취소) 부모가 이 자식을 기다리는 중이면 결과를 체크포인트로 넣어 **한 번만** 깨운다.
-/// 호출자가 부모와 이 run을 이미 잠갔다. 마지막에 감사 한 줄(+깨움 한 줄)을 잇는다.
-pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: &str) -> R<()> {
+/// 호출자가 부모와 이 run을 이미 잠갔다. 감사 항목은 `audits`에 모아 호출자가 커밋 직전에 한 번에 잇는다.
+pub(crate) async fn end_run_into(
+    tx: &mut Tx<'_>,
+    run: &RunRow,
+    end: End<'_>,
+    actor: &str,
+    audits: &mut Vec<OwnedEntry>,
+) -> R<()> {
     // 예약 미발송 안내 등 성공에 딸린 쓰기도 같은 트랜잭션이므로 취소가 먼저면 함께 롤백한다.
     if run.cancel_requested && matches!(end, End::Succeeded(_)) {
         return Err(Error::Stale.into());
@@ -235,30 +241,40 @@ pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: 
             .await?;
         woke = Some(parent.clone());
     }
-    audit::append(
-        tx,
+    audits.push(OwnedEntry::new(
         &run.profile,
-        &Entry::new(actor, action, &run.id, error.unwrap_or("ok")),
-    )
-    .await?;
+        actor,
+        action,
+        &run.id,
+        error.unwrap_or("ok"),
+    ));
     if let Some(parent) = woke {
-        audit::append(
-            tx,
+        audits.push(OwnedEntry::new(
             &run.profile,
-            &Entry::new(actor, "run.wake", &parent, &run.id),
-        )
-        .await?;
+            actor,
+            "run.wake",
+            parent,
+            &run.id,
+        ));
     }
     Ok(())
 }
 
+/// run을 끝내고 즉시 감사를 이어 붙인다(커밋 직전 단독 호출용).
+pub(crate) async fn end_run(tx: &mut Tx<'_>, run: &RunRow, end: End<'_>, actor: &str) -> R<()> {
+    let mut audits = Vec::new();
+    end_run_into(tx, run, end, actor, &mut audits).await?;
+    audit::append_many(tx, &audits).await
+}
+
 /// 발송 어댑터가 없는 구판/미매핑 푸시 실행의 회신은 `pending`으로 쌓지 않고 즉시 보류로 연다.
-/// `bot_outbox_hold` 트리거는 `UPDATE`에서만 돌므로 `INSERT` 직후 보류 발생과 감사를 같은 커밋에 남긴다.
-pub(crate) async fn hold_missing_transport(
+/// `bot_outbox_hold` 트리거는 `UPDATE`에서만 돌므로 `INSERT` 직후 보류 발생을 열고 감사 항목을 `audits`에 모은다.
+pub(crate) async fn hold_missing_transport_into(
     tx: &mut Tx<'_>,
     profile: &str,
     run: &str,
     call: &str,
+    audits: &mut Vec<OwnedEntry>,
 ) -> R<()> {
     sqlx::query("select bot_hold_open($1, $2, $3, null, 'reply')")
         .bind(profile)
@@ -266,19 +282,24 @@ pub(crate) async fn hold_missing_transport(
         .bind(call)
         .execute(&mut **tx)
         .await?;
-    audit::append(
-        tx,
+    audits.push(OwnedEntry::new(
         profile,
-        &Entry::new("system", "outbox.held", call, "missing_transport"),
-    )
-    .await?;
+        "system",
+        "outbox.held",
+        call,
+        "missing_transport",
+    ));
     Ok(())
 }
 
-/// 푸시 어댑터(Slack 등)의 대화에만 회신 행을 쌓는다. CLI·HTTP 결과는 인증된 상태 조회로 가져가고 예약에는 대화가 없다.
-/// 순번은 이 run의 기존 행(승인 카드 포함) 다음부터 잇는다. 호출자가 run을 잠갔다.
-/// 발송 어댑터가 비어 있는 구판/미매핑 푸시 실행은 실행 완료를 실패시키지 않고 회신만 즉시 보류(`held`)로 열어 운영자가 보게 한다.
-pub(crate) async fn push_reply(tx: &mut Tx<'_>, profile: &str, run: &str, body: &str) -> R<()> {
+/// 푸시 어댑터(Slack 등)의 대화에만 회신 행을 쌓고, 보류 감사가 생기면 `audits`에 모은다.
+pub(crate) async fn push_reply_into(
+    tx: &mut Tx<'_>,
+    profile: &str,
+    run: &str,
+    body: &str,
+    audits: &mut Vec<OwnedEntry>,
+) -> R<()> {
     let inserted: Option<(String, String)> = sqlx::query_as(
         "insert into bot_outbox (profile, run, seq, call, binding, principal, conv_kind, conv_id, thread, body, state, reason, transport)
          select r.profile, r.id, n.seq, 'reply:' || r.id || ':' || n.seq::text, r.binding, r.principal,
@@ -299,9 +320,16 @@ pub(crate) async fn push_reply(tx: &mut Tx<'_>, profile: &str, run: &str, body: 
     if let Some((call, state)) = inserted
         && state == "held"
     {
-        hold_missing_transport(tx, profile, run, &call).await?;
+        hold_missing_transport_into(tx, profile, run, &call, audits).await?;
     }
     Ok(())
+}
+
+/// 푸시 어댑터(Slack 등)의 대화에만 회신 행을 쌓고 필요 시 감사를 즉시 이어 붙인다(커밋 직전 단독 호출용).
+pub(crate) async fn push_reply(tx: &mut Tx<'_>, profile: &str, run: &str, body: &str) -> R<()> {
+    let mut audits = Vec::new();
+    push_reply_into(tx, profile, run, body, &mut audits).await?;
+    audit::append_many(tx, &audits).await
 }
 
 impl Store {
@@ -350,7 +378,15 @@ impl Store {
         if delivery.is_some_and(|state| state != "dropped") {
             return Err(Error::Conflict.into());
         }
-        end_run(&mut tx, &run, End::Succeeded(&result), "system").await?;
+        let mut audits = Vec::new();
+        end_run_into(
+            &mut tx,
+            &run,
+            End::Succeeded(&result),
+            "system",
+            &mut audits,
+        )
+        .await?;
         if let Some(outcome) = outcome {
             sqlx::query(
                 "update bot_runs set truncated = $3, usage_prompt = $4, usage_completion = $5 where profile = $1 and id = $2",
@@ -375,9 +411,10 @@ impl Store {
         let silent = quiet_completion(quiet, &final_text(&result)) && !has_attachments;
         if run.parent.is_none() && !silent {
             for body in &answers {
-                push_reply(&mut tx, &run.profile, &run.id, body).await?;
+                push_reply_into(&mut tx, &run.profile, &run.id, body, &mut audits).await?;
             }
         }
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(Completion::Succeeded)
     }

@@ -136,11 +136,11 @@ async fn main() {
     });
     // 민감 DM 보류와 회신 보류: «미실행» 판정의 결과가 종류마다 다르다(종료·새 요청 필요 / 같은 회신을 다시 보냄).
     fake.edit(|d| {
-        use bot_admin::{
-            fake::run_view,
-            port::{HoldKind, HoldView, Waiting},
+        use bot_admin::fake::run_view;
+        use bot_core::{
+            admin::{HoldKind, HoldView, Waiting},
+            id::{CallId, ProfileId, RunId, ToolId},
         };
-        use bot_core::id::{CallId, ProfileId, RunId, ToolId};
         for (run, call, tool, kind) in [
             ("r-p1", "private:r-p1", "inbox.receive", HoldKind::Private),
             ("r-rp", "c-rp", "reply", HoldKind::Reply),
@@ -171,11 +171,9 @@ async fn main() {
     // (tests/browser/hold_pair.mjs가 쓴다). 기본 데모 데이터는 바꾸지 않는다.
     if std::env::var_os("DEMO_PAIR").is_some() {
         fake.edit(|d| {
-            use bot_admin::{
-                fake::{call_view, run_view},
-                port::{HoldKind, HoldView, Waiting},
-            };
+            use bot_admin::fake::{call_view, run_view};
             use bot_core::{
+                admin::{HoldKind, HoldView, Waiting},
                 id::{CallId, HoldId, ProfileId, RunId, ToolId},
                 state::{Risk, RunState},
             };

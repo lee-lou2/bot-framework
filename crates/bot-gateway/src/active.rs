@@ -4,51 +4,7 @@
 //! 구판이다. 구판은 새 접수도 결과 반환도 하지 않고 일시 실패로 닫는다(HTTP 503·CLI `unavailable`·Slack ack 보류) —
 //! 상대가 다시 시도하고, 운영자는 이 프로세스를 새 판본으로 다시 시작한다. 새 접수의 최종 대조(활성 판본 교체와
 //! 같은 잠금 아래)는 저장소가 한다. 여기는 그 앞에서 구판 프로세스를 일찍 닫고, 저장소가 대조하지 않는 결과 반환을 지킨다.
-use bot_core::{
-    id::Revision,
-    port::{Error, Reply},
-    profile::ActiveRevisions,
-};
-use std::sync::{Arc, RwLock};
-
-pub trait ActiveCheck: Send + Sync {
-    /// 이 프로세스의 집합이 저장소의 활성 집합과 같으면 Ok, 다르거나 아직 게시되지 않았으면 `Stale`,
-    /// 저장소를 읽지 못하면 `Unavailable`.
-    fn verify(&self) -> Reply<'_, ()>;
-}
-
-/// 이 프로세스가 쓰는 프로필 집합의 판본을 저장소의 활성 판본과 견준다.
-pub struct ActiveSet {
-    store: Arc<dyn ActiveRevisions>,
-    expected: Arc<RwLock<Revision>>,
-}
-
-impl ActiveSet {
-    pub fn new(store: Arc<dyn ActiveRevisions>, expected: Revision) -> Self {
-        Self::live(store, Arc::new(RwLock::new(expected)))
-    }
-
-    /// 실행 중 스킬·MCP 즉시 활성화로 갱신되는 공유 활성 집합 판본을 본다.
-    pub fn live(store: Arc<dyn ActiveRevisions>, expected: Arc<RwLock<Revision>>) -> Self {
-        Self { store, expected }
-    }
-}
-
-impl ActiveCheck for ActiveSet {
-    fn verify(&self) -> Reply<'_, ()> {
-        Box::pin(async move {
-            let expected = self
-                .expected
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            match self.store.current().await? {
-                Some(current) if current == expected => Ok(()),
-                _ => Err(Error::Stale),
-            }
-        })
-    }
-}
+pub use bot_core::active::{ActiveCheck, ActiveSet};
 
 /// 응답(결과·상태) 직전 확인의 결과
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

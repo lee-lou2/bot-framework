@@ -1,13 +1,13 @@
 //! API 직접 호출 실행기 본체. 한 차례(`step`)는 `요청 만들기 → (판본 확인 → 키 읽기 → POST) → 응답 분류·읽기`다.
 //!
 //! - 취소 신호가 오면 요청을 끊고 `Cancelled`, 전체 시간(`Limits::total`)을 넘기면 `Timeout`이다. 요청을 보내는 순간부터 응답을 다 읽을 때까지가 이 시간 안이다.
-//! - **구판 보호**: `SendGate`로 이 프로세스의 활성화 판본이 저장소의 활성 판본인지 확인한다(`serve/guard/upstream.rs`의 `GuardedUpstream::confirm`과 같은 규칙: 마감 안의 성공만 받는다). 확인은
+//! - **구판 보호**: `ActiveCheck`로 이 프로세스의 활성화 판본이 저장소의 활성 판본인지 확인한다(`serve/guard/upstream.rs`의 `GuardedUpstream::confirm`과 같은 규칙: 마감 안의 성공만 받는다). 확인은
 //!   **두 번**이다 — 키를 읽기 전(구판은 키도 읽지 않는다)과 키를 읽은 뒤 보내기 직전(읽는 사이에 판본이 바뀌었으면 키를 버린다). 기존 경로도 전송 동안 가드를 쥐지 않고 보내기 직전에만 확인한다.
 //!   확인하지 못하면 아무것도 보내지 않는다. 실패는 일시 오류(`stale_worker`·`activation_unverified`)라 워커·저장소가 구판이면 시도를 쓰지 않고 대기열로 돌려준다.
 //! - **키**: 보내는 순간 프로필의 보관소에서 읽는다(교체한 새 값이 바로 쓰인다). 호스트가 준 보관소는 가림 장치에 읽은 값을 등록한다. 값은 요청 머리에만 싣고, 해당 요청의 키가 응답에
 //!   있으면 어떤 글도 체크포인트·브로커에 넘기지 않고 `secret_in_response`로 끝낸다(전체 프로필 공유 가림 목록으로 출력을 고치지 않는다). 검사는 원문과 풀어 읽은 모든 글이다(`scan.rs`).
 //! - HTTP 상태 분류: 2xx만 응답으로 읽고, 3xx `upstream_redirect`·401/403 `upstream_auth`·그 밖의 4xx `upstream_rejected`는 영구, 408 `network`·429 `rate_limited`·5xx `overloaded`는 일시다.
-//!   429의 본문(상한 안에서만 읽는다)이 `insufficient_quota`면 쿼터 소진이라 영구(`quota_exhausted`)다. 본문은 판단에만 쓰고 어디에도 남기지 않는다.
+//!   오류 응답 본문은 작은 상한(`ERROR_BODY_MAX`) 안에서만 읽어 429의 `insufficient_quota` 판별(`quota_exhausted`)과 허용 목록의 오류 분류 로그에만 쓰고 원문은 어디에도 남기지 않는다.
 
 use super::{
     endpoint::ApiEndpoint,
@@ -20,8 +20,9 @@ use crate::model::{
     driver::cancelled,
 };
 use bot_core::{
+    active::ActiveCheck,
     id::{ProfileId, SecretName},
-    port::{Error, Reply, SecretStore},
+    port::{Error, SecretStore},
 };
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -123,17 +124,11 @@ impl ApiSettings {
     }
 }
 
-/// 요청을 보내기 직전의 확인. 호스트가 «이 프로세스의 활성화 판본이 저장소의 활성 판본인가»에 잇는다.
-pub trait SendGate: Send + Sync {
-    /// 같으면 `Ok`, 다르거나 아직 게시되지 않았으면 `Stale`, 저장소를 읽지 못하면 `Unavailable`.
-    fn verify(&self) -> Reply<'_, ()>;
-}
-
 /// API 직접 호출 실행기(`RunnerKind::Step`). 별칭마다 하나를 만든다.
 pub struct ApiRunner {
     settings: ApiSettings,
     secrets: Arc<dyn SecretStore>,
-    gate: Arc<dyn SendGate>,
+    gate: Arc<dyn ActiveCheck>,
     client: ApiClient,
 }
 
@@ -142,7 +137,7 @@ impl ApiRunner {
     pub fn new<S: SecretStore + 'static>(
         settings: ApiSettings,
         secrets: Arc<S>,
-        gate: Arc<dyn SendGate>,
+        gate: Arc<dyn ActiveCheck>,
     ) -> Result<Self, String> {
         if settings.secret.is_none() && !settings.endpoint.is_loopback() {
             return Err("서비스 키(secret) 없이 쓸 수 있는 주소는 loopback뿐이에요".to_owned());
@@ -379,7 +374,13 @@ fn classify_error_type(raw: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::known_error_type;
+    use super::{ApiClient, ModelError, known_error_type, status_error};
+    use crate::model::api::transport::ERROR_BODY_MAX;
+    use std::time::Duration;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     #[test]
     fn known_error_type_only_returns_allowlisted_classifications() {
@@ -398,5 +399,58 @@ mod tests {
             "unknown"
         );
         assert_eq!(known_error_type(b"not json"), "unknown");
+    }
+
+    async fn serve_once(status: &str, body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut req = [0u8; 1024];
+                let _ = stream.read(&mut req).await;
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+            }
+        });
+        format!("http://{addr}/v1/messages")
+    }
+
+    #[tokio::test]
+    async fn non_2xx_error_body_is_read_bounded_and_classified() {
+        let client = ApiClient::new(true).unwrap();
+        let url = serve_once(
+            "400 Bad Request",
+            br#"{"type":"error","error":{"type":"invalid_request_error","message":"sensitive-prompt"}}"#.to_vec(),
+        )
+        .await;
+        let answer = client
+            .post(&url, vec![], b"{}".to_vec(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(answer.status, 400);
+        assert_eq!(
+            status_error(answer.status, &answer.body),
+            Some(ModelError::Failed {
+                code: "upstream_rejected",
+                transient: false,
+            })
+        );
+        assert_eq!(known_error_type(&answer.body), "invalid_request_error");
+
+        // 상한(16 KiB)을 넘는 400 본문은 앞부분만 읽고 잘라낸다
+        let mut big = vec![b' '; ERROR_BODY_MAX + 4096];
+        big.extend_from_slice(br#"{"error":{"type":"invalid_request_error"}}"#);
+        let url = serve_once("400 Bad Request", big).await;
+        let answer = client
+            .post(&url, vec![], b"{}".to_vec(), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(answer.status, 400);
+        assert_eq!(answer.body.len(), ERROR_BODY_MAX);
+        assert_eq!(known_error_type(&answer.body), "unknown");
     }
 }

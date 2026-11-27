@@ -193,7 +193,7 @@ fn parse_tool(
     // 호출 시간 한도(초): 스키마가 1~900의 정수만 받는다. 선언하지 않으면 `None`(기본 60초)이고 도구 판본도 그대로다.
     let timeout_secs = obj
         .get("timeout_secs")
-        .and_then(Value::as_u64)
+        .and_then(crate::schema::as_exact_u64)
         .and_then(|secs| u32::try_from(secs).ok());
     let scopes = strings(obj.get("scopes"));
     let env = strings(obj.get("env"));

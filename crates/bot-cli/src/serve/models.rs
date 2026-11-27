@@ -4,34 +4,24 @@
 //! `sandbox.apple`로 조립한다). 없으면 명시적으로 거절한다 — 별칭만 있다고 일반 실행기로 폴백하지 않는다.
 //!
 //! `anthropic-api`·`openai-api`는 VM·CLI 없이 워커가 상류 API를 직접 부르는 Step 실행기다(`bot_runtime::model::ApiRunner`). 서비스 키를 읽는 보관소(가림 장치를 거친다)와
-//! 요청 직전의 활성화 판본 확인(`ActiveGate`)이 조립돼 있어야 시작한다.
+//! 요청 직전의 활성화 판본 확인(`ActiveCheck`)이 조립돼 있어야 시작한다.
 use super::watched::Watched;
 use crate::{
     execution::{ApiProvider, Provider},
     host::HostFile,
 };
 use bot_core::{
+    active::ActiveCheck,
     id::{ProfileId, SecretName},
-    port::Reply,
 };
-use bot_gateway::active::ActiveCheck;
 use bot_runtime::{
     Models,
-    model::{ApiEndpoint, ApiRunner, ApiSettings, DemoModel, ModelRunner, SendGate},
+    model::{ApiEndpoint, ApiRunner, ApiSettings, DemoModel, ModelRunner},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-
-/// 요청을 보내기 직전의 판본 확인을 이 프로세스의 활성화 판본 확인(`ActiveCheck`)에 잇는다: 구판은 철회된 상류로 대화도 키도 보내지 않는다.
-pub struct ActiveGate(pub Arc<dyn ActiveCheck>);
-
-impl SendGate for ActiveGate {
-    fn verify(&self) -> Reply<'_, ()> {
-        self.0.verify()
-    }
-}
 
 /// API 직접 호출 실행기를 만들 때 쓰는 이 프로세스의 조각
 #[derive(Clone)]
@@ -39,7 +29,7 @@ pub struct ApiParts {
     /// 서비스 키를 읽는 보관소(가림 장치를 거치는 것만 받는다)
     pub secrets: Arc<Watched>,
     /// 요청 직전의 판본 확인
-    pub gate: Arc<dyn SendGate>,
+    pub gate: Arc<dyn ActiveCheck>,
 }
 
 pub struct ProviderModels {
@@ -130,7 +120,7 @@ pub fn build(
 mod tests {
     use super::*;
     use crate::{host, load};
-    use bot_core::port::SecretStore;
+    use bot_core::port::{Reply, SecretStore};
     use bot_runtime::model::{ApiKind, LimitField};
 
     fn parsed(extra: &str) -> HostFile {
@@ -180,7 +170,7 @@ mod tests {
 
     struct Open;
 
-    impl SendGate for Open {
+    impl ActiveCheck for Open {
         fn verify(&self) -> Reply<'_, ()> {
             Box::pin(async { Ok(()) })
         }
@@ -259,7 +249,7 @@ mod tests {
     async fn the_send_gate_follows_the_processs_activation_check() {
         use bot_gateway::testing::ports::MemoryActive;
         let active = MemoryActive::new(Some("set-1"));
-        let gate = ActiveGate(active.check("set-1"));
+        let gate = active.check("set-1");
         assert!(gate.verify().await.is_ok());
         // 다른 프로세스가 집합을 바꿨다: 이 프로세스는 구판이라 보낼 수 없다
         active.set(Some("set-2"));

@@ -230,6 +230,7 @@ async fn every_spawn_itself_refuses_when_the_gateway_address_is_gone_even_before
         relay_up: Arc::new(|_| true),
         ready_within: Duration::from_secs(5),
         reap_pause: Duration::from_millis(1),
+        reap_within: REAP_WITHIN,
         address_poll: Duration::from_secs(3600),
         ready_check: Duration::from_secs(5),
     };
@@ -267,6 +268,7 @@ async fn a_stuck_container_service_never_holds_a_spawn_beyond_the_readiness_wind
         relay_up: Arc::new(|_| true),
         ready_within: Duration::from_secs(5),
         reap_pause: Duration::from_millis(1),
+        reap_within: REAP_WITHIN,
         address_poll: Duration::from_secs(3600),
         ready_check: Duration::from_millis(300),
     };

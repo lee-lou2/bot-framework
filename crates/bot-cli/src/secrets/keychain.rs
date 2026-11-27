@@ -23,13 +23,16 @@ impl KeychainStore {
     /// macOS에서만 쓸 수 있다.
     pub fn new() -> Result<Self, String> {
         if cfg!(target_os = "macos") {
-            Ok(Self::with_program(SECURITY.into()))
+            Ok(Self {
+                program: SECURITY.into(),
+            })
         } else {
             Err("키체인 보관소는 macOS에서만 쓸 수 있어요".into())
         }
     }
 
-    /// 시험용: `security` 대신 이 실행 파일을 쓴다.
+    /// 시험용: `security` 대신 이 실행 파일을 쓴다. 운영 빌드에는 포함하지 않는다.
+    #[cfg(any(test, feature = "testing"))]
     pub fn with_program(program: PathBuf) -> Self {
         Self { program }
     }

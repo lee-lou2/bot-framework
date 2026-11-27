@@ -11,11 +11,12 @@ pub use catalog::TestCatalog;
 use bot_core::{
     command::{
         Accept, AcceptExtras, Beat, Completion, Failure, Finish, HttpRoute, JsonPayload, Retry,
-        Step, Target, Turn,
+        RunOutcome, Step, Target, Turn,
     },
     id::*,
     intake::{
         PrivateCall, PrivateDecision, PrivateIntake, PushTransportId, RequestKey, RequestState,
+        RunProgress,
     },
     pass::PassChain,
     port::{Error, ProfileSecrets, Reply, RunStore, SecretStore, SecretValue},
@@ -395,8 +396,16 @@ impl RunStore for MemoryStore {
         Box::pin(std::future::ready(Ok(state)))
     }
 
+    fn progress(&self, _: ProfileId, _: RunId) -> Reply<'_, Option<RunProgress>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
+
     fn claim(&self) -> Reply<'_, Option<RunContext>> {
         Box::pin(std::future::ready(Ok(None)))
+    }
+
+    fn release_for_shutdown(&self, _: Attempt) -> Reply<'_, ()> {
+        unavailable()
     }
 
     fn renew(&self, _: Attempt) -> Reply<'_, Beat> {
@@ -409,6 +418,10 @@ impl RunStore for MemoryStore {
 
     fn finish(&self, _: Attempt, _: Finish) -> Reply<'_, Completion> {
         unavailable()
+    }
+
+    fn finish_with(&self, a: Attempt, done: Finish, _: RunOutcome) -> Reply<'_, Completion> {
+        self.finish(a, done)
     }
 
     fn fail(&self, _: Attempt, _: Failure) -> Reply<'_, Retry> {

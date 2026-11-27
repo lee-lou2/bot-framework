@@ -555,9 +555,11 @@ fn private_rejection(error: Error) -> Rejection {
     match error {
         Error::Invalid => Rejection::Invalid,
         Error::Denied => Rejection::Forbidden,
-        Error::Conflict | Error::Stale | Error::Missing | Error::Unavailable => {
-            Rejection::Unavailable
-        }
+        Error::Conflict
+        | Error::Stale
+        | Error::Missing
+        | Error::Unavailable
+        | Error::RateLimited => Rejection::Unavailable,
     }
 }
 
@@ -566,7 +568,9 @@ fn rejection_of(error: Error) -> Rejection {
         Error::Invalid => Rejection::Invalid,
         Error::Denied => Rejection::Forbidden,
         Error::Conflict => Rejection::Conflict,
-        Error::Stale | Error::Missing | Error::Unavailable => Rejection::Unavailable,
+        Error::Stale | Error::Missing | Error::Unavailable | Error::RateLimited => {
+            Rejection::Unavailable
+        }
     }
 }
 

@@ -317,9 +317,18 @@ async fn step_hands_the_sandbox_a_secret_free_spec_and_returns_the_final_answer(
         "MCP 설정의 자리표시가 채워지는 곳(토큰은 환경으로만 간다)"
     );
     for (name, want) in [
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
         ("DISABLE_TELEMETRY", "1"),
         ("DISABLE_AUTOUPDATER", "1"),
         ("DISABLE_ERROR_REPORTING", "1"),
+        ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+        ("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS", "1"),
+        ("DISABLE_UPDATES", "1"),
+        ("DO_NOT_TRACK", "1"),
+        ("DISABLE_FEEDBACK_COMMAND", "1"),
+        ("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", "1"),
+        ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),
+        ("CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1"),
     ] {
         assert_eq!(env(name), Some(want), "{name}");
     }

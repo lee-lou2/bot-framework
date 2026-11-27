@@ -1,12 +1,12 @@
 //! 카드 청소와 실패 종결. 승인·감사·안내는 한 트랜잭션으로 쓴다.
 
-use super::{CardKey, Locks, MAX_ATTEMPTS, active_set, can_open, key_of, lock_attempt, now_ms};
+use super::{CardKey, Locks, MAX_ATTEMPTS, can_open, key_of, lock_attempt, now_ms};
 use crate::{
     approvals::wake_waiters,
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     codec::to32,
     db::{Fail, R, Store, Tx},
-    finish::{End, end_run, push_reply},
+    finish::{End, end_run_into, push_reply_into},
     replies,
     unsent::drop_draft,
 };
@@ -168,20 +168,28 @@ impl Store {
         } else {
             false
         };
+        let mut audits = Vec::new();
         if drafted && locks.run.row.parent.is_none() {
             // 전송 승인: 이번 발생만 미발송으로 끝낸다(영수증을 한 번 만들고 초안 본문은 지운다)
             let receipt = serde_json::json!({ "status": APPROVAL_DM_UNAVAILABLE }).to_string();
-            let set = active_set(&mut tx).await?;
+            let set = locks.active.as_deref().ok_or(Error::Stale)?;
             drop_draft(
                 &mut tx,
                 (&profile, &run_id),
                 locks.call_state.as_deref() == Some("open")
                     && locks.approval.get::<String, _>("call") == DELIVER_CALL,
-                (UNSENT_WORD, &receipt, &set),
+                (UNSENT_WORD, &receipt, set),
                 Some(&nonce.0),
             )
             .await?;
-            end_run(&mut tx, &locks.run.row, End::Succeeded(&receipt), "system").await?;
+            end_run_into(
+                &mut tx,
+                &locks.run.row,
+                End::Succeeded(&receipt),
+                "system",
+                &mut audits,
+            )
+            .await?;
         } else {
             // 생성 승인(과 그 밖): 기다리던 run을 깨운다. 호출은 거절된 승인을 만나 `Denied`로 끝난다
             wake_waiters(&mut tx, &profile, &run_id).await?;
@@ -196,17 +204,18 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         // 요청자는 요청이 닫혔다는 사실을 알아야 한다: 원래 채널·스레드에 한 줄만(초안·수신자·해시·승인 식별자 없음). 닫는 커밋이 한 번이라 재전달에도 한 번이다.
-        // HTTP 출처 실행에는 원래 채널이 없어 쌓이는 줄이 없다(`push_reply`는 직접·채널 대화에만 쌓는다)
+        // HTTP 출처 실행에는 원래 채널이 없어 쌓이는 줄이 없다(`push_reply_into`는 직접·채널 대화에만 쌓는다)
         if let Some(text) = closing.notice() {
             let notice = replies::answer(&JsonPayload(
                 serde_json::json!({ "text": text }).to_string(),
             ))?;
-            push_reply(&mut tx, &profile, &run_id, &notice).await?;
+            push_reply_into(&mut tx, &profile, &run_id, &notice, &mut audits).await?;
         }
         let (action, verdict) = closing.audit();
-        let mut entry = Entry::new("system", action, &nonce.0, verdict);
+        let mut entry = OwnedEntry::new(&profile, "system", action, &nonce.0, verdict);
         entry.args = Some(to32(locks.approval.get("args_sha256"))?);
-        audit::append(&mut tx, &profile, &entry).await?;
+        audits.push(entry);
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(())
     }

@@ -8,9 +8,7 @@ use crate::json::parse;
 use serde_json::{Value, json};
 use std::sync::Mutex;
 
-pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+pub(super) use super::lock;
 
 /// 서버가 내세우는 도구 하나.
 #[derive(Clone, Debug)]

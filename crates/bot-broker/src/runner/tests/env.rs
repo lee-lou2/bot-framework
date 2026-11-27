@@ -113,3 +113,25 @@ async fn an_env_name_cannot_shadow_a_declared_secret_and_values_are_bounded() {
     }
     assert!(r.sandbox.specs().is_empty());
 }
+
+#[tokio::test]
+async fn forbidden_secret_env_names_are_refused_before_resolving_secrets() {
+    let r = plain();
+    for var in [
+        "PATH",
+        "LD_PRELOAD",
+        "NODE_OPTIONS",
+        "HTTPS_PROXY",
+        "BOT_EFFECT_URL",
+        "CLAUDE_CODE_TMPDIR",
+        "lowercase",
+    ] {
+        let ran = run(&r, job_with(with_env(&[], &[(var, "reader")]), &[])).await;
+        assert!(matches!(ran, Ran::NotSent), "{var:?}: {ran:?}");
+    }
+    assert!(r.sandbox.specs().is_empty());
+    assert!(
+        r.secrets.resolved().is_empty(),
+        "예약된 환경 이름이면 보관소에서 자격을 풀지도 않는다"
+    );
+}

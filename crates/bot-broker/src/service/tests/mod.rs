@@ -23,7 +23,7 @@ mod secret_check;
 mod unrouted;
 mod wake;
 
-use super::{BrokerService, Config, Parts, preflight::noting_limit};
+use super::{BrokerService, Config, Parts};
 use crate::{ports::Sealer, rate::RateConfig, testing::*};
 use bot_core::{
     command::*,
@@ -213,18 +213,6 @@ impl World {
         args: &str,
     ) -> Result<CallResult, Error> {
         block_on(broker.call(self.tool_call(run, generation, call, tool, args)))
-    }
-
-    /// `call`과 같되 속도·동시성 한도가 **이 호출을 거절했는지**(`noting_limit`)도 결과와 함께 돌려준다.
-    pub fn call_noted(
-        &self,
-        call: &str,
-        tool: &str,
-        args: &str,
-    ) -> (Result<CallResult, Error>, bool) {
-        block_on(noting_limit(
-            self.broker.call(self.tool_call("r1", 1, call, tool, args)),
-        ))
     }
 
     pub fn call(&self, call: &str, tool: &str, args: &str) -> Result<CallResult, Error> {

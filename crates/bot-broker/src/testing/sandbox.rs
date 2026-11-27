@@ -17,9 +17,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::lock;
 
 /// 가짜 서버가 `tools/call`에 답하는 방식.
 pub enum Answer {

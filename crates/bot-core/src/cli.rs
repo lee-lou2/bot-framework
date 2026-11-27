@@ -133,7 +133,7 @@ pub fn error_word(error: &crate::port::Error) -> &'static str {
         Error::Conflict => "conflict",
         Error::Stale => "stale",
         Error::Missing => "unknown_tool",
-        Error::Unavailable => "unavailable",
+        Error::Unavailable | Error::RateLimited => "unavailable",
     }
 }
 

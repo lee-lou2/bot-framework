@@ -320,7 +320,6 @@ impl CliGateway {
             return fail_with(out, "no_entrance", &message, None).await;
         };
         let (binding, source) = (route.binding_id.clone(), route.binding.source.clone());
-        drop(routes);
         let Adapter::Cli { account } = source else {
             return fail(out, "no_entrance", None).await;
         };
@@ -356,7 +355,10 @@ impl CliGateway {
                     body: json!({"text": request.text}),
                     event: Event::Message,
                 };
-                match self.ingress.admit(inbound).await {
+                // 인증에 쓴 바로 그 표로 접수한다(그 사이 입구 소유자가 바뀌어도 같은 스냅숏으로 커밋된다)
+                let admission = self.ingress.admit_with(&routes, inbound).await;
+                drop(routes);
+                match admission {
                     Admission::Accepted { .. } => {}
                     Admission::Rejected(rejection) => {
                         let (code, retry) = match rejection {
@@ -376,6 +378,7 @@ impl CliGateway {
                 }
             }
             Op::Result => {
+                drop(routes);
                 let read = self.store.status(key.clone()).await;
                 // 철회된 사용자에게는 요청이 있는지도 알리지 않고, 구판 프로세스는 결과를 내보내지 않는다
                 if let Some((code, retry)) = self.withheld(&guard).await {

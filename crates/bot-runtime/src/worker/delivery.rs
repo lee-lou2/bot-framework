@@ -85,6 +85,6 @@ fn refused(error: Error, transient: &'static str) -> Flow {
         Error::Conflict => Flow::Fail(Failure::Permanent("delivery_stale")),
         // 이 시도가 소유자가 아니다: 물러난다
         Error::Stale => Flow::Lost,
-        Error::Unavailable => Flow::Fail(Failure::Transient(transient)),
+        Error::Unavailable | Error::RateLimited => Flow::Fail(Failure::Transient(transient)),
     }
 }

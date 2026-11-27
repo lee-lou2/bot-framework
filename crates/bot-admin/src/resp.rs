@@ -42,7 +42,7 @@ pub fn classify(e: &Error) -> (StatusCode, &'static str) {
         Error::Conflict => (StatusCode::CONFLICT, "conflict"),
         Error::Stale => (StatusCode::CONFLICT, "stale"),
         Error::Missing => (StatusCode::NOT_FOUND, "not_found"),
-        Error::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+        Error::Unavailable | Error::RateLimited => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
     }
 }
 

@@ -38,16 +38,18 @@ const BACKOFF_MS: i64 = 5_000;
 /// 이만큼 점유하고도 올리지 못하면 DM 경로가 없는 것으로 닫는다.
 const MAX_ATTEMPTS: i32 = 6;
 
-/// 잠근 승인·작업 행과 run.
+/// 잠근 활성 집합·승인·작업 행과 run.
 struct Locks {
+    active: Option<String>,
     run: crate::unsent::Locked,
     call_state: Option<String>,
     approval: PgRow,
     job: PgRow,
 }
 
-/// 승인이 가리키는 run → 호출 → 승인 → 작업 순서로 잠근다. 승인이나 작업이 없으면 `Missing`.
+/// 활성 집합 → run → 호출 → 승인 → 작업 순서로 잠근다. 승인이나 작업이 없으면 `Missing`.
 async fn lock_attempt(tx: &mut Tx<'_>, key: &CardKey) -> R<Locks> {
+    let active = lock_active_set(tx).await?;
     let nonce = &key.nonce.0;
     let seen = sqlx::query("select profile, run, call from bot_approvals where nonce = $1")
         .bind(nonce)
@@ -79,6 +81,7 @@ async fn lock_attempt(tx: &mut Tx<'_>, key: &CardKey) -> R<Locks> {
         return Err(Error::Stale.into());
     }
     Ok(Locks {
+        active,
         run,
         call_state,
         approval,
@@ -112,13 +115,16 @@ async fn now_ms(tx: &mut Tx<'_>) -> R<i64> {
         .await?)
 }
 
-/// 호스트 활성 집합 판본. 비어 있으면(게시 전) `Stale`.
-async fn active_set(tx: &mut Tx<'_>) -> R<String> {
-    sqlx::query_scalar::<_, String>("select revision from bot_active where singleton for share")
+/// 호스트 활성 집합 판본을 `FOR SHARE`로 먼저 잠가 읽는다(잠금 순서: 활성 집합 → run → …). 게시 전이면 `None`.
+async fn lock_active_set(tx: &mut Tx<'_>) -> R<Option<String>> {
+    Ok(
+        sqlx::query_scalar::<_, String>(
+            "select revision from bot_active where singleton for share",
+        )
         .fetch_optional(&mut **tx)
         .await?
-        .filter(|revision| !revision.is_empty())
-        .ok_or_else(|| Error::Stale.into())
+        .filter(|revision| !revision.is_empty()),
+    )
 }
 
 fn job_card(card: &str) -> R<JsonPayload> {
@@ -196,7 +202,7 @@ impl Store {
         if current.as_deref() != Some(checked.0.as_str()) {
             return Err(Error::Stale.into());
         }
-        let set = active_set(&mut tx).await?;
+        let set = locks.active.as_deref().ok_or(Error::Stale)?;
         sqlx::query(
             "update bot_card_jobs
                 set state = 'sending', sending_ms = bot_now_ms(), lease_until_ms = null, activation = $2, checked_revision = $3,
@@ -204,7 +210,7 @@ impl Store {
               where nonce = $1",
         )
         .bind(&key.nonce.0)
-        .bind(&set)
+        .bind(set)
         .bind(&checked.0)
         .execute(&mut *tx)
         .await?;
@@ -267,9 +273,8 @@ impl Store {
             .await?;
             return Err(Error::Stale.into());
         }
-        let set = active_set(&mut tx).await?;
-        let same_set =
-            locks.job.get::<Option<String>, _>("activation").as_deref() == Some(set.as_str());
+        let set = locks.active.as_deref().ok_or(Error::Stale)?;
+        let same_set = locks.job.get::<Option<String>, _>("activation").as_deref() == Some(set);
         if !(can_open(&locks, now) && same_set) {
             // 올린 뒤 카드가 낡았다(집합 교체·만료·세대·취소): 카드는 열지 않는다. DM 메시지만 남고 영수증이 없어 눌러도 소비되지 않는다
             sqlx::query(

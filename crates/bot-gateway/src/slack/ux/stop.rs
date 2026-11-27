@@ -1,10 +1,11 @@
 //! Slack 스레드 중단 처리(Agent 중단 버튼 · 멘션 중단 · 확인 버튼)와 반응/메시지 보조 호출.
 use super::{
-    ActiveRun, EYES, SlackUx,
+    ActiveRun, EYES, RunUxState, SlackUx,
     cards::{STOP_ACK, STOP_GONE, STOP_RESUMED, can_stop, stop_card_blocks},
 };
 use crate::{
     identity,
+    ingress::Ingress,
     slack::{
         api::{Body, Raw},
         frame::Button,
@@ -13,39 +14,73 @@ use crate::{
 };
 use bot_core::{
     id::{PrincipalId, ProfileId},
+    port::Error,
     profile::Snapshot,
 };
 use serde_json::{Value, json};
+use std::sync::Mutex;
+
+/// 스레드 중단 멘션("중단해줘" 등) 처리 결과.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopMention {
+    /// 이 스레드에 진행 중인 작업이 없어 일반 메시지로 넘긴다.
+    Pass,
+    /// 중단 요청을 처리했거나 권한 없음·구판으로 무시 확정했다(ack 가능).
+    Handled,
+    /// 일시 장애(`Unavailable`)로 취소를 확정하지 못해 ack하지 않고 재전달에 맡긴다.
+    Retry,
+}
+
+/// 동시 클릭이 중복 `admin.cancel`을 보내지 못하게 막고, 취소·패닉 시에도 진행 중 표지를 해제하는 가드.
+struct InFlightGuard<'a>(&'a Mutex<RunUxState>);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stop_in_flight = false;
+    }
+}
 
 impl SlackUx {
     /// Slack Agent 화면의 중단 버튼(`agent_session_stopped`): 확인 카드를 올린다.
+    /// 돌려주는 값은 «ack해도 되는가»다(`Unavailable`만 `false`).
     pub async fn on_stop_requested(
         &self,
+        ingress: &Ingress,
         install: &Installation,
         snapshot: Option<&Snapshot>,
         channel: &str,
         thread_ts: &str,
         user: &str,
-    ) {
+    ) -> bool {
         let Some(active) = self.active_by_thread(channel, thread_ts) else {
-            return;
+            return true;
         };
         if active.info.profile != install.profile {
-            return;
+            return true;
         }
-        if !user.is_empty() {
-            let Some(actor) = identity::slack(&install.alias, user) else {
-                return;
-            };
-            if !can_stop(snapshot, &actor, &active.info.principal) {
-                self.deny_stop(&active, user).await;
-                return;
-            }
+        // 행위자 ID가 비었거나 모양이 틀리면 닫힌 쪽으로 무시한다(인가 생략 금지).
+        let Some(actor) = (!user.is_empty())
+            .then(|| identity::slack(&install.alias, user))
+            .flatten()
+        else {
+            return true;
+        };
+        match ingress.verify_active().await {
+            Ok(()) => {}
+            Err(Error::Unavailable) => return false,
+            Err(_) => return true,
+        }
+        if !can_stop(snapshot, &actor, &active.info.principal) {
+            self.deny_stop(&active, user).await;
+            return true;
         }
         let (step, doing) = {
             let mut st = active.st.lock().unwrap_or_else(|e| e.into_inner());
-            if st.stop_asked || st.stop_confirmed {
-                return;
+            if st.stop_asked || st.stop_in_flight || st.stop_confirmed {
+                return true;
             }
             st.stop_asked = true;
             (st.step, st.doing.clone())
@@ -79,69 +114,104 @@ impl SlackUx {
                     .stop_asked = false;
             }
         }
+        true
     }
 
-    /// 처리 중인 스레드에서 "중단해줘"/"멈춰" 멘션. 진행 중 작업이 있으면 가로채서 중단하고 `true`.
+    /// 처리 중인 스레드에서 "중단해줘"/"멈춰" 멘션. 진행 중 작업이 있으면 가로채서 중단한다.
     pub async fn on_stop_mention(
         &self,
+        ingress: &Ingress,
         install: &Installation,
         snapshot: Option<&Snapshot>,
         channel: &str,
         thread_ts: &str,
         user: &str,
-    ) -> bool {
+    ) -> StopMention {
         let Some(active) = self.active_by_thread(channel, thread_ts) else {
-            return false;
+            return StopMention::Pass;
         };
         if active.info.profile != install.profile {
-            return false;
+            return StopMention::Pass;
         }
-        let Some(actor) = identity::slack(&install.alias, user) else {
-            return true;
+        let Some(actor) = (!user.is_empty())
+            .then(|| identity::slack(&install.alias, user))
+            .flatten()
+        else {
+            return StopMention::Handled;
         };
+        match ingress.verify_active().await {
+            Ok(()) => {}
+            Err(Error::Unavailable) => return StopMention::Retry,
+            Err(_) => return StopMention::Handled,
+        }
         if !can_stop(snapshot, &actor, &active.info.principal) {
             self.deny_stop(&active, user).await;
-            return true;
+            return StopMention::Handled;
         }
-        self.confirm_stop(&active, actor).await;
-        true
+        if self.confirm_stop(&active, actor).await {
+            StopMention::Handled
+        } else {
+            StopMention::Retry
+        }
     }
 
     /// 중단 확인 카드의 [여기서 중단] / [계속 진행] 버튼 클릭.
+    /// 돌려주는 값은 «ack해도 되는가»다(`Unavailable`만 `false`).
     pub async fn on_stop_button(
         &self,
+        ingress: &Ingress,
         install: &Installation,
         snapshot: Option<&Snapshot>,
         button: &Button,
         confirm: bool,
-    ) {
+    ) -> bool {
+        match ingress.verify_active().await {
+            Ok(()) => {}
+            Err(Error::Unavailable) => return false,
+            Err(_) => return true,
+        }
         let active = self.active_by_run(&button.value);
         let state = active.as_ref().map(|r| {
             let st = r.st.lock().unwrap_or_else(|e| e.into_inner());
-            (st.stop_confirmed, st.stop_asked, st.stop_ts.clone())
+            (
+                st.stop_confirmed,
+                st.stop_in_flight,
+                st.stop_asked,
+                st.stop_ts.clone(),
+            )
         });
         match (&active, state) {
-            (Some(_), Some((true, _, _))) => {}
-            (Some(active), Some((false, true, stop_ts)))
+            (Some(_), Some((true, _, _, _))) | (Some(_), Some((_, true, _, _))) => true,
+            (Some(active), Some((false, false, true, stop_ts)))
                 if active.info.profile == install.profile
                     && (stop_ts.is_empty() || stop_ts == button.message_ts) =>
             {
-                let Some(actor) = identity::slack(&install.alias, &button.user) else {
-                    return;
+                let Some(actor) = (!button.user.is_empty())
+                    .then(|| identity::slack(&install.alias, &button.user))
+                    .flatten()
+                else {
+                    return true;
                 };
                 if !can_stop(snapshot, &actor, &active.info.principal) {
                     self.deny_stop(active, &button.user).await;
-                    return;
+                    return true;
                 }
                 if confirm {
-                    self.confirm_stop(active, actor).await;
+                    self.confirm_stop(active, actor).await
                 } else {
-                    active
-                        .st
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .stop_asked = false;
-                    self.settle_stop_notice(active, STOP_RESUMED).await;
+                    let reset = {
+                        let mut st = active.st.lock().unwrap_or_else(|e| e.into_inner());
+                        if !st.stop_confirmed && !st.stop_in_flight {
+                            st.stop_asked = false;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if reset {
+                        self.settle_stop_notice(active, STOP_RESUMED).await;
+                    }
+                    true
                 }
             }
             _ => {
@@ -153,23 +223,27 @@ impl SlackUx {
                     STOP_GONE,
                 )
                 .await;
+                true
             }
         }
     }
 
-    async fn confirm_stop(&self, active: &ActiveRun, actor: PrincipalId) {
-        {
+    /// 저장소에 취소를 먼저 커밋한 뒤에만 확정 상태와 `STOP_ACK`를 반영한다.
+    /// `Err(Error::Unavailable)`이면 `false`를 돌려줘 Slack이 ack하지 않고 재전달하게 한다.
+    async fn confirm_stop(&self, active: &ActiveRun, actor: PrincipalId) -> bool {
+        let snapshot = {
             let mut st = active.st.lock().unwrap_or_else(|e| e.into_inner());
-            if st.stop_confirmed {
-                return;
+            if st.stop_confirmed || st.stop_in_flight {
+                return true;
             }
-            st.stop_confirmed = true;
-            st.stopped_snapshot = Some((
+            st.stop_in_flight = true;
+            (
                 st.step,
                 st.doing.clone(),
                 active.started.elapsed().as_secs(),
-            ));
-        }
+            )
+        };
+        let _guard = InFlightGuard(&active.st);
         let res = self
             .admin
             .cancel(
@@ -179,10 +253,26 @@ impl SlackUx {
                 "slack_user_stop".into(),
             )
             .await;
-        if let Err(error) = res {
-            tracing::warn!(?error, run = %active.info.run.0, "Slack 중단 취소 요청 실패");
+        match res {
+            Ok(()) => {
+                {
+                    let mut st = active.st.lock().unwrap_or_else(|e| e.into_inner());
+                    st.stop_confirmed = true;
+                    st.stopped_snapshot = Some(snapshot);
+                }
+                drop(_guard);
+                self.settle_stop_notice(active, STOP_ACK).await;
+                true
+            }
+            Err(Error::Unavailable) => {
+                tracing::warn!(run = %active.info.run.0, "Slack 중단 취소 요청 일시 실패");
+                false
+            }
+            Err(error) => {
+                tracing::warn!(?error, run = %active.info.run.0, "Slack 중단 취소 요청 실패");
+                true
+            }
         }
-        self.settle_stop_notice(active, STOP_ACK).await;
     }
 
     pub(super) async fn settle_stop_notice(&self, active: &ActiveRun, text: &str) {

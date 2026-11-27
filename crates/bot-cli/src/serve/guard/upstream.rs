@@ -1,7 +1,9 @@
 //! 모델 상류 전송의 판본 확인(`GuardedUpstream`). 구판 보호의 모델 쪽 절반이다(`guard.rs`의 실행 저장소·브로커 래퍼와 한 짝).
 use bot_broker::model::{ChunkSource, Upstream, UpstreamRequest, UpstreamResponse, UpstreamStream};
-use bot_core::port::{Error, Reply};
-use bot_gateway::active::ActiveCheck;
+use bot_core::{
+    active::ActiveCheck,
+    port::{Error, Reply},
+};
 use std::{sync::Arc, time::Duration};
 use tokio::time::{Instant, sleep_until, timeout_at};
 

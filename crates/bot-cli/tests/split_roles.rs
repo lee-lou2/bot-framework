@@ -246,6 +246,10 @@ fn runs_personal_demo() {
         return;
     };
     if !have_srt_and_python() {
+        assert!(
+            !Schema::required(),
+            "BOT_TEST_REQUIRE_DB=1에서 runs_personal_demo는 srt와 python3가 필요해요"
+        );
         return;
     }
     let dir = tempfile::Builder::new()

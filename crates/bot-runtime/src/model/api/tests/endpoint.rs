@@ -65,6 +65,9 @@ fn http_is_accepted_only_for_loopback_ip_literals() {
         "http://2130706433",
         "http://127.1",
         "http://0x7f.0.0.1",
+        "http://0x7f000001",
+        "http://127.0x1",
+        "http://0177.0.0.1",
     ] {
         assert!(ApiEndpoint::parse(bad).is_err(), "{bad}");
     }
@@ -107,6 +110,11 @@ fn credentials_queries_fragments_escapes_and_odd_names_are_refused_without_echoi
         "https://::1",
         "https://[example.com]/",
         "https://1.2.3",
+        "https://0x7f000001",
+        "https://0X7F000001",
+        "https://127.0x1",
+        "https://example.0x1",
+        "https://0177.0.0.1",
         "HTTPS://example.com",
         long.as_str(),
     ] {

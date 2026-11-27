@@ -26,7 +26,6 @@ use std::{
     os::fd::OwnedFd,
     path::Path,
     sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub struct Writer {
@@ -431,11 +430,12 @@ impl Writer {
 
     /// `between`은 폴더를 만든 뒤 열기 전에 불린다(시험이 그 사이의 바꿔치기를 흉내 낸다).
     fn stage_with(&self, between: impl Fn(&str)) -> Result<Stage, String> {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos());
-        for attempt in 0..32u32 {
-            let name = format!(".bot-init-{}-{seed:x}-{attempt}", std::process::id());
+        for _ in 0..32u32 {
+            let name = format!(
+                ".bot-init-{}-{}",
+                std::process::id(),
+                bot_core::random::random_hex(8)
+            );
             // 기대 권한을 알려면 umask를 읽어야 하는데 읽는 호출이 없어 잠깐 바꿨다 되돌린다: 같은 일을 하는 다른 스레드와 겹치면 umask가 엉키므로 잠그고,
             // 같은 잠금 안에서 만들어 «읽은 값 = 만들 때 값»을 지킨다.
             let (made, expected) = {

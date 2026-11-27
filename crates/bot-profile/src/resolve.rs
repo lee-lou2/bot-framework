@@ -7,6 +7,7 @@ use crate::{
         Agent, Binding, Built, ProfileParts, Source, Tool, Trigger, TriggerTarget, adapter_name,
     },
     names,
+    parse::SkillMode,
 };
 use bot_core::{
     id::{AgentId, BindingId, PrincipalId},
@@ -19,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 type Agents = BTreeMap<AgentId, Agent>;
 
-pub fn resolve(built: &Built, issues: &mut Issues) {
+pub fn resolve(built: &Built, mode: SkillMode, issues: &mut Issues) {
     let (p, agents) = (&built.parts, &built.agents);
     let role_scopes: BTreeSet<String> = p.roles.values().flatten().cloned().collect();
     let mut universe = role_scopes.clone();
@@ -28,7 +29,7 @@ pub fn resolve(built: &Built, issues: &mut Issues) {
     }
     bindings(p, agents, issues);
     policy(p, agents, &universe, issues);
-    tools(p, agents, &role_scopes, issues);
+    tools(p, agents, &role_scopes, mode, issues);
     tool_env(agents, issues);
     memory(p, agents, issues);
     triggers(p, agents, issues);
@@ -88,7 +89,13 @@ fn policy(p: &ProfileParts, agents: &Agents, universe: &BTreeSet<String>, issues
     }
 }
 
-fn tools(p: &ProfileParts, agents: &Agents, role_scopes: &BTreeSet<String>, issues: &mut Issues) {
+fn tools(
+    p: &ProfileParts,
+    agents: &Agents,
+    role_scopes: &BTreeSet<String>,
+    mode: SkillMode,
+    issues: &mut Issues,
+) {
     let mut seen = BTreeSet::new();
     for skill in agents.values().flat_map(|a| a.skills.iter()) {
         if !seen.insert(skill.path.clone()) {
@@ -97,6 +104,18 @@ fn tools(p: &ProfileParts, agents: &Agents, role_scopes: &BTreeSet<String>, issu
         let file = format!("{}/tools.yaml", skill.path);
         for tool in &skill.tools {
             for (env, secret) in &tool.secrets {
+                // 구판(`BOTPROFILE1`·`SkillMode::Legacy`) 복원은 이미 저장된 번들을 깨지 않도록 통과시키고,
+                // 실행 시점에는 브로커(`runner.rs`·`srt.rs`)가 예약 이름을 차단한다.
+                if mode == SkillMode::Strict && forbidden_env_name(env) {
+                    issues.error_at(
+                        "env-reserved",
+                        &file,
+                        format!("{} secrets/{env}", tool.name),
+                        format!(
+                            "`{env}`는 로더·셸·프록시·호스트가 쓰는 이름이라 비밀 환경 이름으로 쓸 수 없어요"
+                        ),
+                    );
+                }
                 if !p.secrets.contains(secret.as_str()) {
                     issues.error_at(
                         "unknown-secret",

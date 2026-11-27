@@ -31,8 +31,14 @@ pub(crate) async fn lock_origin_run(tx: &mut Tx<'_>, profile: &str, schedule: &s
     Ok(())
 }
 
-/// 안내 한 건을 쌓는다. `schedule`은 잠근 `bot_user_schedules` 행이고, 호출자가 `lock_origin_run`으로 그 run의 행을 이미 잠갔다(순번은 그 잠금 아래에서 정한다).
-pub(crate) async fn push(tx: &mut Tx<'_>, schedule: &PgRow, text: &str) -> R<()> {
+/// 안내 한 건을 쌓고, 보류 감사가 생기면 `audits`에 모은다.
+/// `schedule`은 잠근 `bot_user_schedules` 행이고, 호출자가 `lock_origin_run`으로 그 run의 행을 이미 잠갔다(순번은 그 잠금 아래에서 정한다).
+pub(crate) async fn push_into(
+    tx: &mut Tx<'_>,
+    schedule: &PgRow,
+    text: &str,
+    audits: &mut Vec<crate::audit::OwnedEntry>,
+) -> R<()> {
     let kind: String = schedule.get("origin_kind");
     if !matches!(kind.as_str(), "direct" | "channel") {
         return Ok(());
@@ -64,7 +70,7 @@ pub(crate) async fn push(tx: &mut Tx<'_>, schedule: &PgRow, text: &str) -> R<()>
     if let Some((call, state)) = inserted
         && state == "held"
     {
-        crate::finish::hold_missing_transport(tx, &profile, &run, &call).await?;
+        crate::finish::hold_missing_transport_into(tx, &profile, &run, &call, audits).await?;
     }
     Ok(())
 }

@@ -21,6 +21,7 @@ use bot_broker::{
     sys::SystemClock,
 };
 use bot_core::{
+    active::ActiveCheck,
     api::ApiRuns,
     cards::CardOutbox,
     intake::{Outbox, PrivateCall, PrivateDecision, PrivateIntake},
@@ -31,7 +32,6 @@ use bot_core::{
     trace::Tracer,
 };
 use bot_gateway::{
-    active::ActiveCheck,
     cli::{CliGateway, socket},
     delivery::Deliverer,
     http::HttpGateway,
@@ -57,7 +57,8 @@ pub struct Deps {
     pub decisions: Arc<dyn Broker>,
     /// 접수·회신·승인 스팬을 보낼 곳(호스트에 설정한 수집기, 없으면 아무것도 내보내지 않는다)
     pub tracer: Arc<dyn Tracer>,
-    /// 가짜 Slack 서버 주소(시험 전용, 제품은 `None`)
+    /// 가짜 Slack 서버 주소(시험 전용, 운영 빌드에는 포함하지 않는다)
+    #[cfg(any(test, feature = "testing"))]
     pub slack_base: Option<String>,
     /// 이 프로세스의 활성화 판본 확인(접수·결과·민감 DM 원격 도구 요청 직전에 다시 확인한다)
     pub active: Arc<dyn ActiveCheck>,
@@ -177,13 +178,17 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     }
     // Slack 설치 검사(토큰·팀·앱 중복)도 열기 전에 끝낸다
     let slack_gateway = if slack {
+        #[cfg(any(test, feature = "testing"))]
+        let slack_base = deps.slack_base.as_deref();
+        #[cfg(not(any(test, feature = "testing")))]
+        let slack_base: Option<&str> = None;
         let gateway = Arc::new(
             SlackGateway::new(
                 ingress.clone(),
                 deps.decisions.clone(),
                 deps.store.clone() as Arc<dyn CallLedger>,
                 deps.secrets.clone(),
-                SlackApi::new(deps.slack_base.as_deref()),
+                SlackApi::new(slack_base),
             )
             // 봇이 참여한 스레드의 증거(Slack `thread_reply` 이벤트용)는 같은 저장소에 둔다
             .with_threads(deps.store.clone() as Arc<dyn BotThreads>)

@@ -3,7 +3,6 @@
 use crate::{
     api::{self, INVALID, R, S, V},
     json,
-    port::{RunAction, RunCommand, RunCommandOutcome},
     resp::{Fail, ok},
 };
 use axum::{
@@ -12,7 +11,10 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use bot_core::id::{ClaimEpoch, Generation, RunId};
+use bot_core::{
+    admin::{RunAction, RunCommand, RunCommandOutcome},
+    id::{ClaimEpoch, Generation, RunId},
+};
 use serde_json::Value;
 
 pub(crate) async fn resume(state: S, viewer: V, target: Path<(String, String)>, bytes: Bytes) -> R {

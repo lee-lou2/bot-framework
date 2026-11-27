@@ -3,7 +3,7 @@
 //! 철회된 승인 행은 남겨 같은 ID가 되살아나지 않는다. 바뀐 선언은 항상 새 ID를 받는다.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, Entry, OwnedEntry},
     codec::*,
     db::{R, Store, Tx},
 };
@@ -33,10 +33,16 @@ pub(crate) struct Note {
 }
 
 impl Note {
-    pub(crate) async fn write(&self, tx: &mut Tx<'_>) -> R<()> {
-        let mut entry = Entry::new("system", self.action, &self.target, &self.verdict);
+    pub(crate) fn into_audit(self) -> OwnedEntry {
+        let mut entry = OwnedEntry::new(
+            self.profile,
+            "system",
+            self.action,
+            self.target,
+            self.verdict,
+        );
         entry.args = self.args;
-        audit::append(tx, &self.profile, &entry).await.map(|_| ())
+        entry
     }
 }
 

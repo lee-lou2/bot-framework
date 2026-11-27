@@ -8,7 +8,6 @@ use super::{
 use crate::fence::Fence;
 use bot_core::port::SecretStore;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     sync::{
         Arc, Mutex, OnceLock,
@@ -198,9 +197,7 @@ impl Breaker {
 }
 
 pub(crate) fn instance_id() -> String {
-    let now = bot_core::trace::now_nano();
-    let d = Sha256::digest(format!("{}:{now}", std::process::id()));
-    crate::json::hex(&d[..6])
+    bot_core::random::random_hex(6)
 }
 
 /// 끝점 검사: `https://`는 명시 없이 허용하고, 평문 `http://`는 `remote: true`가 없으면 루프백·사설 주소·`localhost`만 받는다.

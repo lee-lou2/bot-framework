@@ -23,6 +23,12 @@ const REMOVE_WITHIN: Duration = Duration::from_secs(4);
 const ABSENT_FOR: Duration = Duration::from_millis(400);
 const POLL: Duration = Duration::from_millis(100);
 
+/// 공유 마감(`deadline`)까지 남은 시간을 `cap`으로 자른다. 이미 마감이 지났으면 `None`.
+pub(super) fn budget(deadline: Instant, cap: Duration) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (!remaining.is_zero()).then(|| remaining.min(cap))
+}
+
 /// 컨테이너 하나를 가리키는 값: 클라이언트 프로그램과 컨테이너 이름.
 #[derive(Clone)]
 struct Target {
@@ -45,26 +51,32 @@ impl Target {
         command
     }
 
-    /// 명령 하나를 돌려 끝나기를 기다린다(결과는 보지 않는다).
-    async fn run(&self, args: &[&str]) {
+    /// 명령 하나를 돌려 끝나기를 기다린다(결과는 보지 않는다). 남은 마감이 없으면 띄우지 않는다.
+    async fn run(&self, args: &[&str], deadline: Instant) {
+        let Some(within) = budget(deadline, COMMAND_WITHIN) else {
+            return;
+        };
         let mut command = self.command();
         command
             .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Ok(mut child) = command.spawn() {
-            let _ = timeout(COMMAND_WITHIN, child.wait()).await;
+            let _ = timeout(within, child.wait()).await;
         }
     }
 
     /// 컨테이너가 있는지 `inspect`로 본다: 성공이면 있고, «not found»면 없다. 그 밖(서비스 오류·시간 초과)은 모른다.
-    async fn seen(&self) -> Seen {
+    async fn seen(&self, deadline: Instant) -> Seen {
+        let Some(within) = budget(deadline, COMMAND_WITHIN) else {
+            return Seen::Unknown;
+        };
         let mut command = self.command();
         command
             .args(["inspect", &self.name])
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        match timeout(COMMAND_WITHIN, command.output()).await {
+        match timeout(within, command.output()).await {
             Ok(Ok(output)) if output.status.success() => Seen::Present,
             Ok(Ok(output)) if String::from_utf8_lossy(&output.stderr).contains("not found") => {
                 Seen::Absent
@@ -76,16 +88,21 @@ impl Target {
     /// 컨테이너를 끝내고 지운 뒤 «없음»이 `ABSENT_FOR` 동안 이어질 때까지 본다. 보이면 다시 지운다. 사라진 것을 확인했으면 `true`.
     /// 처음에는 `inspect`와 상관없이 한 번 끝내라고 한다(목록·조회가 늦어도 이미 떠 있는 컨테이너는 바로 멈춘다). 뜨는 중이라 `kill`이 거절돼도 `delete --force`가 멈추고 지운다.
     async fn remove(&self) -> bool {
-        let started = Instant::now();
-        self.run(&["kill", &self.name]).await;
-        self.run(&["delete", "--force", &self.name]).await;
+        self.remove_within(REMOVE_WITHIN).await
+    }
+
+    /// 주어진 전체 마감(`within`) 안에서 지우고 확인한다. 각 하위 명령과 대기의 한도를 남은 마감에 맞춰 잘라 전체 시간을 넘기지 않는다.
+    async fn remove_within(&self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        self.run(&["kill", &self.name], deadline).await;
+        self.run(&["delete", "--force", &self.name], deadline).await;
         let mut absent_since: Option<Instant> = None;
         loop {
-            match self.seen().await {
+            match self.seen(deadline).await {
                 Seen::Present => {
                     absent_since = None;
-                    self.run(&["kill", &self.name]).await;
-                    self.run(&["delete", "--force", &self.name]).await;
+                    self.run(&["kill", &self.name], deadline).await;
+                    self.run(&["delete", "--force", &self.name], deadline).await;
                 }
                 Seen::Absent => {
                     let since = *absent_since.get_or_insert_with(Instant::now);
@@ -95,10 +112,10 @@ impl Target {
                 }
                 Seen::Unknown => absent_since = None,
             }
-            if started.elapsed() >= REMOVE_WITHIN {
+            let Some(sleep_for) = budget(deadline, POLL) else {
                 return false;
-            }
-            tokio::time::sleep(POLL).await;
+            };
+            tokio::time::sleep(sleep_for).await;
         }
     }
 }
@@ -235,5 +252,50 @@ impl Drop for ContainerProcess {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn budget_clamps_to_cap_and_returns_none_after_deadline() {
+        let now = Instant::now();
+        assert_eq!(
+            budget(now + Duration::from_secs(10), Duration::from_secs(3)),
+            Some(Duration::from_secs(3))
+        );
+        let short = budget(now + Duration::from_millis(200), Duration::from_secs(3)).unwrap();
+        assert!(short <= Duration::from_millis(200), "{short:?}");
+        assert_eq!(budget(now, Duration::from_secs(3)), None);
+    }
+
+    #[tokio::test]
+    async fn remove_clamps_every_subcommand_to_the_shared_deadline() {
+        let dir = std::env::temp_dir().join(format!(
+            "bot-process-budget-{}-{}",
+            std::process::id(),
+            bot_core::random::random_hex(4)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("hang-container");
+        // kill·delete·inspect 모두 30초 멈춘다: 공유 마감 없이 COMMAND_WITHIN(3초)을 그대로 쓰면 9초 이상 걸린다
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let target = Target {
+            program: script.to_str().unwrap().to_owned(),
+            name: "botvm-test-1".to_owned(),
+        };
+        let started = Instant::now();
+        let removed = target.remove_within(Duration::from_millis(300)).await;
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!removed);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "공유 마감(300ms) 안에 끝나야 한다: {elapsed:?}"
+        );
     }
 }

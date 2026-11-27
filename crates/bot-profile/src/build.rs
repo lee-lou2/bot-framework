@@ -62,7 +62,7 @@ fn build_inner(
     let has_skill_front_matter = parsed.has_skill_front_matter;
     let built = assemble::assemble(parsed, issues)?;
     check_assembled(&built, mode, limits, issues);
-    resolve::resolve(&built, issues);
+    resolve::resolve(&built, mode, issues);
     if issues.has_errors() {
         return None;
     }

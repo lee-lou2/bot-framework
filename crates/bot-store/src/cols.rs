@@ -12,7 +12,7 @@ pub(crate) fn prefixed(columns: &str, alias: &str) -> String {
         .join(", ")
 }
 
-/// `bot_runs`의 모든 열(정의 순서).
+/// `bot_runs`의 공통 조회에 쓰는 열 목록.
 pub(crate) const RUNS: &str = concat!(
     "profile, id, root, parent, parent_step, depth, agent, principal, approver, scopes, ",
     "revision, trigger, binding, conv_kind, conv_id, thread, attachments, target, input, ",
@@ -22,40 +22,40 @@ pub(crate) const RUNS: &str = concat!(
     "private_started_ms, quiet, wake_depth, run_origin, claim_set, pass_pos"
 );
 
-/// `bot_calls`의 모든 열(정의 순서).
+/// `bot_calls`의 공통 조회에 쓰는 열 목록.
 pub(crate) const CALLS: &str = concat!(
     "profile, run, call, tool, args_sha256, state, approval, started_generation, owner, ",
     "result, reason, resolution, receipt, risk, tool_revision, created_ms, updated_ms, ",
     "started_ms, finished_ms"
 );
 
-/// `bot_approvals`의 모든 열(정의 순서).
+/// `bot_approvals`의 공통 조회에 쓰는 열 목록.
 pub(crate) const APPROVALS: &str = concat!(
     "nonce, profile, run, generation, call, requester, approver, risk, policy_revision, ",
     "tool, tool_revision, args_sha256, expires_ms, reasons, card, state, decided_by, ",
     "decided_ms, created_ms"
 );
 
-/// `bot_effects`의 모든 열(정의 순서).
+/// `bot_effects`의 공통 조회에 쓰는 열 목록.
 pub(crate) const EFFECTS: &str = concat!(
     "profile, id, run, call, step, args_sha256, state, generation, receipt, reason, ",
     "resolution, created_ms, updated_ms"
 );
 
-/// `bot_deliveries`의 모든 열(정의 순서).
+/// `bot_deliveries`의 공통 조회에 쓰는 열 목록.
 pub(crate) const DELIVERIES: &str = concat!(
     "profile, run, dest_binding, dest_kind, dest_id, dest_thread, state, activation, ",
     "result, answers, sha256, drafted_ms, created_ms, updated_ms, unsent, ",
     "unsent_receipt, unsent_activation, unsent_nonce, unsent_ms"
 );
 
-/// `bot_memories`의 모든 열(정의 순서).
+/// `bot_memories`의 공통 조회에 쓰는 열 목록.
 pub(crate) const MEMORIES: &str = concat!(
     "profile, id, agent, owner, visibility, body, seed_path, seed_sha256, created_ms, ",
     "updated_ms, deleted_ms"
 );
 
-/// `bot_user_schedules`의 모든 열(정의 순서).
+/// `bot_user_schedules`의 공통 조회에 쓰는 열 목록.
 pub(crate) const USER_SCHEDULES: &str = concat!(
     "profile, id, owner, agent, origin_run, origin_call, origin_binding, origin_kind, ",
     "origin_id, origin_thread, origin_private_read, approver, ceiling, dest_binding, ",
@@ -64,12 +64,12 @@ pub(crate) const USER_SCHEDULES: &str = concat!(
     "fire_origin"
 );
 
-/// `bot_schedule_segments`의 모든 열(정의 순서).
+/// `bot_schedule_segments`의 공통 조회에 쓰는 열 목록.
 pub(crate) const SEGMENTS: &str = concat!(
     "profile, agent, trigger, from_ms, until_ms, revision, cron, timezone, beat, ",
     "principal, approver, scopes, target"
 );
 
-/// `bot_audit`의 모든 열(정의 순서).
+/// `bot_audit`의 공통 조회에 쓰는 열 목록.
 pub(crate) const AUDIT: &str =
     "seq, profile, at_ms, actor, action, target, args_sha256, verdict, prev_hash, hash";

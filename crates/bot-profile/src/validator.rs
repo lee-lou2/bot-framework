@@ -25,7 +25,7 @@ impl SchemaValidator {
         if let Some(found) = cache.get(schema) {
             return Ok(found.clone());
         }
-        let doc: Value = serde_json::from_str(schema).map_err(|_| Error::Invalid)?;
+        let doc: Value = bot_core::json::parse(schema).ok_or(Error::Invalid)?;
         let compiled = Arc::new(Schema::compile_input(doc).map_err(|_| Error::Invalid)?);
         if cache.len() >= CACHE_LIMIT {
             cache.clear();
@@ -39,7 +39,7 @@ impl InputValidator for SchemaValidator {
     /// 스키마가 지원 어휘 밖이거나 인자가 스키마에 맞지 않으면 `Invalid`.
     fn validate(&self, schema: &JsonPayload, args: &JsonPayload) -> Result<(), Error> {
         let compiled = self.compiled(&schema.0)?;
-        let value: Value = serde_json::from_str(&args.0).map_err(|_| Error::Invalid)?;
+        let value: Value = bot_core::json::parse(&args.0).ok_or(Error::Invalid)?;
         if compiled.validate(&value).is_empty() {
             Ok(())
         } else {
@@ -102,5 +102,32 @@ mod tests {
                 "{schema}"
             );
         }
+    }
+
+    #[test]
+    fn duplicate_keys_and_excessive_depth_are_rejected_in_schema_and_args() {
+        let v = SchemaValidator::new();
+        let schema = payload(r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#);
+        // 인자의 중복 키와 깊이 초과를 거절한다
+        assert!(matches!(
+            v.validate(&schema, &payload(r#"{"a":1,"a":2}"#)),
+            Err(Error::Invalid)
+        ));
+        let deep = format!(
+            "{}1{}",
+            "[".repeat(bot_core::json::MAX_DEPTH + 1),
+            "]".repeat(bot_core::json::MAX_DEPTH + 1)
+        );
+        let any_schema = payload(r#"{"type":"object"}"#);
+        assert!(matches!(
+            v.validate(&any_schema, &payload(&format!(r#"{{"a":{deep}}}"#))),
+            Err(Error::Invalid)
+        ));
+        // 스키마 자체의 중복 키도 거절한다
+        let dup_schema = payload(r#"{"type":"object","type":"object"}"#);
+        assert!(matches!(
+            v.validate(&dup_schema, &payload("{}")),
+            Err(Error::Invalid)
+        ));
     }
 }

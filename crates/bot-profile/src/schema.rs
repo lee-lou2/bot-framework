@@ -1,16 +1,22 @@
 //! JSON Schema(2020-12)의 소집합 해석기. 번들한 스키마(schemas/v1)와 도구 `input` 스키마를 같은 코드로 실행한다.
 //! 어떤 키워드를 받는지는 `vocab`이 정한다(지원하지 않는 키워드·외부 참조는 컴파일 단계에서 거절).
 //! `pattern`은 선형 시간 정규식(regex)이라 악의적 패턴이 시간을 끌지 못한다.
+mod value;
+
+pub(crate) use value::{as_exact_i64, as_exact_u64};
+
 use crate::{
     hint,
     vocab::{self, Dialect, MAX_DEPTH, META_REF, Problem},
 };
 use regex::Regex;
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 use std::{
     cell::Cell,
+    cmp::Ordering,
     collections::{HashMap, HashSet},
 };
+use value::{as_int, is_integer, json_equal, num_cmp};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Violation {
@@ -120,11 +126,11 @@ impl Schema {
                 format!("{}이어야 해요(받은 값: {})", type_label(t), kind(inst)),
             );
         }
-        if let Some(c) = obj.get("const").filter(|c| *c != inst) {
+        if let Some(c) = obj.get("const").filter(|c| !json_equal(c, inst)) {
             push(out, ptr, format!("값은 {c}이어야 해요"));
         }
         if let Some(Value::Array(options)) = obj.get("enum")
-            && !options.contains(inst)
+            && !options.iter().any(|o| json_equal(o, inst))
         {
             let list: Vec<String> = options.iter().map(Value::to_string).collect();
             push(
@@ -137,7 +143,7 @@ impl Schema {
             Value::Object(map) => self.eval_object(cx, obj, map, ptr, depth, out),
             Value::Array(items) => self.eval_array(cx, obj, items, ptr, depth, out),
             Value::String(s) => self.eval_string(obj, s, ptr, out),
-            Value::Number(n) => eval_number(obj, n.as_f64().unwrap_or(0.0), ptr, out),
+            Value::Number(n) => eval_number(obj, n, ptr, out),
             _ => {}
         }
         self.eval_combinators(cx, obj, inst, ptr, depth, out);
@@ -281,9 +287,13 @@ impl Schema {
         }
         count_bounds(obj, ("minItems", "maxItems"), items.len(), "항목", ptr, out);
         if obj.get("uniqueItems") == Some(&Value::Bool(true)) {
-            let mut seen = HashSet::new();
-            for item in items.iter().filter(|i| !seen.insert(i.to_string())) {
-                push(out, ptr, format!("중복된 항목이 있어요: {item}"));
+            let mut seen: Vec<&Value> = Vec::new();
+            for item in items {
+                if seen.iter().any(|prev| json_equal(prev, item)) {
+                    push(out, ptr, format!("중복된 항목이 있어요: {item}"));
+                } else {
+                    seen.push(item);
+                }
             }
         }
     }
@@ -420,18 +430,18 @@ fn report_union(
     let Some((key, consts, value)) = found else {
         return closest(out, ptr, runs);
     };
-    if consts.contains(&value) {
+    if consts.iter().any(|tag| json_equal(tag, value)) {
         let matching = runs
             .into_iter()
             .zip(&consts)
-            .filter(|(_, tag)| **tag == value)
+            .filter(|(_, tag)| json_equal(tag, value))
             .map(|(run, _)| run)
             .collect();
         return closest(out, ptr, matching);
     }
     let mut allowed: Vec<&Value> = Vec::new();
     for tag in &consts {
-        if !allowed.contains(tag) {
+        if !allowed.iter().any(|seen| json_equal(seen, tag)) {
             allowed.push(tag);
         }
     }
@@ -511,9 +521,7 @@ fn type_matches(t: &Value, inst: &Value) -> bool {
         | ("array", Value::Array(_))
         | ("string", Value::String(_))
         | ("number", Value::Number(_)) => true,
-        ("integer", Value::Number(n)) => {
-            n.is_i64() || n.is_u64() || n.as_f64().is_some_and(|f| f.fract() == 0.0)
-        }
+        ("integer", Value::Number(n)) => is_integer(n),
         _ => false,
     };
     match t {
@@ -533,38 +541,50 @@ fn count_bounds(
 ) {
     if let Some(m) = obj
         .get(keys.0)
-        .and_then(Value::as_u64)
+        .and_then(as_exact_u64)
         .filter(|m| (n as u64) < *m)
     {
         push(out, ptr, format!("{unit}이(가) {m}개 이상이어야 해요"));
     }
     if let Some(m) = obj
         .get(keys.1)
-        .and_then(Value::as_u64)
+        .and_then(as_exact_u64)
         .filter(|m| (n as u64) > *m)
     {
         push(out, ptr, format!("{unit}이(가) {m}개 이하여야 해요"));
     }
 }
 
-fn eval_number(obj: &Map<String, Value>, n: f64, ptr: &str, out: &mut Vec<Violation>) {
-    let get = |k: &str| obj.get(k).and_then(Value::as_f64);
-    if let Some(m) = get("minimum").filter(|m| n < *m) {
+fn eval_number(obj: &Map<String, Value>, n: &Number, ptr: &str, out: &mut Vec<Violation>) {
+    let get = |k: &str| obj.get(k).and_then(Value::as_number);
+    if let Some(m) = get("minimum").filter(|m| num_cmp(n, m) == Some(Ordering::Less)) {
         push(out, ptr, format!("{m} 이상이어야 해요"));
     }
-    if let Some(m) = get("maximum").filter(|m| n > *m) {
+    if let Some(m) = get("maximum").filter(|m| num_cmp(n, m) == Some(Ordering::Greater)) {
         push(out, ptr, format!("{m} 이하여야 해요"));
     }
-    if let Some(m) = get("exclusiveMinimum").filter(|m| n <= *m) {
+    if let Some(m) = get("exclusiveMinimum")
+        .filter(|m| matches!(num_cmp(n, m), Some(Ordering::Less | Ordering::Equal)))
+    {
         push(out, ptr, format!("{m}보다 커야 해요"));
     }
-    if let Some(m) = get("exclusiveMaximum").filter(|m| n >= *m) {
+    if let Some(m) = get("exclusiveMaximum")
+        .filter(|m| matches!(num_cmp(n, m), Some(Ordering::Greater | Ordering::Equal)))
+    {
         push(out, ptr, format!("{m}보다 작아야 해요"));
     }
-    if let Some(m) = get("multipleOf").filter(|m| *m > 0.0) {
-        let q = n / m;
-        if (q - q.round()).abs() > 1e-9 {
-            push(out, ptr, format!("{m}의 배수여야 해요"));
+    if let Some(m) = get("multipleOf") {
+        if let (Some(ni), Some(mi)) = (as_int(n), as_int(m)) {
+            if mi > 0 && ni % mi != 0 {
+                push(out, ptr, format!("{m}의 배수여야 해요"));
+            }
+        } else if let (Some(nf), Some(mf)) = (n.as_f64(), m.as_f64())
+            && mf > 0.0
+        {
+            let q = nf / mf;
+            if !q.is_finite() || (q - q.round()).abs() > 1e-9 {
+                push(out, ptr, format!("{m}의 배수여야 해요"));
+            }
         }
     }
 }

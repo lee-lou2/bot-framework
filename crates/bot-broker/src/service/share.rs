@@ -16,7 +16,6 @@ use crate::{
     json::parse,
     ports::Sealed,
     resolve::Resolved,
-    scope::authorize,
     text::json_quote,
 };
 use bot_core::{
@@ -25,6 +24,7 @@ use bot_core::{
     ledger::{CallPhase, StartCall},
     port::Error,
     profile::{Snapshot, Tool},
+    scope::authorize,
     state::{ConversationKind, Risk, RunContext, Visibility},
 };
 use serde_json::Value;
@@ -265,7 +265,7 @@ impl BrokerService {
         let _slot = self
             .limiter
             .admit(&flow.attempt.profile, &flow.ctx.principal)
-            .map_err(|_| Self::limited())?;
+            .map_err(|_| Error::RateLimited)?;
         let class = share_class();
         let approval = match self.gate(&flow, &class, pointer, None).await? {
             Gate::Go(approval) => approval,

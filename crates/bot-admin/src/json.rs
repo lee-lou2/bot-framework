@@ -1,8 +1,8 @@
 //! 조회 값 → 응답 JSON. 시각은 유닉스 밀리초, 해시는 소문자 16진, 상태는 소문자 고정 낱말이다.
 //! 계약 타입은 serde에 의존하지 않으므로 여기서 손으로 옮긴다. 여기 없는 값은 응답에 나가지 않는다.
 
-use crate::port::*;
 use bot_core::{
+    admin::*,
     builtin::{CardBody, card_body},
     command::memory_share_hash,
     id::MemoryId,
@@ -11,13 +11,10 @@ use bot_core::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{fmt::Write, time::SystemTime};
+use std::time::SystemTime;
 
 pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    })
+    bot_core::random::hex(bytes)
 }
 
 /// 사전 승인 한 행: 문자열 4개·정수 3개·불리언 1개(관리 화면과 계약).

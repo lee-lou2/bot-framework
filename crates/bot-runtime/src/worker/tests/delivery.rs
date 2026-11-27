@@ -40,6 +40,9 @@ fn draft() -> DeliveryDraft {
 }
 
 impl ScheduledReplies for FakeReplies {
+    fn receipt(&self, _: Attempt) -> Reply<'_, Option<JsonPayload>> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
     fn draft(&self, _: Attempt, completion: Option<Finish>) -> Reply<'_, Option<DeliveryDraft>> {
         lock(&self.seen).push(completion.is_some());
         let next = lock(&self.drafts).pop_front().unwrap_or(Ok(None));
@@ -49,6 +52,14 @@ impl ScheduledReplies for FakeReplies {
         *lock(&self.fenced) += 1;
         let next = lock(&self.fences).pop_front().unwrap_or(Err(Error::Stale));
         Box::pin(async move { next })
+    }
+    fn finish_unsent(
+        &self,
+        _: bot_core::schedule::DeliveryFence,
+        _: DeliveryTarget,
+        _: bot_core::schedule::UnsentReason,
+    ) -> Reply<'_, JsonPayload> {
+        Box::pin(async { Err(Error::Unavailable) })
     }
     fn enqueue(&self, _: bot_core::ledger::StartCall) -> Reply<'_, ()> {
         Box::pin(async { Err(Error::Unavailable) })

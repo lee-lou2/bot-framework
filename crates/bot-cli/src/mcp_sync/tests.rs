@@ -301,6 +301,7 @@ async fn invalid_skill_md_fails_before_reading_secrets_or_connecting_to_remote()
         profiles: Some(root),
         host_config: Some(host_path),
         database_url: None,
+        db_max_connections: None,
         socket: None,
         secrets: SecretsKind::Env,
         secrets_reread: None,
@@ -344,4 +345,19 @@ async fn invalid_skill_md_fails_before_reading_secrets_or_connecting_to_remote()
         assert!(!skill_dir.join(lock::FILE).exists(), "{label}");
     }
     accept.abort();
+}
+
+#[test]
+fn write_atomic_never_unlinks_an_existing_tmp_file_on_already_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("tools.lock.yaml");
+    let pre = dir.path().join(".tools.lock.yaml.tmp-fixed");
+    std::fs::write(&pre, "precious").unwrap();
+    let err = write_atomic_with(&target, "new-lock", || "fixed".to_owned()).unwrap_err();
+    assert!(err.contains("쓰지 못했어요"), "{err}");
+    assert_eq!(std::fs::read_to_string(&pre).unwrap(), "precious");
+    assert!(!target.exists());
+    // 정상 경로에서는 무작위 접미사로 원자적으로 기록한다
+    write_atomic(&target, "ok-lock").unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "ok-lock");
 }

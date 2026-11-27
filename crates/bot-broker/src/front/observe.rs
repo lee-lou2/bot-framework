@@ -92,7 +92,7 @@ impl TurnSink for CheckpointSink {
         })
     }
 
-    /// `cli-refusal-<호출 ID>`에 JSON 문자열 `"unknown_tool"`·`"invalid"`로 적는다. 같은 표식을 다시 써도 같은 내용이라 멱등이고,
+    /// `cli-refusal-<호출 ID>`에 실행 전 확정 거절 단어(`CliRefusal::word`: `"unknown_tool"`·`"invalid"`·`"denied"`·`"conflict"`·`"stale"`·`"unavailable"`)를 JSON 문자열로 적는다. 같은 표식을 다시 써도 같은 내용이라 멱등이고,
     /// 같은 키에 다른 내용은 저장소가 거절한다.
     fn refused(&self, attempt: Attempt, call: CallId, refusal: CliRefusal) -> Reply<'_, ()> {
         self.runs.checkpoint(attempt, refusal.step(&call))

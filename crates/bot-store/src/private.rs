@@ -11,7 +11,7 @@
 //! - 결과 기록은 세대·claim 토큰을 대조한다. 시작은 살아 있는 리스가 필요하다. 영수증·오류·인자는 저장하지 않는다.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, Entry, OwnedEntry},
     codec::*,
     db::{R, Store, Tx},
 };
@@ -251,10 +251,13 @@ impl Store {
             return Ok(());
         }
         lost.sort();
-        for (profile, run) in &lost {
-            let entry = Entry::new("system", "private.held", run, "lease_expired");
-            audit::append(&mut tx, profile, &entry).await?;
-        }
+        let audits: Vec<OwnedEntry> = lost
+            .into_iter()
+            .map(|(profile, run)| {
+                OwnedEntry::new(profile, "system", "private.held", run, "lease_expired")
+            })
+            .collect();
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(())
     }

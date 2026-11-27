@@ -2,7 +2,7 @@
 //!
 //! `https://호스트[:포트][/경로]`만 쓴다. `http://`는 호스트가 **loopback IP 리터럴**(127.0.0.0/8·`::1`)일 때만 받는다(로컬 Ollama·시험): `localhost` 같은 이름이나
 //! 사설망 주소는 이름 해석·망 구성이 바뀌면 다른 곳을 가리킬 수 있어 평문으로 보내지 않는다. 자격(`user:pass@`)·쿼리·조각·퍼센트 인코딩·공백·제어 문자·비ASCII는 거절한다.
-//! 호스트 이름은 소문자 DNS 이름이어야 하고, `127.1`·`2130706433`처럼 IP 주소의 변형 표기로 읽힐 수 있는 숫자뿐인 마지막 레이블은 거절한다.
+//! 호스트 이름은 소문자 DNS 이름이어야 하고, `127.1`·`2130706433`·`0x7f000001`처럼 IP 주소의 변형 표기로 읽힐 수 있는 숫자·16진수(`0x`) 마지막 레이블은 거절한다.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -176,8 +176,13 @@ fn dns_name(name: &str) -> Option<String> {
             return None;
         }
     }
-    // 숫자뿐인 마지막 레이블은 `127.1`·`2130706433` 같은 IP의 변형 표기로 해석될 수 있다
-    if labels.last()?.bytes().all(|b| b.is_ascii_digit()) {
+    // 숫자뿐이거나 `0x` 16진수인 마지막 레이블은 `127.1`·`2130706433`·`0x7f000001`·`127.0x1` 같은 IP의 변형 표기로 해석될 수 있다
+    let last = *labels.last()?;
+    if last.bytes().all(|b| b.is_ascii_digit())
+        || last
+            .strip_prefix("0x")
+            .is_some_and(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
         return None;
     }
     Some(name)

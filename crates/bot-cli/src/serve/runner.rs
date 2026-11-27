@@ -18,10 +18,10 @@ use bot_broker::{
     sys::OsEntropy,
 };
 use bot_core::{
+    active::ActiveCheck,
     id::ProfileId,
     port::{EffectJournal, Error, Reply},
 };
-use bot_gateway::active::ActiveCheck;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

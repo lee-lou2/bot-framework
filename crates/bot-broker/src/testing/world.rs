@@ -393,7 +393,8 @@ impl SnapshotBuilder {
             let derived = match self.agent_scopes.remove(&path) {
                 Some(explicit) => explicit,
                 None => {
-                    let ceiling = crate::scope::agent_ceiling(&self.snapshot.policy.agents, &path);
+                    let ceiling =
+                        bot_core::scope::agent_ceiling(&self.snapshot.policy.agents, &path);
                     self.snapshot
                         .policy
                         .scopes

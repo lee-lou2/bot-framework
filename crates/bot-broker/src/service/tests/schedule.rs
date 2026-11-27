@@ -1,7 +1,7 @@
 //! 내장 `schedule.create`·`schedule.list`·`schedule.cancel`.
 
 use super::*;
-use crate::rfc3339::parse_utc;
+use bot_core::schedule::utc::parse_utc;
 use bot_core::{
     ledger::{ApprovalState, CallLedger, CallPhase, StartCall},
     schedule::{MAX_ACTIVE_PER_OWNER, Timing},

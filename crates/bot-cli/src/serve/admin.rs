@@ -9,10 +9,14 @@ use crate::host::HostFile;
 use bot_admin::{
     AdminDeps, StaticTokens,
     auth::{new_token, viewer},
-    port::{AdminAct, AdminRead},
 };
-use bot_core::{port::Broker, profile::ProfileCatalog};
-use bot_gateway::{active::ActiveCheck, host::resolve_uid, identity};
+use bot_core::{
+    active::ActiveCheck,
+    admin::{AdminAct, AdminRead},
+    port::Broker,
+    profile::ProfileCatalog,
+};
+use bot_gateway::{host::resolve_uid, identity};
 use bot_profile::Registry;
 use bot_store::Store;
 use std::{

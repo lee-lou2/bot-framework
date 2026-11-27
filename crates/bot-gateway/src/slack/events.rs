@@ -11,7 +11,7 @@ use super::{
     handle::mentions_bot,
     human::{Actor, NOT_HUMAN},
     socket::Installation,
-    ux::{TrackedRun, is_stop_phrase},
+    ux::{StopMention, TrackedRun, is_stop_phrase},
 };
 use crate::{
     entrance::Real,
@@ -22,13 +22,34 @@ use crate::{
     trigger,
 };
 use bot_core::{
-    id::{BindingId, RequestId},
+    id::{BindingId, PrincipalId, RequestId},
     profile::Adapter,
     slack::{BotThread, SlackEvent, SlackSource, SourceKind},
     state::{Conversation, ConversationKind},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use tokio_util::sync::CancellationToken;
+
+/// DM과 채널 글 접수가 함께 쓰는 공통 입력 묶음.
+pub(super) struct SlackAdmission {
+    pub real: Real,
+    pub principal: PrincipalId,
+    pub request: String,
+    pub kind: ConversationKind,
+    pub source_kind: SourceKind,
+    pub team: String,
+    pub channel: String,
+    pub user: String,
+    pub ts: String,
+    pub raw_thread_ts: Option<String>,
+    pub thread_ts: String,
+    pub files: Vec<String>,
+    pub event_id: Option<String>,
+    pub body: Value,
+    pub event: Event,
+    pub track_ux: bool,
+}
 
 /// 채널 글 한 건(`app_mention`과 `message.channels`가 같은 모양으로 합쳐진다)
 pub(super) struct ChannelMsg {
@@ -68,6 +89,90 @@ enum Pick {
 }
 
 impl SlackGateway {
+    /// 스레드에서 중단 명령("중단해줘" 등)을 받으면 진행 중 작업을 가로채 중단한다.
+    pub(super) async fn try_stop_mention(
+        &self,
+        install: &Installation,
+        routes: &Routes,
+        channel: &str,
+        thread_ts: &str,
+        user: &str,
+    ) -> StopMention {
+        let Some(ux) = &self.ux else {
+            return StopMention::Pass;
+        };
+        ux.on_stop_mention(
+            &self.ingress,
+            install,
+            routes.snapshot(&install.profile).map(|v| &**v),
+            channel,
+            thread_ts,
+            user,
+        )
+        .await
+    }
+
+    /// 인증된 Slack 글(DM·채널 멘션·스레드 답글)을 소유자를 확인한 `routes`로 접수하고 필요하면 진행 추적을 시작한다.
+    pub(super) async fn admit_slack_message(
+        &self,
+        install: &Installation,
+        routes: &Routes,
+        msg: SlackAdmission,
+        stop: &CancellationToken,
+    ) -> bool {
+        let inbound = Inbound {
+            real: msg.real,
+            principal: msg.principal.clone(),
+            request: RequestId(msg.request.clone()),
+            conversation: Conversation {
+                kind: msg.kind,
+                id: msg.channel.clone(),
+                thread: Some(msg.thread_ts.clone()),
+            },
+            attachments: msg
+                .files
+                .iter()
+                .map(|id| format!("slack:{}/{id}", install.alias))
+                .collect(),
+            body: msg.body,
+            event: msg.event,
+        };
+        // 인증된 이벤트 원천은 일반 접수의 넘김·승인 증거와 민감 DM의 봉투 지문에 쓰인다.
+        let source = SlackSource {
+            kind: msg.source_kind,
+            team: msg.team.clone(),
+            channel: msg.channel.clone(),
+            ts: msg.ts.clone(),
+            thread_ts: msg.raw_thread_ts,
+            event_id: msg.event_id.unwrap_or(msg.request),
+            reaction: None,
+        };
+        // 소유자를 확인한 바로 그 표로 접수한다(그 사이 입구 소유자가 바뀌어도 이 설치의 프로필 밖으로 새지 않는다)
+        let admission = self
+            .ingress
+            .admit_sourced(routes, inbound, Some(source))
+            .await;
+        if msg.track_ux
+            && let (Some(ux), Admission::Accepted { run, .. }) = (&self.ux, &admission)
+        {
+            ux.track(
+                TrackedRun {
+                    profile: install.profile.clone(),
+                    workspace: install.alias.clone(),
+                    team: msg.team,
+                    channel: msg.channel,
+                    thread_ts: msg.thread_ts,
+                    msg_ts: msg.ts,
+                    user: msg.user,
+                    principal: msg.principal,
+                    run: run.clone(),
+                },
+                stop.clone(),
+            );
+        }
+        admission.settled()
+    }
+
     /// 이 설치의 프로필이 소유한 채널 바인딩과 그 `events`. 설치와 맞지 않는 채널·바인딩이 아니면 `None`.
     fn channel_route<'a>(
         &self,
@@ -107,7 +212,12 @@ impl SlackGateway {
     }
 
     /// 채널 글(멘션 또는 스레드 답글) 접수. 돌려주는 값은 «ack해도 되는가»다.
-    pub(super) async fn on_channel_message(&self, install: &Installation, msg: ChannelMsg) -> bool {
+    pub(super) async fn on_channel_message(
+        &self,
+        install: &Installation,
+        msg: ChannelMsg,
+        stop: &CancellationToken,
+    ) -> bool {
         if msg.team != install.team {
             return true;
         }
@@ -147,22 +257,18 @@ impl SlackGateway {
         }
         let text = super::handle::strip_mention(&msg.text, &install.bot_user);
         let thread_ts = msg.thread_ts.clone().unwrap_or_else(|| msg.ts.clone());
-        if matches!(pick, Pick::Mention)
-            && is_stop_phrase(&text)
-            && let Some(ux) = &self.ux
-            && ux
-                .on_stop_mention(
-                    install,
-                    routes.snapshot(&install.profile).map(|v| &**v),
-                    &msg.channel,
-                    &thread_ts,
-                    &msg.user,
-                )
+        let is_mention = matches!(pick, Pick::Mention);
+        if is_mention && is_stop_phrase(&text) {
+            match self
+                .try_stop_mention(install, &routes, &msg.channel, &thread_ts, &msg.user)
                 .await
-        {
-            return true;
+            {
+                StopMention::Pass => {}
+                StopMention::Handled => return true,
+                StopMention::Retry => return false,
+            }
         }
-        let (event, kind, body) = match &pick {
+        let (event, source_kind, body) = match &pick {
             Pick::Mention => (Event::Message, SourceKind::Message, json!({"text": text})),
             Pick::Reply(root) => (
                 Event::ThreadReply,
@@ -170,60 +276,42 @@ impl SlackGateway {
                 json!({"text": text, "channel": msg.channel, "ts": msg.ts, "thread_ts": root}),
             ),
         };
-        let inbound = Inbound {
-            real: Real::SlackChannel {
-                team: msg.team.clone(),
-                channel: msg.channel.clone(),
-            },
-            principal: principal.clone(),
-            request: RequestId(request.clone()),
-            conversation: Conversation {
+        self.admit_slack_message(
+            install,
+            &routes,
+            SlackAdmission {
+                real: Real::SlackChannel {
+                    team: msg.team.clone(),
+                    channel: msg.channel.clone(),
+                },
+                principal,
+                request,
                 kind: ConversationKind::Channel,
-                id: msg.channel.clone(),
-                thread: Some(thread_ts.clone()),
-            },
-            attachments: msg
-                .files
-                .iter()
-                .map(|id| format!("slack:{}/{id}", install.alias))
-                .collect(),
-            body,
-            event,
-        };
-        let source = SlackSource {
-            kind,
-            team: msg.team.clone(),
-            channel: msg.channel.clone(),
-            ts: msg.ts.clone(),
-            thread_ts: msg.thread_ts,
-            event_id: msg.event_id.unwrap_or(request),
-            reaction: None,
-        };
-        // 소유자를 확인한 바로 그 표로 접수한다(그 사이 입구 소유자가 바뀌어도 이 설치의 프로필 밖으로 새지 않는다)
-        let admission = self
-            .ingress
-            .admit_sourced(&routes, inbound, Some(source))
-            .await;
-        if matches!(pick, Pick::Mention)
-            && let (Some(ux), Admission::Accepted { run, .. }) = (&self.ux, &admission)
-        {
-            ux.track(TrackedRun {
-                profile: install.profile.clone(),
-                workspace: install.alias.clone(),
+                source_kind,
                 team: msg.team,
                 channel: msg.channel,
-                thread_ts,
-                msg_ts: msg.ts,
                 user: msg.user,
-                principal,
-                run: run.clone(),
-            });
-        }
-        admission.settled()
+                ts: msg.ts,
+                raw_thread_ts: msg.thread_ts,
+                thread_ts,
+                files: msg.files,
+                event_id: msg.event_id,
+                body,
+                event,
+                track_ux: is_mention,
+            },
+            stop,
+        )
+        .await
     }
 
     /// 채널의 글 한 건(`message.channels`·`message.groups`). 자기 봇의 글은 스레드 증거로만 기록하고, 사람의 글은 접수 판정으로 보낸다.
-    pub(super) async fn on_post(&self, install: &Installation, post: Post) -> bool {
+    pub(super) async fn on_post(
+        &self,
+        install: &Installation,
+        post: Post,
+        stop: &CancellationToken,
+    ) -> bool {
         if post.team != install.team {
             return true;
         }
@@ -246,6 +334,7 @@ impl SlackGateway {
                 event_id: post.event_id,
                 mention_event: false,
             },
+            stop,
         )
         .await
     }

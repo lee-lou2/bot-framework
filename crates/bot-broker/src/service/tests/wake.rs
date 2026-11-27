@@ -77,7 +77,7 @@ fn a_declared_tool_gets_its_followup_with_the_result_in_one_commit_and_the_model
     assert_eq!(wakes[0].0, "verify the upload");
     assert_eq!(
         wakes[0].1,
-        crate::rfc3339::parse_utc("2030-01-01T12:00:00Z").unwrap()
+        bot_core::schedule::utc::parse_utc("2030-01-01T12:00:00Z").unwrap()
     );
     assert!(wakes[0].2);
     // 결과는 한 커밋으로 원장에 남았다(떼어 낸 모양 그대로)
@@ -266,7 +266,7 @@ fn unsettled_effect_steps_hold_the_call_before_any_followup_is_made() {
 #[test]
 fn the_runner_payload_shape_round_trips_through_the_extraction() {
     use super::super::wake::extract;
-    let now = crate::rfc3339::parse_utc("2029-12-31T00:00:00Z").unwrap();
+    let now = bot_core::schedule::utc::parse_utc("2029-12-31T00:00:00Z").unwrap();
     let payload = JsonPayload(
         r#"{"_meta":{"bot/wake":{"at":"2030-01-01T12:00:00Z","instruction":"x"}},"content":[],"isError":false}"#.into(),
     );

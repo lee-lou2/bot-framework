@@ -6,7 +6,7 @@
 //! 발화(`due`·`advance`)는 `user_due.rs`, 목록과 후속 확인은 `user_wake.rs`다.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     calls::{fence, lock_call, lock_root_shared, phase_of, risk_str, tree_flagged},
     codec::*,
     db::{R, Store, Tx, ms_to_time, time_to_ms},
@@ -80,7 +80,10 @@ pub(crate) fn timed(timing: &Timing, now: i64) -> R<Timed> {
             expression,
             timezone,
         } => {
-            if !id_ok(timezone) || timezone.parse::<chrono_tz::Tz>().is_err() {
+            if !id_ok(timezone)
+                || !valid_iana_timezone(timezone)
+                || timezone.parse::<chrono_tz::Tz>().is_err()
+            {
                 return invalid();
             }
             Ok(Timed {
@@ -244,17 +247,10 @@ pub(crate) async fn finish_call(
     Ok(())
 }
 
-pub(crate) async fn audit_done(
-    tx: &mut Tx<'_>,
-    profile: &str,
-    actor: &str,
-    call: &str,
-    hash: Vec<u8>,
-) -> R<()> {
-    let mut done = Entry::new(actor, "call.done", call, "done");
-    done.args = Some(to32(hash)?);
-    audit::append(tx, profile, &done).await?;
-    Ok(())
+pub(crate) fn done_entry(profile: &str, actor: &str, call: &str, hash: [u8; 32]) -> OwnedEntry {
+    let mut done = OwnedEntry::new(profile, actor, "call.done", call, "done");
+    done.args = Some(hash);
+    done
 }
 
 /// 소유자별 한도를 직렬화하고 활성 예약 수를 센다.
@@ -441,21 +437,20 @@ impl Store {
         } else {
             "cron"
         };
-        audit::append(
+        audit::append_many(
             &mut tx,
-            &at.profile.0,
-            &Entry::new(&origin.principal, "schedule.create", &id, kind),
+            &[
+                OwnedEntry::new(
+                    &at.profile.0,
+                    &origin.principal,
+                    "schedule.create",
+                    &id,
+                    kind,
+                ),
+                done_entry(&at.profile.0, &origin.principal, &s.call.0, sealed),
+            ],
         )
         .await?;
-        let hash: Vec<u8> = sqlx::query_scalar(
-            "select args_sha256 from bot_calls where profile = $1 and run = $2 and call = $3",
-        )
-        .bind(&at.profile.0)
-        .bind(&at.run.0)
-        .bind(&s.call.0)
-        .fetch_one(&mut *tx)
-        .await?;
-        audit_done(&mut tx, &at.profile.0, &origin.principal, &s.call.0, hash).await?;
         tx.commit().await?;
         Ok(ScheduleId(id))
     }
@@ -463,23 +458,23 @@ impl Store {
     pub(crate) async fn schedule_cancel(&self, s: StartCall, id: ScheduleId) -> R<()> {
         ids_ok(&[&s.owner, &s.checked_revision.0, &s.call.0, &id.0])?;
         let at = &s.attempt;
+        let sealed = cancel_hash(&id);
         let mut tx = self.begin_authorized().await?;
-        let (run, shared_flag, approval) =
-            match claim(&mut tx, &s, CANCEL_TOOL, &cancel_hash(&id)).await? {
-                Claimed::Done(result) => {
-                    tx.rollback().await?;
-                    return if id_in(&result).as_deref() == Some(id.0.as_str()) {
-                        Ok(())
-                    } else {
-                        Err(Error::Conflict.into())
-                    };
-                }
-                Claimed::Fresh {
-                    run,
-                    shared_flag,
-                    approval,
-                } => (run, shared_flag, approval),
-            };
+        let (run, shared_flag, approval) = match claim(&mut tx, &s, CANCEL_TOOL, &sealed).await? {
+            Claimed::Done(result) => {
+                tx.rollback().await?;
+                return if id_in(&result).as_deref() == Some(id.0.as_str()) {
+                    Ok(())
+                } else {
+                    Err(Error::Conflict.into())
+                };
+            }
+            Claimed::Fresh {
+                run,
+                shared_flag,
+                approval,
+            } => (run, shared_flag, approval),
+        };
         let origin = origin_of(&mut tx, at, &run, shared_flag).await?;
         // 소유자만: 없는 예약과 남의 예약은 같은 `Missing`이다(존재 여부를 알리지 않는다)
         let row = sqlx::query(
@@ -508,21 +503,20 @@ impl Store {
         } else {
             "already_closed"
         };
-        audit::append(
+        audit::append_many(
             &mut tx,
-            &at.profile.0,
-            &Entry::new(&origin.principal, "schedule.cancel", &id.0, verdict),
+            &[
+                OwnedEntry::new(
+                    &at.profile.0,
+                    &origin.principal,
+                    "schedule.cancel",
+                    &id.0,
+                    verdict,
+                ),
+                done_entry(&at.profile.0, &origin.principal, &s.call.0, sealed),
+            ],
         )
         .await?;
-        let hash: Vec<u8> = sqlx::query_scalar(
-            "select args_sha256 from bot_calls where profile = $1 and run = $2 and call = $3",
-        )
-        .bind(&at.profile.0)
-        .bind(&at.run.0)
-        .bind(&s.call.0)
-        .fetch_one(&mut *tx)
-        .await?;
-        audit_done(&mut tx, &at.profile.0, &origin.principal, &s.call.0, hash).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -557,4 +551,37 @@ pub(crate) fn destination_target(row: &PgRow) -> R<Option<DeliveryTarget>> {
             thread: row.get("dest_thread"),
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::timed;
+    use bot_core::{cron::Cron, port::Error, schedule::Timing};
+
+    #[test]
+    fn timed_rejects_non_canonical_iana_timezone_matching_bot_core() {
+        let expr = Cron::parse("0 9 * * *").unwrap();
+        // 정식 IANA 이름은 허용한다
+        for ok in ["UTC", "Asia/Seoul", "America/New_York"] {
+            let t = Timing::Cron {
+                expression: expr.clone(),
+                timezone: ok.into(),
+            };
+            assert!(timed(&t, 1_700_000_000_000).is_ok(), "{ok}");
+        }
+        // bot-core의 valid_iana_timezone이 거절하는 대소문자 변형·비정식 이름은 거절한다
+        for bad in ["asia/seoul", "utc", "Mars/Phobos"] {
+            let t = Timing::Cron {
+                expression: expr.clone(),
+                timezone: bad.into(),
+            };
+            assert!(
+                matches!(
+                    timed(&t, 1_700_000_000_000),
+                    Err(crate::db::Fail::Core(Error::Invalid))
+                ),
+                "{bad}"
+            );
+        }
+    }
 }

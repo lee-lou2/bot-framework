@@ -27,6 +27,15 @@ impl RunStore for Spy {
     fn status(&self, _: RequestKey) -> Reply<'_, Option<RequestState>> {
         Box::pin(std::future::ready(Ok(None)))
     }
+    fn progress(&self, _: ProfileId, _: RunId) -> Reply<'_, Option<RunProgress>> {
+        Box::pin(std::future::ready(Ok(Some(RunProgress {
+            state: bot_core::state::RunState::Leased,
+            cancel_requested: false,
+            active_agent: None,
+            active_tool: Some("agenda.list".into()),
+            waiting_approval: false,
+        }))))
+    }
     fn claim(&self) -> Reply<'_, Option<RunContext>> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(std::future::ready(Ok(None)))
@@ -78,6 +87,13 @@ async fn a_stale_worker_claims_nothing_and_leaves_the_work_for_a_current_one() {
         request: bot_core::id::RequestId("r1".into()),
     };
     assert!(matches!(runs.status(key).await, Ok(None)));
+    // 진행 요약 조회도 기본값으로 삼키지 않고 안쪽 저장소로 전달된다
+    let progress = runs
+        .progress(ProfileId("personal".into()), RunId("r1".into()))
+        .await
+        .unwrap()
+        .expect("안쪽 저장소의 진행 요약");
+    assert_eq!(progress.active_tool.as_deref(), Some("agenda.list"));
 }
 
 /// 운영 래퍼가 계량을 삼키면 저장소는 잘림·사용량을 영영 받지 못한다(기본 `finish_with`는 계량을 버리고 `finish`로 끝낸다): 같은 완료·같은 계량이 안쪽에 닿아야 한다.

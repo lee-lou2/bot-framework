@@ -4,8 +4,10 @@
 //!
 //! 구판 보호: 이 프로세스의 활성화 판본이 저장소의 활성 판본과 다르면(모델 허용·상류 목적지·egress·설치 판본 같은 권한 설정이
 //! 바뀜) 새 일을 집지 않고 도구를 시작하지 않는다(`guard`). 이미 집은 run은 끝까지 한다.
+#[cfg(any(test, feature = "testing"))]
+use super::claude::ClaudeParts;
 use super::{
-    claude::{self, Claude, ClaudeParts},
+    claude::{self, Claude},
     decide::LiveInstalled,
     guard::{GuardedBroker, GuardedRuns, StoreHandback},
     models,
@@ -16,13 +18,13 @@ use super::{
 };
 use crate::{host::HostFile, secrets::admin::SecretAdmin, settings::Settings};
 use bot_core::{
+    active::ActiveCheck,
     id::Revision,
     ledger::CallLedger,
     port::{Broker, DelegationStore, MemoryStore, RunStore},
     profile::ProfileCatalog,
     schedule::{ScheduleRoutes, ScheduledReplies},
 };
-use bot_gateway::active::ActiveCheck;
 use bot_profile::Registry;
 use bot_runtime::{Delivery, Deps as RuntimeDeps, NoRelays, Relays, Worker, WorkerConfig};
 use bot_store::Store;
@@ -64,9 +66,11 @@ pub struct Deps {
     pub stop: CancellationToken,
     /// 이 프로세스의 활성화 판본이 저장소의 활성 판본과 같은지 확인한다
     pub active: Arc<dyn ActiveCheck>,
-    /// 모델 CLI(`claude-cli`)를 쓰는 별칭이 있을 때 쓸 운영 어댑터 조각(모델 샌드박스·상류 전송). 없으면 `claude-cli`는 시작하지 않는다.
+    /// 모델 CLI(`claude-cli`)를 쓰는 별칭이 있을 때 쓸 시험용 어댑터 조각(합성 샌드박스·가짜 상류). 운영 빌드에는 포함하지 않는다.
+    #[cfg(any(test, feature = "testing"))]
     pub claude: Option<ClaudeParts>,
-    /// 운영 조각의 상류 전송만 바꾼다(시험 전용, 제품은 `None`)
+    /// 운영 조각의 상류 전송만 바꾼다(시험 전용, 운영 빌드에는 포함하지 않는다)
+    #[cfg(any(test, feature = "testing"))]
     pub upstream: Option<Arc<dyn bot_broker::model::Upstream>>,
     /// 명시 목적지 등록부(결정 브로커·scheduler와 같은 것)
     pub routes: Arc<dyn ScheduleRoutes>,
@@ -83,7 +87,7 @@ pub struct Prepared {
 
 /// 모델 실행기와 도구 브로커를 만든다(srt·설치본 점검 포함). 하나라도 어긋나면 Err — 아직 아무 일도 집지 않았고 판본도 그대로다.
 pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
-    // 모델 서비스 키: 프로필이 허용한 claude-cli 별칭의 자격이 보관소에 없으면 아무것도 만들기 전에 멈춘다
+    // 모델 서비스 키: 프로필이 허용한 모델 별칭(`claude-cli`·`anthropic-api`·`openai-api`, 키 없는 loopback 제외)의 자격이 보관소에 없으면 아무것도 만들기 전에 멈춘다
     let missing = claude::missing_keys(
         &deps.host,
         &deps.registry,
@@ -118,19 +122,24 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         tools.broker.clone(),
         deps.active.clone(),
     ));
-    // 모델 CLI를 쓰는 별칭이 있으면 프런트를 연다. 조각은 호출하는 쪽이 줬으면(시험) 그것을, 아니면 호스트 설정으로 운영 조각(Apple VM 어댑터 +
-    // HTTPS 상류 전송)을 만든다 — `sandbox.apple`이 없으면 시작하지 않는다(다른 샌드박스로 대신하지 않는다).
-    let claude = match claude::needed(&deps.host).then(|| match deps.claude.clone() {
-        Some(parts) => Ok(parts),
-        None => claude::operational(&deps.host, deps.settings.installs.as_deref(), deps.uid).map(
-            |mut parts| {
-                if let Some(upstream) = &deps.upstream {
-                    parts.upstream = upstream.clone();
-                }
-                parts
-            },
-        ),
-    }) {
+    // 모델 CLI를 쓰는 별칭이 있으면 프런트를 연다. 운영은 호스트 설정으로 운영 조각(Apple VM 어댑터 + HTTPS 상류 전송)을 만들고
+    // `sandbox.apple`이 없으면 시작하지 않는다(다른 샌드박스로 대신하지 않는다).
+    let claude_parts = claude::needed(&deps.host).then(|| {
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(parts) = deps.claude.clone() {
+            return Ok(parts);
+        }
+        let parts = claude::operational(&deps.host, deps.settings.installs.as_deref(), deps.uid);
+        #[cfg(any(test, feature = "testing"))]
+        let parts = parts.map(|mut parts| {
+            if let Some(upstream) = &deps.upstream {
+                parts.upstream = upstream.clone();
+            }
+            parts
+        });
+        parts
+    });
+    let claude = match claude_parts {
         Some(parts) => Some(
             claude::start(
                 parts?,
@@ -152,7 +161,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     // API 직접 호출 별칭(`anthropic-api`·`openai-api`)은 VM 없이 워커가 상류를 부른다: 키는 가림 장치를 거치는 보관소로만 읽고, 매 요청 직전에 이 프로세스의 활성화 판본을 확인한다
     let api = models::ApiParts {
         secrets: deps.secrets.clone(),
-        gate: Arc::new(models::ActiveGate(deps.active.clone())),
+        gate: deps.active.clone(),
     };
     // 이 뒤의 실패는 이미 띄운 모델 프런트·VM을 치우고 돌아간다(닻 VM이 남지 않게)
     let models = match models::build(

@@ -2,12 +2,9 @@
 //! 호출·단계는 프로필이 키의 일부이므로(`OwnedCall`·`OwnedEffect`) 같은 run·호출 ID를 다른 프로필이 쓰는 경우도 만들 수 있다.
 #![allow(dead_code)]
 
-use bot_admin::{
-    fake::{Data, OwnedEffect, call_view, effect_view, run_view},
-    port::{EffectView, HoldKind, HoldView, Waiting},
-};
+use bot_admin::fake::{Data, OwnedEffect, call_view, effect_view, run_view};
 use bot_core::{
-    admin::CallState,
+    admin::{CallState, EffectView, HoldKind, HoldView, Waiting},
     id::{CallId, HoldId, ProfileId, RunId, ToolId},
     state::{EffectState, Risk, RunState},
 };

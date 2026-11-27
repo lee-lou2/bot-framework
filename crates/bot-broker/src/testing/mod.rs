@@ -1,36 +1,48 @@
-//! 시험용 가짜. 다른 크레이트도 `testing` 기능으로 쓸 수 있다(운영 빌드에는 넣지 않는다).
-//! `MemLedger`는 `CallLedger`가 지켜야 할 불변식을 실행 가능한 형태로 적어 둔 기준 구현이다.
+//! 시험용 가짜 모음. 다른 크레이트의 시험이 쓰는 대역은 `testing` 기능으로 내보내고,
+//! 크레이트 내부 전용 대역은 `cfg(test)`에만 둔다(운영 빌드에는 넣지 않는다).
 
+#[cfg(test)]
 mod exec;
 mod fakes;
 mod journal;
 mod ledger;
 mod memory;
 mod net;
+#[cfg(test)]
 mod private;
+#[cfg(test)]
 mod replies;
 mod routes;
 mod sandbox;
+#[cfg(test)]
 mod schedules;
 mod turns;
 mod wire;
 mod world;
 
 pub use crate::effects::EffectChannel;
+#[cfg(test)]
 pub use exec::write_executable;
 pub use fakes::{FakeCatalog, FakeEffects, FakeRunner, MemAudit, RecordingTracer};
 pub use journal::MemJournal;
 pub use ledger::MemLedger;
 pub use memory::MemMemory;
 pub use net::{End, FakeConnector, FakeResolver, FakeUpstream};
+#[cfg(test)]
 pub use private::MemPrivateLedger;
+#[cfg(test)]
 pub use replies::{MemReplies, Sent};
 pub use routes::MemRoutes;
+#[cfg(test)]
+pub use sandbox::serve_mcp;
 pub use sandbox::{
-    Answer, CallCtx, CallFuture, FakeSandbox, FakeSecrets, Recorder, Server, Terminate, serve_mcp,
+    Answer, CallCtx, CallFuture, FakeSandbox, FakeSecrets, Recorder, Server, Terminate,
 };
+#[cfg(test)]
 pub use schedules::MemSchedules;
-pub use turns::{FakeDelegation, FakeRuns, PlanningRuns, RecordingPark, RecordingTurns};
+#[cfg(test)]
+pub use turns::RecordingTurns;
+pub use turns::{FakeDelegation, FakeRuns, PlanningRuns, RecordingPark};
 pub use wire::{Era, FakeMcp, FakeWire, McpReply, McpRequest, McpTool, Probe};
 pub use world::{SnapshotBuilder, run_context, snapshot, tool};
 
@@ -49,6 +61,10 @@ use std::{
     task::{Context as TaskContext, Poll, Waker},
     time::{Duration, SystemTime},
 };
+
+pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// 메모리 포트만 기다리는 미래를 끝까지 돌린다(I/O가 필요한 시험은 런타임을 쓴다).
 pub fn block_on<F: Future>(future: F) -> F::Output {

@@ -1,5 +1,5 @@
 use super::*;
-use axum::body::to_bytes;
+use axum::body::{Body, to_bytes};
 
 async fn read(failure: &Failure) -> (u16, Value, Response) {
     let response = failure.response();

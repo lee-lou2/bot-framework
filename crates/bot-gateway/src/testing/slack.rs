@@ -210,8 +210,10 @@ fn default_reply(shared: &Shared, method: &str, request: &Value) -> Value {
             Some(users) => json!({"ok": true, "channel": {"id": format!("D{}", &users[1..])}}),
             None => json!({"ok": false, "error": "users_list_not_supplied"}),
         },
-        "chat.postMessage" => json!({"ok": true, "channel": request["channel"],
-            "ts": format!("1700000000.{n:06}")}),
+        "chat.postMessage" | "chat.startStream" => {
+            json!({"ok": true, "channel": request["channel"],
+            "ts": format!("1700000000.{n:06}")})
+        }
         // 기본은 활성 사람 계정이다. 시험이 `set_user`로 필드를 덧씌운다(봇·비활성·모양이 이상한 응답)
         "users.info" => {
             let id = request["user"].as_str().unwrap_or_default();

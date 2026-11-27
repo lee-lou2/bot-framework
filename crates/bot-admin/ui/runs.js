@@ -58,11 +58,20 @@
     }
 
     // ---------- 선택 ----------
+    const runHash = () => (st.sel ? "runs/" + A.seg(st.sel.profile) + "/" + A.seg(st.sel.run) : "runs");
+    function clearSel() {
+      if (!st.sel) return;
+      st.sel = null; st.detail = null; st.detailErr = null;
+      renderAll();
+    }
     // quiet: 탭을 여는 쪽이 이어서 새로고침하므로 여기서는 다시 묻지 않는다.
     function open(profile, run, quiet) {
-      if (st.sel && st.sel.profile === profile && st.sel.run === run) return;
+      if (st.sel && st.sel.profile === profile && st.sel.run === run) {
+        app.setHash(runHash());
+        return;
+      }
       st.sel = { profile, run }; st.detail = null; st.detailErr = null;
-      app.setHash("runs/" + A.seg(profile) + "/" + A.seg(run));
+      app.setHash(runHash());
       renderAll();
       if (!quiet) { app.refresh(true); detail.focus({ preventScroll: true }); }
       // 좁은 화면에서는 상세가 목록을 대신하므로 맨 위에서 시작한다.
@@ -189,11 +198,14 @@
     return {
       load,
       reset() { st.sel = null; st.detail = null; st.detailErr = null; clearList(); renderAll(); },
-      // 다른 탭에서 넘어온 요청: { profile, run, state }
+      // 다른 탭에서 넘어온 요청: { profile, run, state }. run이 없으면 상세 선택을 비워 #runs와 맞춘다.
       apply(arg) {
-        if (arg && arg.run) open(arg.profile, arg.run, true);
-        else if (arg && arg.state !== undefined) { st.state = arg.state || ""; stateSel.value = st.state; clearList(); }
+        if (arg && arg.run) { open(arg.profile, arg.run, true); return; }
+        clearSel();
+        if (arg && arg.state !== undefined) { st.state = arg.state || ""; stateSel.value = st.state; clearList(); }
       },
+      hash() { return runHash(); },
+      selected() { return !!st.sel; },
       busy() { return controls.busy(); },
       show() {}, hide() { controls.hide(); },
     };

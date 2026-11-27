@@ -9,26 +9,53 @@ use std::fmt;
 /// 중첩 깊이 상한.
 pub const MAX_DEPTH: usize = 32;
 
+/// 엄격한 JSON 읽기 실패 이유.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StrictError {
+    /// 문법 오류·뒤따르는 글·중첩 깊이 초과·비유한 수.
+    Syntax,
+    /// 같은 객체 안에 같은 키가 두 번 이상 있다.
+    DuplicateKey,
+}
+
+/// 문서 하나를 `max_depth` 깊이 한도 안에서 엄격하게 읽는다.
+pub fn parse_strict_with_depth(input: &str, max_depth: usize) -> Result<Value, StrictError> {
+    let mut de = serde_json::Deserializer::from_str(input);
+    let mut duplicate = false;
+    let value = Strict {
+        depth: max_depth,
+        duplicate: &mut duplicate,
+    }
+    .deserialize(&mut de)
+    .map_err(|_| {
+        if duplicate {
+            StrictError::DuplicateKey
+        } else {
+            StrictError::Syntax
+        }
+    })?;
+    de.end().map_err(|_| StrictError::Syntax)?;
+    Ok(value)
+}
+
 /// 문서 하나를 읽는다. 중복 키·꼬리 글·깊이 초과·비유한 수는 `None`이다.
 pub fn parse(text: &str) -> Option<Value> {
-    let mut de = serde_json::Deserializer::from_str(text);
-    let value = Strict { depth: MAX_DEPTH }.deserialize(&mut de).ok()?;
-    de.end().ok()?;
-    Some(value)
+    parse_strict_with_depth(text, MAX_DEPTH).ok()
 }
 
-struct Strict {
+struct Strict<'a> {
     depth: usize,
+    duplicate: &'a mut bool,
 }
 
-impl<'de> DeserializeSeed<'de> for Strict {
+impl<'de> DeserializeSeed<'de> for Strict<'_> {
     type Value = Value;
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
         deserializer.deserialize_any(self)
     }
 }
 
-impl<'de> Visitor<'de> for Strict {
+impl<'de> Visitor<'de> for Strict<'_> {
     type Value = Value;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -57,6 +84,10 @@ impl<'de> Visitor<'de> for Strict {
         Ok(Value::String(v.to_owned()))
     }
 
+    fn visit_string<E>(self, v: String) -> Result<Value, E> {
+        Ok(Value::String(v))
+    }
+
     fn visit_unit<E>(self) -> Result<Value, E> {
         Ok(Value::Null)
     }
@@ -67,7 +98,10 @@ impl<'de> Visitor<'de> for Strict {
             .checked_sub(1)
             .ok_or_else(|| de::Error::custom("nesting too deep"))?;
         let mut items = Vec::new();
-        while let Some(item) = seq.next_element_seed(Strict { depth })? {
+        while let Some(item) = seq.next_element_seed(Strict {
+            depth,
+            duplicate: &mut *self.duplicate,
+        })? {
             items.push(item);
         }
         Ok(Value::Array(items))
@@ -81,9 +115,13 @@ impl<'de> Visitor<'de> for Strict {
         let mut out = Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if out.contains_key(&key) {
+                *self.duplicate = true;
                 return Err(de::Error::custom("duplicate key"));
             }
-            let value = map.next_value_seed(Strict { depth })?;
+            let value = map.next_value_seed(Strict {
+                depth,
+                duplicate: &mut *self.duplicate,
+            })?;
             out.insert(key, value);
         }
         Ok(Value::Object(out))
@@ -144,5 +182,29 @@ mod tests {
     #[test]
     fn numbers_too_large_for_floats_are_not_finite() {
         assert!(parse("1e999").is_none());
+    }
+
+    #[test]
+    fn parse_strict_with_depth_distinguishes_duplicate_key_from_syntax_and_depth() {
+        assert_eq!(
+            parse_strict_with_depth(r#"{"a":1,"a":2}"#, 4),
+            Err(StrictError::DuplicateKey)
+        );
+        assert_eq!(
+            parse_strict_with_depth(r#"{"a":1,"x":{"k":1,"k":1}}"#, 4),
+            Err(StrictError::DuplicateKey)
+        );
+        assert_eq!(
+            parse_strict_with_depth(r#"{"a":1} trailing"#, 4),
+            Err(StrictError::Syntax)
+        );
+        assert_eq!(
+            parse_strict_with_depth("[[[[1]]]]", 4),
+            Ok(serde_json::json!([[[[1]]]]))
+        );
+        assert_eq!(
+            parse_strict_with_depth("[[[[[1]]]]]", 4),
+            Err(StrictError::Syntax)
+        );
     }
 }

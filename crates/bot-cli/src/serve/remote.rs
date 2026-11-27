@@ -81,15 +81,20 @@ pub struct ReqwestWire {
 
 impl ReqwestWire {
     pub fn new(resolver: Arc<dyn Resolver>) -> Result<Self, String> {
-        Self::with_read_timeout(resolver, READ_TIMEOUT)
+        Self::build(resolver, READ_TIMEOUT)
     }
 
-    /// 기본 무응답 읽기 제한을 정해 만든다(시험이 짧은 값으로 «긴 호출은 기본 제한에 끊기지 않는다»를 확인하는 데 쓴다).
+    /// 기본 무응답 읽기 제한을 정해 만든다(시험이 짧은 값으로 «긴 호출은 기본 제한에 끊기지 않는다»를 확인하는 데 쓴다). 운영 빌드에는 포함하지 않는다.
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn with_read_timeout(
         resolver: Arc<dyn Resolver>,
         read_timeout: Duration,
     ) -> Result<Self, String> {
+        Self::build(resolver, read_timeout)
+    }
+
+    fn build(resolver: Arc<dyn Resolver>, read_timeout: Duration) -> Result<Self, String> {
         let make = |allow_private, timed: bool| {
             let builder = Client::builder().connect_timeout(CONNECT_TIMEOUT);
             let builder = if timed {

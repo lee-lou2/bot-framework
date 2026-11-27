@@ -83,7 +83,28 @@ impl CallLedger for FakeLedger {
     fn start(&self, _: StartCall) -> Reply<'_, ()> {
         unused()
     }
+    fn start_with(
+        &self,
+        _: StartCall,
+        _: bot_core::grant::Authority,
+    ) -> Reply<'_, bot_core::grant::Granted> {
+        Box::pin(async { Err(Error::Denied) })
+    }
+    fn evidence(&self, _: Attempt) -> Reply<'_, Option<bot_core::grant::Evidence>> {
+        Box::pin(async { Ok(None) })
+    }
     fn finish(&self, _: FinishCall) -> Reply<'_, ()> {
+        unused()
+    }
+    fn finish_blocked(&self, finish: FinishCall, _: bot_core::api::ApprovalBlock) -> Reply<'_, ()> {
+        self.finish(finish)
+    }
+    fn finish_pass(
+        &self,
+        _: FinishCall,
+        _: u32,
+        _: std::collections::BTreeSet<AgentId>,
+    ) -> Reply<'_, bot_core::pass::PassNext> {
         unused()
     }
 }

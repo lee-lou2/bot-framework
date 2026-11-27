@@ -32,9 +32,7 @@ pub struct MemRoutes {
     hook: Mutex<Option<(usize, Hook)>>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::lock;
 
 impl MemRoutes {
     pub fn new() -> Self {

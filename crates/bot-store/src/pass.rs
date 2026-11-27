@@ -3,11 +3,11 @@
 //! 후보마다 호출 ID가 달라(`direct_call_id`) 한 후보는 한 번만 방문한다. 쓰기 단계·보류·승인·회신이 이미 있으면 넘기지 않는다(`pass_after_effect`).
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     calls::{fence, lock_call, phase_of},
     codec::*,
     db::{R, Store, Tx},
-    finish::{End, end_run},
+    finish::{End, end_run_into},
 };
 use bot_core::{
     command::{Accept, Target},
@@ -200,6 +200,7 @@ impl Store {
             (None, None) => (PassNext::End, (None, format!("end@{next_pos}"))),
         };
         let (target, label) = label;
+        let mut audits = Vec::new();
         match &target {
             Some(target) => {
                 // 다음 후보(또는 기본 대화)로: 대상·에이전트·커서를 바꾸고 대기열로 되돌린다. 다음 점유가 세대와 claim 토큰을 올려 이 시도의 쓰기를 막는다.
@@ -226,21 +227,30 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
                 // 보낼 답이 없다: 일반 완료와 달리 outbox를 쌓지 않는다
-                end_run(&mut tx, &run, End::Succeeded(&result), "system").await?;
+                end_run_into(
+                    &mut tx,
+                    &run,
+                    End::Succeeded(&result),
+                    "system",
+                    &mut audits,
+                )
+                .await?;
             }
         }
         // 감사는 마지막에(감사 head 잠금을 짧게): 넘긴 후보와 다음 자리만 남긴다
         let principal: String = cursor.get("principal");
         let verdict = format!("{trigger}@{pos}");
-        let mut entry = Entry::new(&principal, "call.pass", &f.call.0, &verdict);
+        let mut entry = OwnedEntry::new(&run.profile, &principal, "call.pass", &f.call.0, &verdict);
         entry.args = Some(to32(row.get("args_sha256"))?);
-        audit::append(&mut tx, &run.profile, &entry).await?;
-        audit::append(
-            &mut tx,
+        audits.push(entry);
+        audits.push(OwnedEntry::new(
             &run.profile,
-            &Entry::new("system", "trigger.next", &run.id, &label),
-        )
-        .await?;
+            "system",
+            "trigger.next",
+            &run.id,
+            &label,
+        ));
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(next)
     }

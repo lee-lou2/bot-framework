@@ -6,12 +6,13 @@
 //! 돌려주기 전에는 현재 claim·활성 판본을 저장소 기준으로 다시 확인한다.
 
 use super::{Session, Shared};
-use crate::{canon::canonicalize, json::parse, scope::delegation_scopes};
+use crate::{canon::canonicalize, json::parse};
 use bot_core::{
     command::{Delegate, JsonPayload},
     id::{AgentId, CallId},
     port::Error,
     profile::Snapshot,
+    scope::delegation_scopes,
 };
 use serde_json::Value;
 

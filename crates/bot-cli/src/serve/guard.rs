@@ -4,16 +4,16 @@
 //! 모델 CLI는 예외다: 상류 목적지가 바로 호스트 설정이므로 이미 집은 시도라도 **상류로 나가는 모든 요청 직전**에 같은 판본인지 확인하고
 //! 열린 스트림도 주기적으로 다시 확인해 끊는다(`GuardedUpstream`).
 use bot_core::{
+    active::ActiveCheck,
     command::{
         Accept, AcceptExtras, Beat, CallResult, Completion, Failure, Finish, Retry, RunOutcome,
         Step, ToolCall, Turn,
     },
-    id::{ApprovalId, Attempt, PrincipalId, RunId},
-    intake::{RequestKey, RequestState},
+    id::{ApprovalId, Attempt, PrincipalId, ProfileId, RunId},
+    intake::{RequestKey, RequestState, RunProgress},
     port::{Broker, Error, ModelCall, Reply, RunStore},
     state::RunContext,
 };
-use bot_gateway::active::ActiveCheck;
 use bot_store::Store;
 use std::{sync::Arc, time::Duration};
 
@@ -95,6 +95,10 @@ impl RunStore for GuardedRuns {
         self.inner.status(key)
     }
 
+    fn progress(&self, profile: ProfileId, run: RunId) -> Reply<'_, Option<RunProgress>> {
+        self.inner.progress(profile, run)
+    }
+
     /// 구판이면 새 일을 집지 않는다(`None` — 일은 저장소에 그대로 남아 새 판본의 워커가 집는다).
     fn claim(&self) -> Reply<'_, Option<RunContext>> {
         Box::pin(async move {
@@ -109,7 +113,7 @@ impl RunStore for GuardedRuns {
         })
     }
 
-    /// 종료 반납은 구판 검사 없이 그대로 넘긴다: 구판이 된 프로세스도 자기 claim을 돌려줘야 한다(기본 구현은 `Unavailable`이라 빠지면 조용히 반납이 안 된다).
+    /// 종료 반납은 구판 검사 없이 그대로 넘긴다: 구판이 된 프로세스도 자기 claim을 돌려줘야 한다.
     fn release_for_shutdown(&self, attempt: Attempt) -> Reply<'_, ()> {
         self.inner.release_for_shutdown(attempt)
     }
@@ -126,7 +130,7 @@ impl RunStore for GuardedRuns {
         self.inner.finish(attempt, done)
     }
 
-    /// 완료와 같은 커밋에 실행 계량(잘림·실측 사용량)을 싣는 완료도 그대로 넘긴다. 기본 구현은 계량을 버리고 `finish`로 끝내므로 빠지면 저장소가 계량을 영영 받지 못한다.
+    /// 완료와 같은 커밋에 실행 계량(잘림·실측 사용량)을 싣는 완료도 그대로 넘긴다.
     fn finish_with(
         &self,
         attempt: Attempt,

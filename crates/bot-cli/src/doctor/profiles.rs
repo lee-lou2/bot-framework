@@ -7,7 +7,8 @@ use crate::{
     serve::{Publication, seed},
     settings::Settings,
     validate::{
-        all_needed_secrets, missing_model_sandbox, missing_named, weak_http_keys, weak_openai_keys,
+        all_needed_secrets, missing_model_sandbox, missing_named, unsupported_builtin_tools,
+        weak_http_keys, weak_openai_keys,
     },
 };
 use bot_profile::{Limits, ProfileSet, Registry};
@@ -79,6 +80,7 @@ fn profiles(
     let mut problems = Vec::new();
     for snapshot in set.active().values() {
         problems.extend(missing_model_sandbox(snapshot, host));
+        problems.extend(unsupported_builtin_tools(snapshot, host));
         problems.extend(seed::problems(snapshot));
     }
     // 서버 판본을 계산하지 못했으면(도구 서버 항목이 이미 알린다) 활성화 판본은 만들 수 없다

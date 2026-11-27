@@ -118,7 +118,7 @@ impl Store {
                 Err(Error::Conflict.into())
             };
         }
-        let seq = lock_target(&mut tx, hold, &row.get::<String, _>("kind"), private).await?;
+        let locked = lock_target(&mut tx, hold, &row.get::<String, _>("kind"), private).await?;
         let claimed = sqlx::query(
             "update bot_holds set closed_ms = bot_now_ms(), operator = $2, verdict = $3, evidence_sha256 = $4
              where id = $1 and closed_ms is null",
@@ -132,15 +132,34 @@ impl Store {
         if claimed.rows_affected() != 1 {
             return Err(Error::Conflict.into());
         }
-        let target = match seq {
-            Some(seq) => self.resolve_reply(&mut tx, hold, seq, verdict).await?,
-            None if private => {
+        let target = match locked {
+            LockedTarget::Reply {
+                seq,
+                state,
+                transport,
+            } => {
+                self.resolve_reply(&mut tx, hold, seq, &state, &transport, verdict)
+                    .await?
+            }
+            LockedTarget::Private => {
                 self.resolve_private(&mut tx, hold, waiting_on_hold, verdict)
                     .await?
             }
-            None => {
-                self.resolve_call(&mut tx, hold, waiting_on_hold, verdict)
-                    .await?
+            LockedTarget::Tool {
+                call_state,
+                call_resolution,
+                effect,
+            } => {
+                self.resolve_call(
+                    &mut tx,
+                    hold,
+                    &call_state,
+                    call_resolution.as_deref(),
+                    effect.as_ref().map(|(s, r)| (s.as_str(), r.as_deref())),
+                    waiting_on_hold,
+                    verdict,
+                )
+                .await?
             }
         };
         audit::append(
@@ -153,23 +172,19 @@ impl Store {
         Ok(HoldDecision::Applied)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn resolve_call(
         &self,
         tx: &mut Tx<'_>,
         hold: &HoldRef,
+        call_state: &str,
+        call_resolution: Option<&str>,
+        effect_row: Option<(&str, Option<&str>)>,
         waiting_on_hold: bool,
         verdict: &HoldVerdict,
     ) -> R<String> {
         let (profile, run, call) = (&hold.profile.0, &hold.run.0, &hold.call.0);
-        // 잠금 순서: run → 호출 → 단계
-        let call_row = sqlx::query("select state, resolution from bot_calls where profile = $1 and run = $2 and call = $3 for update")
-            .bind(profile)
-            .bind(run)
-            .bind(call)
-            .fetch_optional(&mut **tx)
-            .await?
-            .ok_or(Error::Missing)?;
-        if call_row.get::<String, _>("state") != "held" {
+        if call_state != "held" {
             return Err(Error::Conflict.into());
         }
         let target = match &hold.effect {
@@ -178,7 +193,7 @@ impl Store {
                 if pending || (confirmed && matches!(verdict, HoldVerdict::NotExecuted { .. })) {
                     return invalid();
                 }
-                if call_row.get::<Option<String>, _>("resolution").is_some() {
+                if call_resolution.is_some() {
                     return Err(Error::Conflict.into());
                 }
                 let (resolution, receipt) = match verdict {
@@ -189,17 +204,8 @@ impl Store {
                 call.clone()
             }
             Some(effect) => {
-                let step = sqlx::query("select state, resolution from bot_effects where profile = $1 and id = $2 and run = $3 and call = $4 for update")
-                    .bind(profile)
-                    .bind(&effect.0)
-                    .bind(run)
-                    .bind(call)
-                    .fetch_optional(&mut **tx)
-                    .await?
-                    .ok_or(Error::Missing)?;
-                if step.get::<String, _>("state") != "held"
-                    || step.get::<Option<String>, _>("resolution").is_some()
-                {
+                let (step_state, step_resolution) = effect_row.ok_or(Error::Missing)?;
+                if step_state != "held" || step_resolution.is_some() {
                     return Err(Error::Conflict.into());
                 }
                 match verdict {
@@ -239,21 +245,14 @@ impl Store {
         tx: &mut Tx<'_>,
         hold: &HoldRef,
         seq: i32,
+        state: &str,
+        transport: &str,
         verdict: &HoldVerdict,
     ) -> R<String> {
         let run = &hold.run.0;
         if hold.effect.is_some() {
             return invalid();
         }
-        let (state, transport): (String, String) = sqlx::query_as(
-            "select state, transport from bot_outbox where profile = $1 and run = $2 and seq = $3 for update",
-        )
-        .bind(&hold.profile.0)
-        .bind(run)
-        .bind(seq)
-        .fetch_optional(&mut **tx)
-        .await?
-        .ok_or(Error::Missing)?;
         if state != "held" {
             return Err(Error::Conflict.into());
         }
@@ -348,18 +347,33 @@ async fn set_call_resolution(
     Ok(())
 }
 
-/// 발생이 가리키는 대상 행을 잠그고(호출 → 단계, 또는 회신 행) 회신이면 순번을 돌려준다. 발생의 종류와 run의 성격이 어긋나면 Conflict다.
+/// `lock_target`이 한 번의 `FOR UPDATE`로 잠가 읽어 둔 판정 대상 행.
+enum LockedTarget {
+    Tool {
+        call_state: String,
+        call_resolution: Option<String>,
+        effect: Option<(String, Option<String>)>,
+    },
+    Reply {
+        seq: i32,
+        state: String,
+        transport: String,
+    },
+    Private,
+}
+
+/// 발생이 가리키는 대상 행을 잠그고(호출 → 단계, 또는 회신 행) 판정에 필요한 열을 함께 돌려준다. 발생의 종류와 run의 성격이 어긋나면 Conflict다.
 async fn lock_target(
     tx: &mut Tx<'_>,
     hold: &HoldRef,
     kind: &str,
     private_run: bool,
-) -> R<Option<i32>> {
+) -> R<LockedTarget> {
     let (profile, run, call) = (&hold.profile.0, &hold.run.0, &hold.call.0);
     match kind {
         "tool" if !private_run => {
-            sqlx::query(
-                "select 1 from bot_calls where profile = $1 and run = $2 and call = $3 for update",
+            let (call_state, call_resolution): (String, Option<String>) = sqlx::query_as(
+                "select state, resolution from bot_calls where profile = $1 and run = $2 and call = $3 for update",
             )
             .bind(profile)
             .bind(run)
@@ -367,35 +381,48 @@ async fn lock_target(
             .fetch_optional(&mut **tx)
             .await?
             .ok_or(Error::Missing)?;
-            if let Some(effect) = &hold.effect {
-                sqlx::query("select 1 from bot_effects where profile = $1 and id = $2 and run = $3 and call = $4 for update")
+            let effect = match &hold.effect {
+                Some(effect) => Some(
+                    sqlx::query_as::<_, (String, Option<String>)>(
+                        "select state, resolution from bot_effects where profile = $1 and id = $2 and run = $3 and call = $4 for update",
+                    )
                     .bind(profile)
                     .bind(&effect.0)
                     .bind(run)
                     .bind(call)
                     .fetch_optional(&mut **tx)
                     .await?
-                    .ok_or(Error::Missing)?;
-            }
-            Ok(None)
+                    .ok_or(Error::Missing)?,
+                ),
+                None => None,
+            };
+            Ok(LockedTarget::Tool {
+                call_state,
+                call_resolution,
+                effect,
+            })
         }
         "reply" if !private_run && hold.effect.is_none() => {
-            let seqs: Vec<i32> = sqlx::query_scalar(
-                "select seq from bot_outbox where profile = $1 and run = $2 and call = $3 for update",
+            let rows: Vec<(i32, String, String)> = sqlx::query_as(
+                "select seq, state, transport from bot_outbox where profile = $1 and run = $2 and call = $3 for update",
             )
             .bind(profile)
             .bind(run)
             .bind(call)
             .fetch_all(&mut **tx)
             .await?;
-            match seqs.as_slice() {
+            match rows.as_slice() {
                 [] => Err(Error::Missing.into()),
-                [seq] => Ok(Some(*seq)),
+                [(seq, state, transport)] => Ok(LockedTarget::Reply {
+                    seq: *seq,
+                    state: state.clone(),
+                    transport: transport.clone(),
+                }),
                 _ => Err(Error::Conflict.into()),
             }
         }
         "private" if private_run && hold.effect.is_none() && *call == format!("private:{run}") => {
-            Ok(None)
+            Ok(LockedTarget::Private)
         }
         _ => Err(Error::Conflict.into()),
     }

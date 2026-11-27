@@ -1,11 +1,12 @@
 //! 엄격한 JSON 읽기: 같은 객체 안의 **중복 키**(깊이와 무관)를 거절한다. `serde_json::from_slice`는 중복 키를 조용히 받아 마지막 값을 쓰므로,
-//! 검증이 본 값과 실행이 받는 값이 갈리는 길을 막으려고 직접 읽는다. 문법 오류·뒤따르는 글·잘못된 UTF-8·너무 깊은 중첩도 오류다.
-use serde::{
-    Deserialize, Deserializer,
-    de::{self, MapAccess, SeqAccess, Visitor},
-};
-use serde_json::{Map, Number, Value};
-use std::fmt;
+//! 검증이 본 값과 실행이 받는 값이 갈리는 길을 막으려고 `bot_core::json::parse_strict_with_depth`로 읽는다.
+//! 문법 오류·뒤따르는 글·잘못된 UTF-8·너무 깊은 중첩도 오류다.
+
+use bot_core::json::{StrictError, parse_strict_with_depth};
+use serde_json::Value;
+
+/// OpenAI 입구 JSON의 중첩 깊이 상한(`serde_json` 기본 재귀 한도와 같다).
+const MAX_DEPTH: usize = 128;
 
 /// 왜 읽지 못했나(사용자에게는 고정 문구만 보인다)
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -16,87 +17,13 @@ pub enum Reject {
     DuplicateKey,
 }
 
-const MARK: &str = "bot-duplicate-key";
-
-struct Strict(Value);
-
-struct Reader;
-
-impl<'de> Visitor<'de> for Reader {
-    type Value = Value;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("JSON 값")
-    }
-
-    fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
-        Ok(Value::Bool(v))
-    }
-
-    fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
-        Ok(Value::Number(v.into()))
-    }
-
-    fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
-        Ok(Value::Number(v.into()))
-    }
-
-    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Value, E> {
-        Number::from_f64(v)
-            .map(Value::Number)
-            .ok_or_else(|| E::custom("유한하지 않은 수"))
-    }
-
-    fn visit_str<E>(self, v: &str) -> Result<Value, E> {
-        Ok(Value::String(v.to_owned()))
-    }
-
-    fn visit_string<E>(self, v: String) -> Result<Value, E> {
-        Ok(Value::String(v))
-    }
-
-    fn visit_unit<E>(self) -> Result<Value, E> {
-        Ok(Value::Null)
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
-        let mut items = Vec::new();
-        while let Some(Strict(item)) = seq.next_element()? {
-            items.push(item);
-        }
-        Ok(Value::Array(items))
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
-        let mut object = Map::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if object.contains_key(&key) {
-                return Err(de::Error::custom(MARK));
-            }
-            let Strict(value) = map.next_value()?;
-            object.insert(key, value);
-        }
-        Ok(Value::Object(object))
-    }
-}
-
-impl<'de> Deserialize<'de> for Strict {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(Reader).map(Strict)
-    }
-}
-
 /// 본문 전체를 한 JSON 값으로 읽는다.
 pub fn parse(bytes: &[u8]) -> Result<Value, Reject> {
-    serde_json::from_slice::<Strict>(bytes)
-        .map(|Strict(value)| value)
-        .map_err(|error| {
-            if error.to_string().starts_with(MARK) {
-                Reject::DuplicateKey
-            } else {
-                Reject::Syntax
-            }
-        })
+    let text = std::str::from_utf8(bytes).map_err(|_| Reject::Syntax)?;
+    parse_strict_with_depth(text, MAX_DEPTH).map_err(|error| match error {
+        StrictError::DuplicateKey => Reject::DuplicateKey,
+        StrictError::Syntax => Reject::Syntax,
+    })
 }
 
 #[cfg(test)]

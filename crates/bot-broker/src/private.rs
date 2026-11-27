@@ -16,7 +16,6 @@ use crate::{
     ports::{Ran, Sealer, ToolJob, ToolRunner},
     rate::{Limiter, RateConfig},
     resolve::{Resolved, find_tool, pinned_to_image, selected_env},
-    scope::effective,
     sys::Clock,
     text::hex,
 };
@@ -26,6 +25,7 @@ use bot_core::{
     ledger::{PrivateLedger, PrivateOutcome, PrivatePermit, PrivateRequest, PrivateStart},
     port::{Error, Reply, SecretStore},
     profile::{Adapter, Destination, ProfileCatalog, TriggerSource, TriggerTarget},
+    scope::effective,
     state::{Conversation, ConversationKind, RunOrigin},
     trace::{SpanIds, SpanRecord, Tracer, key},
 };
@@ -76,7 +76,7 @@ fn error_class(error: &Error) -> &'static str {
         Error::Denied => "denied",
         Error::Conflict => "conflict",
         Error::Stale => "stale",
-        Error::Unavailable => "unavailable",
+        Error::Unavailable | Error::RateLimited => "unavailable",
         Error::Invalid | Error::Missing => "invalid",
     }
 }

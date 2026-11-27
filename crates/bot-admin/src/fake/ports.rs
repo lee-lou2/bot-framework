@@ -4,8 +4,8 @@ use super::{
     Data, Decision, Fake, Resolution, Settled, entry_hash, hold_key, ms_key, operator, paged,
     verdict_print,
 };
-use crate::port::*;
 use bot_core::{
+    admin::*,
     command::{CallResult, ToolCall},
     id::*,
     port::{Broker, Error, Reply},
@@ -240,6 +240,10 @@ impl AdminRead for Fake {
 }
 
 impl AdminAct for Fake {
+    fn control_run(&self, _: PrincipalId, _: RunCommand) -> Reply<'_, RunCommandOutcome> {
+        Box::pin(async { Err(Error::Unavailable) })
+    }
+
     /// 정지·재개: 승인 ID·정지 세대를 현재와 대조하는 규칙은 `bot_core::grant::decide_pause`로 저장소와 같다.
     fn set_pause(
         &self,

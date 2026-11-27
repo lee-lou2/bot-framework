@@ -9,7 +9,6 @@ use crate::{
     canon::{canonicalize, sha256},
     json::parse,
     ports::Sealed,
-    rfc3339::{format_utc, parse_utc},
 };
 use bot_core::{
     builtin::MAX_SCHEDULE_AHEAD_MS,
@@ -17,7 +16,10 @@ use bot_core::{
     cron::Cron,
     id::{BindingId, ScheduleId},
     port::Error,
-    schedule::{DeliveryTarget, ScheduleSpec, ScheduleSummary, Timing},
+    schedule::{
+        DeliveryTarget, ScheduleSpec, ScheduleSummary, Timing,
+        utc::{format_utc, parse_utc},
+    },
     state::{Conversation, ConversationKind},
 };
 use serde_json::{Map, Value};

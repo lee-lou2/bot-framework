@@ -5,7 +5,7 @@
 //! - **목적지**: 호스트 설정의 `providers.<별칭>.endpoint`만(`ApiEndpoint`). `https`만 쓰고, `http`는 호스트가 loopback IP 리터럴(127.0.0.0/8·`::1`)일 때만 — 로컬 Ollama·시험.
 //!   `localhost` 이름·사설망 `http`·자격(`user@`)·쿼리·조각이 있는 주소는 거절한다. 서비스 키(`secret`)는 loopback일 때만 생략한다.
 //! - **전송**(`ApiClient`): 리다이렉트·숨은 재시도·연결 재사용을 끄고, 연결·응답 시간 한도와 본문 크기 상한을 둔다. 키는 보내는 순간 읽어 머리에만 싣고 `sensitive`로 표시한다.
-//!   판본 확인(`SendGate`)은 키를 읽기 전과 읽은 뒤 보내기 직전, 두 번 한다: 구판은 철회된 목적지로 대화도 키도 보내지 않고, 키를 읽는 사이에 판본이 바뀌어도 키를 버리고 보내지 않는다.
+//!   판본 확인(`bot_core::active::ActiveCheck`)은 키를 읽기 전과 읽은 뒤 보내기 직전, 두 번 한다: 구판은 철회된 목적지로 대화도 키도 보내지 않고, 키를 읽는 사이에 판본이 바뀌어도 키를 버리고 보내지 않는다.
 //! - **재시도 없음**: 실행기는 스스로 다시 보내지 않는다. 429·5xx·연결 실패·시간 초과는 일시 오류, 400·401·403·404·응답 모양 불일치와 쿼터 소진(429 본문이 `insufficient_quota`)은 영구 실패로
 //!   분류하고 다시 할지는 워커 정책이 정한다.
 //! - **도구 이름**: 상류 규칙(`^[a-zA-Z0-9_-]{1,64}$`)에 맞게 요청마다 되돌릴 수 있는 별칭표를 만든다. 표에 없는 이름·깨진 인자는 도구를 부르지 않고 고정 코드로 끝낸다.
@@ -24,7 +24,7 @@ mod transport;
 mod wire;
 
 pub use endpoint::ApiEndpoint;
-pub use runner::{ApiRunner, ApiSettings, Effort, LimitField, SendGate};
+pub use runner::{ApiRunner, ApiSettings, Effort, LimitField};
 pub use transport::ApiClient;
 pub use wire::ApiKind;
 

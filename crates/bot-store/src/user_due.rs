@@ -4,7 +4,7 @@
 
 use crate::{
     accept::{check, insert_run},
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     codec::*,
     db::{R, Store, Tx, ms_to_time, time_to_ms},
     user_schedule::{destination_target, origin_target},
@@ -277,16 +277,19 @@ impl Store {
                 }
                 let reason = closing.code();
                 close(&mut tx, profile, id, reason).await?;
+                let mut audits = Vec::new();
                 // 수신 경로가 없어진 예약은 원래 대화에 고정 안내 한 건을 같은 커밋으로 남긴다
                 if let Some(text) = closing.notice() {
-                    crate::user_notice::push(&mut tx, &row, text).await?;
+                    crate::user_notice::push_into(&mut tx, &row, text, &mut audits).await?;
                 }
-                audit::append(
-                    &mut tx,
+                audits.push(OwnedEntry::new(
                     profile,
-                    &Entry::new("system", "schedule.close", id, reason),
-                )
-                .await?;
+                    "system",
+                    "schedule.close",
+                    id,
+                    reason,
+                ));
+                audit::append_many(&mut tx, &audits).await?;
                 tx.commit().await?;
                 Ok(None)
             }
@@ -412,21 +415,24 @@ impl Store {
                 .bind(CloseReason::Finished.code())
                 .execute(&mut *tx)
                 .await?;
-                audit::append(
-                    &mut tx,
+                let mut audits = vec![OwnedEntry::new(
                     profile,
-                    &Entry::new(&accept.event.principal.0, "schedule.fire", &run, "accepted"),
-                )
-                .await?;
+                    &accept.event.principal.0,
+                    "schedule.fire",
+                    &run,
+                    "accepted",
+                )];
                 // 마지막 발생을 접수하면 같은 커밋에서 정상 종료로 닫힌다(감사 한 줄, 안내 없음)
                 if next_ms.is_none() {
-                    audit::append(
-                        &mut tx,
+                    audits.push(OwnedEntry::new(
                         profile,
-                        &Entry::new("system", "schedule.close", id, CloseReason::Finished.code()),
-                    )
-                    .await?;
+                        "system",
+                        "schedule.close",
+                        id,
+                        CloseReason::Finished.code(),
+                    ));
                 }
+                audit::append_many(&mut tx, &audits).await?;
                 tx.commit().await?;
                 Ok(Some(RunId(run)))
             }

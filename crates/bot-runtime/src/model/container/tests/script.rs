@@ -67,6 +67,10 @@ elif cmd == "ls":
         sys.exit(1)
     print(json.dumps(st["containers"]))
 elif cmd == "kill":
+    if st.get("kill_hangs"):
+        release()
+        time.sleep(30)
+        sys.exit(1)
     st["killed"].append(argv[-1])
     st.setdefault("alive_at_remove", []).append(client_alive(argv[-1]))
     pid_path = os.path.join(here, "pid-" + argv[-1])

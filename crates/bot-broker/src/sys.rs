@@ -19,15 +19,13 @@ pub trait Entropy: Send + Sync {
     fn fill(&self, buf: &mut [u8]) -> bool;
 }
 
-/// 운영체제 난수(`/dev/urandom`).
+/// 운영체제 CSPRNG(`bot_core::random`).
 pub struct OsEntropy;
 
 impl Entropy for OsEntropy {
     fn fill(&self, buf: &mut [u8]) -> bool {
-        use std::io::Read;
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut file| file.read_exact(buf))
-            .is_ok()
+        bot_core::random::fill(buf);
+        true
     }
 }
 

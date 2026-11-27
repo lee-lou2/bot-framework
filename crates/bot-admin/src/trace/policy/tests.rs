@@ -53,6 +53,9 @@ fn token_shapes_are_masked_and_the_rest_is_kept() {
         "{out}"
     );
     assert!(r.leaks(&format!("token {}", token())));
+    let refresh = format!("{}_{}", "ghr", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6");
+    assert!(r.leaks(&refresh) && r.leaks_meta(&refresh));
+    assert_eq!(r.mask(&format!("tok {refresh} end")), "tok [redacted] end");
     let jwt = format!(
         "{}.{}.{}",
         "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJhYmMifQ", "c2lnbmF0dXJlLXZhbHVl"

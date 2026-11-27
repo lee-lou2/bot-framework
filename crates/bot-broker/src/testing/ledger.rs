@@ -207,7 +207,7 @@ impl MemLedger {
         let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let key = (start.attempt.run.clone(), start.call.clone());
         let record = i.calls.get(&key).ok_or(Error::Missing)?;
-        if record.phase_is_done() {
+        if matches!(record.phase, CallPhase::Done(_)) {
             return Ok(()); // 완료한 호출의 재시도는 다시 공유하지 않는다
         }
         if record.args_sha256 != expected {
@@ -218,74 +218,6 @@ impl MemLedger {
             CallPhase::Done(JsonPayload(format!("{{\"id\":\"{id}\"}}")));
         i.audit.push("memory.shared".into());
         Ok(())
-    }
-}
-
-impl MemLedger {
-    /// 내장 도구 하나의 저장소 쪽 커밋: 승인 소비·시작·완료를 한 번에 한다(`StartCall` 검사는 일반 `start`와 같다). 호출이 이미
-    /// 완료됐으면 아무것도 바꾸지 않고 `Ok(false)`다. 호출을 기록한 도구가 `tool`이 아니면 `Conflict`다.
-    pub fn complete_builtin(
-        &self,
-        start: StartCall,
-        tool: &str,
-        result: &str,
-    ) -> Result<bool, Error> {
-        let now = self.clock.now();
-        let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let key = (start.attempt.run.clone(), start.call.clone());
-        let record = i.calls.get(&key).ok_or(Error::Missing)?;
-        if record.tool.0 != tool {
-            return Err(Error::Conflict);
-        }
-        if record.phase_is_done() {
-            return Ok(false);
-        }
-        Self::begin_run(&mut i, now, start)?;
-        i.calls.get_mut(&key).expect("call").phase = CallPhase::Done(JsonPayload(result.into()));
-        i.audit.push(format!("{tool}.done"));
-        Ok(true)
-    }
-
-    /// `Started`인 호출을 결과와 함께 완료한다(후속 예약과 한 커밋으로 쓰는 `finish_with_wake`가 쓴다). 현재 claim·활성 판본을 같이 본다.
-    pub fn finish_started(
-        &self,
-        attempt: &Attempt,
-        call: &CallId,
-        checked: &Revision,
-        result: &str,
-    ) -> Result<(), Error> {
-        let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        i.fence(attempt)?;
-        if i.active.get(&attempt.profile) != Some(checked) {
-            return Err(Error::Stale);
-        }
-        let key = (attempt.run.clone(), call.clone());
-        let record = i.calls.get_mut(&key).ok_or(Error::Missing)?;
-        match record.phase {
-            CallPhase::Started { .. } => {
-                record.phase = CallPhase::Done(JsonPayload(result.into()));
-                i.audit.push("call.done".into());
-                Ok(())
-            }
-            _ => Err(Error::Conflict),
-        }
-    }
-
-    /// 이 run의 소유자(요청자).
-    pub fn principal_of(&self, attempt: &Attempt) -> Result<PrincipalId, Error> {
-        let i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(i.fence(attempt)?.context.principal.clone())
-    }
-
-    /// 활성 판본이 `checked`와 같은지 포함해 현재 claim을 확인한다(`UserSchedules::list`가 쓴다).
-    pub fn check_current(&self, attempt: &Attempt, checked: &Revision) -> Result<(), Error> {
-        let i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        i.fence(attempt)?;
-        if i.active.get(&attempt.profile) == Some(checked) {
-            Ok(())
-        } else {
-            Err(Error::Stale)
-        }
     }
 }
 
@@ -587,14 +519,24 @@ impl CallLedger for MemLedger {
         }
         reply
     }
-}
+    fn start_with(
+        &self,
+        _: StartCall,
+        _: bot_core::grant::Authority,
+    ) -> Reply<'_, bot_core::grant::Granted> {
+        Box::pin(async { Err(Error::Denied) })
+    }
 
-trait PhaseIsDone {
-    fn phase_is_done(&self) -> bool;
-}
+    fn evidence(&self, _: Attempt) -> Reply<'_, Option<bot_core::grant::Evidence>> {
+        Box::pin(async { Ok(None) })
+    }
 
-impl PhaseIsDone for CallRecord {
-    fn phase_is_done(&self) -> bool {
-        matches!(self.phase, CallPhase::Done(_))
+    fn finish_pass(
+        &self,
+        _: FinishCall,
+        _: u32,
+        _: std::collections::BTreeSet<AgentId>,
+    ) -> Reply<'_, bot_core::pass::PassNext> {
+        Box::pin(async { Err(Error::Unavailable) })
     }
 }

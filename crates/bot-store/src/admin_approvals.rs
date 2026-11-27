@@ -3,7 +3,6 @@
 use crate::db::{R, Store, ms_to_time};
 use bot_core::builtin::{CardBody as Body, card_body};
 use bot_core::{admin::*, id::*, port::Error};
-use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 
 /// 단순 `<시각>:<ID>` 커서(승인 대기 목록과 다른 목록들이 같이 쓴다).
@@ -28,57 +27,21 @@ fn processed_cursor(after: &Option<String>) -> Option<(i64, i32, i64, String)> {
 /// 그 조각을 이어 붙여 풀어 **한 행(원문 전체)**으로 준다: 소비자가 `memory_share_hash(기억 ID, SHA-256(본문))`나 초안의 SHA-256을 승인의
 /// 인자 해시와 대조해 "보이는 것 = 승인한 것"을 확인할 수 있다. 풀 수 없으면 그 행을 주지 않는다(대조가 실패로 끝난다).
 fn render_of(card: &str, body: Body) -> Vec<(String, String)> {
-    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(card) else {
-        return vec![];
-    };
-    let Some(Value::Object(card)) = map.get("approval") else {
-        return vec![];
-    };
-    let mut out = Vec::new();
-    if let Some(title) = card.get("title").and_then(Value::as_str) {
-        out.push(("제목".to_owned(), title.to_owned()));
-    }
-    // 본문 줄 묶음마다 하나씩(정상 카드는 정확히 하나). 풀어 보기 전에 개수부터 센다: 하나가 아니면(둘 이상이면 하나만 풀려도) 본문 행을 주지 않는다
-    let first_label = match body {
+    let label = match body {
         Body::None => None,
-        Body::Share => Some("본문: ".to_owned()),
-        Body::Draft => Some(format!("{}: ", bot_core::schedule::DELIVERY_CARD_LABEL)),
+        Body::Share => Some("본문"),
+        Body::Draft => Some(bot_core::schedule::DELIVERY_CARD_LABEL),
     };
-    let mut bodies: Vec<String> = Vec::new();
-    for line in card
-        .get("lines")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        if let Some(label) = &first_label {
-            if let Some(first) = line.strip_prefix(label.as_str()) {
-                bodies.push(first.to_owned());
-                continue;
-            }
-            if let (Some(chunk), Some(quoted)) = (line.strip_prefix("  "), bodies.last_mut()) {
-                quoted.push_str(chunk);
-                continue;
-            }
-        }
-        out.push(match line.split_once(": ") {
-            Some((label, value)) => (label.to_owned(), value.to_owned()),
-            None => (String::new(), line.to_owned()),
-        });
-    }
-    if let [joined] = bodies.as_slice() {
+    let (mut out, joined) = bot_core::cards::split_render(card, label);
+    if let Some(joined) = joined {
         // 풀 수 없는 본문도 행을 주지 않는다(소비자는 이 행이 정확히 하나여야 승인하고 그 지문이 승인 해시와 같아야 한다)
         match body {
             Body::Share => {
-                if let Ok(text) = serde_json::from_str::<String>(joined) {
+                if let Ok(text) = serde_json::from_str::<String>(&joined) {
                     out.push(("본문".to_owned(), text));
                 }
             }
-            Body::Draft => out.push((
-                bot_core::schedule::DELIVERY_CARD_LABEL.to_owned(),
-                joined.clone(),
-            )),
+            Body::Draft => out.push((bot_core::schedule::DELIVERY_CARD_LABEL.to_owned(), joined)),
             Body::None => {}
         }
     }

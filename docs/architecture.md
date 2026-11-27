@@ -90,7 +90,7 @@ flowchart LR
 
 - **목적지.** `https`만 쓴다. `http`는 호스트가 loopback IP 리터럴(127.0.0.0/8·`::1`)일 때만 받는다(로컬 Ollama). `localhost` 이름·사설망 `http`·자격(`user@`)·쿼리·조각이 있는 주소는 설정 단계에서 거절한다. `secret`은 loopback 주소에서만 생략할 수 있다. 종류·모델·기준 주소 전체·자격 이름은 활성화 지문에 들어가고(`max_tokens`·`max_completion_tokens`·`effort`는 아니다), 워커는 이 프로세스의 활성화 판본이 저장소의 활성 판본인지 키를 읽기 전과 키를 읽은 뒤 보내기 직전에 **두 번** 확인한다(기존 모델 중계 경로의 `GuardedUpstream`과 같은 규칙이고 그 경로도 전송 동안 가드를 쥐지 않는다). 구판은 철회된 목적지로 대화도 키도 보내지 않고 키를 읽지도 않으며, 키를 읽는 사이에 판본이 바뀌면 읽은 키를 버리고 보내지 않는다. 일시 오류(`stale_worker`)로 보고하면 저장소가 구판의 시도를 쓰지 않고 대기열로 돌려준다.
 - **전송.** 리다이렉트·숨은 재시도·연결 재사용을 끄고 연결 시간·전체 시간(`Limits::total`)·본문 크기 상한을 둔다. 취소 신호가 오면 요청을 끊는다. 키는 보내는 순간 보관소에서 읽어 요청 머리에만 싣고 비밀로 표시한다. 해당 요청의 키가 상류 응답(원문과, 이스케이프를 풀어 읽은 모든 글 — 최종 글·호출과 함께 온 글·인자·공급자 상태 포함)에 있으면 체크포인트·브로커에 아무것도 넘기지 않고 `secret_in_response`로 끝낸다.
-- **분류.** 실행기는 스스로 다시 보내지 않는다. 429(`rate_limited`)·5xx(`overloaded`)·408·연결 실패·시간 초과(`network`·`timeout`)는 일시 오류, 400·404·그 밖의 4xx(`upstream_rejected`)·401·403(`upstream_auth`)·3xx(`upstream_redirect`)·응답 모양 불일치(`invalid_response`)·쿼터 소진(429인데 본문의 `error.code`·`error.type`이 `insufficient_quota`, `quota_exhausted`)은 영구 실패다. 429 본문은 작은 상한 안에서만 읽고 어디에도 남기지 않으며, 오류 상태 로그에는 상태 코드와 허용 목록의 고정 분류 낱말만 싣는다. 다시 할지는 워커 정책이 정한다. 출력 한도에서 끊긴 응답(`max_tokens`·`length`)은 부분 글이나 잘린 호출을 쓰지 않고 `output_limit`으로 끝낸다(잘린 도구 호출은 실행하지 않는다). 거절(`refusal`)·콘텐츠 필터는 `refused`·`content_filter`다.
+- **분류.** 실행기는 스스로 다시 보내지 않는다. 429(`rate_limited`)·5xx(`overloaded`)·408·연결 실패·시간 초과(`network`·`timeout`)는 일시 오류, 400·404·그 밖의 4xx(`upstream_rejected`)·401·403(`upstream_auth`)·3xx(`upstream_redirect`)·응답 모양 불일치(`invalid_response`)·쿼터 소진(429인데 본문의 `error.code`·`error.type`이 `insufficient_quota`, `quota_exhausted`)은 영구 실패다. 오류 응답 본문은 작은 상한(16 KiB) 안에서만 읽어 분류에만 쓰고 어디에도 남기지 않으며, 오류 상태 로그에는 상태 코드와 허용 목록의 고정 분류 낱말만 싣는다. 다시 할지는 워커 정책이 정한다. 출력 한도에서 끊긴 응답(`max_tokens`·`length`)은 부분 글이나 잘린 호출을 쓰지 않고 `output_limit`으로 끝낸다(잘린 도구 호출은 실행하지 않는다). 거절(`refusal`)·콘텐츠 필터는 `refused`·`content_filter`다.
 - **도구 이름과 스키마.** 상류 규칙(`^[a-zA-Z0-9_-]{1,64}$`)에 맞게 요청마다 되돌릴 수 있는 별칭표를 만든다. Anthropic Messages API는 도구 `input_schema` 최상위에서 `oneOf`·`allOf`·`anyOf`를 받지 않으므로, 상류 전송본에서는 최상위 조합자만 풀어 분기 속성·공통 필수 키를 끌어올리고 실제 호출 인자는 브로커가 프로필 원본 스키마 전체로 다시 검증한다. 응답의 이름은 이 표로 정확히 도구 ID로 되돌린다. 표에 없는 이름(`unknown_tool`)·없거나 객체가 아니거나 큰 인자, 같은 키가 두 번 나오는 인자(`invalid_tool_args`)·너무 많은 호출(`too_many_calls`)·한 응답 안의 같은 상류 호출 ID(`invalid_response`)·Anthropic에서 `tool_use`로 끝나지 않은 응답의 `tool_use` 블록은 그 차례의 도구를 하나도 부르지 않고 영구 실패로 끝낸다. 인자는 빈 객체로 짐작하지 않는다.
 - **신뢰 경계.** 맥락 조립이 준 시스템 글만 시스템 자리에 간다. 사용자 줄·도구 결과(`tool_result`·`tool` 역할)·회상 기억은 사용자 영역에만 간다.
 - **사용량.** 응답이 실제로 보고한 토큰만 쓴다(없으면 없음, 0으로 채우지 않는다). 모든 모델 요청이 보고됐고 이 run이 첫 claim이며 **실제로 자식을 만든** 위임이 없을 때만 합계를 저장한다(자식을 만들지 못한 위임 실패는 해당하지 않는다). 보고하지 않은 요청의 `worker.model` 스팬에는 토큰 속성을 적지 않는다(0으로 채우지 않는다). 차례마다의 기록은 계획 체크포인트에 남아 승인 대기 뒤 재개에서도 이어진다.
@@ -128,7 +128,7 @@ Rust 어댑터는 열린 리스너의 실제 주소 하나로 init용 `BOT_RELAY
 | bot-core | 공통 ID·상태·인터페이스 | 없음 |
 | bot-profile | 프로필 탐색·검증·판본 생성 | core |
 | bot-store | PG 큐·원장·회신 저장 | core |
-| bot-runtime | 워커·예약·위임 및 Apple container VM에서 모델 CLI 실행 | core |
+| bot-runtime | 워커·예약·위임 및 API 직접 호출(`anthropic-api`·`openai-api`)·Apple container VM 모델 CLI 실행 | core |
 | bot-broker | 도구 인가·승인, 모델 프록시 및 srt에서 MCP 도구 실행 | core |
 | bot-gateway | CLI·Slack·HTTP 접수와 회신 | core |
 | bot-admin | 관리 API·UI와 OTLP 추적·로그·이슈 트래커 내보내기(모든 역할이 쓴다) | core |

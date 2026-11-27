@@ -17,6 +17,7 @@ pub(super) fn carry_script(names: &[&str]) -> String {
 }
 
 /// 경로 이름에 쓸 수 있게 다듬는다.
+#[cfg(test)]
 pub(super) fn safe(text: &str) -> String {
     text.chars()
         .map(|c| {

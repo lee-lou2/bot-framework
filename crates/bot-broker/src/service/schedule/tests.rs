@@ -1,13 +1,10 @@
 use super::*;
-use crate::{
-    rfc3339::parse_utc,
-    service::schedule::args::{Create, Reject, parse_cancel, render_list},
-};
+use crate::service::schedule::args::{Create, Reject, parse_cancel, render_list};
 use bot_core::{
     cron::Cron,
     id::BindingId,
     port::Error,
-    schedule::{DeliveryTarget, MAX_INSTRUCTION_BYTES, ScheduleSummary, Timing},
+    schedule::{DeliveryTarget, MAX_INSTRUCTION_BYTES, ScheduleSummary, Timing, utc::parse_utc},
     state::{Conversation, ConversationKind},
 };
 
@@ -181,7 +178,7 @@ fn timing_checks_wait_until_the_record_is_known_not_to_be_a_replay() {
     let at = |time| {
         format!(
             r#"{{"at":"{}","instruction":"x"}}"#,
-            crate::rfc3339::format_utc(time)
+            bot_core::schedule::utc::format_utc(time)
         )
     };
     assert!(spec(&at(limit), "UTC").is_ok());

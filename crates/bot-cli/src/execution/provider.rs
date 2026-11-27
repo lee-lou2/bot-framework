@@ -165,14 +165,19 @@ fn upstream_host(endpoint: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or_default()
 }
 
-/// 상류 주소: `https://호스트[:포트][/경로]`. 자격(`user@`)·쿼리·조각은 금지(자격은 SecretStore로만 준다). 호스트와 포트는 실제로
-/// 보내는 쪽(브로커의 egress)과 같은 규칙(`HostPort::parse`)으로 해석돼야 한다 — 포트가 범위 밖(70000)·0이거나 호스트를 정규화할
+/// 상류 주소: `https://호스트[:포트][/경로]`. 자격(`user@`)·쿼리·조각·퍼센트 인코딩·공백·제어 문자·IP 변형 표기(`0x`·숫자뿐인 마지막 레이블)는 금지.
+/// 호스트와 포트는 실제로 보내는 쪽(브로커의 egress)과 같은 규칙(`HostPort::parse`)으로 해석돼야 한다 — 포트가 범위 밖(70000)·0이거나 호스트를 정규화할
 /// 수 없으면 기동 전에 거절한다. 포트를 생략하면 443이다.
 fn endpoint_ok(endpoint: &str) -> bool {
     let Some(rest) = endpoint.strip_prefix("https://") else {
         return false;
     };
-    if !endpoint.is_ascii() || endpoint.contains(['?', '#', '@', ' ', '\\']) {
+    if !endpoint.is_ascii()
+        || endpoint
+            .bytes()
+            .any(|b| b <= b' ' || b == 0x7f || b == b'\\')
+        || endpoint.contains(['?', '#', '@', '%'])
+    {
         return false;
     }
     let (authority, _) = rest.split_once('/').unwrap_or((rest, ""));
@@ -181,7 +186,19 @@ fn endpoint_ok(endpoint: &str) -> bool {
     } else {
         format!("{authority}:443")
     };
-    bot_broker::resolve::HostPort::parse(&target).is_some()
+    let Some(parsed) = bot_broker::resolve::HostPort::parse(&target) else {
+        return false;
+    };
+    if parsed.host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    let Some(last) = parsed.host.rsplit('.').next() else {
+        return false;
+    };
+    !(last.bytes().all(|b| b.is_ascii_digit())
+        || last
+            .strip_prefix("0x")
+            .is_some_and(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit())))
 }
 
 fn parse_effort(fields: &Map<String, Value>, path: &str) -> Result<Option<Effort>, String> {

@@ -16,7 +16,6 @@ use crate::{
     approval::same_binding,
     approver::{approver_for, openai},
     classify::classify,
-    scope::authorize,
 };
 use bot_core::{
     id::*,
@@ -24,6 +23,7 @@ use bot_core::{
     port::Error,
     profile::ApprovalRoute,
     schedule::{DELIVER_REVISION, DELIVER_TOOL, DeliveryFence, DeliveryTarget, UnsentReason},
+    scope::authorize,
 };
 
 /// 승인 화면이 보여 준 조건을 지금 다시 본 결과.

@@ -2,7 +2,7 @@
 //! 소유자의 모든 쓰기는 같은 트랜잭션에서 세대·리스를 대조한다. 긴 외부 호출 동안 잠금을 쥐지 않는다.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, Entry, OwnedEntry},
     codec::*,
     db::{Fail, R, Store, Tx},
     finish::*,
@@ -172,11 +172,13 @@ impl Store {
                             };
                         }
                         if reclaimed {
-                            crate::approvals::supersede_generation(
+                            let mut audits = Vec::new();
+                            crate::approvals::supersede_generation_into(
                                 &mut tx,
                                 &run.profile,
                                 &run.id,
                                 c.generation,
+                                &mut audits,
                             )
                             .await?;
                             let reason = if forgiven {
@@ -184,12 +186,14 @@ impl Store {
                             } else {
                                 "lease_expired"
                             };
-                            audit::append(
-                                &mut tx,
+                            audits.push(OwnedEntry::new(
                                 &run.profile,
-                                &Entry::new("system", "run.reclaim", &run.id, reason),
-                            )
-                            .await?;
+                                "system",
+                                "run.reclaim",
+                                &run.id,
+                                reason,
+                            ));
+                            audit::append_many(&mut tx, &audits).await?;
                         }
                         tx.commit().await?;
                         return Ok(Some(claimed));

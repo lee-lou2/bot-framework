@@ -104,13 +104,190 @@ pub trait CardOutbox: Send + Sync {
     fn begin(&self, key: CardKey, checked_revision: Revision) -> Reply<'_, ()>;
     /// 결과를 기록한다(`Posted`면 카드를 열고 공개 안내 한 줄, 아니면 닫는다). 같은 정산의 재전달은 같은 결과다.
     fn settle(&self, key: CardKey, outcome: CardOutcome) -> Reply<'_, ()>;
-    /// 이 카드가 이어받은 원래 요청의 고정 증거. HTTP(OpenAI 호환) 출처 카드에만 `Some`이다(기본 구현은 없음).
-    fn origin(&self, _nonce: ApprovalId) -> Reply<'_, Option<CardOrigin>> {
-        Box::pin(async { Ok(None) })
-    }
+    /// 이 카드가 이어받은 원래 요청의 고정 증거. HTTP(OpenAI 호환) 출처 카드에만 `Some`이다.
+    fn origin(&self, nonce: ApprovalId) -> Reply<'_, Option<CardOrigin>>;
     /// 올리기 전에 승인 경로가 어긋났음을 알았다(승인 지정·사람 멤버 철회, 전달 경로·설치·바인딩 재지정): 카드를 올리지 않고 작업과 승인을 닫으며
-    /// 저장된 판정(`ApprovalBlock`)을 남긴다. 조회가 이 낱말로 «도구가 실행되지 않았다»를 알린다. 이 구분을 모르는 구현은 전달 실패로 정산한다(기본 구현).
-    fn block(&self, key: CardKey, _why: ApprovalBlock) -> Reply<'_, ()> {
-        self.settle(key, CardOutcome::Unavailable)
+    /// 저장된 판정(`ApprovalBlock`)을 남긴다. 조회가 이 낱말로 «도구가 실행되지 않았다»를 알린다.
+    fn block(&self, key: CardKey, why: ApprovalBlock) -> Reply<'_, ()>;
+}
+
+/// 승인 카드 JSON에서 `label: `로 시작하는 행과 바로 뒤따르는 공백 두 칸(`"  "`) 연속 줄을 합쳐 돌려준다.
+/// 다른 줄이 나오면 연속이 끊겨 뒤 라벨의 연속 줄이 앞 라벨에 섞이지 않는다.
+/// JSON이 엄격한 형식(`json::parse`)이 아니거나, `approval.lines`가 문자열 배열이 아니거나,
+/// `label` 행이 정확히 하나가 아니면 `None`이다.
+pub fn extract_line(card: &str, label: &str) -> Option<String> {
+    let value = crate::json::parse(card)?;
+    let lines: Vec<&str> = value
+        .get("approval")?
+        .get("lines")?
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<_>>()?;
+    let prefix = format!("{label}: ");
+    let mut found: Vec<String> = Vec::new();
+    let mut in_target = false;
+    for line in lines {
+        if let Some(first) = line.strip_prefix(&prefix) {
+            found.push(first.to_owned());
+            in_target = true;
+        } else if in_target && let Some(chunk) = line.strip_prefix("  ") {
+            if let Some(last) = found.last_mut() {
+                last.push_str(chunk);
+            }
+        } else {
+            in_target = false;
+        }
+    }
+    match found.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
+/// 관리 조회용 카드 줄 분해: `approval.title`과 `approval.lines`를 `(라벨, 값)` 행 목록으로 옮기고,
+/// `joined_label`이 주어지면 그 라벨의 행과 바로 뒤따르는 `"  "` 연속 줄을 따로 모아 정확히 하나일 때만
+/// 두 번째 값으로 돌려준다(다른 줄이 나오면 연속이 끊겨 뒤 라벨의 연속 줄은 일반 행으로 남는다).
+pub fn split_render(
+    card: &str,
+    joined_label: Option<&str>,
+) -> (Vec<(String, String)>, Option<String>) {
+    let Some(serde_json::Value::Object(map)) = crate::json::parse(card) else {
+        return (vec![], None);
+    };
+    let Some(serde_json::Value::Object(approval)) = map.get("approval") else {
+        return (vec![], None);
+    };
+    let mut out = Vec::new();
+    if let Some(title) = approval.get("title").and_then(serde_json::Value::as_str) {
+        out.push(("제목".to_owned(), title.to_owned()));
+    }
+    let lines: Vec<&str> = match approval.get("lines") {
+        Some(value) => {
+            let Some(arr) = value.as_array() else {
+                return (vec![], None);
+            };
+            let Some(lines) = arr
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()
+            else {
+                return (vec![], None);
+            };
+            lines
+        }
+        None => Vec::new(),
+    };
+    let prefix = joined_label.map(|label| format!("{label}: "));
+    let mut joined: Vec<String> = Vec::new();
+    let mut in_target = false;
+    for line in lines {
+        if let Some(prefix) = &prefix {
+            if let Some(first) = line.strip_prefix(prefix.as_str()) {
+                joined.push(first.to_owned());
+                in_target = true;
+                continue;
+            }
+            if in_target && let Some(chunk) = line.strip_prefix("  ") {
+                if let Some(last) = joined.last_mut() {
+                    last.push_str(chunk);
+                }
+                continue;
+            }
+        }
+        in_target = false;
+        out.push(match line.split_once(": ") {
+            Some((label, value)) => (label.to_owned(), value.to_owned()),
+            None => (String::new(), line.to_owned()),
+        });
+    }
+    let single = match joined.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    };
+    (out, single)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn card_json(lines: &[&str]) -> String {
+        json!({
+            "approval": {
+                "nonce": "n1",
+                "title": "승인 요청",
+                "lines": lines,
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn extract_line_joins_immediate_continuations_only() {
+        let card = card_json(&[
+            "도구: mail.send",
+            "내용: \"hello ",
+            "  world\"",
+            "인자: {\"a\":\"long-",
+            "  tail\"}",
+        ]);
+        // 뒤 라벨(`인자`)의 `"  "` 연속 줄이 앞 라벨(`내용`)에 섞이지 않는다
+        assert_eq!(
+            extract_line(&card, "내용").as_deref(),
+            Some("\"hello world\"")
+        );
+        assert_eq!(
+            extract_line(&card, "인자").as_deref(),
+            Some("{\"a\":\"long-tail\"}")
+        );
+        assert_eq!(extract_line(&card, "도구").as_deref(), Some("mail.send"));
+        assert_eq!(extract_line(&card, "없는라벨"), None);
+    }
+
+    #[test]
+    fn extract_line_refuses_duplicate_labels_and_stray_continuations() {
+        let dup = card_json(&["인자: {\"a\":1}", "인자: {\"a\":2}"]);
+        assert_eq!(extract_line(&dup, "인자"), None);
+        let stray = card_json(&["도구: x", "  stray", "인자: {\"ok\":true}"]);
+        assert_eq!(
+            extract_line(&stray, "인자").as_deref(),
+            Some("{\"ok\":true}")
+        );
+        assert_eq!(extract_line(&stray, "도구").as_deref(), Some("xstray"));
+        // 비문자열 요소나 중복 키 JSON은 거절한다
+        let non_str = json!({"approval":{"lines":["인자: 1", 42]}}).to_string();
+        assert_eq!(extract_line(&non_str, "인자"), None);
+        let dup_key = r#"{"approval":{"lines":["인자: 1"]},"approval":{"lines":["인자: 2"]}}"#;
+        assert_eq!(extract_line(dup_key, "인자"), None);
+    }
+
+    #[test]
+    fn split_render_does_not_corrupt_body_with_later_continuation_lines() {
+        let card = card_json(&[
+            "도구: memory.share",
+            "본문: \"secret ",
+            "  body\"",
+            "비고: 앞줄",
+            "  뒤줄",
+        ]);
+        let (rows, joined) = split_render(&card, Some("본문"));
+        assert_eq!(joined.as_deref(), Some("\"secret body\""));
+        assert_eq!(
+            rows,
+            vec![
+                ("제목".into(), "승인 요청".into()),
+                ("도구".into(), "memory.share".into()),
+                ("비고".into(), "앞줄".into()),
+                (String::new(), "  뒤줄".into()),
+            ]
+        );
+        // 중복 본문 행은 None으로 닫는다
+        let dup = card_json(&["본문: \"a\"", "본문: \"b\""]);
+        assert_eq!(split_render(&dup, Some("본문")).1, None);
+        // `lines`에 문자열이 아닌 요소가 섞이면 닫는다
+        let bad = json!({"approval": {"title": "t", "lines": ["본문: \"a\"", 42]}}).to_string();
+        assert_eq!(split_render(&bad, Some("본문")), (vec![], None));
     }
 }

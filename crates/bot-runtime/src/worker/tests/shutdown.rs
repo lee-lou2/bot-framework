@@ -10,7 +10,7 @@ use crate::{
 use bot_core::{
     command::*,
     id::*,
-    intake::{RequestKey, RequestState},
+    intake::{RequestKey, RequestState, RunProgress},
     port::{Broker, Error, Reply, RunStore},
     state::RunContext,
 };
@@ -34,6 +34,9 @@ impl RunStore for Runs {
     fn status(&self, key: RequestKey) -> Reply<'_, Option<RequestState>> {
         self.inner.status(key)
     }
+    fn progress(&self, profile: ProfileId, run: RunId) -> Reply<'_, Option<RunProgress>> {
+        self.inner.progress(profile, run)
+    }
     fn claim(&self) -> Reply<'_, Option<RunContext>> {
         self.inner.claim()
     }
@@ -53,6 +56,14 @@ impl RunStore for Runs {
     }
     fn finish(&self, attempt: Attempt, done: Finish) -> Reply<'_, Completion> {
         self.inner.finish(attempt, done)
+    }
+    fn finish_with(
+        &self,
+        attempt: Attempt,
+        done: Finish,
+        outcome: RunOutcome,
+    ) -> Reply<'_, Completion> {
+        self.inner.finish_with(attempt, done, outcome)
     }
     fn fail(&self, attempt: Attempt, failure: Failure) -> Reply<'_, Retry> {
         self.inner.fail(attempt, failure)

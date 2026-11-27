@@ -5,27 +5,24 @@ use super::{
     api::Body,
     blocks::{APPROVE, DENY, resolved_blocks},
     cards::is_the_card,
+    events::SlackAdmission,
     frame::{Button, Frame, Message, StopRequested},
     socket::Installation,
-    ux::{STOP_CONFIRM, STOP_CONTINUE, TrackedRun, is_stop_phrase},
+    ux::{STOP_CONFIRM, STOP_CONTINUE, StopMention, is_stop_phrase},
 };
 use crate::{
     entrance::Real,
     identity,
-    inbound::{Event, Inbound, valid_request_id},
-    ingress::Admission,
+    inbound::{Event, valid_request_id},
     observe,
     reply::parse_card,
 };
 use bot_core::{
-    id::{ApprovalId, RequestId},
-    ledger::ApprovalState,
-    port::Error,
-    slack::{SlackSource, SourceKind},
-    state::{Conversation, ConversationKind},
+    id::ApprovalId, ledger::ApprovalState, port::Error, slack::SourceKind, state::ConversationKind,
     trace::now_nano,
 };
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 /// 글에서 봇 멘션(`<@봇>` 또는 `<@봇|이름>`)을 뗀다. 다른 사람의 멘션은 그대로 둔다.
 pub fn strip_mention(text: &str, bot_user: &str) -> String {
@@ -103,54 +100,63 @@ fn status_line(state: ApprovalState) -> Option<&'static str> {
 impl SlackGateway {
     /// 받은 프레임을 처리하고 «ack해도 되는가»를 돌려준다.
     pub async fn on_frame(&self, install: &Installation, frame: Frame) -> bool {
+        self.on_frame_with_stop(install, frame, &self.shutdown)
+            .await
+    }
+
+    pub(super) async fn on_frame_with_stop(
+        &self,
+        install: &Installation,
+        frame: Frame,
+        stop: &CancellationToken,
+    ) -> bool {
         match frame {
             // 멘션 이벤트(채널)는 `events`에 따라 가르고, DM은 그대로 접수한다
             Frame::Message(message) if !message.direct => {
-                self.on_channel_message(install, message.into()).await
+                self.on_channel_message(install, message.into(), stop).await
             }
-            Frame::Message(message) => self.on_message(install, message).await,
-            Frame::Post(post) => self.on_post(install, post).await,
+            Frame::Message(message) => self.on_message(install, message, stop).await,
+            Frame::Post(post) => self.on_post(install, post, stop).await,
             Frame::Reaction(reaction) => self.on_reaction(install, reaction).await,
             Frame::Button(button) => self.on_button(install, button).await,
-            Frame::StopRequested(req) => {
-                self.on_stop_requested(install, req).await;
-                true
-            }
+            Frame::StopRequested(req) => self.on_stop_requested(install, req).await,
             _ => true,
         }
     }
 
-    async fn on_stop_requested(&self, install: &Installation, req: StopRequested) {
+    async fn on_stop_requested(&self, install: &Installation, req: StopRequested) -> bool {
         if req.team != install.team {
-            return;
+            return true;
         }
-        let Some(ux) = &self.ux else { return };
-        let routes = self.ingress.routes().ok();
-        let snapshot = routes.as_ref().and_then(|r| r.snapshot(&install.profile));
+        let Some(ux) = &self.ux else { return true };
+        let Ok(routes) = self.ingress.routes() else {
+            return false;
+        };
+        let snapshot = routes.snapshot(&install.profile);
         ux.on_stop_requested(
+            &self.ingress,
             install,
             snapshot.map(|v| &**v),
             &req.channel,
             &req.thread_ts,
             &req.user,
         )
-        .await;
+        .await
     }
 
-    async fn on_message(&self, install: &Installation, message: Message) -> bool {
+    /// 1:1 DM 글 접수(`on_frame_with_stop`이 `message.direct`만 여기로 보낸다).
+    async fn on_message(
+        &self,
+        install: &Installation,
+        message: Message,
+        stop: &CancellationToken,
+    ) -> bool {
         // 이 설치의 워크스페이스가 아니면 받았다는 표시만 한다
         if message.team != install.team {
             return true;
         }
-        let real = if message.direct {
-            Real::SlackDm {
-                team: message.team.clone(),
-            }
-        } else {
-            Real::SlackChannel {
-                team: message.team.clone(),
-                channel: message.channel.clone(),
-            }
+        let real = Real::SlackDm {
+            team: message.team.clone(),
         };
         let Ok(routes) = self.ingress.routes() else {
             return false; // 표를 만들 수 없으면 ack하지 않아 Slack이 다시 보낸다
@@ -173,70 +179,46 @@ impl SlackGateway {
             .thread_ts
             .clone()
             .unwrap_or_else(|| message.ts.clone());
-        if is_stop_phrase(&stripped)
-            && let Some(ux) = &self.ux
-            && ux
-                .on_stop_mention(
+        if is_stop_phrase(&stripped) {
+            match self
+                .try_stop_mention(
                     install,
-                    routes.snapshot(&install.profile).map(|v| &**v),
+                    &routes,
                     &message.channel,
                     &thread_ts,
                     &message.user,
                 )
                 .await
-        {
-            return true;
+            {
+                StopMention::Pass => {}
+                StopMention::Handled => return true,
+                StopMention::Retry => return false,
+            }
         }
-        let inbound = Inbound {
-            real,
-            principal: principal.clone(),
-            request: RequestId(request.clone()),
-            conversation: Conversation {
-                kind: if message.direct {
-                    ConversationKind::Direct
-                } else {
-                    ConversationKind::Channel
-                },
-                id: message.channel.clone(),
-                thread: Some(thread_ts.clone()),
-            },
-            attachments: message
-                .files
-                .iter()
-                .map(|id| format!("slack:{}/{id}", install.alias))
-                .collect(),
-            body: json!({"text": stripped}),
-            event: Event::Message,
-        };
-        // 인증된 이벤트 원천은 일반 접수의 넘김·승인 증거와 민감 DM의 봉투 지문에 쓰인다.
-        let source = SlackSource {
-            kind: SourceKind::Message,
-            team: message.team.clone(),
-            channel: message.channel.clone(),
-            ts: message.ts.clone(),
-            thread_ts: message.thread_ts,
-            event_id: message.event_id.unwrap_or(request),
-            reaction: None,
-        };
-        // 소유자를 확인한 바로 그 표로 접수한다(그 사이 입구 소유자가 바뀌어도 이 설치의 프로필 밖으로 새지 않는다)
-        let admission = self
-            .ingress
-            .admit_sourced(&routes, inbound, Some(source))
-            .await;
-        if let (Some(ux), Admission::Accepted { run, .. }) = (&self.ux, &admission) {
-            ux.track(TrackedRun {
-                profile: install.profile.clone(),
-                workspace: install.alias.clone(),
+        self.admit_slack_message(
+            install,
+            &routes,
+            SlackAdmission {
+                real,
+                principal,
+                request,
+                kind: ConversationKind::Direct,
+                source_kind: SourceKind::Message,
                 team: message.team,
                 channel: message.channel,
-                thread_ts,
-                msg_ts: message.ts,
                 user: message.user,
-                principal,
-                run: run.clone(),
-            });
-        }
-        admission.settled()
+                ts: message.ts,
+                raw_thread_ts: message.thread_ts,
+                thread_ts,
+                files: message.files,
+                event_id: message.event_id,
+                body: json!({"text": stripped}),
+                event: Event::Message,
+                track_ux: true,
+            },
+            stop,
+        )
+        .await
     }
 
     /// 버튼 클릭 한 건. 돌려주는 값은 «ack해도 되는가»다 — 판정이 커밋됐거나 영구적으로 처리할 수 없는 클릭만 ack하고,
@@ -246,15 +228,19 @@ impl SlackGateway {
             if button.team == install.team
                 && let Some(ux) = &self.ux
             {
-                let routes = self.ingress.routes().ok();
-                let snapshot = routes.as_ref().and_then(|r| r.snapshot(&install.profile));
-                ux.on_stop_button(
-                    install,
-                    snapshot.map(|v| &**v),
-                    &button,
-                    button.action_id == STOP_CONFIRM,
-                )
-                .await;
+                let Ok(routes) = self.ingress.routes() else {
+                    return false;
+                };
+                let snapshot = routes.snapshot(&install.profile);
+                return ux
+                    .on_stop_button(
+                        &self.ingress,
+                        install,
+                        snapshot.map(|v| &**v),
+                        &button,
+                        button.action_id == STOP_CONFIRM,
+                    )
+                    .await;
             }
             return true;
         }

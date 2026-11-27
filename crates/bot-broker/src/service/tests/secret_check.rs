@@ -234,7 +234,7 @@ fn a_call_over_the_rate_limit_never_makes_the_store_be_read_and_a_missing_secret
     // 한도를 넘으면 자격을 거절하기 전에 속도 제한이 먼저 돌려보낸다: 보관소 조회가 늘지 않고 기록도 없다
     assert!(matches!(
         w.call("c3", "agenda.mail", "{}"),
-        Err(Error::Unavailable)
+        Err(Error::RateLimited)
     ));
     assert_eq!(w.runner.secret_checks().len(), 2, "보관소 읽기 그대로");
     assert!(!w.ledger.has_call("r1", "c3"));
@@ -261,7 +261,7 @@ fn a_new_call_that_passes_the_checks_keeps_one_rate_slot_for_the_whole_call() {
     done(w.call("c2", "agenda.mail", "{}"));
     assert!(matches!(
         w.call("c3", "agenda.mail", "{}"),
-        Err(Error::Unavailable)
+        Err(Error::RateLimited)
     ));
     assert_eq!(w.runner.jobs().len(), 2);
 }

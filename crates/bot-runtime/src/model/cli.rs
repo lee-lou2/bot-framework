@@ -9,8 +9,6 @@ use std::{
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 /// 입력 폴더가 붙는 곳이자 CLI의 작업 폴더
@@ -70,8 +68,6 @@ pub(crate) struct CallDir {
     pub work: PathBuf,
 }
 
-static NEXT: AtomicU64 = AtomicU64::new(0);
-
 /// 폴더 이름에 쓸 수 있는 글자만 남긴다.
 fn safe(part: &str) -> String {
     part.chars()
@@ -113,20 +109,9 @@ fn make_exclusive(path: &Path) -> io::Result<()> {
     }
 }
 
-/// 폴더 이름 끝에 붙일 무작위 낱말(`/dev/urandom`, 없으면 시각+순번). 겹치면 배타적 생성이 걸러 다시 한다.
+/// 폴더 이름 끝에 붙일 무작위 낱말(8바이트 소문자 16진 16자리). 겹치면 배타적 생성이 걸러 다시 한다.
 fn random_suffix() -> String {
-    use std::io::Read;
-    let mut bytes = [0u8; 8];
-    let read = fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
-    if read.is_err() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let mixed = now ^ u128::from(NEXT.fetch_add(1, Ordering::Relaxed));
-        bytes.copy_from_slice(&mixed.to_le_bytes()[..8]);
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bot_core::random::random_hex(8)
 }
 
 impl CallDir {

@@ -117,7 +117,9 @@ impl Worker {
                 Err(Error::Missing) => return Err(CallError::Missing),
                 Err(Error::Invalid) => return Err(CallError::Invalid),
                 Err(Error::Conflict) => return Err(CallError::Conflict),
-                Err(Error::Unavailable) => return Err(CallError::Transient("broker_unavailable")),
+                Err(Error::Unavailable | Error::RateLimited) => {
+                    return Err(CallError::Transient("broker_unavailable"));
+                }
                 // 리스를 잃은 것인지(물러난다), 판정에 쓴 판본이 그 사이 바뀐 것인지(다시 부른다) 리스로 가른다
                 Err(Error::Stale) => {
                     if self.lost_lease(attempt).await {
@@ -245,7 +247,9 @@ impl Worker {
                 }
                 Err(Error::Denied) => Ok(Ran::End(CallEnd::Denied)),
                 Err(Error::Stale) => Err(Flow::Lost),
-                Err(Error::Unavailable) => Err(Flow::Fail(Failure::Transient("store_unavailable"))),
+                Err(Error::Unavailable | Error::RateLimited) => {
+                    Err(Flow::Fail(Failure::Transient("store_unavailable")))
+                }
             };
         }
         let started = span
@@ -268,7 +272,9 @@ impl Worker {
                 Err(Flow::Fail(Failure::Transient("store_unavailable")))
             }
             Err(Error::Conflict) => Err(Flow::Fail(Failure::Permanent("delegate_conflict"))),
-            Err(Error::Unavailable) => Err(Flow::Fail(Failure::Transient("store_unavailable"))),
+            Err(Error::Unavailable | Error::RateLimited) => {
+                Err(Flow::Fail(Failure::Transient("store_unavailable")))
+            }
             Err(Error::Stale) => Err(Flow::Lost),
         }
     }

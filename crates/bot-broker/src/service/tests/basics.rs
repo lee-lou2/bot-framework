@@ -110,7 +110,7 @@ fn the_rate_limit_refuses_a_burst_but_replays_are_free() {
     done(w.call("c2", "agenda.list", "{}"));
     assert!(matches!(
         w.call("c3", "agenda.list", "{}"),
-        Err(Error::Unavailable)
+        Err(Error::RateLimited)
     ));
     done(w.call("c1", "agenda.list", "{}"));
     w.clock.advance(Duration::from_secs(1));

@@ -30,24 +30,23 @@ mod worker;
 use self::activation::{commit_with_refresh, plan_activation};
 /// `bot doctor`가 worker 시작과 같은 판정을 쓰도록 내보낸다(따로 판정하지 않는다).
 pub(crate) use self::runner::refuse_required_state;
+#[cfg(any(test, feature = "testing"))]
+use crate::secrets::admin::SecretAdmin;
 use crate::{
     cli::Role,
     host::HostFile,
     load::{check_entrances, load, secret_admin},
-    secrets::admin::SecretAdmin,
     settings::Settings,
 };
 use bot_core::{
+    active::{ActiveCheck, ActiveSet},
     command::{MemorySeed, TriggerSpec},
     id::{ProfileId, Revision},
     port::{Error, SecretStore},
     profile::{ActiveRevisions, ProfileCatalog},
     schedule::ScheduleRoutes,
 };
-use bot_gateway::{
-    active::{ActiveCheck, ActiveSet},
-    schedule_routes::HostRoutes,
-};
+use bot_gateway::schedule_routes::HostRoutes;
 use bot_profile::ProfileSet;
 use bot_runtime::schedule_set;
 use bot_store::{Config, Store};
@@ -65,7 +64,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) fn check_model_aliases(host: &HostFile) -> Result<(), String> {
     /// 요청을 보내지 않으므로 판본 확인은 늘 통과한다
     struct Open;
-    impl bot_runtime::model::SendGate for Open {
+    impl ActiveCheck for Open {
         fn verify(&self) -> bot_core::port::Reply<'_, ()> {
             Box::pin(async { Ok(()) })
         }
@@ -197,8 +196,9 @@ fn watch_signals(stop: CancellationToken) {
     });
 }
 
-/// 시험이 넣는 대체: 모델 실행 조각(합성 샌드박스·가짜 상류)과 자격 보관소·종료 신호·가짜 Slack 주소. 운영 실행(`run`)은 모두 비어 있다 —
-/// 제품 CLI에는 이것을 고르는 설정이 없고, 모델 CLI의 운영 조각은 호스트 설정(`sandbox.apple`)에서 만든 Apple VM 어댑터와 HTTPS 상류 전송뿐이다.
+/// 시험이 넣는 대체: 모델 실행 조각(합성 샌드박스·가짜 상류)과 자격 보관소·종료 신호·가짜 Slack 주소. 운영 빌드(`testing` 비활성)에는 포함하지 않으며,
+/// 제품 CLI에는 이것을 고르는 설정이 없다. 모델 CLI의 운영 조각은 호스트 설정(`sandbox.apple`)에서 만든 Apple VM 어댑터와 HTTPS 상류 전송뿐이다.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 #[derive(Default)]
 pub struct Overrides {
@@ -216,15 +216,32 @@ pub struct Overrides {
 }
 
 pub async fn run(settings: &Settings, roles: &[Role], explicit: bool) -> Result<(), String> {
-    run_with(settings, roles, explicit, Overrides::default()).await
+    #[cfg(any(test, feature = "testing"))]
+    {
+        run_inner(settings, roles, explicit, Overrides::default()).await
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    {
+        run_inner(settings, roles, explicit).await
+    }
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub async fn run_with(
     settings: &Settings,
     roles: &[Role],
     explicit: bool,
     overrides: Overrides,
+) -> Result<(), String> {
+    run_inner(settings, roles, explicit, overrides).await
+}
+
+async fn run_inner(
+    settings: &Settings,
+    roles: &[Role],
+    explicit: bool,
+    #[cfg(any(test, feature = "testing"))] overrides: Overrides,
 ) -> Result<(), String> {
     let roles = Role::expand(roles);
     let blocked: Vec<String> = roles
@@ -259,11 +276,14 @@ pub async fn run_with(
     // 그쪽이 `install::install`로 읽기 전용 설치본을 만들어 같은 판본으로 실행한다.
     let revisions = crate::install::measure_all(&loaded.host.servers, &loaded.host.remote_servers)?;
     // 자격 보관소와 관측: 모든 역할이 같은 수집기(Exporter)를 쓴다(단독 gateway도). 잘못된 수집기 설정이면 여기서 멈춘다.
+    #[cfg(any(test, feature = "testing"))]
     let secrets_admin = match (overrides.secret_admin, overrides.secrets) {
         (Some(admin), _) => admin,
         (None, Some(secrets)) => Arc::new(SecretAdmin::custom(secrets)),
         (None, None) => secret_admin(settings)?,
     };
+    #[cfg(not(any(test, feature = "testing")))]
+    let secrets_admin = secret_admin(settings)?;
     let observe = Arc::new(
         trace::start(
             &loaded.host,
@@ -279,7 +299,14 @@ pub async fn run_with(
         .database_url
         .as_deref()
         .ok_or("BOT_DATABASE_URL이 필요해요(PostgreSQL 접속 주소)")?;
-    let store = Store::connect(url, overrides.store_config.clone().unwrap_or_default())
+    #[cfg(any(test, feature = "testing"))]
+    let mut store_config = overrides.store_config.clone().unwrap_or_default();
+    #[cfg(not(any(test, feature = "testing")))]
+    let mut store_config = Config::default();
+    if let Some(max) = settings.db_max_connections {
+        store_config.max_connections = max;
+    }
+    let store = Store::connect(url, store_config)
         .await
         .map_err(|e| format!("저장소에 접속하지 못했어요: {}", explain(e.into_core())))?;
     store.migrate().await.map_err(|e| {
@@ -343,8 +370,10 @@ pub async fn run_with(
         observe.tracer(),
         routes.clone(),
     );
-    let own_signals = overrides.stop.is_none();
-    let stop = overrides.stop.unwrap_or_default();
+    #[cfg(any(test, feature = "testing"))]
+    let (own_signals, stop) = (overrides.stop.is_none(), overrides.stop.unwrap_or_default());
+    #[cfg(not(any(test, feature = "testing")))]
+    let (own_signals, stop) = (true, CancellationToken::new());
     let mut tasks: JoinSet<Result<(), String>> = JoinSet::new();
     let prepared_gateway = if roles.contains(&Role::Gateway) {
         let deps = gateway::Deps {
@@ -357,6 +386,7 @@ pub async fn run_with(
             stop: stop.clone(),
             decisions: decisions.clone(),
             tracer: observe.tracer(),
+            #[cfg(any(test, feature = "testing"))]
             slack_base: overrides.slack_base.clone(),
             active: active.clone(),
         };
@@ -407,7 +437,9 @@ pub async fn run_with(
             uid: loaded.uid,
             stop: stop.clone(),
             active: active.clone(),
+            #[cfg(any(test, feature = "testing"))]
             claude: overrides.claude.clone(),
+            #[cfg(any(test, feature = "testing"))]
             upstream: overrides.upstream.clone(),
             routes: routes.clone(),
         };

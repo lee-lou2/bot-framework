@@ -47,9 +47,7 @@ pub struct MemSchedules {
     list_failure: Mutex<Option<Error>>,
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::lock;
 
 /// 저장소가 받는 시간대 이름(시험용: 진짜 IANA 검증은 저장소가 한다).
 fn known_timezone(name: &str) -> bool {

@@ -37,8 +37,6 @@ pub(crate) use bot_core::json;
 pub(crate) mod keyed;
 pub(crate) mod lines;
 pub(crate) mod recovery;
-pub(crate) mod rfc3339;
-pub(crate) mod scope;
 pub(crate) mod text;
 
 #[cfg(any(test, feature = "testing"))]

@@ -13,7 +13,6 @@ use crate::{
     classify::{classify, risk_code},
     ports::*,
     resolve::{Resolved, effective_tool, find_tool, pinned_to_image, selected_env},
-    scope::authorize,
 };
 use bot_core::{
     api::ApprovalBlock,
@@ -23,6 +22,7 @@ use bot_core::{
     port::Error,
     profile::{Snapshot, Tool},
     schedule::DeliveryTarget,
+    scope::authorize,
     state::{Risk, RunContext},
     trace::{SpanIds, SpanKind, SpanRecord, key, now_nano},
 };
@@ -90,7 +90,7 @@ fn error_class(error: &Error) -> &'static str {
         Error::Conflict => "conflict",
         Error::Stale => "stale",
         Error::Missing => "missing",
-        Error::Unavailable => "unavailable",
+        Error::Unavailable | Error::RateLimited => "unavailable",
     }
 }
 
@@ -267,7 +267,7 @@ impl BrokerService {
             held = Some(
                 self.limiter
                     .admit(&attempt.profile, &ctx.principal)
-                    .map_err(|_| Self::limited())?,
+                    .map_err(|_| Error::RateLimited)?,
             );
             let mut names: Vec<_> = resolved.tool.secrets.values().cloned().collect();
             names.extend(bound);
@@ -387,7 +387,7 @@ impl BrokerService {
             None => self
                 .limiter
                 .admit(&flow.attempt.profile, &flow.ctx.principal)
-                .map_err(|_| Self::limited())?,
+                .map_err(|_| Error::RateLimited)?,
         };
         let class = classify(
             &flow.resolved.tool,

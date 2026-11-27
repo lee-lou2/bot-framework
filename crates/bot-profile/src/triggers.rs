@@ -116,7 +116,10 @@ fn parse_one(
         id: text(obj, "id").to_owned(),
         on,
         target,
-        order: obj.get("order").and_then(Value::as_i64).unwrap_or(0),
+        order: obj
+            .get("order")
+            .and_then(crate::schema::as_exact_i64)
+            .unwrap_or(0),
         private: obj.get("private").and_then(Value::as_bool).unwrap_or(false),
         private_pass: obj
             .get("private_pass")
@@ -359,5 +362,23 @@ mod tests {
         for bad in ["agenda", "/a//b", "/a/./b", "/a/..", "/a b", ""] {
             assert!(!http_path_ok(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn float_integer_order_and_preapproved_max_per_day_are_accepted() {
+        let (out, codes) = run(json!({"version": 1, "triggers": [{
+            "id": "morning",
+            "on": {"cron": "0 9 * * *"},
+            "principal": "service:morning",
+            "order": 5.0,
+            "target": {"tool": "agenda.list", "args": {}},
+            "preapproved": {
+                "max_per_day": 5.0,
+                "targets": [{"operation": "send", "target": "team"}]
+            }
+        }]}));
+        assert!(codes.is_empty(), "{codes:?}");
+        assert_eq!(out[0].order, 5);
+        assert_eq!(out[0].preapproved.as_ref().unwrap().max_per_day, 5);
     }
 }

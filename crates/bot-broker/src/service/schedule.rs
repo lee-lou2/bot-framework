@@ -17,7 +17,7 @@ use super::{
     gate::Gate,
     route::Route,
 };
-use crate::{approver::approver_for, classify::classify, resolve::Resolved, scope::authorize};
+use crate::{approver::approver_for, classify::classify, resolve::Resolved};
 use bot_core::{
     command::{CallResult, JsonPayload, ToolCall},
     id::*,
@@ -25,6 +25,7 @@ use bot_core::{
     port::Error,
     profile::{Scopes, Snapshot, Tool},
     schedule::{DeliveryTarget, ScheduleSpec},
+    scope::authorize,
     state::{ConversationKind, Risk, RunContext},
 };
 
@@ -394,7 +395,7 @@ impl BrokerService {
         let _slot = self
             .limiter
             .admit(&flow.attempt.profile, &flow.ctx.principal)
-            .map_err(|_| Self::limited())?;
+            .map_err(|_| Error::RateLimited)?;
         let class = classify(
             &spec,
             &flow.snapshot.policy.approve,

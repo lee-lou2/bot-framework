@@ -20,23 +20,13 @@ fn cap(s: &str, limit: usize) -> String {
     }
 }
 
-/// UTC 나노초를 RFC 3339 문자열(`YYYY-MM-DDTHH:MM:SSZ`)로 바꾼다(Howard Hinnant civil-from-days).
+/// UTC 나노초를 RFC 3339 문자열(`YYYY-MM-DDTHH:MM:SSZ`)로 바꾼다.
 pub(super) fn rfc3339_utc(nano: u64) -> String {
-    let secs = (nano / 1_000_000_000) as i64;
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = y + i64::from(mo <= 2);
-    format!("{year:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+    use std::time::{Duration, UNIX_EPOCH};
+    let at = UNIX_EPOCH
+        .checked_add(Duration::from_secs(nano / 1_000_000_000))
+        .unwrap_or(UNIX_EPOCH);
+    bot_core::schedule::utc::format_utc(at)
 }
 
 /// `X-Sentry-Auth` 헤더 값을 만든다(키가 있을 때만 호출한다). 키에 공백·쉼표·제어 문자가 섞이면 거절한다.

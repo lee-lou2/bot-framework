@@ -18,7 +18,7 @@ mod delivery;
 mod unsent;
 pub mod utc;
 pub use close::CloseReason;
-pub use create::CreateSeal;
+pub use create::{CreateSeal, valid_iana_timezone};
 pub use delivery::{DELIVER_CALL, DELIVER_REVISION, DELIVER_TOOL, DELIVERY_CARD_LABEL};
 pub use unsent::{DeliveryFence, UNROUTED_NOTICE, UnsentReason};
 
@@ -198,9 +198,7 @@ pub trait ScheduledReplies: Send + Sync {
     /// 마지막 claim에 이미 커밋된 등록 또는 미발송 영수증을 돌려준다. 미종결이면 None이다.
     /// 저장소는 한 시점에서 프로필·run·세대·claim_epoch, 현재 활성 집합과 종결 당시 집합을 대조한다.
     /// 초안의 본문과 목적지는 반환하지 않는다.
-    fn receipt(&self, _attempt: Attempt) -> Reply<'_, Option<JsonPayload>> {
-        Box::pin(async { Err(crate::port::Error::Unavailable) })
-    }
+    fn receipt(&self, attempt: Attempt) -> Reply<'_, Option<JsonPayload>>;
 
     /// Some은 최종 결과·답을 한 번 동결한다. None은 재개 시 기존 초안만 읽는다.
     /// 일반 실행, 원래 대화로 보내는 답, 첨부 없는 quiet 성공이면 None이다.
@@ -210,9 +208,7 @@ pub trait ScheduledReplies: Send + Sync {
         completion: Option<crate::command::Finish>,
     ) -> Reply<'_, Option<DeliveryDraft>>;
     /// 현재 집합·유효 claim에서 이 발생의 고정 목적지만 읽는다. 초안이 옛 집합에서 동결됐어도 내용을 노출하지 않고 철회를 판별한다.
-    fn target(&self, _attempt: Attempt) -> Reply<'_, Option<DeliveryTarget>> {
-        Box::pin(async { Err(Error::Unavailable) })
-    }
+    fn target(&self, attempt: Attempt) -> Reply<'_, Option<DeliveryTarget>>;
     /// 현재 집합·fence·보관한 목적지를 대조한 뒤 발생 하나만 종결한다.
     /// 같은 트랜잭션에서 해당 전송의 소유자 거절·철회가 확인되면 요청 사유가 Unrouted여도 Rejected로 기록한다.
     /// Rejected에는 안내가 없다. 재전달에는 실제로 커밋한 사유의 영수증을 반환한다.
@@ -220,12 +216,10 @@ pub trait ScheduledReplies: Send + Sync {
     /// 동일 종결의 재전달은 같은 영수증이다. 목적지 발송·승인 소비 또는 이미 등록된 답의 취소는 허용하지 않는다.
     fn finish_unsent(
         &self,
-        _fence: DeliveryFence,
-        _target: DeliveryTarget,
-        _reason: UnsentReason,
-    ) -> Reply<'_, JsonPayload> {
-        Box::pin(async { Err(Error::Unavailable) })
-    }
+        fence: DeliveryFence,
+        target: DeliveryTarget,
+        reason: UnsentReason,
+    ) -> Reply<'_, JsonPayload>;
     /// 현재 사람 소유자·권한·활성 집합·저장된 초안의 sha256()을 확인한다.
     /// DELIVER_CALL의 승인 소비, 명시 목적지 outbox, run 완료를 한 커밋에 쓴다.
     fn enqueue(&self, approval: StartCall) -> Reply<'_, ()>;

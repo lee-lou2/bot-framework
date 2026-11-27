@@ -505,3 +505,23 @@ pub fn build(
         name,
     })
 }
+
+/// 이름이 가리키는 이미지를 다이제스트로 고정한다(`이름:태그` → `이름@sha256:…`). 이미 다이제스트면 같아야 한다.
+pub(super) fn pin(image: &str, digest: &str) -> Option<String> {
+    let hex = digest.strip_prefix("sha256:")?;
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    if let Some((_, given)) = image.split_once('@') {
+        return (given == digest).then(|| image.to_owned());
+    }
+    let name = match image.rfind(':') {
+        Some(at) if !image[at..].contains('/') => &image[..at],
+        _ => image,
+    };
+    Some(format!("{name}@{digest}"))
+}

@@ -10,7 +10,7 @@
 //!   정상 행과 손상 행이 섞인 쪽은 저장소가 읽은 순서(`(다음 확인 시각, 프로필, ID)`) 그대로 처리한다 — 뒤에 온 손상 행의 잠금을 기다리느라 앞의 정상 행이 밀리지 않는다.
 
 use super::Scheduler;
-use crate::{cron::Cron, scope};
+use crate::cron::Cron;
 use bot_core::{
     id::{ProfileId, Revision, ScheduleId},
     port::Error,
@@ -19,6 +19,7 @@ use bot_core::{
         AdvanceSchedule, CloseReason, DeliveryTarget, DueKey, DuePage, DueSchedule, NextOccurrence,
         Timing, UnreadableSchedule,
     },
+    scope,
 };
 use chrono_tz::Tz;
 use std::{collections::HashSet, time::SystemTime};

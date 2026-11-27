@@ -235,7 +235,7 @@ impl HttpGateway {
             Some(key) => key,
             None if retried(headers) => return Err(Failure::idempotency_required()),
             None => {
-                let random = super::random_hex(16).map_err(|_| Failure::unavailable())?;
+                let random = bot_core::random::random_hex(16);
                 format!("{GENERATED_PREFIX}{random}")
             }
         };
@@ -258,7 +258,7 @@ impl HttpGateway {
             request: RequestId(key.clone()),
             body: chat.body.clone(),
             digest,
-            conversation: super::random_hex(16).map_err(|_| Failure::unavailable())?,
+            conversation: bot_core::random::random_hex(16),
         };
         // 접수 호출이 기한을 넘기면 커밋했는지 모른다: 같은 키로 확인한다
         let verdict =

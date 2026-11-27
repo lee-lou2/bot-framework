@@ -31,6 +31,60 @@ impl<'a> Entry<'a> {
     }
 }
 
+/// 한 트랜잭션의 커밋 직전에 여러 감사 행을 한 번에 이어 붙일 때 모으는 소유 항목.
+pub(crate) struct OwnedEntry {
+    pub profile: String,
+    pub actor: String,
+    pub action: String,
+    pub target: String,
+    pub args: Option<[u8; 32]>,
+    pub verdict: String,
+    pub run_command_id: Option<String>,
+}
+
+impl OwnedEntry {
+    pub(crate) fn new(
+        profile: impl Into<String>,
+        actor: impl Into<String>,
+        action: impl Into<String>,
+        target: impl Into<String>,
+        verdict: impl Into<String>,
+    ) -> Self {
+        Self {
+            profile: profile.into(),
+            actor: actor.into(),
+            action: action.into(),
+            target: target.into(),
+            args: None,
+            verdict: verdict.into(),
+            run_command_id: None,
+        }
+    }
+
+    pub(crate) fn from_entry(profile: &str, e: &Entry<'_>) -> Self {
+        Self {
+            profile: profile.to_owned(),
+            actor: e.actor.to_owned(),
+            action: e.action.to_owned(),
+            target: e.target.to_owned(),
+            args: e.args,
+            verdict: e.verdict.to_owned(),
+            run_command_id: e.run_command_id.map(str::to_owned),
+        }
+    }
+
+    fn as_entry(&self) -> Entry<'_> {
+        Entry {
+            actor: &self.actor,
+            action: &self.action,
+            target: &self.target,
+            args: self.args,
+            verdict: &self.verdict,
+            run_command_id: self.run_command_id.as_deref(),
+        }
+    }
+}
+
 fn link(profile: &str, prev: &[u8], seq: i64, at_ms: i64, e: &Entry<'_>) -> [u8; 32] {
     let mut h = Sha256::new();
     let mut text = |s: &str| {
@@ -96,6 +150,77 @@ pub(crate) async fn append(tx: &mut Tx<'_>, profile: &str, e: &Entry<'_>) -> R<i
         .execute(&mut **tx)
         .await?;
     Ok(seq)
+}
+
+/// 같은 트랜잭션에서 head를 한 번만 잠그고 여러 감사 행을 순서대로 잇는다. 상태 변경 뒤 커밋 직전에 부른다.
+pub(crate) async fn append_many(tx: &mut Tx<'_>, entries: &[OwnedEntry]) -> R<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("insert into bot_audit_head (singleton, seq, hash) values (true, 0, $1) on conflict do nothing")
+        .bind(GENESIS.as_slice())
+        .execute(&mut **tx)
+        .await?;
+    let head = sqlx::query(
+        "select seq, hash, bot_now_ms() as now_ms from bot_audit_head where singleton for update",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    let (mut seq, mut prev, now_ms): (i64, Vec<u8>, i64) =
+        (head.get("seq"), head.get("hash"), head.get("now_ms"));
+    let count = entries.len();
+    let mut seqs = Vec::with_capacity(count);
+    let mut profiles = Vec::with_capacity(count);
+    let mut actors = Vec::with_capacity(count);
+    let mut actions = Vec::with_capacity(count);
+    let mut targets = Vec::with_capacity(count);
+    let mut args = Vec::with_capacity(count);
+    let mut verdicts = Vec::with_capacity(count);
+    let mut prevs = Vec::with_capacity(count);
+    let mut hashes = Vec::with_capacity(count);
+    let mut commands = Vec::with_capacity(count);
+    for item in entries {
+        seq += 1;
+        let entry = item.as_entry();
+        let hash = link(&item.profile, &prev, seq, now_ms, &entry);
+        let next = hash.to_vec();
+        seqs.push(seq);
+        profiles.push(item.profile.as_str());
+        actors.push(item.actor.as_str());
+        actions.push(item.action.as_str());
+        targets.push(item.target.as_str());
+        args.push(item.args.map(|a| a.to_vec()));
+        verdicts.push(item.verdict.as_str());
+        prevs.push(prev);
+        hashes.push(next.clone());
+        commands.push(item.run_command_id.as_deref());
+        prev = next;
+    }
+    sqlx::query(
+        "insert into bot_audit (seq, profile, at_ms, actor, action, target, args_sha256, verdict, prev_hash, hash, run_command_id)
+         select s, nullif(p, ''), $3, actor, action, target, args_sha256, verdict, prev_hash, hash, run_command_id
+         from unnest($1::bigint[], $2::text[], $4::text[], $5::text[], $6::text[], $7::bytea[], $8::text[], $9::bytea[], $10::bytea[], $11::text[])
+           as t(s, p, actor, action, target, args_sha256, verdict, prev_hash, hash, run_command_id)",
+    )
+    .bind(&seqs)
+    .bind(&profiles)
+    .bind(now_ms)
+    .bind(&actors)
+    .bind(&actions)
+    .bind(&targets)
+    .bind(&args)
+    .bind(&verdicts)
+    .bind(&prevs)
+    .bind(&hashes)
+    .bind(&commands)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("update bot_audit_head set seq = $1, hash = $2 where singleton")
+        .bind(seq)
+        .bind(&prev)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// 체인을 처음부터 다시 계산한다: 순번 공백·이전 해시 불일치·내용 변조·꼬리 삭제(head와 불일치)를 찾는다.

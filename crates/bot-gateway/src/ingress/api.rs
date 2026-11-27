@@ -215,7 +215,9 @@ impl Ingress {
                 tracing::error!(endpoint = %inbound.endpoint, "저장소가 OpenAI 접수 명령을 거절했어요(Invalid)");
                 ApiVerdict::Unavailable
             }
-            Err(Error::Unavailable | Error::Stale | Error::Missing) => ApiVerdict::Unavailable,
+            Err(Error::Unavailable | Error::RateLimited | Error::Stale | Error::Missing) => {
+                ApiVerdict::Unavailable
+            }
         }
     }
 

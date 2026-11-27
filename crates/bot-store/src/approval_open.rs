@@ -4,7 +4,7 @@
 //! 잠금 순서: 활성 집합 → run → 호출 → 승인.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     calls::{fence, lock_call, risk_str},
     codec::*,
     db::{R, Store, time_to_ms},
@@ -136,6 +136,7 @@ impl Store {
         if expires <= now {
             return invalid();
         }
+        let mut audits = Vec::new();
         if let Some(old) = previous {
             let closed = sqlx::query(
                 "update bot_approvals set state = 'superseded' where nonce = $1 and state in ('pending', 'approved')",
@@ -145,12 +146,13 @@ impl Store {
             .await?
             .rows_affected();
             if closed == 1 {
-                audit::append(
-                    &mut tx,
+                audits.push(OwnedEntry::new(
                     &run.profile,
-                    &Entry::new(&a.requester.0, "approval.supersede", &old.0, "superseded"),
-                )
-                .await?;
+                    &a.requester.0,
+                    "approval.supersede",
+                    &old.0,
+                    "superseded",
+                ));
             }
         }
         let inserted = sqlx::query(
@@ -240,17 +242,19 @@ impl Store {
             .await?;
         } else if matches!(kind.as_str(), "direct" | "channel") {
             let card = replies::card(&open.card, &a.nonce.0)?;
-            push_reply(&mut tx, &run.profile, &run.id, &card).await?;
+            push_reply_into(&mut tx, &run.profile, &run.id, &card, &mut audits).await?;
         }
         park(&mut tx, &run, &Wait::Approval).await?;
-        let mut entry = Entry::new(
+        let mut entry = OwnedEntry::new(
+            &run.profile,
             &a.requester.0,
             "approval.open",
             &a.nonce.0,
             risk_str(a.risk),
         );
         entry.args = Some(a.args_sha256);
-        audit::append(&mut tx, &run.profile, &entry).await?;
+        audits.push(entry);
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(())
     }

@@ -3,7 +3,7 @@
 
 use crate::{
     approvals,
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     db::{R, Store},
     finish::lock_leased,
 };
@@ -31,14 +31,23 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         // 옛 세대가 연 승인은 무효다(옛 버튼 거절). 시작한 호출은 그대로 두고 다음 점유의 브로커가 복구를 판정한다
-        approvals::supersede_generation(&mut tx, &run.profile, &run.id, at.generation.0 as i64)
-            .await?;
-        audit::append(
+        let mut audits = Vec::new();
+        approvals::supersede_generation_into(
             &mut tx,
             &run.profile,
-            &Entry::new("system", "run.release", &run.id, "shutdown"),
+            &run.id,
+            at.generation.0 as i64,
+            &mut audits,
         )
         .await?;
+        audits.push(OwnedEntry::new(
+            &run.profile,
+            "system",
+            "run.release",
+            &run.id,
+            "shutdown",
+        ));
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(())
     }

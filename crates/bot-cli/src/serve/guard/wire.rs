@@ -4,7 +4,7 @@
 //! 목록을 기다리는 사이 다른 프로세스가 목적지를 철회한 새 집합을 게시하면, 구판 워커가 옛 주소로 bearer와 쓰기 호출을 보낼 수 있다. 그래서 **요청마다**(자격을 읽은 뒤,
 //! 연결을 맺기 전에) 이 프로세스의 판본이 아직 활성인지 다시 확인하고, 아니면(또는 확인하지 못하면) 아무것도 보내지 않는다(`WireFail::Stale`).
 use bot_broker::mcp::wire::{RemoteWire, WireFail, WireReply, WireRequest};
-use bot_gateway::active::ActiveCheck;
+use bot_core::active::ActiveCheck;
 use std::{sync::Arc, time::Duration};
 use tokio::time::{Instant, timeout_at};
 

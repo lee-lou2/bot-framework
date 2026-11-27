@@ -9,11 +9,11 @@
 //! 잠금 순서: 활성 판본 → run → 호출 → 승인 → 초안 → 감사 head.
 
 use crate::{
-    audit::{self, Entry},
+    audit::{self, OwnedEntry},
     codec::{kind_from, to32},
     db::{R, Store, Tx},
     delivery::peek,
-    finish::{End, RunRow, end_run, lock_leased, parent_of, push_reply},
+    finish::{End, RunRow, end_run_into, lock_leased, parent_of, push_reply_into},
     replies,
 };
 use bot_core::{
@@ -206,6 +206,13 @@ impl Store {
         reason: UnsentReason,
     ) -> R<JsonPayload> {
         let mut tx = self.begin_authorized().await?;
+        // 잠금 순서: 활성 집합 → run → 호출 → 승인 → 초안 → 감사 head
+        let current_set: Option<String> = sqlx::query_scalar::<_, String>(
+            "select revision from bot_active where singleton for share",
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .filter(|r| !r.is_empty());
         // 어느 run인가: Claim은 시도가, Approval은 카드가 알려 준다
         let (profile, run_id) = match &fence {
             DeliveryFence::Claim(at) => (at.profile.0.clone(), at.run.0.clone()),
@@ -330,11 +337,7 @@ impl Store {
             // «거절»은 소유자 본인의 거절·철회 결정이 저장돼 있을 때만 쓴다
             return Err(Error::Denied.into());
         }
-        let current: Option<String> =
-            sqlx::query_scalar("select revision from bot_active where singleton")
-                .fetch_optional(&mut *tx)
-                .await?;
-        let current = current.filter(|r| !r.is_empty()).ok_or(Error::Stale)?;
+        let current = current_set.ok_or(Error::Stale)?;
         let sealed = to32(
             delivery
                 .get::<Option<Vec<u8>>, _>("sha256")
@@ -342,12 +345,13 @@ impl Store {
         )?;
         let receipt = reason.receipt().0;
 
+        let mut audits = Vec::new();
         if reason == UnsentReason::Unrouted {
             // 원래 대화에는 고정 안내 한 건만 간다(초안·수신자·지시문은 넣지 않는다)
             let notice = replies::answer(&JsonPayload(
                 serde_json::json!({ "text": UNROUTED_NOTICE }).to_string(),
             ))?;
-            push_reply(&mut tx, &profile, &run_id, &notice).await?;
+            push_reply_into(&mut tx, &profile, &run_id, &notice, &mut audits).await?;
         }
         drop_draft(
             &mut tx,
@@ -357,16 +361,25 @@ impl Store {
             nonce.as_deref(),
         )
         .await?;
-        // 열린 승인은 이 종결로 무효가 된다(`end_run`이 닫는다)
+        // 열린 승인은 이 종결로 무효가 된다(`end_run_into`가 닫는다)
         let actor = if card.is_some() || reason == UnsentReason::Rejected {
             run.owner.clone()
         } else {
             "system".to_owned()
         };
-        end_run(&mut tx, &run.row, End::Succeeded(&receipt), &actor).await?;
-        let mut entry = Entry::new(&actor, "delivery.unsent", &run_id, reason.code());
+        end_run_into(
+            &mut tx,
+            &run.row,
+            End::Succeeded(&receipt),
+            &actor,
+            &mut audits,
+        )
+        .await?;
+        let mut entry =
+            OwnedEntry::new(&profile, &actor, "delivery.unsent", &run_id, reason.code());
         entry.args = Some(sealed);
-        audit::append(&mut tx, &profile, &entry).await?;
+        audits.push(entry);
+        audit::append_many(&mut tx, &audits).await?;
         tx.commit().await?;
         Ok(JsonPayload(receipt))
     }
