@@ -204,6 +204,30 @@ impl MemLedger {
         i.audit.push("memory.shared".into());
         Ok(())
     }
+
+    /// Atomically verifies the bound digest against `expected`, consumes approval, and completes a built-in memory mutation.
+    pub fn complete_memory_op(
+        &self,
+        start: StartCall,
+        expected: [u8; 32],
+        result: String,
+        audit_label: &'static str,
+    ) -> Result<(), Error> {
+        let now = self.clock.now();
+        let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (start.attempt.run.clone(), start.call.clone());
+        let record = i.calls.get(&key).ok_or(Error::Missing)?;
+        if matches!(record.phase, CallPhase::Done(_)) {
+            return Ok(());
+        }
+        if record.args_sha256 != expected {
+            return Err(Error::Conflict);
+        }
+        Self::begin_run(&mut i, now, start)?;
+        i.calls.get_mut(&key).expect("call").phase = CallPhase::Done(JsonPayload(result));
+        i.audit.push(audit_label.into());
+        Ok(())
+    }
 }
 
 impl CallLedger for MemLedger {

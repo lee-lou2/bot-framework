@@ -12,6 +12,7 @@ mod legacy;
 mod limited;
 mod manage;
 mod memory;
+mod memory_ops;
 mod openai;
 mod owner_precedence;
 mod preflight;

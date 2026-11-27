@@ -44,14 +44,19 @@ pub fn needed_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> 
 }
 
 pub fn model_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> {
-    host.catalog
+    let mut names: BTreeSet<String> = host
+        .catalog
         .models
         .get(&snapshot.id.0)
         .into_iter()
         .flatten()
         .filter_map(|alias| host.providers.get(alias).and_then(Provider::secret))
         .map(str::to_owned)
-        .collect()
+        .collect();
+    if let Some(secret) = host.embeddings.as_ref().and_then(|e| e.secret.as_deref()) {
+        names.insert(secret.to_owned());
+    }
+    names
 }
 
 pub fn entrance_secrets(snapshot: &Snapshot, gateway: &HostConfig) -> BTreeSet<String> {

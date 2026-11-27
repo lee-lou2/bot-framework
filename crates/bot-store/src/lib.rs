@@ -37,6 +37,8 @@ mod finish;
 mod grants;
 mod handover;
 mod memory;
+mod memory_ops;
+mod memory_search;
 mod outbox;
 mod pass;
 mod ports;

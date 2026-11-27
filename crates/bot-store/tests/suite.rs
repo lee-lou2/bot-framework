@@ -104,6 +104,8 @@ mod ledger_fence_profiles;
 mod ledger_lookup;
 #[path = "suite/memory.rs"]
 mod memory;
+#[path = "suite/memory_hybrid.rs"]
+mod memory_hybrid;
 #[path = "suite/memory_scope.rs"]
 mod memory_scope;
 #[path = "suite/memory_share.rs"]

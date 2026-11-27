@@ -76,6 +76,63 @@ fn answer(ctx: &RunContext, text: &str, mut outcome: RunOutcome, usage_whole: bo
 }
 
 impl Worker {
+    /// Lazily backfills a bounded batch of unembedded rows (outside DB locks) and runs hybrid or lexical recall.
+    async fn recall_memory(
+        &self,
+        attempt: &bot_core::id::Attempt,
+        query: String,
+    ) -> Result<Vec<bot_core::command::MemoryHit>, Error> {
+        let Some(embedder) = &self.embedder else {
+            return self.deps.memory.search(attempt.clone(), query).await;
+        };
+        if let Ok(pending) = self
+            .deps
+            .memory
+            .unembedded(
+                attempt.profile.clone(),
+                embedder.model().to_owned(),
+                embedder.dimensions(),
+                16,
+            )
+            .await
+        {
+            for item in pending {
+                match embedder.embed(&attempt.profile, &item.body).await {
+                    Ok(Some(emb)) => {
+                        let _ = self
+                            .deps
+                            .memory
+                            .store_embedding(
+                                attempt.profile.clone(),
+                                item.id,
+                                item.body_sha256,
+                                emb,
+                            )
+                            .await;
+                    }
+                    Err(Error::Stale) => return Err(Error::Stale),
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        }
+        let embedding = match embedder.embed(&attempt.profile, &query).await {
+            Ok(emb) => emb,
+            Err(Error::Stale) => return Err(Error::Stale),
+            Err(_) => None,
+        };
+        self.deps
+            .memory
+            .search_hybrid(
+                attempt.clone(),
+                bot_core::memory::MemoryQuery {
+                    text: query,
+                    embedding,
+                    limit: context::MAX_MEMORY_ITEMS as u32,
+                },
+            )
+            .await
+    }
+
     pub(super) async fn agent(&self, ctx: &RunContext, control: &Control, span: &RunSpan) -> Flow {
         let attempt = &ctx.attempt;
         let Some(snapshot) = self
@@ -104,7 +161,7 @@ impl Worker {
             }
         };
         let query = context::query_text(ctx);
-        let memory = match self.deps.memory.search(attempt.clone(), query).await {
+        let memory = match self.recall_memory(attempt, query).await {
             Ok(hits) => hits,
             Err(Error::Stale | Error::Denied | Error::Missing) => return Flow::Lost,
             Err(_) => Vec::new(),

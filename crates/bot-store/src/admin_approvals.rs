@@ -46,7 +46,7 @@ fn render_of(card: &str, body: Body) -> Vec<(String, String)> {
     out
 }
 
-/// Redacts card contents for memory-share and scheduled-delivery approvals unless the viewer is both requester and approver.
+/// Redacts card contents for memory-share, memory-save, and scheduled-delivery approvals unless the viewer is both requester and approver.
 fn render_for(
     viewer: &Viewer,
     approval: &bot_core::state::Approval,
@@ -54,7 +54,7 @@ fn render_for(
 ) -> Vec<(String, String)> {
     let owner = approval.requester == viewer.principal && approval.approver == viewer.principal;
     let body = card_body(&approval.tool.0);
-    if body != Body::None && !owner {
+    if (body != Body::None || approval.tool.0 == bot_core::builtin::MEMORY_SAVE_TOOL) && !owner {
         return vec![];
     }
     render_of(card, body)

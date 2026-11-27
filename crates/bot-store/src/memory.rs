@@ -26,7 +26,7 @@ fn visibility_str(v: Visibility) -> &'static str {
     }
 }
 
-fn visibility_of(s: &str) -> Visibility {
+pub(crate) fn visibility_of(s: &str) -> Visibility {
     if s == "profile" {
         Visibility::Profile
     } else {
@@ -70,7 +70,7 @@ fn like_pattern(term: &str) -> String {
     format!("%{escaped}%")
 }
 
-fn text_ok(text: &str) -> R<()> {
+pub(crate) fn text_ok(text: &str) -> R<()> {
     if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES || text.contains('\0') {
         invalid()
     } else {
@@ -154,7 +154,7 @@ impl Store {
             "select id, visibility, body,
                     (select count(*) from unnest($5::text[]) p where lower(m.body) like p escape '\\') as score
              from bot_memories m
-             where m.profile = $1 and m.deleted_ms is null and m.agent = any($2)
+             where m.profile = $1 and m.deleted_ms is null and m.superseded_by is null and m.agent = any($2)
                and (m.visibility = 'profile' or ($4 and m.owner = $3))
                and (cardinality($5::text[]) = 0 or exists (select 1 from unnest($5::text[]) p where lower(m.body) like p escape '\\'))
              order by score desc, m.updated_ms desc, m.id
@@ -248,9 +248,13 @@ impl Store {
                 text_ok(&text)?;
                 self.owned(&mut tx, &run.profile, &id.0, &principal, &kind, &agent)
                     .await?;
-                // Reset visibility to private on edit so any prior share approval cannot cover modified text.
+                // Reset visibility to private and drop stale embedding on edit so prior share approvals and vectors never cover modified text.
                 sqlx::query(
-                    "update bot_memories set body = $3, visibility = 'private', updated_ms = bot_now_ms() where profile = $1 and id = $2",
+                    "update bot_memories
+                     set body = $3, visibility = 'private',
+                         embedding_model = null, embedding_dim = null, embedding_f16 = null,
+                         updated_ms = bot_now_ms()
+                     where profile = $1 and id = $2",
                 )
                 .bind(&run.profile)
                 .bind(&id.0)
@@ -262,7 +266,12 @@ impl Store {
             MemoryChange::Delete { id } => {
                 self.owned(&mut tx, &run.profile, &id.0, &principal, &kind, &agent)
                     .await?;
-                sqlx::query("update bot_memories set body = '', deleted_ms = bot_now_ms(), updated_ms = bot_now_ms() where profile = $1 and id = $2")
+                sqlx::query(
+                    "update bot_memories
+                     set body = '', embedding_model = null, embedding_dim = null, embedding_f16 = null,
+                         deleted_ms = bot_now_ms(), updated_ms = bot_now_ms()
+                     where profile = $1 and id = $2",
+                )
                     .bind(&run.profile)
                     .bind(&id.0)
                     .execute(&mut *tx)

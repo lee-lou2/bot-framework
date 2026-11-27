@@ -6,6 +6,7 @@ use bot_core::{
     command::{MemoryChange, MemoryHit, MemoryPreview, MemorySeed, memory_share_hash},
     id::*,
     ledger::{CallLedger, StartCall},
+    memory::{MemoryQuery, MemorySave, MemorySaved, forget_seal, save_seal},
     port::{Error, MemoryStore, Reply},
     state::{ConversationKind, Visibility},
 };
@@ -87,11 +88,54 @@ impl MemMemory {
     pub fn shared(&self) -> Vec<MemoryId> {
         lock(&self.shared).clone()
     }
+
+    pub fn contains(&self, id: &str) -> bool {
+        lock(&self.entries).contains_key(&MemoryId(id.into()))
+    }
+
+    pub fn len(&self) -> usize {
+        lock(&self.entries).len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        lock(&self.entries).is_empty()
+    }
 }
 
 impl MemoryStore for MemMemory {
-    fn search(&self, _: Attempt, _: String) -> Reply<'_, Vec<MemoryHit>> {
-        Box::pin(async { Err(Error::Unavailable) })
+    fn search(&self, attempt: Attempt, query: String) -> Reply<'_, Vec<MemoryHit>> {
+        self.search_hybrid(attempt, MemoryQuery::lexical(query))
+    }
+
+    fn search_hybrid(&self, attempt: Attempt, query: MemoryQuery) -> Reply<'_, Vec<MemoryHit>> {
+        Box::pin(async move {
+            let ctx = self.ledger.context(attempt).await?;
+            let owner_channel = matches!(
+                ctx.conversation.kind,
+                ConversationKind::Direct | ConversationKind::Cli
+            );
+            let q = query.text.to_lowercase();
+            let entries = lock(&self.entries);
+            let mut hits: Vec<MemoryHit> = entries
+                .iter()
+                .filter(|(_, e)| {
+                    e.visibility == Visibility::Profile
+                        || (owner_channel && e.owner == ctx.principal)
+                })
+                .filter(|(_, e)| q.is_empty() || e.text.to_lowercase().contains(&q))
+                .map(|(id, e)| MemoryHit {
+                    id: id.clone(),
+                    visibility: e.visibility,
+                    text: e.text.clone(),
+                })
+                .collect();
+            hits.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+            hits.truncate(query.limit as usize);
+            if hits.iter().any(|h| h.visibility == Visibility::Private) {
+                self.ledger.set_private_recall(&ctx.root.0);
+            }
+            Ok(hits)
+        })
     }
 
     fn preview(&self, attempt: Attempt, id: MemoryId) -> Reply<'_, MemoryPreview> {
@@ -134,6 +178,81 @@ impl MemoryStore for MemMemory {
 
     fn change(&self, _: Attempt, _: MemoryChange) -> Reply<'_, MemoryId> {
         Box::pin(async { Err(Error::Unavailable) })
+    }
+
+    fn save(&self, start: StartCall, spec: MemorySave) -> Reply<'_, MemorySaved> {
+        Box::pin(async move {
+            let (_, expected) =
+                save_seal(&spec.text, spec.kind, spec.supersedes.as_ref()).ok_or(Error::Invalid)?;
+            let ctx = self.ledger.context(start.attempt.clone()).await?;
+            if !matches!(
+                ctx.conversation.kind,
+                ConversationKind::Direct | ConversationKind::Cli
+            ) {
+                return Err(Error::Denied);
+            }
+            let (id, deduplicated) = {
+                let mut entries = lock(&self.entries);
+                if let Some(old) = &spec.supersedes {
+                    let existing = entries.get(old).ok_or(Error::Missing)?;
+                    if existing.owner != ctx.principal {
+                        return Err(Error::Denied);
+                    }
+                }
+                if spec.supersedes.is_none()
+                    && let Some((existing_id, _)) = entries.iter().find(|(_, e)| {
+                        e.owner == ctx.principal
+                            && e.visibility == Visibility::Private
+                            && e.text.trim() == spec.text.trim()
+                    })
+                {
+                    (existing_id.clone(), true)
+                } else {
+                    let id = MemoryId(format!("m-saved-{}", entries.len() + 1));
+                    if let Some(old) = &spec.supersedes {
+                        entries.remove(old);
+                    }
+                    entries.insert(
+                        id.clone(),
+                        Entry {
+                            owner: ctx.principal,
+                            visibility: Visibility::Private,
+                            text: spec.text,
+                        },
+                    );
+                    (id, false)
+                }
+            };
+            let payload = format!("{{\"deduplicated\":{deduplicated},\"id\":\"{}\"}}", id.0);
+            self.ledger
+                .complete_memory_op(start, expected, payload, "memory.saved")?;
+            Ok(MemorySaved { id, deduplicated })
+        })
+    }
+
+    fn forget(&self, start: StartCall, id: MemoryId) -> Reply<'_, MemoryId> {
+        Box::pin(async move {
+            let (_, expected) = forget_seal(&id).ok_or(Error::Invalid)?;
+            let ctx = self.ledger.context(start.attempt.clone()).await?;
+            if !matches!(
+                ctx.conversation.kind,
+                ConversationKind::Direct | ConversationKind::Cli
+            ) {
+                return Err(Error::Denied);
+            }
+            {
+                let entries = lock(&self.entries);
+                let entry = entries.get(&id).ok_or(Error::Missing)?;
+                if entry.owner != ctx.principal {
+                    return Err(Error::Denied);
+                }
+            }
+            let payload = format!("{{\"id\":\"{}\"}}", id.0);
+            self.ledger
+                .complete_memory_op(start, expected, payload, "memory.forgotten")?;
+            lock(&self.entries).remove(&id);
+            Ok(id)
+        })
     }
 
     fn share(&self, start: StartCall, id: MemoryId) -> Reply<'_, MemoryId> {

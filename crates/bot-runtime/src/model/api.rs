@@ -8,8 +8,8 @@
 mod endpoint;
 mod names;
 mod runner;
-mod scan;
-mod transport;
+pub(crate) mod scan;
+pub(crate) mod transport;
 mod wire;
 
 pub use endpoint::ApiEndpoint;

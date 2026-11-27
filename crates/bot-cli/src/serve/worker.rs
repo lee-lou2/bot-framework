@@ -159,7 +159,12 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         Some(claude) => claude.relays.clone(),
         None => Arc::new(NoRelays),
     };
-    let worker = Worker::new(
+    let embedder = crate::embeddings::build(
+        deps.host.embeddings.as_ref(),
+        deps.secrets.clone(),
+        deps.active.clone(),
+    )?;
+    let mut worker = Worker::new(
         RuntimeDeps {
             runs: Arc::new(
                 GuardedRuns::new(deps.store.clone() as Arc<dyn RunStore>, deps.active.clone())
@@ -195,6 +200,9 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
             .as_ref()
             .map(|claude| (claude.sessions.clone(), claude.sandbox.clone())),
     )));
+    if let Some(embedder) = embedder {
+        worker = worker.with_embedder(embedder);
+    }
     Ok(Prepared {
         worker,
         stop: deps.stop.clone(),

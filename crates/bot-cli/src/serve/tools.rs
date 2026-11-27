@@ -75,10 +75,11 @@ pub async fn build(deps: ToolDeps<'_>) -> Result<Tools, String> {
         &secrets,
         store.clone() as Arc<dyn EffectJournal>,
         uid,
-        active,
+        active.clone(),
     )
     .await?;
     let runner = live_runner.tool_runner();
+    let embedder = crate::embeddings::build(host.embeddings.as_ref(), secrets.clone(), active)?;
     // Missing tool secrets warn by name without blocking startup; the broker refuses calls with `secret_missing`.
     if !host.servers.is_empty() {
         for item in unusable_tools(&*secrets, &registry.active()).await {
@@ -106,6 +107,9 @@ pub async fn build(deps: ToolDeps<'_>) -> Result<Tools, String> {
     .with_schedules(schedules)
     .with_replies(replies)
     .with_routes(routes);
+    if let Some(embedder) = embedder {
+        service = service.with_embedder(embedder);
+    }
 
     if let Some(profiles_root) = settings.profiles.clone() {
         let host_copy = match &settings.host_config {

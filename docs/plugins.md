@@ -104,9 +104,9 @@ Tools performing multiple external writes declare `effects: true` to record step
 
 ## Built-In Tools Exposed to Models
 
-All 12 framework-reserved tool IDs (`delegate`, `memory.share`, `schedule.create`, `schedule.list`, `schedule.cancel`, `schedule.deliver`, `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`) cannot be declared in `tools.yaml`.
+All 15 framework-reserved tool IDs (`delegate`, `memory.share`, `memory.search`, `memory.save`, `memory.forget`, `schedule.create`, `schedule.list`, `schedule.cancel`, `schedule.deliver`, `skill.inspect`, `skill.create`, `skill.update`, `skill.delete`, `mcp.add`, `mcp.remove`) cannot be declared in `tools.yaml`.
 
-- `anthropic-api`, `openai-api`, and `claude-cli` expose `memory.share`, `schedule.create`, `schedule.list`, and `schedule.cancel` when within the agent's scope cap, plus `delegate` (`{"agent":"main/research","instruction":"Summarize today's agenda"}`) for agents with direct children. The host uses `schedule.deliver` internally for delivery-draft approval.
+- `anthropic-api`, `openai-api`, and VM CLI runners expose `memory.share`, `memory.search`, `memory.save`, `memory.forget`, `schedule.create`, `schedule.list`, and `schedule.cancel` when within the agent's scope cap, plus `delegate` (`{"agent":"main/research","instruction":"Summarize today's agenda"}`) for agents with direct children. The host uses `schedule.deliver` internally for delivery-draft approval.
 - For profile `super_admins` holding the matching scopes, the 6 live-management tools below are also exposed (hidden from non-super-admins; direct calls fail with `not_super_admin`). Claude CLI exposes dot names as underscores (`memory_share`, `skill_create`); API runners map aliases per request.
 
 | Super-admin tool | Class | Behavior |
@@ -120,7 +120,7 @@ All 12 framework-reserved tool IDs (`delegate`, `memory.share`, `schedule.create
 
 - Management mutations are atomic: any validation, install, or DB failure rolls back disk edits. Success commits the new bundle and active revision while preserving existing `bot_grants`, then hot-reloads the in-process registry, runners, sandboxes, and decision gate with no restart.
 - Secret values (`secret_value`, `secret_values`) are registered with `Redactor`, stored encrypted in SOPS (`sops set`) or keychain (`bot/<profile>/<name>`) with immediate cache flush, and never written to plaintext files or approval cards.
-- The broker checks pinned and current permissions on every built-in call. `memory.share` requires the owner to approve the exact body from their DM or `bot chat`. Confirmed rejections replay deterministically by call ID ([reliability.md](reliability.md)).
+- The broker checks pinned and current permissions on every built-in call. `memory.share` requires the owner to approve the exact body from their DM or `bot chat`. `memory.search` runs hybrid (embedding + lexical) recall under the same visibility and `private_memory_read` taint rules as turn-start recall. `memory.save` (private, 1:1 DM/CLI only, 500 active entries per owner, automatic exact/near-duplicate skipping, optional `kind: "core"|"fact"` and non-destructive `supersedes`) escalates to owner approval whenever the run is private-tainted or policy-gated and computes embeddings only after approval passes. `memory.forget` soft-deletes one owner-visible memory in 1:1 DM/CLI. Confirmed rejections replay deterministically by call ID ([reliability.md](reliability.md)).
 
 ### Schedules and Follow-Up Wakes
 
