@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
 mod provider;
-pub use provider::{ApiProvider, CliProvider, Provider, parse_providers};
+pub use provider::{
+    ApiProvider, CliProvider, Provider, fallback_chain, parse_providers, reachable_aliases,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Srt {

@@ -1,6 +1,6 @@
 //! Minimal fake `CallLedger` backing worker CLI session-resume unit tests.
 
-use super::fakes::lock;
+use super::{fake_runs::FakeRuns, fakes::lock};
 use bot_core::{
     command::JsonPayload,
     id::*,
@@ -11,10 +11,15 @@ use bot_core::{
     port::{Error, Reply},
     state::RunContext,
 };
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Default)]
 pub(super) struct FakeLedger {
+    pub ctx: Mutex<Option<RunContext>>,
+    pub runs: Option<Arc<FakeRuns>>,
     pub steps: Mutex<BTreeMap<String, JsonPayload>>,
     pub calls: Mutex<BTreeMap<String, CallRecord>>,
     pub active: Mutex<Option<Revision>>,
@@ -30,7 +35,29 @@ impl CallLedger for FakeLedger {
         unused()
     }
     fn context(&self, _: Attempt) -> Reply<'_, RunContext> {
-        unused()
+        let down = self.down.load(std::sync::atomic::Ordering::SeqCst);
+        let ctx = lock(&self.ctx).clone().map(|mut c| {
+            let mut merged: BTreeMap<String, JsonPayload> = BTreeMap::new();
+            if let Some(runs) = &self.runs {
+                for step in &lock(&runs.state).steps {
+                    merged.insert(step.key.clone(), step.body.clone());
+                }
+            }
+            for (k, v) in lock(&self.steps).iter() {
+                merged.insert(k.clone(), v.clone());
+            }
+            c.work.steps = merged
+                .into_iter()
+                .map(|(key, body)| bot_core::command::Step { key, body })
+                .collect();
+            c
+        });
+        Box::pin(async move {
+            if down {
+                return Err(Error::Unavailable);
+            }
+            ctx.ok_or(Error::Unavailable)
+        })
     }
     fn lookup(&self, _: Attempt, call: CallId) -> Reply<'_, Option<CallRecord>> {
         let down = self.down.load(std::sync::atomic::Ordering::SeqCst);

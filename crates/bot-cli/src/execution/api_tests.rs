@@ -26,6 +26,7 @@ fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_
             max_tokens: None,
             limit_field: LimitField::MaxTokens,
             effort: None,
+            fallback: None,
         })
     );
     assert_eq!(
@@ -38,6 +39,7 @@ fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_
             max_tokens: Some(2048),
             limit_field: LimitField::MaxTokens,
             effort: None,
+            fallback: None,
         })
     );
     for endpoint in [
@@ -57,6 +59,7 @@ fn both_api_kinds_take_a_model_an_endpoint_a_secret_name_and_an_optional_output_
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
                 effort: None,
+                fallback: None,
             })
         );
     }
@@ -197,6 +200,7 @@ fn api(
         max_tokens,
         limit_field: LimitField::MaxTokens,
         effort: None,
+        fallback: None,
     })
 }
 
@@ -245,6 +249,7 @@ fn the_activation_fingerprint_binds_kind_model_whole_base_url_and_credential_nam
         endpoint: "https://h.example/v1".into(),
         secret: "key".into(),
         effort: None,
+        fallback: None,
     });
     assert_ne!(print(base.clone()), print(cli));
     assert_ne!(print(base), print(Provider::Demo));
@@ -273,6 +278,7 @@ fn openai_api_takes_max_completion_tokens_or_max_tokens_but_never_both() {
             max_tokens,
             limit_field,
             effort: None,
+            fallback: None,
         })
     };
     assert_eq!(
@@ -317,6 +323,7 @@ fn effort_accepts_five_levels_on_non_demo_providers_and_refuses_bad_values() {
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
                 effort: Some(expected),
+                fallback: None,
             })
         );
         assert_eq!(
@@ -336,6 +343,7 @@ fn effort_accepts_five_levels_on_non_demo_providers_and_refuses_bad_values() {
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
                 effort: Some(expected),
+                fallback: None,
             })
         );
         assert_eq!(
@@ -353,6 +361,7 @@ fn effort_accepts_five_levels_on_non_demo_providers_and_refuses_bad_values() {
                 endpoint: "https://api.example.com/v1".into(),
                 secret: "claude-key".into(),
                 effort: Some(expected),
+                fallback: None,
             })
         );
     }

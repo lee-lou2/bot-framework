@@ -29,7 +29,7 @@ RUN set -eu; \
     case "$AGY_URL" in \
       *.tar.gz | *.tgz) \
         tar -xzf agy.download; \
-        bin="$(find . -maxdepth 3 -type f -name 'agy' | head -n 1)"; \
+        bin="$(find . -maxdepth 3 -type f \( -name 'agy' -o -name 'antigravity' \) | head -n 1)"; \
         [ -n "$bin" ] || { echo "agy binary not found in archive" >&2; exit 1; }; \
         install -m 0555 "$bin" /agy ;; \
       *) \

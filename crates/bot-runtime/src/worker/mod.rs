@@ -6,6 +6,7 @@ mod checkpoint;
 mod control;
 mod delivery;
 mod exec;
+mod fallback;
 mod session;
 mod span;
 #[cfg(test)]

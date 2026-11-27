@@ -1,7 +1,7 @@
 //! Resolves allowed profile model aliases into `DemoModel`, VM CLI runners (`claude-cli`, `codex-cli`, `agy-cli`), or `ApiRunner`.
 use super::watched::Watched;
 use crate::{
-    execution::{ApiProvider, Provider},
+    execution::{ApiProvider, Provider, fallback_chain, reachable_aliases},
     host::HostFile,
 };
 use bot_core::{
@@ -27,6 +27,7 @@ pub struct ApiParts {
 pub struct ProviderModels {
     allowed: BTreeMap<String, BTreeSet<String>>,
     runners: BTreeMap<String, Arc<dyn ModelRunner>>,
+    fallbacks: BTreeMap<String, Vec<String>>,
 }
 
 impl Models for ProviderModels {
@@ -36,6 +37,17 @@ impl Models for ProviderModels {
             .is_some_and(|aliases| aliases.contains(alias))
             .then(|| self.runners.get(alias).cloned())
             .flatten()
+    }
+
+    fn fallbacks(&self, profile: &ProfileId, alias: &str) -> Vec<String> {
+        if !self
+            .allowed
+            .get(&profile.0)
+            .is_some_and(|aliases| aliases.contains(alias))
+        {
+            return Vec::new();
+        }
+        self.fallbacks.get(alias).cloned().unwrap_or_default()
     }
 }
 
@@ -70,15 +82,18 @@ fn api_runner(
     Ok(Arc::new(runner))
 }
 
-/// Builds runners for every profile-allowed alias; refuses to start rather than falling back if a runner is missing.
+/// Builds runners for every profile-allowed alias and its fallback chain; refuses to start if any runner is missing.
 pub fn build(
     host: &HostFile,
     cli_runners: &BTreeMap<CliKind, Arc<dyn ModelRunner>>,
     api: Option<&ApiParts>,
 ) -> Result<ProviderModels, String> {
+    let mut allowed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut runners: BTreeMap<String, Arc<dyn ModelRunner>> = BTreeMap::new();
-    for (profile, aliases) in &host.catalog.models {
-        for alias in aliases {
+    let mut fallbacks: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (profile, roots) in &host.catalog.models {
+        let reachable = reachable_aliases(&host.providers, roots.iter().map(String::as_str));
+        for alias in &reachable {
             if runners.contains_key(alias) {
                 continue;
             }
@@ -97,12 +112,18 @@ pub fn build(
                 })?,
                 Provider::Api(config) => api_runner(alias, config, api)?,
             };
+            let chain = fallback_chain(&host.providers, alias);
+            if !chain.is_empty() {
+                fallbacks.insert(alias.clone(), chain);
+            }
             runners.insert(alias.clone(), runner);
         }
+        allowed.insert(profile.clone(), reachable);
     }
     Ok(ProviderModels {
-        allowed: host.catalog.models.clone(),
+        allowed,
         runners,
+        fallbacks,
     })
 }
 
@@ -209,6 +230,7 @@ mod tests {
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
                 effort: None,
+                fallback: None,
             }),
         );
         let error = build(&forced, &empty, Some(&parts())).err().unwrap();
@@ -226,6 +248,7 @@ mod tests {
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
                 effort: None,
+                fallback: None,
             }),
         );
         let error = build(&forced, &empty, Some(&parts())).err().unwrap();
@@ -304,5 +327,42 @@ mod tests {
                 .runner(&ProfileId("personal".into()), "assistant")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn fallback_chain_resolves_runners_and_exposes_ordered_fallback_aliases() {
+        let host = host::parse(
+            r#"{"version": 1, "models": {"personal": ["primary"]},
+                "providers": {
+                    "primary": {"kind": "agy-cli", "model": "gemini-4-hydrogen", "endpoint": "https://generativelanguage.googleapis.com", "secret": "g-key", "effort": "xhigh", "fallback": "backup"},
+                    "backup": {"kind": "claude-cli", "model": "claude-sonnet-5-5", "endpoint": "https://proxy.example", "secret": "c-key", "effort": "medium"}}}"#,
+        )
+        .unwrap();
+        let r_agy: Arc<dyn ModelRunner> = Arc::new(DemoModel);
+        let r_claude: Arc<dyn ModelRunner> = Arc::new(DemoModel);
+        // Missing fallback CLI runner must fail startup.
+        let only_agy = BTreeMap::from([(CliKind::Agy, r_agy.clone())]);
+        assert!(build(&host, &only_agy, None).is_err());
+
+        let both = BTreeMap::from([
+            (CliKind::Agy, r_agy.clone()),
+            (CliKind::Claude, r_claude.clone()),
+        ]);
+        let models = build(&host, &both, None).unwrap();
+        let personal = ProfileId("personal".into());
+        assert_eq!(models.fallbacks(&personal, "primary"), vec!["backup"]);
+        assert!(
+            models
+                .fallbacks(&ProfileId("work".into()), "primary")
+                .is_empty()
+        );
+        assert!(Arc::ptr_eq(
+            &models.runner(&personal, "primary").unwrap(),
+            &r_agy
+        ));
+        assert!(Arc::ptr_eq(
+            &models.runner(&personal, "backup").unwrap(),
+            &r_claude
+        ));
     }
 }

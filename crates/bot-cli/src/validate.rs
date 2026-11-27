@@ -1,6 +1,6 @@
 //! Offline pre-flight validation (`bot validate`) for profiles, host config, routes, and secrets.
 use crate::{
-    execution::{CliProvider, Provider},
+    execution::{CliProvider, Provider, fallback_chain, reachable_aliases},
     host::HostFile,
     load::{check_entrances, load, secret_store},
     settings::{SecretsKind, Settings},
@@ -44,13 +44,16 @@ pub fn needed_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> 
 }
 
 pub fn model_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> {
-    let mut names: BTreeSet<String> = host
+    let roots = host
         .catalog
         .models
         .get(&snapshot.id.0)
         .into_iter()
         .flatten()
-        .filter_map(|alias| host.providers.get(alias).and_then(Provider::secret))
+        .map(String::as_str);
+    let mut names: BTreeSet<String> = reachable_aliases(&host.providers, roots)
+        .into_iter()
+        .filter_map(|alias| host.providers.get(&alias).and_then(Provider::secret))
         .map(str::to_owned)
         .collect();
     if let Some(secret) = host.embeddings.as_ref().and_then(|e| e.secret.as_deref()) {
@@ -102,13 +105,16 @@ pub fn has_private_triggers(snapshot: &Snapshot) -> bool {
 }
 
 pub fn missing_model_sandbox(snapshot: &Snapshot, host: &HostFile) -> Option<String> {
-    let kinds: BTreeSet<CliKind> = host
+    let roots = host
         .catalog
         .models
         .get(&snapshot.id.0)
         .into_iter()
         .flatten()
-        .filter_map(|alias| host.providers.get(alias).and_then(Provider::cli_kind))
+        .map(String::as_str);
+    let kinds: BTreeSet<CliKind> = reachable_aliases(&host.providers, roots)
+        .into_iter()
+        .filter_map(|alias| host.providers.get(&alias).and_then(Provider::cli_kind))
         .collect();
     if kinds.is_empty() {
         return None;
@@ -153,60 +159,64 @@ pub fn unsupported_builtin_tools(snapshot: &Snapshot, host: &HostFile) -> Vec<St
         if agent.builtin.is_empty() {
             continue;
         }
-        match host.providers.get(&agent.model) {
-            Some(Provider::Api(_)) => {
-                let list = agent
-                    .builtin
-                    .iter()
-                    .copied()
-                    .map(builtin_name)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                problems.push(format!(
-                    "{}: agent {} declares built-in tools ({}), but model alias {} uses a direct API provider that does not support built-in tools",
-                    snapshot.id.0, agent_id.0, list, agent.model
-                ));
-            }
-            Some(Provider::Cli(CliProvider {
-                kind: CliKind::Claude,
-                ..
-            })) => {
-                let bad: Vec<_> = agent
-                    .builtin
-                    .iter()
-                    .copied()
-                    .filter(|b| matches!(b, Builtin::Grep | Builtin::Glob))
-                    .map(builtin_name)
-                    .collect();
-                if !bad.is_empty() {
+        let aliases = std::iter::once(agent.model.clone())
+            .chain(fallback_chain(&host.providers, &agent.model));
+        for alias in aliases {
+            match host.providers.get(&alias) {
+                Some(Provider::Api(_)) => {
+                    let list = agent
+                        .builtin
+                        .iter()
+                        .copied()
+                        .map(builtin_name)
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     problems.push(format!(
-                        "{}: agent {} declares built-in tools ({}), but claude-cli (--bare VM) supports `read` only",
-                        snapshot.id.0,
-                        agent_id.0,
-                        bad.join(", ")
+                        "{}: agent {} declares built-in tools ({}), but model alias {} uses a direct API provider that does not support built-in tools",
+                        snapshot.id.0, agent_id.0, list, alias
                     ));
                 }
+                Some(Provider::Cli(CliProvider {
+                    kind: CliKind::Claude,
+                    ..
+                })) => {
+                    let bad: Vec<_> = agent
+                        .builtin
+                        .iter()
+                        .copied()
+                        .filter(|b| matches!(b, Builtin::Grep | Builtin::Glob))
+                        .map(builtin_name)
+                        .collect();
+                    if !bad.is_empty() {
+                        problems.push(format!(
+                            "{}: agent {} declares built-in tools ({}), but claude-cli (--bare VM) supports `read` only",
+                            snapshot.id.0,
+                            agent_id.0,
+                            bad.join(", ")
+                        ));
+                    }
+                }
+                Some(Provider::Cli(CliProvider {
+                    kind: kind @ (CliKind::Codex | CliKind::Agy),
+                    ..
+                })) => {
+                    let list = agent
+                        .builtin
+                        .iter()
+                        .copied()
+                        .map(builtin_name)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    problems.push(format!(
+                        "{}: agent {} declares built-in tools ({}), but {} does not support built-in file tools",
+                        snapshot.id.0,
+                        agent_id.0,
+                        list,
+                        kind.as_str()
+                    ));
+                }
+                Some(Provider::Demo) | None => {}
             }
-            Some(Provider::Cli(CliProvider {
-                kind: kind @ (CliKind::Codex | CliKind::Agy),
-                ..
-            })) => {
-                let list = agent
-                    .builtin
-                    .iter()
-                    .copied()
-                    .map(builtin_name)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                problems.push(format!(
-                    "{}: agent {} declares built-in tools ({}), but {} does not support built-in file tools",
-                    snapshot.id.0,
-                    agent_id.0,
-                    list,
-                    kind.as_str()
-                ));
-            }
-            Some(Provider::Demo) | None => {}
         }
     }
     problems

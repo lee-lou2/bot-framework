@@ -68,7 +68,7 @@ VM CLI 모드(`claude-cli`, `codex-cli`, `agy-cli`)에서 워커는 공유 앵�
 
 ## 호스트 설정 및 모델 실행
 
-`BOT_HOST_CONFIG`에서 `models`는 프로필별로 허용되는 모델 별칭을 선언하고, `providers`는 각 별칭의 실행 방식을 정의합니다. 예를 들어 외부 계정 없는 로컬 데모에서는 `{"models":{"personal":["assistant"]},"providers":{"assistant":{"kind":"demo"}}}`를 사용합니다. VM CLI 프로바이더(`claude-cli`, `codex-cli`, `agy-cli`)는 업스트림 `model`, HTTPS `endpoint`, 프로필 시크릿 이름 `secret`이 필수이며, 선택적으로 `effort`(`low`, `medium`, `high`, `xhigh`, `max`; 기본값 `medium`)를 지정할 수 있습니다.
+`BOT_HOST_CONFIG`에서 `models`는 프로필별로 허용되는 모델 별칭을 선언하고, `providers`는 각 별칭의 실행 방식을 정의합니다. 예를 들어 외부 계정 없는 로컬 데모에서는 `{"models":{"personal":["assistant"]},"providers":{"assistant":{"kind":"demo"}}}`를 사용합니다. VM CLI 프로바이더(`claude-cli`, `codex-cli`, `agy-cli`)는 업스트림 `model`, HTTPS `endpoint`, 프로필 시크릿 이름 `secret`이 필수이며, 선택적으로 `effort`(`low`, `medium`, `high`, `xhigh`, `max`; 기본값 `medium`)를 지정할 수 있습니다. 데모가 아닌 모든 프로바이더는 선택적 `fallback`으로 다른 프로바이더 별칭을 지정할 수 있으며(비순환 체인, 최대 깊이 8), 폴백 대상도 활성화 지문·시크릿 검증·VM 이미지 검사에 포함되고 워커는 중복 실행이 발생하지 않는 조건(`Loop` 러너 간 전환 시 커밋된 원장 단계 0건, 또는 체크포인트된 `Step` 간 전환)에서만 폴백합니다.
 
 ### 모델 러너 선택
 

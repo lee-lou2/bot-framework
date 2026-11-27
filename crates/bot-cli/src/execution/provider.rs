@@ -4,7 +4,9 @@ use bot_core::id::SecretName;
 use bot_runtime::model::{ApiEndpoint, ApiKind, CliKind, Effort, LimitField};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+const MAX_FALLBACK_DEPTH: usize = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Provider {
@@ -21,6 +23,7 @@ pub struct CliProvider {
     pub endpoint: String,
     pub secret: String,
     pub effort: Option<Effort>,
+    pub fallback: Option<String>,
 }
 
 /// Direct API provider config (`anthropic-api` / `openai-api`); keeps raw endpoint text for authority hashing.
@@ -35,6 +38,7 @@ pub struct ApiProvider {
     /// Upstream field name (`max_tokens` or OpenAI-only `max_completion_tokens`).
     pub limit_field: LimitField,
     pub effort: Option<Effort>,
+    pub fallback: Option<String>,
 }
 
 impl Provider {
@@ -43,6 +47,14 @@ impl Provider {
             Provider::Demo => None,
             Provider::Cli(cli) => Some(&cli.secret),
             Provider::Api(api) => api.secret.as_deref(),
+        }
+    }
+
+    pub fn fallback(&self) -> Option<&str> {
+        match self {
+            Provider::Demo => None,
+            Provider::Cli(cli) => cli.fallback.as_deref(),
+            Provider::Api(api) => api.fallback.as_deref(),
         }
     }
 
@@ -65,8 +77,12 @@ impl Provider {
                 let effort_note = cli
                     .effort
                     .map_or_else(String::new, |e| format!(" · effort {e}"));
+                let fallback_note = cli
+                    .fallback
+                    .as_deref()
+                    .map_or_else(String::new, |fb| format!(" · fallback {fb}"));
                 format!(
-                    "{alias}: {} · model {} · upstream {} · secret {}{effort_note}",
+                    "{alias}: {} · model {} · upstream {} · secret {}{effort_note}{fallback_note}",
                     cli.kind.as_str(),
                     cli.model,
                     upstream_host(&cli.endpoint),
@@ -91,8 +107,12 @@ impl Provider {
                 let effort_note = api
                     .effort
                     .map_or_else(String::new, |e| format!(" · effort {e}"));
+                let fallback_note = api
+                    .fallback
+                    .as_deref()
+                    .map_or_else(String::new, |fb| format!(" · fallback {fb}"));
                 format!(
-                    "{alias}: {kind} · model {} · upstream {} · {key}{limit}{effort_note}",
+                    "{alias}: {kind} · model {} · upstream {} · {key}{limit}{effort_note}{fallback_note}",
                     api.model,
                     upstream_host(&api.endpoint)
                 )
@@ -111,6 +131,7 @@ impl Provider {
                 endpoint,
                 secret,
                 effort: _,
+                fallback,
             }) => {
                 hash.update([match kind {
                     CliKind::Claude => 1,
@@ -119,6 +140,10 @@ impl Provider {
                 }]);
                 for part in [model, endpoint, secret] {
                     field(hash, part.as_bytes());
+                }
+                if let Some(target) = fallback {
+                    hash.update(b"fallback\0");
+                    field(hash, target.as_bytes());
                 }
             }
             // Output limits and effort are operational tuning, not authority. Destructure every field explicitly so new fields force a review.
@@ -130,6 +155,7 @@ impl Provider {
                 max_tokens: _,
                 limit_field: _,
                 effort: _,
+                fallback,
             }) => {
                 hash.update([match kind {
                     ApiKind::Anthropic => 2,
@@ -143,6 +169,10 @@ impl Provider {
                         field(hash, name.as_bytes());
                     }
                     None => hash.update([0]),
+                }
+                if let Some(target) = fallback {
+                    hash.update(b"fallback\0");
+                    field(hash, target.as_bytes());
                 }
             }
         }
@@ -202,6 +232,19 @@ fn parse_effort(fields: &Map<String, Value>, path: &str) -> Result<Option<Effort
         .ok_or_else(|| format!("{path}.effort: must be one of low, medium, high, xhigh, max"))
 }
 
+fn parse_fallback(fields: &Map<String, Value>, path: &str) -> Result<Option<String>, String> {
+    if !fields.contains_key("fallback") {
+        return Ok(None);
+    }
+    let raw = text(fields, "fallback", path)?;
+    if !bot_core::id::is_name(raw) {
+        return Err(format!(
+            "{path}.fallback: must follow naming rules (lowercase letters, digits, hyphens)"
+        ));
+    }
+    Ok(Some(raw.to_owned()))
+}
+
 fn parse_api(
     fields: &Map<String, Value>,
     path: &str,
@@ -215,6 +258,7 @@ fn parse_api(
             "secret",
             "max_tokens",
             "effort",
+            "fallback",
         ],
         ApiKind::OpenAi => &[
             "kind",
@@ -224,6 +268,7 @@ fn parse_api(
             "max_tokens",
             "max_completion_tokens",
             "effort",
+            "fallback",
         ],
     };
     only(fields, allowed, path)?;
@@ -269,6 +314,7 @@ fn parse_api(
         ),
     };
     let effort = parse_effort(fields, path)?;
+    let fallback = parse_fallback(fields, path)?;
     Ok(ApiProvider {
         kind,
         model: model.to_owned(),
@@ -277,6 +323,7 @@ fn parse_api(
         max_tokens,
         limit_field,
         effort,
+        fallback,
     })
 }
 
@@ -287,7 +334,7 @@ fn parse_cli(
 ) -> Result<CliProvider, String> {
     only(
         fields,
-        &["kind", "model", "endpoint", "secret", "effort"],
+        &["kind", "model", "endpoint", "secret", "effort", "fallback"],
         path,
     )?;
     let endpoint = text(fields, "endpoint", path)?;
@@ -301,13 +348,72 @@ fn parse_cli(
         return Err(format!("{path}.secret: invalid secret name"));
     }
     let effort = parse_effort(fields, path)?;
+    let fallback = parse_fallback(fields, path)?;
     Ok(CliProvider {
         kind,
         model: text(fields, "model", path)?.to_owned(),
         endpoint: endpoint.to_owned(),
         secret: secret.to_owned(),
         effort,
+        fallback,
     })
+}
+
+fn validate_fallbacks(providers: &BTreeMap<String, Provider>) -> Result<(), String> {
+    for start in providers.keys() {
+        let mut seen = BTreeSet::from([start.as_str()]);
+        let mut current = start.as_str();
+        let mut depth = 0usize;
+        while let Some(next) = providers.get(current).and_then(Provider::fallback) {
+            if !providers.contains_key(next) {
+                return Err(format!(
+                    "providers.{current}.fallback: unknown provider alias `{next}`"
+                ));
+            }
+            if !seen.insert(next) {
+                return Err(format!(
+                    "providers.{start}.fallback: cycle detected at `{next}`"
+                ));
+            }
+            depth += 1;
+            if depth > MAX_FALLBACK_DEPTH {
+                return Err(format!(
+                    "providers.{start}.fallback: fallback chain exceeds maximum depth of {MAX_FALLBACK_DEPTH}"
+                ));
+            }
+            current = next;
+        }
+    }
+    Ok(())
+}
+
+/// Ordered fallback aliases reachable from `alias` (excluding `alias` itself).
+pub fn fallback_chain(providers: &BTreeMap<String, Provider>, alias: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::from([alias]);
+    let mut current = alias;
+    while out.len() < MAX_FALLBACK_DEPTH
+        && let Some(next) = providers.get(current).and_then(Provider::fallback)
+        && providers.contains_key(next)
+        && seen.insert(next)
+    {
+        out.push(next.to_owned());
+        current = next;
+    }
+    out
+}
+
+/// All aliases in `roots` plus every alias reachable via `fallback` links.
+pub fn reachable_aliases<'a>(
+    providers: &BTreeMap<String, Provider>,
+    roots: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<String> {
+    let mut all = BTreeSet::new();
+    for root in roots {
+        all.insert(root.to_owned());
+        all.extend(fallback_chain(providers, root));
+    }
+    all
 }
 
 pub fn parse_providers(value: &Value) -> Result<BTreeMap<String, Provider>, String> {
@@ -343,5 +449,6 @@ pub fn parse_providers(value: &Value) -> Result<BTreeMap<String, Provider>, Stri
         };
         out.insert(alias.clone(), provider);
     }
+    validate_fallbacks(&out)?;
     Ok(out)
 }

@@ -40,16 +40,31 @@ impl AgyRunner {
         Self { sandbox, config }
     }
 
-    /// Maps host model alias/effort to a built-in AGY catalog display label; the broker always pins the upstream model URL.
+    /// Maps host model alias/effort to an AGY CLI `--model` argument; the broker always pins the upstream model URL.
     pub fn catalog_model(model: &CliModel) -> String {
         if model.id.starts_with("Gemini ") {
             return model.id.clone();
         }
-        if model.effort.eq_ignore_ascii_case("low") {
-            "Gemini 3.1 Pro (Low)".to_owned()
-        } else {
-            "Gemini 3.1 Pro (High)".to_owned()
+        if model.id.starts_with("gemini-3.1-pro") {
+            return if model.effort.eq_ignore_ascii_case("low") {
+                "Gemini 3.1 Pro (Low)".to_owned()
+            } else {
+                "Gemini 3.1 Pro (High)".to_owned()
+            };
         }
+        model.id.clone()
+    }
+
+    fn passes_effort(model: &CliModel) -> bool {
+        if model.effort.is_empty()
+            || model.id.starts_with("Gemini ")
+            || model.id.starts_with("gemini-3.1-pro")
+        {
+            return false;
+        }
+        !["-low", "-medium", "-high", "-xhigh", "-max"]
+            .iter()
+            .any(|suffix| model.id.ends_with(suffix))
     }
 
     pub fn settings(relay: &RelayChannel) -> String {
@@ -74,7 +89,7 @@ impl AgyRunner {
         if !builtin.is_empty() {
             return Err(cli::failed("unsupported_builtin"));
         }
-        Ok([
+        let mut args: Vec<String> = [
             "--print=",
             "--input-format",
             "stream-json",
@@ -83,11 +98,17 @@ impl AgyRunner {
             "--disable-slash-commands",
             "--model",
             &Self::catalog_model(model),
-            "--settings",
-            &format!("{WORK_MOUNT}/{SETTINGS_CONFIG}"),
         ]
         .map(String::from)
-        .into())
+        .into();
+        if Self::passes_effort(model) {
+            args.extend(["--effort".into(), model.effort.clone()]);
+        }
+        args.extend([
+            "--settings".into(),
+            format!("{WORK_MOUNT}/{SETTINGS_CONFIG}"),
+        ]);
+        Ok(args)
     }
 
     fn env(&self, relay: &RelayChannel) -> Vec<(String, String)> {
