@@ -6,7 +6,7 @@
 #
 # Checks:
 #   1. `claude --version` runs via bot-init on a read-only rootfs and matches the image label; image bot-init matches repo.
-#   2. bot-init fail-closed rejection (missing/invalid relay env, missing cap, non-root, non-claude arg):
+#   2. bot-init fail-closed rejection (missing/invalid relay env, missing cap, non-root, unrecognized arg):
 #      non-zero exit, stderr is `vm_init_failed`, model probe does not start.
 #   3. Firewall (nftables) and privilege drop: model runs as 10001:10001, no groups/caps, no_new_privs;
 #      only the relay is reachable (other gateway port, IPv4/IPv6 neighbor, host IPv6/LAN, internet, inbound, and tamper attempts blocked).
@@ -281,7 +281,7 @@ for missing in CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_SETPCAP; do
 done
 m_reset; M_CAPS=; expect_init_fail "no capabilities" -- claude
 m_reset; M_USER=10001:10001; expect_init_fail "started as non-root" -- claude
-m_reset; expect_init_fail "first arg is not claude (sh)" -- sh -c 'touch /work/started'
+m_reset; expect_init_fail "first arg is unrecognized (sh)" -- sh -c 'touch /work/started'
 m_reset; expect_init_fail "first arg is full path to claude" -- /usr/local/bin/claude
 
 echo "==> 3 & 4. Firewall, privilege drop, tamper resistance, mounts, env"

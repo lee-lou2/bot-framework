@@ -16,7 +16,7 @@
 모든 요청은 호스트, 속도 제한, 자격 증명 검사를 거치며, `POST` 변경 요청은 CSRF 검증도 추가로 통과해야 합니다.
 
 1. **`Host` 검사**: DNS 리바인딩을 막기 위해 허용 목록(바인드 주소, 루프백 이름, 설정된 `hosts`) 밖의 `Host` 헤더를 `421`로 거부합니다.
-2. **IP별 실패 제한**: 60초 내 실패 횟수가 `max_failures`(기본 `5`)를 초과하면 다른 클라이언트에 영향을 주지 않고 해당 피어 IP를 60초간 차단합니다(`429`). 소켓 피어 주소만 사용하며 `X-Forwarded-For`나 `Forwarded`는 절대 읽지 않습니다(테스트로 고정됨; 프록시 뒤에서는 프록시 IP가 단일 버킷을 공유). 자격 증명이 없는 요청(초기 브라우저 프롬프트)은 세지 않으며 잘못되거나 형식 오류가 있는 자격 증명만 횟수에 포함합니다.
+2. **IP별 실패 제한**: 60초 내 실패 횟수가 `max_failures`(기본 `5`)에 도달하면 다른 클라이언트에 영향을 주지 않고 해당 피어 IP를 60초간 차단합니다(`429`). 소켓 피어 주소만 사용하며 `X-Forwarded-For`나 `Forwarded`는 절대 읽지 않습니다(테스트로 고정됨; 프록시 뒤에서는 프록시 IP가 단일 버킷을 공유). 자격 증명이 없는 요청(초기 브라우저 프롬프트)은 세지 않으며 잘못되거나 형식 오류가 있는 자격 증명만 횟수에 포함합니다.
 3. **시크릿 일치 검증**: 시크릿을 해시하여 모든 항목과 상수 시간으로 비교합니다(실패 시 `401`).
 4. **CSRF 보호 (`POST`)**: 인증된 `GET /v1/admin/me`가 발급한 뷰어 바인딩 `X-Bot-Csrf`, `Content-Type: application/json`, 동일 출처 헤더(`Origin` / `Sec-Fetch-Site`)를 요구하며 실패 시 `403`을 반환합니다.
 
@@ -123,7 +123,7 @@ API로 결정하려면 `GET /v1/admin/me`에서 받은 `X-Bot-Csrf`, `Content-Ty
 
 | 화면 | 대상 | 내용 |
 |---|---|---|
-| Overview | 전체 (범위 제한) | 기본 홈 대시보드: 시스템 상태 배너, 즉시 조치 대기열(대기 승인, 보류, 실패 실행, 일시 중지된 자동화), 실행 처리 현황, 최근 활동 및 (운영자용) 활성 프로필 카드·사전 승인 자동화·관측성 요약. |
+| Overview | 전체 (범위 제한) | 기본 홈 대시보드: 시스템 상태 배너, 개인 대기열(본인 지정 승인 및 최근 실행)과 최근 활동, 그리고 (운영자용) 전체 조치 대기열(대기 승인, 보류, 실패 실행, 일시 중지된 자동화)·실행 처리 현황 지표·활성 프로필 카드·사전 승인 자동화·관측성 요약. |
 | Approvals & Holds | 전체 (보류: 운영자) | 필터 가능한 조치 인박스(`All open`, `Assigned to me`, `Approvals`, `Holds`), 보류 바로가기, 본인 지정 승인 카드 강조(`seen` 해시 검증), 2단계 보류 해결 폼, 최근 결정 기록. |
 | Runs | 전체 | 검색 및 상태 필터 칩을 지원하는 실행 목록과 상세 패널(계보, 2열 메타데이터 그리드, 도구 호출, 이펙트, 하위 실행, 트레이스 링크), 운영자 재개/취소 제어. |
 | Pre-approvals | 운영자 | 상태 필터(`All`/`Active`/`Paused`), UTC 일일 사용량 미터, 긴급 일시 중지/재개 제어([사전 승인 UI](#사전-승인-ui)). |
@@ -138,7 +138,7 @@ API로 결정하려면 `GET /v1/admin/me`에서 받은 `X-Bot-Csrf`, `Content-Ty
 
 ### 구조 화면 및 맵
 
-활성 `ProfileCatalog`에서 결정적 리비전(`rev`) 아래 8종 카드(profile, agent, skill, tool, trigger, binding, scope, secret)와 6종 엣지(delegates, uses, owns, handles, wakes, needs)로 구성됩니다. 이름, 분류, 개수만 노출하며 지침, 지식 본문, 환경 변수, 시크릿 값은 절대 노출하지 않습니다. 기본 **Directory** 모드는 에이전트와 연결된 바인딩·트리거·스킬·도구 및 공유 스코프/시크릿을 검색 가능한 카드로 정리해 보여주며, **Graph** 모드는 이동·확대/축소 가능한 토폴로지 캔버스를 제공합니다. 두 모드 모두 동일한 슬라이드 상세 서랍을 공유합니다. 상속된 스킬은 정의된 에이전트에 한 번만 표시됩니다. 에이전트 요약에는 설명 첫 줄(≤ 140자, 없으면 모델명)과 비상속 `builtin` 읽기 전용 도구(스키마는 `read`/`grep`/`glob` 허용; `claude-cli` VM은 `read`만 지원)가 표시됩니다.
+활성 `ProfileCatalog`에서 결정적 리비전(`rev`) 아래 8종 카드(profile, agent, skill, tool, trigger, binding, scope, secret)와 6종 엣지(delegates, uses, runs, handles, triggers, needs)로 구성됩니다. 이름, 분류, 개수만 노출하며 지침, 지식 본문, 환경 변수, 시크릿 값은 절대 노출하지 않습니다. 기본 **Directory** 모드는 에이전트와 연결된 바인딩·트리거·스킬·도구 및 공유 스코프/시크릿을 검색 가능한 카드로 정리해 보여주며, **Graph** 모드는 이동·확대/축소 가능한 토폴로지 캔버스를 제공합니다. 두 모드 모두 동일한 슬라이드 상세 서랍을 공유합니다. 상속된 스킬은 정의된 에이전트에 한 번만 표시됩니다. 에이전트 요약에는 설명 첫 줄(≤ 140자, 없으면 모델명)과 비상속 `builtin` 읽기 전용 도구(스키마는 `read`/`grep`/`glob` 허용; `claude-cli` VM은 `read`만 지원하며 `codex-cli`, `agy-cli`, 직접 API 프로바이더는 미지원)가 표시됩니다.
 
 ### 사전 승인 UI
 
@@ -168,7 +168,7 @@ API로 결정하려면 `GET /v1/admin/me`에서 받은 `X-Bot-Csrf`, `Content-Ty
 
 둘 다 동일한 전송 계층, 서킷 브레이커, 활성화 펜스, `Redactor`를 공유합니다.
 
-- **구조화 stderr 및 OTLP 로그 (`admin.logs`)**: `BOT_LOG_FORMAT=json`은 줄 단위 `{ts_ms, level, target, message, fields}`를 stderr에 기록하며(기본 `text`), `BOT_LOG`로 필터링됩니다(워크스페이스 크레이트 전용; 외부 크레이트는 `warn` 상한; `sqlx` 비활성). `admin.logs`를 켜면 같은 이벤트를 최소 `level`(`debug`, `info`, 기본 `warn`, `error`; `BOT_LOG` 범위 내) 기준으로 OTLP/HTTP(S) protobuf(`ExportLogsServiceRequest`, 기본 경로 `/v1/logs`) 배치 전송합니다. 본문과 필드는 마스킹되고 크기가 제한됩니다(본문 2 KiB, 값 256자, 필드 32개).
+- **구조화 stderr 및 OTLP 로그 (`admin.logs`)**: `BOT_LOG_FORMAT=json`은 줄 단위 `{ts_ms, level, target, message, fields}`를 stderr에 기록하며(기본 `text`), `BOT_LOG`로 필터링됩니다(워크스페이스 크레이트 전용; 외부 크레이트는 `warn` 상한; `sqlx` 비활성). `admin.logs`를 켜면 같은 이벤트를 최소 `level`(`debug`, `info`, 기본 `warn`, `error`; `BOT_LOG` 범위 내) 기준으로 OTLP/HTTP(S) protobuf(`ExportLogsServiceRequest`, 기본 경로 `/v1/logs`) 배치 전송합니다. 본문과 필드는 마스킹되고 크기가 제한됩니다(본문 2,048자, 값 256자, `code.namespace` 포함 속성 총 32개).
 - **이슈 트래커 (`admin.issues`, `kind: "sentry"`)**: Sentry, GlitchTip, Bugsink 및 호환 백엔드용 Sentry Envelope v7(`POST <endpoint>`, `Content-Type: application/x-sentry-envelope`, `X-Sentry-Auth`)으로 `bot_core::issue::IssueReporter`를 구현합니다. 자동 보고 대상: (1) `tracing::error!`, (2) 패닉(`fatal`), (3) 비정상 실패 스팬(예상된 거부/취소인 `cancelled`, `denied`, `invalid`, `rate_limited`, `forbidden`, `unregistered`, `no_route`, `too_large`, `parked`, `lost`는 제외). 실패 스팬은 `contexts.trace.trace_id`로 연결하며 `bot.private` 스팬에는 추가 태그를 생략합니다. 루프/폭주 방지: 익스포터 실패는 로그를 남기지 않고 카운터/`last_error`만 갱신하며, 관측성/HTTP 전송 타깃은 건너뛰고 `(kind, target)` 기준으로 5초 쿨다운 중복 제거를 적용합니다.
 - **호스트 범위 시크릿 참조**: `admin.logs.headers` 시크릿 객체와 `admin.issues.key`는 `{"secret": "<name>"}`(`bot/host/<name>`에서 해석) 또는 `{"profile": "<profile>", "secret": "<name>"}`을 허용합니다(`bot validate`/`bot doctor`가 검사하고 `bot serve`가 마스킹기에 사전 적재). `admin.issues.key`는 루프백 평문 `http://` 목(mock)에서만 생략할 수 있습니다.
 - **상태**: `GET /v1/admin/status`는 `process.logs`와 `process.issues`에 `{enabled, queued, sent, dropped, failed, circuit, last_error, backends}`를 노출합니다(`origin`만 표시하며 경로·헤더·키는 절대 노출하지 않음).
@@ -184,8 +184,8 @@ API로 결정하려면 `GET /v1/admin/me`에서 받은 `X-Bot-Csrf`, `Content-Ty
 | `hosts` | `[]` | 리버스 프록시 뒤에서 추가로 허용할 `Host` 값(`host:port`). |
 | `max_failures` | `5` | 60초 차단이 걸리기 전 피어 IP당 60초 내 허용 인증 실패 횟수(범위 `1..=100`). |
 | `trace.<profile>` | 끔 | 프로필별 OTLP 트레이스 익스포터(`null`로 비활성화): 필수 `endpoint`, 선택 `name`(기본 `default`), `link`(`{trace_id}` 포함 `http(s)` 템플릿), `headers`(문자열 또는 해당 프로필 `SecretStore`의 `{"secret": "<name>"}`), `content`(`false`), `ids`(`hash` 또는 `plain`), `sample`(`0.0..=1.0`, 기본 `1.0`), `remote`(`false`). |
-| `logs` | 끔 | 호스트 전역 OTLP 로그 익스포터: `endpoint`, `name`, `headers`(문자열 또는 `{"secret": "<name>"}` / `{"profile": "<p>", "secret": "<name>"}`), `level`(`warn`), `remote`(`false`). |
-| `issues` | 끔 | 호스트 전역 이슈 트래커: `kind`(`sentry`), `name`, `endpoint`, `key`(`{"secret": "<name>"}` 또는 `profile` 포함; 루프백 `http://`에서만 생략 가능), `environment`, `release`, `sample`(`1.0`), `remote`(`false`). |
+| `logs` | 끔 | 호스트 전역 OTLP 로그 익스포터: `endpoint`, `name`(기본 `otlp-logs`), `headers`(문자열 또는 `{"secret": "<name>"}` / `{"profile": "<p>", "secret": "<name>"}`), `level`(`warn`), `remote`(`false`). |
+| `issues` | 끔 | 호스트 전역 이슈 트래커: `kind`(`sentry`), `name`(기본 `sentry`), `endpoint`, `key`(`{"secret": "<name>"}` 또는 `profile` 포함; 루프백 `http://`에서만 생략 가능), `environment`, `release`, `sample`(`1.0`), `remote`(`false`). |
 
 로컬 수집기 설정 예(`host.json`의 `admin` 객체):
 

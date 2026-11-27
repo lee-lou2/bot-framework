@@ -70,7 +70,7 @@ Effective scopes are the three-way intersection: `role scopes ∩ policy.scopes 
 
 | Agent | Scope ceiling | Capabilities |
 |---|---|---|
-| `main` | Per caller role (`lead` gets all) | Agenda lookup, delegation, scheduling |
+| `main` | Per caller role (`lead` gets all) | Agenda lookup, delegation, scheduling, private memory (`memory.search`/`save`/`forget`) |
 | `main/developer` | `run` | No MCP tools; uses built-in `read` to inspect code |
 | `main/designer` | `run` | No tools; prose and table reviews only |
 | `main/pm` | `run`, `calendar.read`, `schedule.*` | Read-only agenda plus chat scheduling (`create`/`list`/`cancel`) |
@@ -85,7 +85,7 @@ The weekday digest trigger runs as `service:standup` (`digest` role: `run`, `cal
 
 ## Adapt for Your Team
 
-1. **Copy:** `cp -R examples/profiles/team profiles/<your-team>` (place only profile directories directly under `BOT_PROFILES`), or scaffold a fresh workspace with `bot init <your-team> --template team`.
+1. **Copy:** `cp -R examples/profiles/team profiles/<your-team>` (place only profile directories directly under `BOT_PROFILES`) to start from this full 5-agent sample walked through below. If you prefer a minimal 4-agent starter (`main`, `developer`, `designer`, `pm` without sample tools, triggers, `ops`, or seeds), run `bot init <your-team> --template team` instead.
 2. **Set ID:** Match `profile.yaml` `id` to the folder name (lowercase, digits, hyphens). Keep `policy.agents` paths as-is.
 3. **Replace synthetic content:** Edit or remove the sample files under `knowledge/` and `memory/` (every memory seed `owner` must exist in `members`).
 4. **Configure members and entrances:** Replace `local:team` with real identities and bind host-registered entrances (CLI accounts or Slack workspaces/channels; uncomment the Slack lines in `profile.yaml`). Each entrance must be unique across active profiles.
@@ -114,8 +114,8 @@ All names must match `^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$` (<= 63 chars). Unknown fi
 
 ## Good to Know
 
-- `main/developer` declares `builtin: [read]`, which requires a `claude-cli` VM with verified read isolation. Remove `builtin` if running `main/developer` on a direct API provider (`anthropic-api`, `openai-api`; see [architecture.md](architecture.md)).
-- `main` and `main/pm` share the same chat scheduling tools across `anthropic-api`, `openai-api`, and `claude-cli`: `lead` can create, list, and cancel schedules; `member` can list. Targeting another registered Slack channel requires owner approval at creation and approval of each `Delivery draft` card on firing. Use `triggers.yaml` for profile-level recurring jobs; service principals cannot create user schedules ([plugins.md](plugins.md#schedules-and-follow-up-wakes)).
+- `main/developer` declares `builtin: [read]`, which requires a `claude-cli` VM with verified read isolation. Remove `builtin` if running `main/developer` on a direct API provider (`anthropic-api`, `openai-api`) or another VM CLI (`codex-cli`, `agy-cli`; see [architecture.md](architecture.md)).
+- `main` and `main/pm` share the same chat scheduling tools across `anthropic-api`, `openai-api`, `claude-cli`, `codex-cli`, and `agy-cli`: `lead` can create, list, and cancel schedules; `member` can list. Targeting another registered Slack channel requires owner approval at creation and approval of each `Delivery draft` card on firing. Use `triggers.yaml` for profile-level recurring jobs; service principals cannot create user schedules ([plugins.md](plugins.md#schedules-and-follow-up-wakes)).
 - All sample names (`alice`, `bob`, etc.) are synthetic; real identities and secrets live solely in `host.json`, `members`, and the secret store.
 
 Related: [Profile Specification](profile-spec.md) · [Security](security.md) · [MCP Tools](plugins.md) · [Gateway](gateway.md)

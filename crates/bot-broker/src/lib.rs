@@ -1,6 +1,6 @@
 //! Tool-call gate: authorization, risk classification, approval, sandboxed execution, and auditing.
 //!
-//! Pure policy modules (`scope`, `classify`, `approval`, `recovery`, `egress`, `rate`, `guard`) have
+//! Pure policy modules (`classify`, `approval`, `recovery`, `egress`, `rate`, `guard`; plus `bot_core::scope`) have
 //! no port dependencies; `service` wires them to `ports` to implement `bot_core::port::Broker`.
 //! Start new modules as `pub(crate)` and open `pub mod` only when another crate requires it.
 

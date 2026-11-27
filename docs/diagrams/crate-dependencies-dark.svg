@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 688" width="1120" height="688" role="img" aria-labelledby="t-cr-d d-cr-d">
   <title id="t-cr-d">Bot Framework Rust Crate Dependency Architecture</title>
-  <desc id="d-cr-d">Three-layer workspace where the top-level bot-cli binary wires six independent domain crates that never depend on one another and communicate only through bot-core port traits.</desc>
+  <desc id="d-cr-d">Three-layer workspace where the top-level bot-cli binary wires six independent domain crates with no runtime cross-dependencies that communicate only through bot-core port traits.</desc>
   <style>
     .bg { fill: #1c212c; }
     .frame { fill: #1c212c; stroke: #343d50; stroke-width: 1; }
@@ -79,7 +79,7 @@
     <!-- Header -->
     <text x="24" y="28" class="h-eye">WORKSPACE · RUST CRATES · HEXAGONAL PORTS &amp; ADAPTERS</text>
     <text x="24" y="51" class="h-title">Rust Workspace Crate Dependencies (8 Crates)</text>
-    <text x="24" y="67" class="h-sub">bot-core ◄ {bot-profile, bot-gateway, bot-store, bot-runtime, bot-broker, bot-admin} ◄ bot-cli (no middle-layer cross-deps)</text>
+    <text x="24" y="67" class="h-sub">bot-core ◄ {bot-profile, bot-gateway, bot-store, bot-runtime, bot-broker, bot-admin} ◄ bot-cli (no runtime middle-layer cross-deps)</text>
     <line x1="0" y1="76" x2="1120" y2="76" class="hdr-rule"/>
 
     <g transform="translate(0,68)">
@@ -115,7 +115,7 @@
       <rect x="488" y="150" width="144" height="14" rx="2" class="lbl-bg"/>
       <text x="560" y="160" text-anchor="middle" class="elbl-acc">Adapter wiring · Role setup</text>
       <rect x="444" y="381" width="232" height="14" rx="2" class="lbl-bg"/>
-      <text x="560" y="391" text-anchor="middle" class="elbl">Depend only on bot-core port traits</text>
+      <text x="560" y="391" text-anchor="middle" class="elbl">Depend only on bot-core at runtime</text>
 
       <!-- NODES -->
       <g id="cr-cli">
@@ -176,7 +176,7 @@
         <text x="932" y="270" class="ttl-sm">bot-admin</text>
         <line x1="932" y1="280" x2="1068" y2="280" class="div"/>
         <text x="932" y="298" class="sub">Admin API · Embedded UI</text>
-        <text x="932" y="314" class="sub">OTLP traces · logs</text>
+        <text x="932" y="314" class="sub">OTLP traces/logs · Sentry</text>
         <text x="932" y="334" class="mono">Used by every role</text>
       </g>
       <g id="cr-core">
@@ -191,7 +191,7 @@
   <line x1="1" y1="608" x2="1119" y2="608" class="hdr-rule"/>
   <line x1="24" y1="624" x2="24" y2="672" class="bar-acc"/>
   <text x="34" y="634" class="fk-acc">UNIDIRECTIONAL DEPENDENCIES</text>
-  <text x="34" y="653" class="fv">Zero cross-dependencies among the 6 middle</text>
+  <text x="34" y="653" class="fv">Zero runtime cross-deps among the 6 middle</text>
   <text x="34" y="669" class="fv">crates — communicate only via bot-core ports</text>
   <line x1="296" y1="624" x2="296" y2="672" class="bar"/>
   <text x="306" y="634" class="fk">DUAL SANDBOX PORTS</text>

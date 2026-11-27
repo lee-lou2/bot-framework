@@ -122,13 +122,13 @@ tools:
 }
 ```
 
-**`my-bot/profiles/my-bot/profile.yaml`**(필요한 곳에만 스코프 부여):
+**`my-bot/profiles/my-bot/profile.yaml`**(기본 메모리 스코프에 `notes.lookup` 추가):
 
 ```yaml
 roles:
-  owner: [run, notes.lookup]
+  owner: [run, memory.search, memory.save, memory.forget, notes.lookup]
 policy:
-  scopes: [run, notes.lookup]
+  scopes: [run, memory.search, memory.save, memory.forget, notes.lookup]
   # 하위 에이전트에 한정하려면 policy.agents.<path> 아래에도 notes.lookup 추가
 ```
 

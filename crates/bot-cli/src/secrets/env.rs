@@ -44,7 +44,8 @@ impl EnvStore {
         }
     }
 
-    pub fn from_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_pairs(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
         Self {
             vars: pairs
                 .into_iter()

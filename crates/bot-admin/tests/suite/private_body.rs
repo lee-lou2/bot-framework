@@ -540,3 +540,30 @@ async fn refusing_stays_allowed_for_every_incomplete_card() {
         assert_eq!(deny.json()["approval"]["state"], "denied");
     }
 }
+
+#[tokio::test]
+async fn memory_save_cards_hide_body_and_set_render_hidden_for_non_owners() {
+    let fake = with_share_card("local:guest", "local:guest");
+    fake.edit(|d| {
+        if let Some(a) = d.approvals.iter_mut().find(|a| a.nonce.0 == "ap-mem") {
+            a.tool = ToolId("memory.save".into());
+            a.render = vec![
+                (LABEL_TITLE.into(), "Memory save approval".into()),
+                (LABEL_BODY.into(), BODY.into()),
+            ];
+        }
+    });
+    let s = start(fake).await;
+
+    let op_resp = get(&s, OPERATOR, "/v1/admin/approvals").await;
+    assert_eq!(op_resp.status, 200);
+    assert!(!op_resp.body.contains(BODY));
+    let op_card = card(&op_resp.json(), "ap-mem").clone();
+    assert_eq!(op_card["render"].as_array().map(Vec::len), Some(0));
+    assert_eq!(op_card["render_hidden"], true);
+
+    let owner_list = get(&s, GUEST, "/v1/admin/approvals").await.json();
+    let owner_card = card(&owner_list, "ap-mem");
+    assert_eq!(owner_card["render_hidden"], false);
+    assert_eq!(body_row(owner_card), Some(BODY));
+}

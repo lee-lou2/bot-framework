@@ -460,6 +460,7 @@ impl Store {
         if model.is_empty() || model.len() > 128 || !(1..=MAX_EMBEDDING_DIMENSIONS).contains(&dim) {
             return Err(Error::Invalid.into());
         }
+        let mut tx = self.begin_authorized().await?;
         let rows = sqlx::query(
             "select id, body from bot_memories
              where profile = $1 and deleted_ms is null and superseded_by is null
@@ -471,8 +472,9 @@ impl Store {
         .bind(model)
         .bind(dim as i32)
         .bind(i64::from(limit.clamp(1, 64)))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(rows
             .into_iter()
             .map(|r| {
@@ -495,18 +497,21 @@ impl Store {
         embedding: &MemoryEmbedding,
     ) -> R<()> {
         ids_ok(&[&profile.0, &id.0])?;
+        let mut tx = self.begin_authorized().await?;
         let Some(current): Option<String> = sqlx::query_scalar(
-            "select body from bot_memories where profile = $1 and id = $2 and deleted_ms is null",
+            "select body from bot_memories where profile = $1 and id = $2 and deleted_ms is null for update",
         )
         .bind(&profile.0)
         .bind(&id.0)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?
         else {
+            tx.commit().await?;
             return Ok(());
         };
         let actual: [u8; 32] = Sha256::digest(current.as_bytes()).into();
         if actual != body_sha256 {
+            tx.commit().await?;
             return Ok(());
         }
         sqlx::query(
@@ -520,8 +525,9 @@ impl Store {
         .bind(embedding.dim() as i32)
         .bind(embedding.to_f16_bytes())
         .bind(&current)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 }

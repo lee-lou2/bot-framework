@@ -26,9 +26,8 @@ impl HttpsUpstream {
         Self::build("https", MAX_BODY)
     }
 
-    #[cfg(any(test, feature = "testing"))]
-    #[doc(hidden)]
-    pub fn over_http(max_body: usize) -> Result<Self, String> {
+    #[cfg(test)]
+    pub(crate) fn over_http(max_body: usize) -> Result<Self, String> {
         Self::build("http", max_body)
     }
 

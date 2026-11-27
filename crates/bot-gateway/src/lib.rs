@@ -10,7 +10,7 @@ pub mod http;
 pub mod identity;
 pub mod inbound;
 pub mod ingress;
-pub mod limits;
+mod limits;
 pub mod mapping;
 pub mod observe;
 pub mod reply;
@@ -19,4 +19,6 @@ pub mod schedule_routes;
 pub mod slack;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
-pub mod trigger;
+mod trigger;
+
+pub use limits::Limits;

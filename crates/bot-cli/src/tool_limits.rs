@@ -126,6 +126,10 @@ mod tests {
             "lowering the ceiling must change the fingerprint"
         );
         assert_eq!(at(300), at(300));
+        assert_eq!(
+            bot_core::random::hex(&at(300)),
+            "99cb2ce809dac7836ec9d1250e11ed1cd3b57e2cad4822abf7efd857ac16dc9b"
+        );
         assert_ne!(
             bind(
                 [8u8; 32],

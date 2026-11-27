@@ -122,13 +122,13 @@ Follow the instructions printed by `bot add tool` to update `host.json` and `pro
 }
 ```
 
-**`my-bot/profiles/my-bot/profile.yaml`** (grant scopes only where needed):
+**`my-bot/profiles/my-bot/profile.yaml`** (append `notes.lookup` alongside the default memory scopes):
 
 ```yaml
 roles:
-  owner: [run, notes.lookup]
+  owner: [run, memory.search, memory.save, memory.forget, notes.lookup]
 policy:
-  scopes: [run, notes.lookup]
+  scopes: [run, memory.search, memory.save, memory.forget, notes.lookup]
   # If scoped to a sub-agent, also add notes.lookup under policy.agents.<path>
 ```
 

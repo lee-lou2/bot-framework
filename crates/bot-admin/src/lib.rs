@@ -2,17 +2,17 @@
 //!
 //! Store contracts live in `bot_core::admin`; approvals go through `Broker::decide` and hold/run actions through `AdminAct`.
 
-pub mod api;
+mod api;
 pub mod assets;
 pub mod auth;
-pub mod fence;
+mod fence;
 pub mod issues;
 pub mod json;
 pub mod logs;
 pub mod map;
 pub mod obs;
-pub mod preapproval;
-pub mod resp;
+mod preapproval;
+mod resp;
 mod run_control;
 pub mod settings;
 pub mod trace;

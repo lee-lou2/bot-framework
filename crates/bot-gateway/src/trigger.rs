@@ -4,7 +4,7 @@ use crate::{
     routes::BoundTrigger,
 };
 use bot_core::{
-    id::{BindingId, ProfileId},
+    id::BindingId,
     profile::{Trigger, TriggerSource, TriggerTarget},
 };
 use serde_json::{Map, Value, json};
@@ -114,10 +114,6 @@ pub fn tool_args(trigger: &Trigger, envelope: &Value) -> Option<String> {
         object.insert(name.clone(), lookup(envelope, path)?.clone());
     }
     Some(Value::Object(object).to_string())
-}
-
-pub fn label(profile: &ProfileId, trigger: &Trigger) -> String {
-    format!("{}/{}", profile.0, trigger.id)
 }
 
 #[cfg(test)]

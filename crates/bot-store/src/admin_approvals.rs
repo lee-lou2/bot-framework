@@ -1,7 +1,7 @@
 //! Admin approval listings, detail lookups, and card rendering with owner-only body redaction.
 
 use crate::db::{R, Store, ms_to_time};
-use bot_core::builtin::{CardBody as Body, card_body};
+use bot_core::builtin::{CardBody as Body, card_body, owner_only_card};
 use bot_core::{admin::*, id::*, port::Error};
 use sqlx::{Row, postgres::PgRow};
 
@@ -54,7 +54,7 @@ fn render_for(
 ) -> Vec<(String, String)> {
     let owner = approval.requester == viewer.principal && approval.approver == viewer.principal;
     let body = card_body(&approval.tool.0);
-    if (body != Body::None || approval.tool.0 == bot_core::builtin::MEMORY_SAVE_TOOL) && !owner {
+    if owner_only_card(&approval.tool.0) && !owner {
         return vec![];
     }
     render_of(card, body)

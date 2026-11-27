@@ -20,7 +20,7 @@ use tokio::{
 pub mod header;
 pub mod http;
 pub mod remote;
-pub mod sse;
+pub(crate) mod sse;
 pub mod wire;
 
 /// Supported MCP protocol versions; servers negotiating anything else are rejected.

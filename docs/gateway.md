@@ -10,15 +10,15 @@ Push entrances pin the reply delivery adapter (`transport`) from the authenticat
 
 `host.json` maps profile aliases to OS accounts, services, and executables. Omitting `BOT_HOST_CONFIG` uses built-in demo defaults for example profiles. Custom profiles must register their models and entrances ([Host configuration for a new profile](profile-spec.md#host-configuration-for-a-new-profile)).
 
-Top-level keys: `version` (`1`), `gateway`, `servers`, `models`, `providers`, `egress`, `private_egress`, `super_admins`, `sandbox`, `limits`, `admin`.
+Top-level keys: `version` (`1`), `gateway`, `servers`, `models`, `providers`, `egress`, `private_egress`, `super_admins`, `sandbox`, `limits`, `embeddings`, `memory_judge`, `admin`.
 
-- `models` / `providers`: per-profile allowed model aliases bound to `demo`, `claude-cli`, `anthropic-api`, or `openai-api`. Upstream endpoints require `https://` URLs with no credentials, query, or fragment (direct API providers also accept `http://` on loopback IP literals, the only case where `secret` may be omitted).
+- `models` / `providers`: per-profile allowed model aliases bound to `demo`, `claude-cli`, `codex-cli`, `agy-cli`, `anthropic-api`, or `openai-api`. Upstream endpoints require `https://` URLs with no credentials, query, or fragment (direct API providers also accept `http://` on loopback IP literals, the only case where `secret` may be omitted).
 - `egress` / `private_egress`: per-profile allowed external `host:port` caps and pinned private/local destination mappings.
 - `super_admins`: host-level upper bound on super-admin principals per profile (included in the activation fingerprint when non-empty).
 - `servers`: registers local MCP packages (`root` and command) or remote HTTP servers (`transport: "http"`, `url`). `bot validate` computes server revisions from server files and commands. Tool runners use read-only installs under `BOT_INSTALLS`. Default `state` is `ephemeral`; `required` servers cannot start on the current `srt` host ([Plugins](plugins.md)).
-- `sandbox` / `limits` / `admin`: model VM and sandbox settings (`instance`, image, network — see [Architecture](architecture.md)), tool limits, and Admin UI/observability settings (`bind`, `hosts`, `max_failures`, `trace`, `logs`, `issues` — see [Admin UI](admin.md)).
+- `sandbox` / `limits` / `embeddings` / `memory_judge` / `admin`: model VM and sandbox settings (`instance`, `image`/`images`, `network` — see [Architecture](architecture.md)), tool limits, optional hybrid memory `/embeddings` and System One `memory_judge` endpoints, and Admin UI/observability settings (`bind`, `hosts`, `max_failures`, `trace`, `logs`, `issues` — see [Admin UI](admin.md)).
 
-The active set binds profile revisions together with authority-affecting host settings (CLI user mappings, Slack teams/channels, HTTP auth, allowed models/upstreams/secret names, server revisions, `egress`, `private_egress`, `super_admins`, and VM image/network). Secret values are never included. Apply host mapping changes with `bot serve --activate`.
+The active set binds profile revisions together with authority-affecting host settings (CLI user mappings, Slack teams/channels, HTTP auth, allowed models/upstreams/secret names, server revisions, `egress`, `private_egress`, `super_admins`, VM `image`/`images`/network, non-default `limits.tool_call_max_secs`, configured `embeddings`/`memory_judge`, and enabled `admin.trace`/`logs`/`issues`). Secret values are never included. Apply host mapping changes with `bot serve --activate`.
 
 ### `gateway` Keys
 
@@ -139,7 +139,7 @@ Errors follow `{"error":{"message":"…","type":"…","param":null,"code":"…"}
 | `422` | `server_error` | `request_outcome_unknown` (poll with same key + body), `run_failed`, `run_cancelled` |
 
 - Hitting `max_active_runs` returns `429` with `Retry-After: 1`; rate limits return ceiling seconds remaining. Polling an already-accepted key consumes no active-run slot.
-- **Auth failure limit**: tracked per gateway process by direct peer IP (`X-Forwarded-For` is ignored). Exceeding 20 failed `Authorization` attempts in 60s blocks all model/chat requests from that IP for 60s (`429` + `Retry-After`) before key lookup—including valid keys and polls. Missing headers and store outages do not count. Fixed in v2.0; enforce per-user limits at a shared TLS proxy if needed.
+- **Auth failure limit**: tracked per gateway process by direct peer IP (`X-Forwarded-For` is ignored). Reaching 20 failed `Authorization` attempts in 60s blocks all model/chat requests from that IP for 60s (`429` + `Retry-After`) before key lookup—including valid keys and polls. Missing headers and store outages do not count. Fixed in v2.0; enforce per-user limits at a shared TLS proxy if needed.
 - Post-auth accepted runs never return SDK auto-retried `408`/`409`/`429`/`5xx`; uncertain commits return `422` with `x-should-retry: false`. See the official [Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) and [Models](https://developers.openai.com/api/reference/resources/models/methods/list) specs. Future Responses API and token streaming will share this auth, permission, and outcome model and stream only externally safe text in order.
 
 ## Slack Entrance
@@ -159,6 +159,7 @@ v2.0 receives Slack events and button clicks strictly via [Socket Mode](https://
 | Approval / stop buttons | Enable **Interactivity & Shortcuts → Interactivity**. | `block_actions` over Socket Mode. |
 | Owner DM for channel schedules | Bot scope `im:write` (plus `chat:write` and Interactivity). | [`conversations.open`](https://docs.slack.dev/reference/methods/conversations.open/) to open a 1:1 DM with the owner (works even with DM intake disabled). |
 | Reply file attachments | Bot scope `files:write`. | [`files.getUploadURLExternal`](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) → byte upload → `files.completeUploadExternal`. |
+| Progress indicators & stop (optional) | Bot scope `reactions:write` (for 👀/✅/❌); enable Slack AI App / streaming with `chat:write` and Interactivity for streamed progress and stop cards. | `reactions.add`/`remove`, `chat.startStream`/`appendStream`/`stopStream`/`delete`, `agent_session_stopped`. |
 
 Install (or reinstall after scope changes) the app in the workspace, store bot/app tokens in the profile's `SecretStore`, and configure `team_id`, `channels`, `bot_token`, and `app_token` names under `gateway.slack.workspaces.<alias>`.
 
@@ -198,7 +199,7 @@ Handles are pinned to one profile at creation and cannot read other profiles. Pr
 
 | Command | Behavior |
 |---|---|
-| `bot validate` | Offline validation (no DB/Slack) of profiles, host registry, entrance uniqueness, required secrets (declared, tool, entrance, and allowed `claude-cli`/`anthropic-api`/`openai-api` provider keys—missing keys report name and env var), HTTP key length (≥ 32 bytes), memory seed body limit (8 KiB), agent `builtin` compatibility, and tool server installs. Prints activation and server revisions only when all checks pass. |
+| `bot validate` | Offline validation (no DB/Slack) of profiles, host registry, entrance uniqueness, required secrets (declared, tool, remote HTTP bearer, entrance, observability, and allowed `claude-cli`/`codex-cli`/`agy-cli`/`anthropic-api`/`openai-api`, `embeddings`, and `memory_judge` keys—missing keys report name and env var), HTTP key length (≥ 32 bytes), memory seed body limit (8 KiB), agent `builtin` compatibility, and tool server installs. Prints activation and server revisions only when all checks pass. |
 | `bot chat [--profile P] [--thread T] [--request-id ID] [--no-wait] "text"` | Sends a chat request (e.g., `bot chat --profile personal "Show today's agenda"`, `bot chat --profile personal --request-id walk-1 "Delete the walk event"`). Re-attach after disconnect with `bot chat --profile P --attach --request-id ID`. Exit code `3` is retryable. Escapes terminal control characters (ESC, C1, BEL, CR, DEL, etc.) as `\u{1b}`-style literals so model/tool output cannot trigger OSC 52 clipboard writes, title changes, or screen clears (`\r\n` normalizes to `\n`). |
 | `bot map [--json] [--profile P]` | Prints structure map (names, classifications, and counts only). |
 | `bot init <name> [--template personal\|team\|company] [--dir <dir>]` | Scaffolds `<name>/` (`host.json` with demo model + current OS user CLI account, plus `profiles/<name>/`) passing `bot validate`. Lowercase alphanumeric + hyphen names; never overwrites or follows symlinks; validates in a `$TMPDIR` copy before atomically moving a temp dir under `--dir` (opened once with final umask permissions); ignores `BOT_*` env vars. |
@@ -220,14 +221,14 @@ Handles are pinned to one profile at creation and cannot read other profiles. Pr
 | `BOT_ADMIN_TOKEN_FILE` | Absolute path (`0600`) for headless Admin UI operator secret delivery. |
 | `BOT_LOG`, `BOT_LOG_FORMAT` | Log level (`error`, `warn` default, `info`, `debug`, `trace`) and stderr format (`text` default, `json` line-delimited `{ts_ms, level, target, message, fields}`). |
 
-Intake, delivery, and approval emit `core::trace` spans (`bot.private` marks private DMs) carrying only identifiers and vocabulary codes—never bodies, args, nonces, or receipts. `BOT_LOG` applies only to workspace crates: external HTTP/WebSocket/TLS crates cap at `warn` and `sqlx` is disabled completely so `trace` never leaks raw frames, private DM text, or unknown DSN params (`crates/bot-cli/src/logging.rs`). When `admin.logs` is enabled, filtered logs also ship to OTLP `/v1/logs` (`admin.logs.level` bounded by `BOT_LOG`); when `admin.issues` is enabled, errors, panics, and abnormal failed spans report to the issue tracker.
+Intake, delivery, and approval emit `bot_core::trace` spans (`bot.private` marks private DMs) carrying only identifiers and vocabulary codes—never bodies, args, nonces, or receipts. `BOT_LOG` applies only to workspace crates: external HTTP/WebSocket/TLS crates cap at `warn` and `sqlx` is disabled completely so `trace` never leaks raw frames, private DM text, or unknown DSN params (`crates/bot-cli/src/logging.rs`). When `admin.logs` is enabled, filtered logs also ship to OTLP `/v1/logs` (`admin.logs.level` bounded by `BOT_LOG`); when `admin.issues` is enabled, errors, panics, and abnormal failed spans report to the issue tracker.
 
 ## Running Roles
 
 `--role all` starts `gateway`, `scheduler`, `worker`, and `admin` together. Split deployments share PostgreSQL and the same active set.
 
 - **Gateway**: handles intake and delivery. Private DM triggers require the target tool's `srt` runner and per-profile `private-intake` fingerprint key; raw text goes only to the designated tool, and uncertain outcomes become operator holds.
-- **Worker**: runs models and the embedded tool broker. Refuses to publish an active revision if any allowed model alias (`claude-cli`, `anthropic-api`, `openai-api`, excluding keyless loopback) lacks its provider key. Missing tool secrets warn by name only; calls fail before opening approval cards and audit `secret_missing` (`bot validate` reports both; see [Reliability](reliability.md)).
+- **Worker**: runs models and the embedded tool broker. Refuses to publish an active revision if any allowed model alias (`claude-cli`, `codex-cli`, `agy-cli`, `anthropic-api`, `openai-api`, excluding keyless loopback) or configured `embeddings` / `memory_judge` endpoint lacks its provider key. Missing tool secrets warn by name only; calls fail before opening approval cards and audit `secret_missing` (`bot validate` reports both; see [Reliability](reliability.md)).
 - **Scheduler**: enqueues due runs. Static triggers commit atomically with the active revision and memory seeds regardless of which role publishes. Removed trigger windows close at switch time while prior occurrences stay in their window ([Profile Spec](profile-spec.md)).
 - **Admin**: defaults to `127.0.0.1:8787` (HTTP intake defaults to `127.0.0.1:8788`). Authenticated data responses re-verify the active set right before sending (`503` + fixed error code on drift/outage; see [Admin UI](admin.md#startup-sequence)).
 
@@ -245,4 +246,4 @@ For channel-origin schedules, v2.0 opens a 1:1 DM with the owner via the channel
 
 ### In-Flight Model Requests During Deployments
 
-The Claude worker binds a relay on the anchor VM gateway address and passes the listening port to the model VM. Before each upstream request, the relay checks the active set (`403` stale, `503` outage/timeout—never sends upstream). Open streams re-check every 1s and must resolve within 10s of the first scheduled check or terminate with a fixed error event ([Architecture](architecture.md), [Reliability](reliability.md)).
+VM CLI workers (`claude-cli`, `codex-cli`, `agy-cli`) bind a relay on the anchor VM gateway address and pass the listening port to the model VM. Before each upstream request, the relay checks the active set (`403` stale, `503` outage/timeout—never sends upstream). Open streams re-check every 1s and must resolve within 10s of the first scheduled check or terminate with a fixed error event ([Architecture](architecture.md), [Reliability](reliability.md)).

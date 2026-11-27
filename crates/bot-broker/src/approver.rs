@@ -7,7 +7,7 @@
 //!
 //! Returns `None` unless the candidate is a human member of the current snapshot.
 
-pub mod openai;
+pub(crate) mod openai;
 
 use bot_core::{
     id::PrincipalId,

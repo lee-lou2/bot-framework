@@ -5,7 +5,7 @@
 //! any status or result body.
 mod openai;
 pub use openai::{Passed, Probe};
-pub mod reply;
+mod reply;
 pub mod token;
 mod wire;
 

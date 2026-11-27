@@ -129,9 +129,9 @@ impl SlackUx {
     }
 
     /// Test-only: overrides the progress poll interval and watch deadline.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
-    pub fn with_watch_timing(mut self, poll_every: Duration, watch_limit: Duration) -> Self {
+    pub(crate) fn with_watch_timing(mut self, poll_every: Duration, watch_limit: Duration) -> Self {
         self.poll_every = poll_every;
         self.watch_limit = watch_limit;
         self

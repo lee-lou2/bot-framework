@@ -88,12 +88,12 @@ fn logs_and_issues_change_the_fingerprint_and_leaving_them_off_preserves_existin
     let trace_only = fingerprint(&host(&traced("personal", ENDPOINT)));
     // Golden fingerprints from origin/main 34c860b to catch accidental hash drift.
     assert_eq!(
-        bot_admin::json::hex(&bare),
+        bot_core::random::hex(&bare),
         "b5912597998a504ee0018a14e3b4910c39cd6c1f223d1b4e04e0e49629b0611d",
         "baseline host activation fingerprint (logs/issues off) drifted"
     );
     assert_eq!(
-        bot_admin::json::hex(&trace_only),
+        bot_core::random::hex(&trace_only),
         "8b06e3e8736e594cce01431284dd3711c7f9adbe02c8e0b65e2db612f1034a4f",
         "trace-only host activation fingerprint drifted"
     );

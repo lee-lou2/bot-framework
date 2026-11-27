@@ -32,7 +32,7 @@ flowchart LR
   B -->|Streamable HTTP, 정확한 host:port만 허용| R[원격 MCP 서버]
   P -->|허용된 호스트| E[외부 API]
   P -. 선택적 단계 영수증 .-> B
-  B -->|모델 프록시| M
+  B -->|모델 프록시 / 임베딩| M
   B <--> D
   W -->|완료 및 아웃박스| D
   D -->|원래 대화로 응답| G
@@ -62,7 +62,7 @@ VM CLI 모드(`claude-cli`, `codex-cli`, `agy-cli`)에서 워커는 공유 앵�
 |---|---|---|---|
 | `claude-cli` | `POST /v1/messages` (`Anthropic`, `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`) | `/work/mcp.claude.json`(`Bearer ${RELAY_TOKEN}`)으로 `POST /mcp` 호출; `_meta["claudecode/toolUseId"]` 매칭. | 감사된 JSONL 세션 추적 + 브로커 회상 도구 출력으로 `--resume`. |
 | `codex-cli` | `POST /v1/responses` (`OpenAiResponses`, `Authorization: Bearer ${RELAY_TOKEN}`) | `mcp_servers.relay.bearer_token_env_var="RELAY_TOKEN"`으로 `POST /mcp` 호출; `_meta["callId"]` 매칭. | 감사된 롤아웃 JSONL 추적 + 브로커 회상 도구 출력으로 `codex exec resume`. |
-| `agy-cli` | `POST /v1beta/models/<model>:streamGenerateContent` (`Gemini`, `GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY`) | `bot-init`이 `/work/mcp.agy.template.json`에서 RAM 전용 `/tmp/mcp_config.json`으로 확장한 심볼릭 링크를 통해 `POST /mcp` 호출; 브로커가 `call_mcp_tool` 계획을 `_meta["progressToken"]` 기준 FIFO로 매칭. | 브로커가 `cli-group-*` / `cli-use-*`를 직접 커밋하며, 대기/재개 시 원장 슬롯을 정산하고 렌더링된 대화 기록으로 새 세션을 시작. |
+| `agy-cli` | `POST /v1beta/models/<model>:streamGenerateContent` / `:generateContent` (`Gemini`, `GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY`) | `bot-init`이 `/work/mcp.agy.template.json`에서 RAM 전용 `/tmp/mcp_config.json`으로 확장한 심볼릭 링크를 통해 `POST /mcp` 호출; 브로커가 `call_mcp_tool` 계획을 `_meta["progressToken"]` 기준 FIFO로 매칭. | 브로커가 `cli-group-*` / `cli-use-*`를 직접 커밋하며, 대기/재개 시 원장 슬롯을 정산하고 렌더링된 대화 기록으로 새 세션을 시작. |
 
 모든 CLI 모드에서 브로커는 업스트림 프록시 구간에서만 실제 프로바이더 키를 주입하고, 도구 목록 조회 시에도 활성 claim을 검증하며, 모든 `/mcp` 호출을 브로커가 관찰한 모델 턴과 대조해 결정적 호출 ID를 부여하고, 워커 종료 시 자신이 발급한 토큰만 폐기합니다. ([신뢰성](reliability.md))
 
@@ -102,7 +102,7 @@ VM CLI 모드(`claude-cli`, `codex-cli`, `agy-cli`)에서 워커는 공유 앵�
 | 실패 분류 | 고정 코드 | 발생 조건 |
 |---|---|---|
 | 일시적(Transient) | `rate_limited`, `overloaded`, `network`, `timeout` | HTTP 429(할당량 초과 제외), 5xx, 408, 연결 실패, 타임아웃 |
-| 영구적(Permanent) | `upstream_rejected`, `upstream_auth`, `upstream_redirect`, `invalid_response`, `output_limit`, `refused`, `content_filter` | HTTP 400/404/기타 4xx, 401/403, 3xx, 잘못된 페이로드, `error.code`/`error.type`이 `insufficient_quota`/`quota_exhausted`인 HTTP 429, 출력 잘림(`max_tokens`/`length`), `refusal`, 콘텐츠 필터 |
+| 영구적(Permanent) | `upstream_rejected`, `upstream_auth`, `upstream_redirect`, `invalid_response`, `quota_exhausted`, `context_limit`, `output_limit`, `refused`, `content_filter` | HTTP 400/404/기타 4xx, 401/403, 3xx, 잘못된 페이로드, `error.code`/`error.type == insufficient_quota`인 HTTP 429, Anthropic `model_context_window_exceeded`, 출력 잘림(`max_tokens`/`length`), `refusal`, 콘텐츠 필터 |
 
 오류 본문은 분류 목적으로만 최대 16 KiB까지 읽으며 로그나 저장소에 남기지 않습니다. 로그에는 HTTP 상태와 허용 목록의 고정 사유 코드만 기록합니다. 잘린 도구 호출은 절대 실행하지 않습니다.
 
@@ -118,14 +118,17 @@ VM CLI 모드(`claude-cli`, `codex-cli`, `agy-cli`)에서 워커는 공유 앵�
 | `sandbox.srt.binary`, `work_root`, `extra_path` | `srt` 바이너리와 읽기 전용 도구 설치/작업 루트의 절대 경로. 선택적 `extra_path`는 최대 16개의 호스트 절대 디렉터리(예: `/opt/homebrew/bin`)를 샌드박스 도구의 `PATH`에 추가합니다. |
 | `limits.tool_call_max_secs` | 도구별 `timeout_secs`의 선택적 상한(초 단위; 기본 `60`, 최대 `900`). 상한을 높여도 `timeout_secs`를 생략한 도구의 기본값 60초는 올라가지 않습니다. 활성화 지문에 포함됩니다. ([MCP 도구](plugins.md)) |
 | `embeddings` (`endpoint`, `model`, `secret`, `dimensions`) | 하이브리드 메모리 회상(유니코드 어휘·트라이그램 + 정규화된 IEEE-754 `f16` 코사인 + RRF + 최신성 가중치, 추가 확장 없는 기본 PostgreSQL 사용)을 위한 선택적 OpenAI 호환 `/embeddings` API 설정. 예: `{"endpoint":"https://generativelanguage.googleapis.com/v1beta/openai","model":"gemini-embedding-2","secret":"gemini-api-key","dimensions":3072}`. `dimensions` 기본값은 `3072`(`1..=4096`)이며, `secret`은 루프백 IP 엔드포인트에서만 생략할 수 있고, 미설정 시 어휘 회상으로 폴백합니다. 설정 시 활성화 지문에 포함됩니다. |
-| `memory_judge` (`endpoint`, `model`, `secret`) | 1:1 DM/CLI 사용자 메시지에서 생성 토큰 없이 저장·갱신(`supersedes`)·삭제(`forget`) 여부를 자동 판단하는 선택적 System One 판단 모델 설정. Liquid AI(`{"endpoint":"https://api.liquid.ai/decisions/v1/systemone","model":"d1.2-ultra","secret":"liquid-api-key"}`) 및 TypeSafe Jev(`https://api.typesafe.ai/v1/systemone`, `jev-latest`)를 지원합니다. `secret`은 루프백 IP 엔드포인트에서만 생략 가능하며, 미설정 시 자동 저장은 비활성화됩니다(명시적 `memory.save`/`memory.forget` 도구는 계속 동작). 설정 시 활성화 지문에 포함됩니다. |
+| `memory_judge` (`endpoint`, `model`, `secret`) | 1:1 DM/CLI 사용자 메시지에서 생성 토큰 없이 저장·갱신(`supersede`)·삭제(`forget`) 여부를 자동 판단하는 선택적 System One 판단 모델 설정. Liquid AI(`{"endpoint":"https://api.liquid.ai/decisions/v1/systemone","model":"d1.2-ultra","secret":"liquid-api-key"}`) 및 TypeSafe Jev(`https://api.typesafe.ai/v1/systemone`, `jev-latest`)를 지원합니다. `secret`은 루프백 IP 엔드포인트에서만 생략 가능하며, 미설정 시 자동 저장은 비활성화됩니다(명시적 `memory.save`/`memory.forget` 도구는 계속 동작). 설정 시 활성화 지문에 포함됩니다. |
 | `sandbox.apple.image`, `sandbox.apple.images`, `sandbox.apple.network` | CLI 워커용 다이제스트 고정 VM 이미지와 호스트 전용 네트워크 이름(공유 앵커 VM 1대가 호스트 인터페이스를 유지). `sandbox.apple.images`는 CLI별 키(`claude`, `codex`, `agy`)를 다이제스트 고정 참조에 매핑합니다(`claude`는 `sandbox.apple.image`로 폴백하며 `codex`와 `agy`는 명시적 키가 필요). 활성화 지문에 포함됩니다. |
 | `sandbox.apple.relay_bind` | 선택적 워커 로컬 릴레이 바인드 주소. 기본값은 앵커 VM 게이트웨이 IPv4 + OS 할당 포트이며, 지정 시 해당 게이트웨이 IP와 일치해야 합니다. |
 | `sandbox.apple.work_root` | 선택적 워커 로컬 모델 작업 디렉터리 절대 경로(`0700`). 기본값은 `<tool-root-parent>/work/models`입니다. |
 | `sandbox.apple.instance` | 선택적 워커 로컬 VM 이름 접두사(기본값 `botvm`). |
 | `sandbox.apple.binary` | 선택적 워커 로컬 Apple `container` 바이너리 절대 경로(기본값 `container`). |
-| `bot/<profile>/private-intake` | 프라이빗 DM을 받는 게이트웨이에 필요한 프로필별 지문 키(설정된 도구 러너와 함께 사용). 도구 환경 변수에는 절대 주입되지 않습니다. |
+| `private_egress` | 이미 허용된 이그레스 대상에 대해 로컬 샌드박스 도구가 사용할 선택적 프로필별 `host:port -> IP:port` 매핑. 비어 있지 않으면 활성화 지문에 포함됩니다. |
+| `super_admins` | 실시간 `skill.*` 및 `mcp.*` 작성 도구 사용을 허용할 프로필별 비서비스 사람 주체 목록. 비어 있지 않으면 활성화 지문에 포함됩니다. |
 | `admin.trace`, `admin.logs`, `admin.issues` | OTLP 트레이스/로그 및 Sentry 호환 이슈 익스포터 설정(엔드포인트, 헤더, 시크릿, 레벨, 콘텐츠 플래그, ID 형식, 샘플링 비율). 활성화 지문에 포함되므로 변경·제거 시 구버전 프로세스의 내보내기를 멈추기 위해 재활성화가 필요합니다. ([관리자 및 관측성](admin.md)) |
+
+프라이빗 DM을 받는 게이트웨이에는 `SecretStore` 키 `bot/<profile>/private-intake`(및 설정된 도구 러너)도 필요하며, 이 키는 도구 환경 변수에 절대 주입되지 않습니다.
 
 Rust 어댑터는 릴레이 리스너의 실제 주소에서 `BOT_RELAY_IP`(RFC 1918 IPv4), `BOT_RELAY_PORT`(`1..=65535`) 및 CLI별 릴레이 기본 URL(`claude-cli`는 `ANTHROPIC_BASE_URL`, `codex-cli`는 `model_providers.relay.base_url` / `mcp_servers.relay.url`, `agy-cli`는 `GOOGLE_GEMINI_BASE_URL`)을 호스트 측에서만 파생합니다. 모델 VM은 `bot-init`으로 부팅하고, 앵커 VM은 UID:GID `10001:10001`로 `bot-anchor`를 실행합니다. ([모델 이미지](model-image.md))
 
@@ -151,18 +154,19 @@ flowchart LR
   R <--> DB[(PostgreSQL bot_memories f16)]
   R -->|비신뢰 사용자 블록| M[모델 턴]
   M -->|memory.search/save/forget/share| B[브로커 메모리 게이트]
+  B -->|질의 / 사실 벡터| E
   B <--> DB
   M -->|루트 DM/CLI 완료| F[사람 메시지 필터 + 시크릿 차단]
   F -->|JSON state| J[MemoryJudgeClient /v1/systemone]
   J -->|저장 / 갱신 / 삭제| A[auto_save / auto_forget]
-  A -->|3072d 임베딩 + 비공개 TX| DB
+  A -->|선택적 임베딩 + 비공개 TX| DB
 ```
 
 </details>
 
 - **턴 시작 하이브리드 회상:** `host.json`에 `embeddings`가 설정되면 워커가 미임베딩 행 최대 16건을 지연 백필(SHA-256 경합 안전)하고 질의를 임베딩(기본 `3072`차원, IEEE-754 `f16` `bytea`)한 뒤, 유니코드 트라이그램·ASCII 단어 경계 및 한국어 조사 분리 토큰·코드 ID·zero-alloc `f16` 코사인·z-score 오탐 방지 게이트·RRF·30일 최신성 감쇠로 순위를 매깁니다. `embeddings` 미설정 또는 일시적 API 오류 시 어휘 회상으로 깔끔하게 폴백합니다.
 - **내장 메모리 도구:** `bot init` 기본 템플릿과 예시 프로필에 `memory.search`, `memory.save`, `memory.forget` 권한이 기본 포함되며, `memory.save` 스코프가 허용되면 런타임이 간결한 `## Memory` 지침을 주입합니다. `memory.save`는 1:1 DM/CLI에서 소유자 전용 비공개 항목을 저장(활성 500건 쿼터, 정확 및 `cos >= 0.94` 중복 생략, 비파괴 `supersedes`, 선택적 `policy.approve`)하며, `memory.share`는 `irreversible`로서 항상 소유자의 전문 확인 승인을 요구합니다.
-- **System One 자동 저장(`memory_judge`):** `host.json`에 `memory_judge`(예: Liquid `d1.2-ultra`, TypeSafe `jev-latest`)를 설정하면 워커가 생성 토큰 없는 단일 호출로 인증된 사람의 1:1 DM/CLI 원문 메시지와 본인 회상 비공개 기억만 평가해 저장·갱신(`supersedes`)·삭제(`forget`)·무시 여부를 결정합니다. 로컬 패턴 및 `contains_secret`으로 자격 증명을 차단하고, 모델이 이미 `memory.save`/`memory.forget`을 실행한 턴은 건너뛰며, 새 항목을 3072차원으로 임베딩해 본인 `private` 행으로만 커밋합니다(일시 오류 시 응답을 중단하지 않음).
+- **System One 자동 저장(`memory_judge`):** `host.json`에 `memory_judge`(예: Liquid `d1.2-ultra`, TypeSafe `jev-latest`)를 설정하면 워커가 생성 토큰 없는 호출로 인증된 사람의 1:1 DM/CLI 원문 메시지와 본인 회상 비공개 기억만 평가해 저장·갱신·삭제·무시(`save`, `supersede`, `forget`, `none`; `spans` 미지원 엔드포인트는 HTTP 422 시 폴백) 여부를 결정합니다. 로컬 패턴 및 `contains_secret`으로 자격 증명을 차단하고, 모델이 이미 `memory.save`/`memory.forget`을 실행한 턴은 건너뛰며, `embeddings`가 설정된 경우 새 항목을 임베딩(기본 `3072`차원)해 본인 `private` 행으로만 커밋합니다(일시 오류 시 응답을 중단하지 않음).
 
 ## Rust 워크스페이스 크레이트
 
@@ -172,7 +176,7 @@ flowchart LR
   <img alt="Rust 워크스페이스 크레이트 의존성 그래프 (8개 크레이트)" src="../diagrams/crate-dependencies-light.svg" width="100%">
 </picture>
 
-| 크레이트 | 책임 | 내부 의존성 |
+| 크레이트 | 책임 | 내부 런타임 의존성 |
 |---|---|---|
 | `bot-core` | 공통 ID, 상태 타입, 포트 트레이트, 내장 도구 테이블, 결정적 알고리즘 | 없음 |
 | `bot-profile` | 프로필 탐색, 검증, 번들 패킹, 리비전 생성 | `bot-core` |
@@ -183,6 +187,6 @@ flowchart LR
 | `bot-admin` | Admin API/UI 및 OTLP 트레이스/로그 + Sentry 호환 이슈 익스포터(모든 역할에서 사용) | `bot-core` |
 | `bot-cli` | `bot` 바이너리, 호스트 설정, `SecretStore` 구현, 역할 배선 | 위 7개 전체 |
 
-공통 상위 트레이트가 없는 두 개의 독립된 샌드박스 포트가 존재합니다. `ContainerSandbox`는 모델 VM용 `bot_core::sandbox::Sandbox<ModelSpec>`을 구현하고, `SrtSandbox`는 MCP 도구용 `bot_broker::sandbox::Sandbox`를 구현하며, `bot-cli`가 각 어댑터를 독립적으로 주입합니다.
+중간 6개 크레이트는 런타임 `[dependencies]`에서 서로 의존하지 않습니다(통합 테스트용 `[dev-dependencies]`에서만 동료 크레이트와 `testing` 테스트 더블을 연결). 공통 상위 트레이트가 없는 두 개의 독립된 샌드박스 포트가 존재합니다. `ContainerSandbox`는 모델 VM용 `bot_core::sandbox::Sandbox<ModelSpec>`을 구현하고, `SrtSandbox`는 MCP 도구용 `bot_broker::sandbox::Sandbox`를 구현하며, `bot-cli`가 각 어댑터를 독립적으로 주입합니다.
 
 런타임 환경 변수는 `BOT_` 접두사를 사용하며, 프로필 디렉터리는 `BOT_PROFILES`로 지정합니다. 공개 워크스페이스에는 하드코딩된 프로필 이름, 경로, 비공개 식별자가 없습니다.

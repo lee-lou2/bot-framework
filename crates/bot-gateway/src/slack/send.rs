@@ -158,8 +158,7 @@ fn sendable(body: &ReplyBody) -> bool {
 }
 
 /// Confirms a post only when Slack echoes the target channel, a valid `ts`, and no truncation warning.
-#[doc(hidden)]
-pub fn confirms_post(channel: &str, reply: &Value) -> Option<(String, String)> {
+pub(crate) fn confirms_post(channel: &str, reply: &Value) -> Option<(String, String)> {
     if truncated(reply) {
         return None;
     }

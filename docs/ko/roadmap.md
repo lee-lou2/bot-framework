@@ -60,7 +60,7 @@
 
 ## v2.0 이후 모델 설정
 
-- `providers.<alias>`는 `claude-cli`(기본값 `medium`, 최대 출력 토큰 8,192), `anthropic-api`, `openai-api` 전반에서 `effort`를 지원하며, `max_tokens`(`openai-api`에서는 `max_completion_tokens` 포함)를 지원합니다. 향후 호스트 상한 내에서 에이전트별 `effort` 및 출력 토큰 재정의를 추가할 예정입니다.
+- `providers.<alias>`는 VM CLI(`claude-cli`, `codex-cli`, `agy-cli`, 기본값 `medium`; `claude-cli`는 최대 출력 토큰 8,192 설정), `anthropic-api`, `openai-api` 전반에서 `effort`를 지원하며, `max_tokens`(`openai-api`에서는 `max_completion_tokens` 포함)를 지원합니다. 향후 호스트 상한 내에서 에이전트별 `effort` 및 출력 토큰 재정의를 추가할 예정입니다.
 - Pi CLI(`kind: "pi"`)는 v2.0에서 미지원입니다. 미사용 러너 코드는 제거되었고(Git 히스토리에 보존), 격리·재개·세션 토큰 경계가 검증될 때까지 호스트 설정에서 `kind: "pi"`는 계속 거부됩니다.
 
 ## 시간 라이브러리 마이그레이션
@@ -82,10 +82,10 @@
 | 멀티턴 주기적 메모리 통합·요약 | 단일 턴 하이브리드 회상(`embeddings`, 3072d `f16`), 명시적 `memory.search`/`save`/`forget`, 선택적 System One(`memory_judge`: `d1.2-ultra`/`jev-latest`) 자동 저장은 구현 완료되었습니다. 세션을 가로지르는 주기적 요약·병합은 별도 LLM 비용과 충돌 해소 정책이 필요합니다. | 활성 개인/팀 메모리가 500건 상한에 자주 도달해 주기적 압축이 필요해질 때. |
 | `bot eval`(오프라인 프로필 평가) | 프로덕션 바이너리에서 `testing` 테스트 대역을 제외하는 경계(선택적 피처 vs 별도 크레이트)와 맞물립니다. 현재는 `bot validate`와 `bot map --json` diff로 스코프/도구 회귀를 잡습니다. | DB나 외부 API 없이 시나리오별 권한·승인·거부 경로를 검증하려는 반복적 CI 수요가 생길 때. |
 | `bot validate --json` | 프로필 검증은 안정된 `Issue.code`를 내지만 호스트 설정 오류는 아직 자유 형식 문자열입니다. 버전이 지정된 JSON 스키마와 호스트 오류 코드 계약이 먼저 필요합니다. | 에디터나 CI 파이프라인에서 기계 판독 가능한 검증 출력이 필요할 때. |
-| `host.schema.json` | 호스트 검증은 9개 모듈에 걸친 의미·경로·지문 검사가 대부분이며, `.github/scripts/docs_contract.py`가 이미 문서화된 키를 지킵니다. 지금 스키마 우선 파싱으로 재작성하면 비용 대비 효과가 낮습니다. | 외부 도구에서 `host.json` 자동 완성/스키마 검증을 요구하거나 중복 키 파서를 통합할 때. |
+| `host.schema.json` | 호스트 검증은 10개 모듈에 걸친 의미·경로·지문 검사가 대부분이며, `.github/scripts/docs_contract.py`가 이미 문서화된 키를 지킵니다. 지금 스키마 우선 파싱으로 재작성하면 비용 대비 효과가 낮습니다. | 외부 도구에서 `host.json` 자동 완성/스키마 검증을 요구하거나 중복 키 파서를 통합할 때. |
 | 포트 적합성(conformance) 테스트킷 | 브로커 테스트 대역이 순환 의존성 제약에 걸립니다. `bot-core` 페이크와 공통 PG 적합성 매크로를 추출하려면 여러 크레이트에 걸친 테스트 재구성이 필요합니다. | 페이크 스토어와 PostgreSQL 간 불일치가 반복되거나 두 번째 영속 백엔드를 추가할 때. |
 | Clippy 함수 길이 임계값 | `.github/scripts/check_contracts.py`가 이미 파일 600줄 상한을 강제합니다. `clippy.toml` 길이·복잡도 임계값을 켜려면 기존 함수에 대한 단계적 조임 계획이 필요합니다. | 600줄 파일 안의 과도하게 긴 단일 함수가 반복적인 리뷰 병목이 될 때. |
-| Linux용 모델 VM | Linux 호스트는 VM 없는 직접 API(`anthropic-api`, `openai-api`)를 실행할 수 있습니다. Linux `claude-cli` VM 어댑터에는 전용 격리·네트워크 차단·재개 검증이 필요합니다. | 직접 API 대신 Linux에서 로컬 `claude-cli`를 실행해야 할 운영 요구가 확정될 때. |
+| Linux용 모델 VM | Linux 호스트는 VM 없는 직접 API(`anthropic-api`, `openai-api`)를 실행할 수 있습니다. Linux용 VM CLI 어댑터(`claude-cli`, `codex-cli`, `agy-cli`)에는 전용 격리·네트워크 차단·재개 검증이 필요합니다. | 직접 API 대신 Linux에서 로컬 VM CLI 어댑터를 실행해야 할 운영 요구가 확정될 때. |
 | 외부 MCP 클라이언트 라이브러리 | 자체 클라이언트(`crates/bot-broker/src/mcp.rs`, `crates/bot-broker/src/mcp/`)는 크기·헤더·스키마 해시 고정 강화 테스트를 통과합니다. 외부 크레이트가 이 보장을 유지하는지 검증된 스파이크가 아직 없습니다. | 새 MCP 전송/인증/버전 추적이 내부 클라이언트 유지 비용을 넘을 때(기존 강화 테스트 통과가 전제). |
 | 데이터 보존/정리 정책 | 감사 체인, 열린 보류, 멱등성 키, 참조 중인 리비전을 성급히 삭제하면 중복 실행이나 감사 손상이 발생합니다. 테이블별 경계와 재전달 안전성 증명이 필요합니다. | 완료된 실행·체크포인트·아웃박스 증가가 DB 용량이나 조회 지연에 측정 가능한 영향을 줄 때(미참조 종료 행 드라이런 집계부터 시작). |
-| 점진적 스킬 본문 로딩 | 스킬 본문을 지연 로딩하면 읽기 경계, 스캔 한도, 리비전 해싱이 달라집니다. 현재는 `SKILL.md` 프런트매터 `description`을 구조체에 유지하고 에이전트당 64 KiB 상한(`crates/bot-runtime/src/context.rs`) 안에서 본문을 주입하는 방식으로 충분합니다. | 에이전트가 64 KiB 스킬 본문 상한에 자주 도달하고 측정 데이터가 요약 우선 지연 로딩을 정당화할 때. |
+| 점진적 스킬 본문 로딩 | 스킬 본문을 지연 로딩하면 읽기 경계, 스캔 한도, 리비전 해싱이 달라집니다. 현재는 `SKILL.md` 프런트매터 `description`을 구조체에 유지하고 `crates/bot-profile/src/{limits,parse,build}.rs`에서 64 KiB 상한을 강제한 뒤 `crates/bot-runtime/src/context.rs`에서 본문을 주입하는 방식으로 충분합니다. | 에이전트가 64 KiB 스킬 본문 상한에 자주 도달하고 측정 데이터가 요약 우선 지연 로딩을 정당화할 때. |

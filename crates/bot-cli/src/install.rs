@@ -269,7 +269,8 @@ impl Installs {
         self.items.get(alias)
     }
 
-    pub fn aliases(&self) -> impl Iterator<Item = &String> {
+    #[cfg(test)]
+    pub(crate) fn aliases(&self) -> impl Iterator<Item = &String> {
         self.items.keys()
     }
 

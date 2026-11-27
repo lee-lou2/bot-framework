@@ -29,8 +29,8 @@ impl KeychainStore {
         }
     }
 
-    #[cfg(any(test, feature = "testing"))]
-    pub fn with_program(program: PathBuf) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_program(program: PathBuf) -> Self {
         Self { program }
     }
 

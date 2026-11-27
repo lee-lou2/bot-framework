@@ -191,6 +191,7 @@ impl Store {
                 .await?
                 .ok_or(Error::Missing)?;
                 if old.get::<String, _>("owner") != principal
+                    || old.get::<String, _>("visibility") != "private"
                     || !lineage(&agent).contains(&old.get::<String, _>("agent"))
                 {
                     return Err(Error::Denied.into());

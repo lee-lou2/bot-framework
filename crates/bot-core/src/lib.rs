@@ -5,8 +5,8 @@
 //! | Category | Modules |
 //! |---|---|
 //! | Data vocabulary | `id`, `command`, `state`, `profile`, `identity`, `grant`, `pass`, `mcp`, `install`, `attachments`, `builtin`, `memory` |
-//! | Port traits | `port` (core), `active`, `ledger`, `intake`, `schedule`, `manage`, `admin`, `trace`, `issue`, `sandbox` (model VM), `memory` (`Embedder`) |
-//! | Adapter contracts | `slack`, `cards` (owner-DM approval cards), `api` (OpenAI-compatible ingress), `cli` (Claude CLI invocation, not CLI ingress) |
+//! | Port traits | `port` (core), `active`, `ledger`, `intake`, `schedule`, `manage`, `admin`, `trace`, `issue`, `sandbox` (model VM), `memory` (`Embedder`, `MemoryJudge`) |
+//! | Adapter contracts | `slack`, `cards` (owner-DM approval cards), `api` (OpenAI-compatible ingress), `cli` (VM model CLI invocation, not CLI ingress) |
 //! | Bit-exact algorithms | `cron`, `canon` (RFC 8785), `json` (strict parser), `scope`, `random`, `redact` |
 //!
 //! `tool_env` is private; `forbidden_env_name` is re-exported from `profile`.

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 660" width="1120" height="660" role="img" aria-labelledby="t-pt-d d-pt-d">
   <title id="t-pt-d">Bot Framework Model Execution Paths Comparison</title>
-  <desc id="d-pt-d">Compares the recommended Direct API path (anthropic-api, openai-api) and the disposable Apple container VM path (claude-cli) for isolated file reads — both block secret exposure and route every tool call through Broker::call.</desc>
+  <desc id="d-pt-d">Compares the recommended Direct API path (anthropic-api, openai-api) and the disposable Apple container VM path (claude-cli, codex-cli, agy-cli) for CLI harnesses and optional isolated file reads — both block secret exposure and route every tool call through Broker::call.</desc>
   <style>
     .bg { fill: #1c212c; }
     .frame { fill: #1c212c; stroke: #343d50; stroke-width: 1; }
@@ -154,8 +154,8 @@
         <text x="916" y="114" class="ttl-sm">MCP · Built-ins</text>
         <line x1="916" y1="124" x2="1060" y2="124" class="div"/>
         <text x="916" y="142" class="sub">srt sandbox · Remote MCP</text>
-        <text x="916" y="158" class="mono">memory.* · schedule.*</text>
-        <text x="916" y="174" class="mono">delegate (no read)</text>
+        <text x="916" y="158" class="mono">memory/schedule/skill/mcp</text>
+        <text x="916" y="174" class="mono">delegate · pass (no read)</text>
       </g>
 
       <!-- PATH B NODES -->
@@ -193,8 +193,8 @@
         <text x="916" y="338" class="ttl-sm">MCP · Built-ins</text>
         <line x1="916" y1="348" x2="1060" y2="348" class="div"/>
         <text x="916" y="366" class="sub">srt sandbox · Remote MCP</text>
-        <text x="916" y="382" class="mono">memory.* · schedule.*</text>
-        <text x="916" y="398" class="mono">delegate + isolated read</text>
+        <text x="916" y="382" class="mono">memory/schedule/skill/mcp</text>
+        <text x="916" y="398" class="mono">delegate · read (claude)</text>
       </g>
     </g>
 
@@ -203,7 +203,7 @@
   <line x1="24" y1="596" x2="24" y2="644" class="bar"/>
   <text x="34" y="606" class="fk">WHEN TO CHOOSE</text>
   <text x="34" y="625" class="fv">Use Direct API by default for chat &amp; tools</text>
-  <text x="34" y="641" class="fv">Use Disposable VM when workspace read is needed</text>
+  <text x="34" y="641" class="fv">Use Disposable VM for CLI harnesses or read</text>
   <line x1="296" y1="596" x2="296" y2="644" class="bar-acc"/>
   <text x="306" y="606" class="fk-acc">SHARED BROKER GATE</text>
   <text x="306" y="625" class="fv">Both paths share Broker::call for tool auth,</text>

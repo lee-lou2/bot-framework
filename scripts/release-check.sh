@@ -497,7 +497,7 @@ step_selftest() {
   fi
   local code=0 file
   export RELEASE_CHECK_IN_SELFTEST=1
-  for file in test_private_terms_check.py test_check_contracts.py test_check_docs.py test_parity_audit.py test_integration_list.py test_release_check.py test_release_check_integration.py test_openai_sdk_results.py; do
+  for file in test_private_terms_check.py test_check_contracts.py test_check_workspace_contracts.py test_check_docs.py test_parity_audit.py test_integration_list.py test_release_check.py test_release_check_integration.py test_openai_sdk_results.py; do
     xs "python3 scripts/$file" python3 -I "$here/$file" || code=1
   done
   return $code

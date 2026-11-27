@@ -1,8 +1,8 @@
 //! `SecretStore` backends (env, macOS Keychain, SOPS) scoped strictly to `bot/<profile>/<name>`.
 // Values only travel inside opaque `SecretValue`; errors carry name/class only, never values.
 pub mod admin;
-pub mod env;
-pub mod keychain;
+pub(crate) mod env;
+mod keychain;
 pub mod sops;
 
 use crate::settings::SecretsKind;

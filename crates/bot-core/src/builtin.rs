@@ -260,3 +260,8 @@ pub fn card_body(id: &str) -> CardBody {
         _ => CardBody::None,
     }
 }
+
+/// Approvals whose rendered card carries private memory text or an outbound draft (visible only to requester == approver).
+pub fn owner_only_card(id: &str) -> bool {
+    card_body(id) != CardBody::None || id == MEMORY_SAVE_TOOL
+}

@@ -1,17 +1,20 @@
-"""Documents must name what the code defines, and what they cite must exist.
+"""Documents must name what the code defines, what they cite must exist, and Korean companion docs must stay in sync.
 
 Checked from the repository root (`python3 -I .github/scripts/docs_contract.py`, or `check_docs()` in check_contracts.py):
   schema   every property of schemas/v1/*.json appears in the documents
   host     every host-settings key the Rust code accepts is written as code (in backticks or a code block) in the documents, so a common word in prose
            (`state`, `name`) does not count. The keys are read from the files of HOST_READERS, each by the way it rejects the rest: `top.remove("key")`,
-           `only(map, &["key"], path)`, `matches!(key.as_str(), "key")`, `match key.as_str() { "key" => … }` and the fields of `#[derive(Deserialize)]`
-           structs. A reader in another file is not seen until it is added there (the selftest fails when a file that rejects unknown keys is not listed)
+           `map.remove("key")`, `only(map, &["key"], path)`, `matches!(key.as_str(), "key")`, `match key.as_str() { "key" => … }` and the fields of
+           `#[derive(Deserialize)]` structs. A reader in another file is not seen until it is added there (the selftest fails when a file that rejects
+           unknown keys is not listed)
   cli      every `bot` subcommand and `--flag` defined in crates/bot-cli/src/cli.rs appears in the documents
   route    every admin API route (`/v1/admin/…`) registered in crates/bot-admin/src/lib.rs appears in docs/admin.md
   tool     every reserved built-in tool id appears in the documents
-  crate    the crate tables of docs/architecture.md and AGENTS.md list exactly the workspace members
-  path     every repository path in backticks (`file.rs`, `file.rs:12`, `file.rs:12-20`), every relative link and every `#anchor` in the documents exists;
-           code blocks are not read
+  crate    the crate tables of docs/architecture.md, docs/ko/architecture.md and AGENTS.md list exactly the workspace members
+  path     every repository path in backticks (`file.rs`, `file.rs:12`, `file.rs:12-20`), every relative link, every HTML `src`/`srcset` image path and
+           every `#anchor` in English and Korean documents exists; code blocks are not read
+  ko-*     Korean companion editions (`README.ko.md`, `docs/ko/*.md`) match English docs 1:1 in files, heading structure, anchored link counts,
+           non-English cross-links, and schema/host/cli/route/tool/crate coverage
 What it cannot see: whether a sentence is still true, and (for schema, cli and tool names) whether a common name is documented for the right thing,
 because those names are looked up anywhere in the documents. A reviewer checks the sentences.
 
@@ -20,25 +23,44 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from urllib.parse import unquote
 
 ALLOW_FILE = Path(".github/docs-allow.txt")
 PATH_ROOTS = ("crates/", "docs/", "schemas/", "scripts/", "examples/", ".github/", "images/")
 ADMIN_ROUTES_FILE = "crates/bot-admin/src/lib.rs"
 BUILTIN_TOOLS_FILE = "crates/bot-core/src/builtin.rs"
 FENCE = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.S | re.M)
+SCHEME = re.compile(r"[a-z][a-z0-9+.-]*:")
+MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+HTML_MEDIA = re.compile(r'\b(src|srcset)="([^"]+)"')
 
 
 def read(root, relative):
     return (root / relative).read_text(encoding="utf-8")
 
 
-def doc_files(root):
+def en_doc_files(root):
     return sorted((root / "docs").glob("*.md")) + [p for p in (root / "README.md", root / "AGENTS.md") if p.is_file()]
 
 
+def ko_doc_files(root):
+    ko_dir = root / "docs/ko"
+    docs = sorted(ko_dir.glob("*.md")) if ko_dir.is_dir() else []
+    return docs + [p for p in (root / "README.ko.md",) if p.is_file()]
+
+
+def doc_files(root):
+    return en_doc_files(root) + ko_doc_files(root)
+
+
 def corpus(root):
-    """The text the names are looked up in: docs/*.md and README.md."""
-    return "\n".join(p.read_text(encoding="utf-8") for p in doc_files(root) if p.name != "AGENTS.md")
+    """The text the names are looked up in: English docs/*.md and README.md."""
+    return "\n".join(p.read_text(encoding="utf-8") for p in en_doc_files(root) if p.name != "AGENTS.md")
+
+
+def ko_corpus(root):
+    """The Korean companion text: docs/ko/*.md and README.ko.md."""
+    return "\n".join(p.read_text(encoding="utf-8") for p in ko_doc_files(root))
 
 
 def mentioned(name, text):
@@ -51,9 +73,9 @@ def code_text(text):
     return "\n".join(FENCE.findall(text) + re.findall(r"`[^`\n]+`", FENCE.sub("", text)))
 
 
-def missing(kind, names, text, where, how="mentioned"):
+def missing(kind, names, text, where, how="mentioned", label="documents"):
     """One problem per name the text does not mention (`how` says in what form); `where` says what defines it."""
-    return [(kind, name, f"`{name}` ({where(name)}) is not {how} in the documents") for name in sorted(names) if not mentioned(name, text)]
+    return [(kind, name, f"`{name}` ({where(name)}) is not {how} in the {label}") for name in sorted(names) if not mentioned(name, text)]
 
 
 # ---- what the code defines ---------------------------------------------------------------------------------------------------------------------------------
@@ -83,15 +105,34 @@ def non_test_text(text):
 
 
 def code_chars(text, start=0):
-    """(index, character) of the characters outside string literals."""
-    i = start
-    while i < len(text):
-        if text[i] == '"':
+    """(index, character) of the characters outside string literals, char literals, and Rust comments."""
+    i, n = start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            nl = text.find("\n", i + 2)
+            i = n if nl == -1 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if ch == '"':
             i += 1
-            while i < len(text) and text[i] != '"':
+            while i < n and text[i] != '"':
                 i += 2 if text[i] == "\\" else 1
-        else:
-            yield i, text[i]
+            i += 1
+            continue
+        if ch == "'":
+            if i + 2 < n and text[i + 1] != "\\" and text[i + 2] == "'":
+                i += 3
+                continue
+            if i + 1 < n and text[i + 1] == "\\":
+                end = text.find("'", i + 2)
+                if end != -1 and "\n" not in text[i:end]:
+                    i = end + 1
+                    continue
+        yield i, ch
         i += 1
 
 
@@ -122,8 +163,8 @@ def literals(text):
 
 
 def removed_keys(text):
-    """Top-level keys: `top.remove("key")`."""
-    return re.findall(r'top\.remove\("([^"]+)"\)', text)
+    """Keys extracted via `top.remove("key")` or `map.remove("key")`."""
+    return re.findall(r'\b(?:top|map)\.remove\("([^"]+)"\)', text)
 
 
 def only_lists(text):
@@ -134,8 +175,9 @@ def only_lists(text):
 
 
 def matched_keys(text):
-    """Keys tested with `matches!(key.as_str(), "a" | "b")`."""
-    return [key for found in re.finditer(r'matches!\(\s*\w+\.as_str\(\),\s*((?:"[^"\n]*"\s*\|?\s*)+)\)', text) for key in literals(found.group(1))]
+    """Keys tested with `matches!(key.as_str(), "a" | "b")` (allowing optional leading `|` and trailing `,`)."""
+    pattern = r'matches!\(\s*\w+\.as_str\(\),\s*(?:\|\s*)?((?:"[^"\n]*"\s*(?:\|\s*)?)+),?\s*\)'
+    return [key for found in re.finditer(pattern, text) for key in literals(found.group(1))]
 
 
 def match_arms(text):
@@ -162,7 +204,7 @@ def serde_fields(text):
 
 # The readers of the host settings: how a file lists the keys it accepts, and the files. A new reader is added here (its file by its idiom).
 HOST_READERS = (
-    (removed_keys, ("crates/bot-cli/src/host.rs",)),
+    (removed_keys, ("crates/bot-cli/src/host.rs", "crates/bot-gateway/src/host/openai.rs")),
     (only_lists, ("crates/bot-cli/src/execution.rs", "crates/bot-cli/src/execution/provider.rs", "crates/bot-cli/src/embeddings.rs", "crates/bot-cli/src/memory_judge.rs", "crates/bot-admin/src/settings.rs")),
     (matched_keys, ("crates/bot-cli/src/install.rs",)),
     (match_arms, ("crates/bot-cli/src/tool_limits.rs",)),
@@ -186,7 +228,7 @@ def kebab(name):
 
 def cli_commands(root):
     """(`bot` subcommand paths like `add skill`, flags like `--check-db`) from the clap definitions."""
-    text = read(root, "crates/bot-cli/src/cli.rs")
+    text = non_test_text(read(root, "crates/bot-cli/src/cli.rs"))
     enums = {m.group(1): m.group(2) for m in re.finditer(r"#\[derive\([^)]*Subcommand[^)]*\)\]\s*pub enum (\w+) \{(.*?)\n\}", text, re.S)}
     structs = {m.group(1): m.group(2) for m in re.finditer(r"#\[derive\([^)]*Args[^)]*\)\]\s*pub struct (\w+) \{(.*?)\n\}", text, re.S)}
     commands = set()
@@ -215,7 +257,8 @@ def cli_commands(root):
 
 def admin_routes(root):
     """The API routes; the static `/ui` routes serve files, not a contract."""
-    return sorted({route for route in re.findall(r'\.route\(\s*"([^"]+)"', read(root, ADMIN_ROUTES_FILE)) if route.startswith("/v1/admin/")})
+    text = non_test_text(read(root, ADMIN_ROUTES_FILE))
+    return sorted({route for route in re.findall(r'\.route\(\s*"([^"]+)"', text) if route.startswith("/v1/admin/")})
 
 
 def reserved_tools(root):
@@ -235,25 +278,33 @@ def table_crates(text):
     return set(re.findall(r"^\|\s*`?(bot-[a-z0-9-]+)`?\s*\|", text, re.M))
 
 
-# ---- paths, links and anchors ------------------------------------------------------------------------------------------------------------------------------
+# ---- paths, links, headings and Korean companion parity ----------------------------------------------------------------------------------------------------
 def slug(heading):
     """GitHub's anchor for a heading: lower case, punctuation dropped, spaces to hyphens."""
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading)
     return re.sub(r"[^\w\- ]", "", text.strip().lower()).replace(" ", "-")
 
 
+def headings(text):
+    """List of (level, title) pairs for markdown headings outside fenced code blocks."""
+    found, in_fence = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        heading = None if in_fence else re.match(r"(#{1,6})\s+(.*?)\s*#*\s*$", line)
+        if heading:
+            found.append((len(heading.group(1)), heading.group(2)))
+    return found
+
+
 def anchors(text):
     seen, found = {}, set()
-    in_fence = False
-    for line in text.splitlines():
-        if line.startswith("```"):
-            in_fence = not in_fence
-        heading = None if in_fence else re.match(r"#{1,6}\s+(.*?)\s*#*\s*$", line)
-        if heading:
-            base = slug(heading.group(1))
-            count = seen.get(base, 0)
-            seen[base] = count + 1
-            found.add(base if count == 0 else f"{base}-{count}")
+    for _, title in headings(text):
+        base = slug(title)
+        count = seen.get(base, 0)
+        seen[base] = count + 1
+        found.add(base if count == 0 else f"{base}-{count}")
     return found
 
 
@@ -265,7 +316,7 @@ def expand_braces(token):
 
 
 def path_problems(root, doc):
-    """Repository paths in backticks, relative links and `#anchor`s of one document that point at nothing."""
+    """Repository paths in backticks, relative links, HTML `src`/`srcset` media refs and `#anchor`s of one document that point at nothing."""
     text = FENCE.sub("", doc.read_text(encoding="utf-8"))
     name = str(doc.relative_to(root))
     problems = []
@@ -276,15 +327,85 @@ def path_problems(root, doc):
             path = re.sub(r"(?::\d+(?:-\d+)?)?(?:#.*)?$", "", candidate).rstrip("/")
             if path and not (root / path).exists():
                 problems.append(("path", path, f"{name}: `{path}` does not exist"))
-    for target in sorted(set(re.findall(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)", text))):
-        if re.match(r"[a-z][a-z0-9+.-]*:", target):
+    for target in sorted(set(MD_LINK.findall(text))):
+        if SCHEME.match(target):
             continue
         file, _, anchor = target.partition("#")
-        linked = doc if not file else (doc.parent / file).resolve()
+        linked = doc if not file else (doc.parent / unquote(file)).resolve()
         if file and not linked.exists():
             problems.append(("path", file, f"{name}: link `{target}` points at a missing file"))
-        elif anchor and linked.suffix == ".md" and anchor not in anchors(linked.read_text(encoding="utf-8")):
+        elif anchor and linked.suffix == ".md" and unquote(anchor) not in anchors(linked.read_text(encoding="utf-8")):
             problems.append(("path", target, f"{name}: link `{target}` points at a missing heading"))
+    for attr, value in HTML_MEDIA.findall(text):
+        entries = value.split(",") if attr == "srcset" else [value]
+        for entry in entries:
+            ref = entry.strip().split()[0] if entry.strip() else ""
+            if not ref or SCHEME.match(ref):
+                continue
+            ref_file = unquote(ref.partition("#")[0].partition("?")[0])
+            if ref_file and not (doc.parent / ref_file).resolve().exists():
+                problems.append(("path", ref_file, f"{name}: `{attr}` `{ref}` points at a missing file"))
+    return problems
+
+
+def ko_parity_problems(root, props, keys, cmds, flags, routes, tools, members):
+    """Verify Korean companion docs mirror English docs in file list, structure, links, and code contracts."""
+    problems = []
+    pairs = []
+    if (root / "README.md").is_file():
+        if (root / "README.ko.md").is_file():
+            pairs.append((root / "README.md", root / "README.ko.md"))
+        else:
+            problems.append(("ko-sync", "README.ko.md", "README.ko.md is missing (Korean companion for README.md)"))
+    en_docs = {p.name: p for p in sorted((root / "docs").glob("*.md"))}
+    ko_dir = root / "docs/ko"
+    ko_docs = {p.name: p for p in sorted(ko_dir.glob("*.md"))} if ko_dir.is_dir() else {}
+    for name in sorted(set(en_docs) - set(ko_docs)):
+        problems.append(("ko-sync", f"docs/ko/{name}", f"docs/ko/{name} is missing (Korean companion for docs/{name})"))
+    for name in sorted(set(ko_docs) - set(en_docs)):
+        problems.append(("ko-sync", f"docs/ko/{name}", f"docs/ko/{name} has no English counterpart docs/{name}"))
+    for name in sorted(set(en_docs) & set(ko_docs)):
+        pairs.append((en_docs[name], ko_docs[name]))
+    resolved_root = root.resolve()
+    for en_path, ko_path in pairs:
+        en_rel, ko_rel = str(en_path.relative_to(root)), str(ko_path.relative_to(root))
+        en_raw, ko_raw = en_path.read_text(encoding="utf-8"), ko_path.read_text(encoding="utf-8")
+        en_levels = [lvl for lvl, _ in headings(en_raw)]
+        ko_levels = [lvl for lvl, _ in headings(ko_raw)]
+        if en_levels != ko_levels:
+            problems.append(("ko-sync", ko_rel, f"{ko_rel}: heading structure differs from {en_rel} ({len(ko_levels)} vs {len(en_levels)} headings)"))
+        en_body, ko_body = FENCE.sub("", en_raw), FENCE.sub("", ko_raw)
+        en_anchors = [t for t in MD_LINK.findall(en_body) if not SCHEME.match(t) and "#" in t]
+        ko_anchors = [t for t in MD_LINK.findall(ko_body) if not SCHEME.match(t) and "#" in t]
+        if len(en_anchors) != len(ko_anchors):
+            problems.append(("ko-sync", ko_rel, f"{ko_rel}: anchored link count differs from {en_rel} ({len(ko_anchors)} vs {len(en_anchors)})"))
+        for target in sorted(set(MD_LINK.findall(ko_body))):
+            if SCHEME.match(target):
+                continue
+            file, _, _ = target.partition("#")
+            if not file.endswith(".md"):
+                continue
+            resolved = (ko_path.parent / unquote(file)).resolve()
+            if resolved == en_path.resolve():
+                continue
+            try:
+                rel = resolved.relative_to(resolved_root)
+            except ValueError:
+                continue
+            if rel == Path("README.md") or (rel.parts[:1] == ("docs",) and rel.parts[:2] != ("docs", "ko")):
+                problems.append(("ko-sync", f"{ko_rel}->{target}", f"{ko_rel}: links to English doc `{target}` instead of Korean companion"))
+    if ko_doc_files(root):
+        ko_text = ko_corpus(root)
+        problems += missing("ko-schema", props, ko_text, lambda n: "schemas/v1/" + ", ".join(sorted(props[n])), label="Korean documents")
+        problems += missing("ko-host", keys, code_text(ko_text), lambda n: keys[n], "written as code", label="Korean documents")
+        problems += missing("ko-cli", cmds, ko_text, lambda _: "crates/bot-cli/src/cli.rs", label="Korean documents")
+        problems += missing("ko-cli", flags, ko_text, lambda _: "crates/bot-cli/src/cli.rs", label="Korean documents")
+        problems += missing("ko-tool", tools, ko_text, lambda _: BUILTIN_TOOLS_FILE, label="Korean documents")
+        if (root / "docs/ko/admin.md").is_file():
+            problems += missing("ko-route", routes, read(root, "docs/ko/admin.md"), lambda _: ADMIN_ROUTES_FILE, label="docs/ko/admin.md")
+        if (root / "docs/ko/architecture.md").is_file():
+            listed = table_crates(read(root, "docs/ko/architecture.md"))
+            problems += [("ko-crate", c, f"docs/ko/architecture.md: crate table and Cargo.toml members differ at `{c}`") for c in sorted(listed ^ members)]
     return problems
 
 
@@ -313,7 +434,7 @@ def filter_allowed(problems, allowed):
 
 # ---- the check ---------------------------------------------------------------------------------------------------------------------------------------------
 def docs_problems(root):
-    """(kind, token, message) for everything the documents lack or cite wrongly."""
+    """(kind, token, message) for everything the documents lack, cite wrongly, or drift on across EN/KO."""
     text = corpus(root)
     problems = []
     props = schema_properties(root)
@@ -321,17 +442,20 @@ def docs_problems(root):
     keys = host_keys(root)
     problems += missing("host", keys, code_text(text), lambda name: keys[name], "written as code")
     commands, flags = cli_commands(root)
-    problems += missing("cli", {f"bot {c}" if " " not in c else c for c in commands}, text, lambda _: "crates/bot-cli/src/cli.rs")
+    cmd_tokens = {f"bot {c}" if " " not in c else c for c in commands}
+    problems += missing("cli", cmd_tokens, text, lambda _: "crates/bot-cli/src/cli.rs")
     problems += missing("cli", flags, text, lambda _: "crates/bot-cli/src/cli.rs")
-    admin = read(root, "docs/admin.md")
-    problems += missing("route", admin_routes(root), admin, lambda _: ADMIN_ROUTES_FILE)
-    problems += missing("tool", reserved_tools(root), text, lambda _: BUILTIN_TOOLS_FILE)
+    routes = admin_routes(root)
+    problems += missing("route", routes, read(root, "docs/admin.md"), lambda _: ADMIN_ROUTES_FILE)
+    tools = reserved_tools(root)
+    problems += missing("tool", tools, text, lambda _: BUILTIN_TOOLS_FILE)
     members = workspace_crates(root)
     for name in ("docs/architecture.md", "AGENTS.md"):
         listed = table_crates(read(root, name))
         problems += [("crate", crate, f"{name}: crate table and Cargo.toml members differ at `{crate}`") for crate in sorted(listed ^ members)]
     for doc in doc_files(root):
         problems += path_problems(root, doc)
+    problems += ko_parity_problems(root, props, keys, cmd_tokens, flags, routes, tools, members)
     return problems
 
 

@@ -3,7 +3,7 @@
 //! Each socket serves one authenticated `(profile, workspace)` installation with no cross-profile fallback; startup
 //! rejects two profiles sharing the same app token because Slack splits events across connections.
 pub mod api;
-pub mod blocks;
+pub(crate) mod blocks;
 pub mod cards;
 pub mod creds;
 mod events;
@@ -49,6 +49,7 @@ pub struct SlackGateway {
     ingress: Arc<Ingress>,
     broker: Arc<dyn Broker>,
     ledger: Arc<dyn CallLedger>,
+    #[cfg(any(test, feature = "testing"))]
     secrets: Arc<dyn SecretStore>,
     creds: Arc<Credentials>,
     api: SlackApi,
@@ -75,6 +76,7 @@ impl SlackGateway {
             ingress,
             broker,
             ledger,
+            #[cfg(any(test, feature = "testing"))]
             secrets,
             creds,
             api,
@@ -97,7 +99,7 @@ impl SlackGateway {
         self
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn with_ux_timing(
         mut self,
@@ -113,7 +115,7 @@ impl SlackGateway {
         self
     }
 
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn with_token_ttl(mut self, ttl: Duration) -> Self {
         self.creds = Arc::new(

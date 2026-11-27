@@ -8,9 +8,9 @@ Short answers to the recurring "why" questions behind this design. Exact contrac
 
 ## Why isolate only the model in a VM?
 
-The model is the least trustworthy component because it reads user messages and untrusted external content (prompt injection). When running a local model process (`claude-cli`), only that process runs inside a disposable VM with zero secrets (the host broker holds the provider key; the VM gets only a session token) and a single egress route through the broker relay. Even if tricked, it has no keys to steal and nowhere to exfiltrate data.
+The model is the least trustworthy component because it reads user messages and untrusted external content (prompt injection). When running a local model process (`claude-cli`, `codex-cli`, `agy-cli`), only that process runs inside a disposable VM with zero secrets (the host broker holds the provider key; the VM gets only a session token) and a single egress route through the broker relay. Even if tricked, it has no keys to steal and nowhere to exfiltrate data.
 
-Agents that do not need workspace files use direct APIs (`anthropic-api`, `openai-api`): there is no model process to contain, the worker attaches the provider key only when calling upstream, the model has no host filesystem or shell, and every tool call still goes through the broker. ([Model Image](model-image.md) · [Security](security.md))
+Agents that do not need a CLI harness or isolated workspace file reads use direct APIs (`anthropic-api`, `openai-api`): there is no model process to contain, the worker attaches the provider key only when calling upstream, the model has no host filesystem or shell, and every tool call still goes through the broker. ([Model Image](model-image.md) · [Security](security.md))
 
 ## Why not put the entire bot in one container?
 
@@ -40,7 +40,7 @@ Irreversible side effects (external messages, deletions, writes) require out-of-
 
 ## Why disable shell, file-write, and web tools on the model?
 
-They are off by default to minimize attack surface. Even in the `claude-cli` VM, only isolation-backed `read` can be opted into (direct API runners expose no built-in file tools). Wrap any needed capability as an explicitly reviewed tool instead. ([Profile Spec](profile-spec.md))
+They are off by default to minimize attack surface. Only `claude-cli` VMs allow opting into isolation-backed `read` (`codex-cli`, `agy-cli`, and direct API runners expose no built-in file tools). Wrap any needed capability as an explicitly reviewed tool instead. ([Profile Spec](profile-spec.md))
 
 ## When this architecture is not a fit
 

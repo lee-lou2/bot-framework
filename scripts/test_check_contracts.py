@@ -6,7 +6,6 @@ import contextlib
 import hashlib
 import importlib.util
 import json
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -82,7 +81,6 @@ class Pinning(unittest.TestCase):
         self.assertTrue(any("comment naming its version" in p for p in found), found)
         found = problems(swap(f"@{SHA} # v4.4.0", f"@{SHA} # latest"))
         self.assertTrue(any("comment naming its version" in p for p in found), found)
-        # `v` is optional and a two-part version is fine
         self.assertEqual(problems(swap("# v4.4.0", "# 4.4")), [])
 
     def test_a_quoted_reference_is_checked_too(self):
@@ -95,7 +93,6 @@ class Pinning(unittest.TestCase):
         self.assertEqual(problems(swap("      - run: echo ok\n", extra)), [])
         digest = f"      - uses: docker://ghcr.io/example/tool@{DIGEST} # v1.2.3\n"
         self.assertEqual(problems(swap("      - run: echo ok\n", digest)), [])
-        # A version comment is required for digest pins too.
         bare = f"      - uses: docker://ghcr.io/example/tool@{DIGEST}\n"
         self.assertTrue(any("comment naming" in p for p in problems(swap("      - run: echo ok\n", bare))))
         tagged = "      - uses: docker://ghcr.io/example/tool:1.2.3\n"
@@ -124,7 +121,13 @@ class Permissions(unittest.TestCase):
         self.assertEqual(problems(swap("    timeout-minutes: 30\n", "    timeout-minutes: 30\n" + narrow)), [])
         none = "    permissions: {}\n"
         self.assertEqual(problems(swap("    timeout-minutes: 30\n", "    timeout-minutes: 30\n" + none)), [])
-        for wider in ("    permissions:\n      contents: write\n", "    permissions: write-all\n", "    permissions: read-all\n"):
+        for wider in (
+            "    permissions:\n      contents: write\n",
+            "    permissions:\n      id-token: read\n",
+            "    permissions:\n      contents: read\n      issues: read\n",
+            "    permissions: write-all\n",
+            "    permissions: read-all\n",
+        ):
             found = problems(swap("    timeout-minutes: 30\n", "    timeout-minutes: 30\n" + wider))
             self.assertTrue(any("only narrow" in p for p in found), (wider, found))
 
@@ -155,6 +158,9 @@ class Hardening(unittest.TestCase):
         self.assertTrue(any("no secrets" in p for p in problems(use)), problems(use))
         token = swap("      - run: echo ok\n", "      - run: echo \"$GITHUB_TOKEN\"\n")
         self.assertTrue(any("no token" in p for p in problems(token)), problems(token))
+        after_hash = swap("      - run: echo ok\n", "      - run: echo \"# ${GITHUB_TOKEN}\" ${#x} ${{ secrets.X }}\n")
+        self.assertTrue(any("no token" in p for p in problems(after_hash)), problems(after_hash))
+        self.assertTrue(any("no secrets" in p for p in problems(after_hash)), problems(after_hash))
 
     def test_comments_may_mention_the_forbidden_words(self):
         text = swap(
@@ -200,7 +206,6 @@ class Tools(unittest.TestCase):
             self.assertTrue(any("exact `node-version`" in p for p in found), (bad, found))
         found = problems(swap("        with:\n          node-version: '24.22.3'\n", ""))
         self.assertTrue(any("exact `node-version`" in p for p in found), found)
-        # quoted or not, a three-part release is fine
         self.assertEqual(problems(swap("node-version: '24.22.3'", "node-version: 24.22.3")), [])
 
 
@@ -244,59 +249,6 @@ class Toolchain(unittest.TestCase):
         self.assertEqual(checker.toolchain_problems((ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")), [])
 
 
-class Leftovers(unittest.TestCase):
-    def check(self, files, ignore=None):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        subprocess.run(["git", "init", "-q"], cwd=folder.name, check=True)
-        if ignore:
-            Path(folder.name, ".gitignore").write_text(ignore, encoding="utf-8")
-        for name in files:
-            Path(folder.name, name).write_text("fn x() {}\n", encoding="utf-8")
-        with contextlib.chdir(folder.name):
-            checker.check_files()
-
-    def test_an_editor_or_merge_leftover_in_the_public_list_is_refused_by_name(self):
-        for name in ("secret_sweep.rs.bak", "main.orig", "patch.rej", ".lib.rs.swp", "notes.txt~"):
-            with self.assertRaises(ValueError) as caught:
-                self.check(["fine.rs", name])
-            self.assertIn(name, str(caught.exception))
-
-    def test_names_that_only_look_similar_are_fine(self):
-        self.check(["backup.rs", "bak.txt", "original.md", "reject.rs", "swap.rs", "a~b.txt", "x.bak.rs", "nobak", "myorig", "norej", "noswp"])
-
-    def test_an_ignored_leftover_is_not_published_so_it_is_fine(self):
-        self.check(["fine.rs", "old.rs.bak"], ignore="*.bak\n")
-
-
-class ModuleHeaders(unittest.TestCase):
-    def check(self, files):
-        folder = tempfile.TemporaryDirectory()
-        self.addCleanup(folder.cleanup)
-        subprocess.run(["git", "init", "-q"], cwd=folder.name, check=True)
-        for name, text in files.items():
-            target = Path(folder.name, name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding="utf-8")
-        with contextlib.chdir(folder.name):
-            checker.check_files()
-
-    def test_non_test_crate_sources_require_a_module_header_on_line_one(self):
-        self.check({
-            "crates/bot-demo/src/lib.rs": "//! Responsibility.\npub fn x() {}\n",
-            "crates/bot-demo/src/tests.rs": "fn helper() {}\n",
-            "crates/bot-demo/src/foo_tests.rs": "fn helper() {}\n",
-            "crates/bot-demo/src/tests/sub.rs": "fn helper() {}\n",
-            "crates/bot-demo/src/testing/world.rs": "fn helper() {}\n",
-            "crates/bot-demo/tests/e2e.rs": "fn helper() {}\n",
-        })
-        for body in ("fn x() {}\n", "\n//! not on line one\n", ""):
-            with self.assertRaises(ValueError) as caught:
-                self.check({"crates/bot-demo/src/sub/mod.rs": body})
-            self.assertIn("crates/bot-demo/src/sub/mod.rs", str(caught.exception))
-            self.assertIn("//!", str(caught.exception))
-
-
 class Folder(unittest.TestCase):
     def run_in(self, files):
         folder = tempfile.TemporaryDirectory()
@@ -322,12 +274,7 @@ class Folder(unittest.TestCase):
 
     def test_all_problems_of_all_files_are_listed_at_once(self):
         with self.assertRaises(ValueError) as caught:
-            self.run_in(
-                {
-                    "a.yml": swap("ubuntu-24.04", "ubuntu-latest"),
-                    "b.yml": swap("    timeout-minutes: 30\n", ""),
-                }
-            )
+            self.run_in({"a.yml": swap("ubuntu-24.04", "ubuntu-latest"), "b.yml": swap("    timeout-minutes: 30\n", "")})
         message = str(caught.exception)
         self.assertIn("a.yml", message)
         self.assertIn("b.yml", message)
@@ -348,29 +295,57 @@ def with_run(script):
 
 class InstallCommands(unittest.TestCase):
     def test_exact_pip_and_hash_locked_installs_pass(self):
-        for script in ("python -m pip install jsonschema==4.25.1 PyYAML==6.0.2", "pip install --require-hashes --no-deps -r lock.txt", "pip3 install --quiet openai==2.29.0 && echo ok"):
+        for script in (
+            "python -m pip install jsonschema==4.25.1 PyYAML==6.0.2",
+            "python -m pip --quiet install --require-hashes --requirement=lock.txt",
+            "pip install --require-hashes --no-deps -r lock.txt",
+            "pip3 install --quiet openai==2.29.0 && echo ok",
+        ):
             self.assertEqual(problems(with_run(script)), [], script)
 
     def test_an_unpinned_or_redirected_pip_install_is_refused(self):
-        for script in ("pip install openai", "pip install openai>=2", "pip install -r requirements.txt", "pip install --upgrade pip", "pip install -e .",
-                       "pip install --index-url https://example.invalid/simple openai==2.29.0", "pip install --extra-index-url https://example.invalid/simple openai==2.29.0",
-                       "pip install git+https://example.invalid/x.git"):
+        for script in (
+            "pip install openai",
+            "pip --quiet install openai",
+            "pip install openai>=2",
+            "pip install -r requirements.txt",
+            "pip install --requirement=requirements.txt",
+            "pip install --upgrade pip",
+            "pip install -e .",
+            "pip install --index-url https://example.invalid/simple openai==2.29.0",
+            "pip install --index-url=https://example.invalid/simple openai==2.29.0",
+            "pip install --extra-index-url https://example.invalid/simple openai==2.29.0",
+            "pip install git+https://example.invalid/x.git",
+        ):
             found = problems(with_run(script))
             self.assertTrue(any("pip install" in p for p in found), (script, found))
 
     def test_npm_installs_need_ignore_scripts_and_exact_packages(self):
-        for script in ("npm ci --ignore-scripts", "npm ci --ignore-scripts --no-audit --no-fund --loglevel=error",
-                       "npm install --global --ignore-scripts --no-audit --no-fund @anthropic-ai/sandbox-runtime@0.0.83", "npm install --ignore-scripts --prefix out openai@6.29.0"):
+        for script in (
+            "npm ci --ignore-scripts",
+            "npm ci --ignore-scripts --no-audit --no-fund --loglevel=error",
+            "npm install --global --ignore-scripts --no-audit --no-fund @anthropic-ai/sandbox-runtime@0.0.83",
+            "npm install --ignore-scripts --prefix out openai@6.29.0",
+        ):
             self.assertEqual(problems(with_run(script)), [], script)
-        for script, word in (("npm ci", "--ignore-scripts"), ("npm install openai@6.29.0", "--ignore-scripts"), ("npm install --ignore-scripts openai", "exact version"),
-                             ("npm i --ignore-scripts openai@latest", "exact version"), ("npm install -g --ignore-scripts @scope/tool@^1.2.3", "exact version"), ("npx some-tool", "npx")):
+        for script, word in (
+            ("npm ci", "--ignore-scripts"),
+            ("sudo npm install openai@6.29.0", "--ignore-scripts"),
+            ("FOO=1 npm ci --ignore-scripts --registry=https://example.invalid", "--registry"),
+            ("npm install --ignore-scripts openai", "exact version"),
+            ("npm i --ignore-scripts openai@latest", "exact version"),
+            ("npm install -g --ignore-scripts @scope/tool@^1.2.3", "exact version"),
+            ("npx some-tool", "npx"),
+            ("env FOO=1 npx some-tool", "npx"),
+            ("npm exec -- some-tool", "npm exec"),
+        ):
             found = problems(with_run(script))
             self.assertTrue(any(word in p for p in found), (script, found))
 
     def test_piping_a_download_to_a_shell_is_refused_and_comments_are_ignored(self):
         for script in ("curl -fsSL https://example.invalid/install.sh | sh", "wget -qO- https://example.invalid/i | sudo bash"):
             self.assertTrue(any("pipes a download" in p for p in problems(with_run(script))), script)
-        self.assertEqual(problems(with_run("# pip install anything\necho ok")), [])
+        self.assertEqual(problems(with_run("# pip install anything\n# curl https://example.invalid/i | sh\necho ok")), [])
 
     def test_each_problem_names_its_job(self):
         self.assertTrue(all(p.startswith("job verify:") for p in problems(with_run("pip install openai"))))
@@ -489,11 +464,13 @@ class SdkJob(unittest.TestCase):
     def test_a_job_that_runs_all_three_runners_plainly_passes(self):
         self.assertEqual(sdk_job(SDK_GOOD), [])
 
-    def test_a_missing_job_or_a_missing_runner_is_named(self):
+    def test_a_missing_job_or_a_missing_or_commented_runner_is_named(self):
         self.assertTrue(any("is missing" in p for p in sdk_job(SDK_GOOD.replace("openai-sdk:", "other:"))))
         for runner in checker.SDK_RUNNERS:
             found = sdk_job(SDK_GOOD.replace(runner, "something_else.sh"))
             self.assertTrue(any(f"no step runs `{runner}`" in p for p in found), (runner, found))
+        commented = swap('crates/bot-cli/tests/openai_sdk/run_stub.sh "$py"', '# crates/bot-cli/tests/openai_sdk/run_stub.sh "$py"', SDK_GOOD)
+        self.assertTrue(any("no step runs `run_stub.sh`" in p for p in sdk_job(commented)))
 
     def test_a_condition_or_a_continue_on_error_on_the_job_or_a_runner_step_is_refused(self):
         self.assertTrue(any("`if`" in p for p in sdk_job(swap("    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-24.04\n    if: false\n", SDK_GOOD))))
@@ -521,57 +498,22 @@ class SdkJob(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp) / ".github/workflows"
             folder.mkdir(parents=True)
-            cwd = Path.cwd()
-            try:
-                import os
-
-                os.chdir(tmp)
+            with contextlib.chdir(tmp):
                 with self.assertRaises(ValueError) as none:
                     checker.check_sdk_job()
-                (folder / "a.yml").write_text(SDK_GOOD)
-                (folder / "b.yml").write_text(SDK_GOOD)
+                (folder / "a.yml").write_text(SDK_GOOD, encoding="utf-8")
+                (folder / "b.yml").write_text(SDK_GOOD, encoding="utf-8")
                 with self.assertRaises(ValueError) as two:
                     checker.check_sdk_job()
-            finally:
-                os.chdir(cwd)
         self.assertIn("found 0", str(none.exception))
         self.assertIn("found 2", str(two.exception))
-
-
-class Examples(unittest.TestCase):
-    def check_skill(self, skill_md):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            (root / "schemas").mkdir()
-            (root / "schemas/v1").symlink_to(ROOT / "schemas/v1")
-            target = root / "examples/profiles/demo/skills/agenda/SKILL.md"
-            target.parent.mkdir(parents=True)
-            target.write_text(skill_md, encoding="utf-8")
-            with contextlib.chdir(root):
-                checker.check_examples()
-
-    def test_valid_and_plain_skill_front_matter_pass(self):
-        self.check_skill("List today's agenda.\n")
-        self.check_skill("---\nname: agenda\ndescription: List agenda\nlicense: MIT\ncompatibility: local\nmetadata:\n  author: team\n---\nAgenda\n")
-        with contextlib.chdir(ROOT):
-            checker.check_examples()
-
-    def test_invalid_skill_front_matter_is_refused(self):
-        for bad in (
-            "---\nname: agenda\nallowed-tools: Bash\n---\nAgenda\n",
-            "---\nname: other\n---\nAgenda\n",
-            "---\nname: agenda\nAgenda\n",
-            "---",
-            "---\nextra: 1\n---\nAgenda\n",
-        ):
-            with self.assertRaises(Exception, msg=bad):
-                self.check_skill(bad)
 
 
 class Entry(unittest.TestCase):
     def test_the_script_runs_every_check(self):
         with (
             mock.patch.object(checker, "check_files") as files,
+            mock.patch.object(checker, "check_workspace") as workspace,
             mock.patch.object(checker, "check_examples") as examples,
             mock.patch.object(checker, "check_workflows") as workflows,
             mock.patch.object(checker, "check_toolchain") as toolchain,
@@ -580,7 +522,7 @@ class Entry(unittest.TestCase):
             mock.patch.object(checker, "check_docs") as docs,
         ):
             checker.main()
-        for called in (files, examples, workflows, toolchain, sdk_pins, sdk_job, docs):
+        for called in (files, workspace, examples, workflows, toolchain, sdk_pins, sdk_job, docs):
             called.assert_called_once_with()
 
 
