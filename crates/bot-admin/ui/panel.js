@@ -20,7 +20,7 @@
     if (it.lock) notes.push("Approval required");
     if (off) notes.push("Not allowed by policy");
     const tail = notes.length ? " — " + notes.join(", ") : "";
-    return h("button", { type: "button", class: "chip" + (off ? " is-off" : "") + (it.ref ? " is-ref" : ""), "data-key": it.key, title: it.name + tail, "aria-label": it.name + " (" + label(it.kind) + (notes.length ? ", " + notes.join(", ") : "") + ")" }, [icon(it.kind, { size: 14, off }), h("span", { class: "nm", text: it.name }), it.ref ? h("span", { class: "chip-tag", text: "Inherited" }) : null, it.lock ? icon("lock", { size: 12, cls: "chip-lock" }) : null]);
+    return h("button", { type: "button", class: "chip" + (off ? " is-off" : "") + (it.ref ? " is-ref" : ""), "data-kind": it.kind, "data-key": it.key, title: it.name + tail, "aria-label": it.name + " (" + label(it.kind) + (notes.length ? ", " + notes.join(", ") : "") + ")" }, [icon(it.kind, { size: 14, off }), h("span", { class: "nm", text: it.name }), it.ref ? h("span", { class: "chip-tag", text: "Inherited" }) : null, it.lock ? icon("lock", { size: 12, cls: "chip-lock" }) : null]);
   }
 
   function createPanel(o) {

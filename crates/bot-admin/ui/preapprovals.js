@@ -1,24 +1,25 @@
-// Operator-only Pre-approvals view: immediate emergency pause and two-step confirmed resume backed by BotPreapproval.
+// Operator-only Pre-approvals view: filterable quota cards with immediate emergency pause and two-step confirmed resume.
 (function (root) {
   "use strict";
   const D = root.BotDom, A = root.BotApi, R = root.BotPreapproval, { h, icon, code } = D;
   const ARM_MS = 12000, ARM_GUARD_MS = 600, SEND_MS = 15000;
   const HELP = {
-    pause: "Pausing immediately stops new occurrences and new external write grants. Result recording and hold recovery for already-started writes continue. Occurrences during a pause are skipped and resume applies from the next occurrence.",
+    pause: "Pausing immediately stops new occurrences and new external write grants. In-flight result recording and hold recovery continue; skipped occurrences do not replay.",
     resume: "Currently paused. Resuming re-enables external writes without human approval cards starting from the next occurrence.",
   };
 
   function create(app, box) {
-    const st = { rows: null, skipped: 0, err: null, epoch: 0 };
+    const st = { rows: null, skipped: 0, err: null, epoch: 0, filter: "all" };
     const ui = { busy: {}, notes: {}, arm: {}, btn: {}, ids: {}, seq: 0 };
     let memo = {};
 
     const count = h("em"), sub = h("p", { class: "sub" }), warn = h("div"), none = h("div");
+    const filterBar = h("div", { class: "chips", role: "group", "aria-label": "Filter pre-approvals" });
     const cards = h("div", { class: "cards pcards", "aria-label": "Pre-approvals list" });
     const title = h("h3", { class: "sec-t", id: "pa-title", tabindex: "-1" }, [h("span", { text: "Pre-approved triggers" }), count]);
     box.appendChild(h("div", { class: "wrap" }, [
-      h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "Pre-approvals" }), sub])]),
-      h("div", { class: "stack" }, [h("section", { class: "sec", "aria-labelledby": "pa-title" }, [title, h("p", { class: "sec-h", text: "Static triggers pre-authorized by an operator. External writes run without approval cards within the declared scope and daily cap, and can be paused per trigger." }), warn, none, cards])]),
+      h("header", { class: "ph" }, [h("div", null, [h("h2", { text: "Pre-approvals" }), sub]), h("div", { class: "ph-act" }, [filterBar])]),
+      h("div", { class: "stack" }, [h("section", { class: "sec", "aria-labelledby": "pa-title" }, [title, h("p", { class: "sec-h", text: "Static triggers pre-authorized by an operator. External writes run without approval cards within their declared scope and daily UTC quota." }), warn, none, cards])]),
     ]));
     box.classList.add("preapprovals");
 
@@ -59,10 +60,13 @@
           u.full ? D.pill("Daily limit reached", "bad", "error") : null,
           h("span", { class: "ac-left", text: "Today " + u.used + " / " + u.max }),
         ]),
-        h("p", { class: "ac-meta" }, [multi ? "Profile " + r.profile + " · " : null, "Agent ", code(r.agent), " · Grant ID ", code(r.grant_id.slice(0, 12), r.grant_id), " · Pause epoch ", code(String(r.epoch))]),
+        h("p", { class: "ac-meta pc-meta" }, [multi ? "Profile " + r.profile + " · " : null, "Agent ", code(r.agent), " · Grant ID ", code(r.grant_id.slice(0, 12), r.grant_id), " · Pause epoch ", code(String(r.epoch))]),
         h("div", { class: "pc-use" }, [
           h("div", { class: "meter" + (u.full ? " is-full" : ""), role: "meter", "aria-label": "External writes authorized today", "aria-valuemin": "0", "aria-valuemax": String(u.max), "aria-valuenow": String(Math.min(u.used, u.max)), "aria-valuetext": u.used + " / " + u.max }, [fill]),
-          h("p", { class: "pc-use-t", text: "External writes authorized today (UTC): " + u.used + " · Remaining: " + u.left }),
+          h("div", { class: "pc-use-row" }, [
+            h("span", { class: "pc-use-t", text: "External writes authorized today (UTC): " + u.used + " · Remaining: " + u.left }),
+            h("span", { class: "pc-use-pct", text: u.pct + "%" }),
+          ]),
         ]),
         h("p", { class: "pc-help", id: hid, text: HELP[R.offered(r)] }),
         sum,
@@ -116,17 +120,28 @@
       });
     }
 
+    function renderFilters(scoped, counts) {
+      D.clear(filterBar);
+      if (!st.rows || !scoped.length) return;
+      [["all", "All", counts.total], ["active", "Active", counts.total - counts.paused], ["paused", "Paused", counts.paused]].forEach(([v, label, n]) => {
+        filterBar.appendChild(h("button", { type: "button", class: "fchip", "aria-pressed": String(st.filter === v), onclick: () => { st.filter = v; render(); } }, [h("span", { text: label }), h("em", { text: String(n) })]));
+      });
+    }
+
     function render() {
-      const p = app.profile(), all = st.rows || [], rows = all.filter((r) => !p || r.profile === p), multi = !p, n = R.counts(rows);
+      const p = app.profile(), all = st.rows || [], scoped = all.filter((r) => !p || r.profile === p), multi = !p, n = R.counts(scoped);
+      const rows = st.filter === "active" ? scoped.filter((r) => !r.paused) : st.filter === "paused" ? scoped.filter((r) => r.paused) : scoped;
       sub.textContent = st.rows && n.total ? n.total + " pre-approved · " + n.paused + " paused" : "";
+      renderFilters(scoped, n);
+      if (app.setBadges && st.rows) app.setBadges({ paused: n.paused });
       D.sync(cards, rows.map((r) => { const k = R.key(r); return { key: k, sig: JSON.stringify([r, multi, ui.busy[k] || "", ui.notes[k] || null, !!ui.arm[k]]), build: () => ({ node: card(r, multi) }) }; }), memo, { stagger: true });
-      count.textContent = st.rows ? String(n.total) : "";
+      count.textContent = st.rows ? String(rows.length) : "";
       D.clear(warn);
       if (st.skipped) warn.appendChild(h("p", { class: "warnbox", text: "Skipped " + st.skipped + " unreadable row(s) without action buttons. Server and UI versions may differ; reload the page." }));
       if (st.err) warn.appendChild(h("p", { class: "warnbox", text: st.err }));
       D.clear(none);
       if (!st.rows) { if (!st.err) none.appendChild(D.skeleton(3)); }
-      else if (!rows.length) none.appendChild(D.empty(all.length ? "No pre-approved triggers in this profile" : "No pre-approved triggers", "Declare preapproved in triggers.yaml and have an operator explicitly activate it to appear here.", "check"));
+      else if (!rows.length) none.appendChild(D.empty(scoped.length ? "No triggers match this filter" : all.length ? "No pre-approved triggers in this profile" : "No pre-approved triggers", scoped.length ? "Switch back to All to inspect every pre-approved trigger." : "Declare preapproved in triggers.yaml and have an operator explicitly activate it to appear here.", "check"));
     }
     function load(ctx) {
       const epoch = st.epoch;
@@ -160,7 +175,7 @@
 
     return {
       load,
-      reset() { st.epoch++; st.rows = null; st.skipped = 0; st.err = null; armed().forEach(disarm); ui.notes = {}; memo = {}; D.clear(cards); render(); },
+      reset() { st.epoch++; st.rows = null; st.skipped = 0; st.err = null; st.filter = "all"; armed().forEach(disarm); ui.notes = {}; memo = {}; D.clear(cards); render(); },
       busy() { return Object.keys(ui.busy).length > 0 || armed().length > 0; },
       show() {},
       hide() { if (armed().length) { armed().forEach(disarm); render(); } },

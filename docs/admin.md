@@ -121,23 +121,24 @@ Holds occur when an external write's outcome cannot be confirmed. Multi-step too
 
 `/ui` serves buildless static HTML/CSS/JS embedded at compile time from `crates/bot-admin/ui/` via `build.rs` (manifest locked by `crates/bot-admin/tests/suite/assets.rs`). Strict same-origin CSP—tests forbid external URLs, HTML injection, and inline scripts/styles.
 
-| Tab | Audience | Contents |
+| View | Audience | Contents |
 |---|---|---|
-| Structure | Operator | Interactive card map (pan, zoom, search, kind filter) with dependency and shared-resource (`needs`) edges. |
-| Runs | All | Scoped run list and detail pane (lineage, children, tool calls, effects, trace links), plus operator resume/cancel. |
-| Approvals & Holds | All (holds: operator) | Approval cards (designated approver only, verified by `seen` hash) and two-step hold resolution forms. |
-| Pre-approvals | Operator | Status, UTC daily usage meter, and emergency pause/resume controls ([Pre-Approvals UI](#pre-approvals-ui)). |
-| Access | Operator | Roles, members, policy caps, tool risk/approval/scopes/secret names, and external-egress tools. |
-| Audit | Operator | Hash-chained log and **Verify chain** action. |
-| Status | Operator | Per-profile run counts, queue wait age, pending approvals, holds, and observability exporter health. |
+| Overview | All (scoped) | Default home dashboard: system health banner, immediate action queue (pending approvals, holds, dead runs, paused automations), run throughput metrics, recent activity, and (for operators) active profile cards, pre-approved automations, and observability status. |
+| Approvals & Holds | All (holds: operator) | Filterable action inbox (`All open`, `Assigned to me`, `Approvals`, `Holds`) with quick hold jump, visually emphasized cards assigned to the signed-in principal (verified by `seen` hash), two-step hold resolution forms, and recent decisions. |
+| Runs | All | Searchable, state-filterable run list and detail pane (lineage, compact facts grid, tool calls, effects, child runs, trace links), plus operator resume/cancel controls. |
+| Pre-approvals | Operator | Filterable status (`All`/`Active`/`Paused`), UTC daily usage meter, and emergency pause/resume controls ([Pre-Approvals UI](#pre-approvals-ui)). |
+| Structure | Operator | Dual-mode view switching between a searchable **Directory** of profiles, agents, channels, triggers, skills, tools, scopes, and secrets and an interactive pan/zoom **Graph** map with shared-resource (`needs`) edges and slide-out inspector. |
+| Access | Operator | Searchable, section-filterable view of roles, members, policy caps, tool risk/approval/scopes/secret names, and external-egress tools. |
+| Audit | Operator | Searchable, verdict-filterable hash-chained log and **Verify chain** action. |
+| Status | Operator | Balanced per-profile run queues, queue wait age, pending approvals, holds, and compact observability exporter health. |
 
-Respects light/dark mode and `prefers-reduced-motion`; 5s auto-refresh pauses during typing or armed confirmations. Operator tabs are hidden from non-operators (and blocked server-side with `403`). Vocabulary labels live in `crates/bot-admin/ui/labels.js` (unknown codes display as `Other`).
+A responsive sidebar holds the profile scope selector, grouped navigation with live attention badges, and signed-in identity; the top bar provides live sync status, manual refresh (`r`), theme cycling, and a **Settings** popover (persisted in `localStorage`: auto-refresh toggle, 5s/15s/30s cadence, Auto/Light/Dark appearance, Comfortable/Compact density, and default Structure mode). Respects `prefers-reduced-motion` and pauses auto-refresh while typing or during armed confirmations. Operator views are removed from the DOM for non-operators (and blocked server-side with `403`). Vocabulary labels live in `crates/bot-admin/ui/labels.js` (unknown codes display as `Other`).
 
 In **Runs** detail, **Resume** on a `dead` root run requires two presses within 12s (600ms guard) pinning observed state; **Cancel run** uses one confirmation prompt. Subtree holds show **View in Approvals & Holds**. Lost responses pause auto-refresh and offer **Resend same command** or **Reload latest state**.
 
-### Structure Map
+### Structure View & Map
 
-Built from the active `ProfileCatalog` with 8 card kinds (profile, agent, skill, tool, trigger, binding, scope, secret) and 6 edge kinds (delegates, uses, owns, handles, wakes, needs) under a deterministic revision (`rev`). Exposes names, classifications, and counts only—never instructions, knowledge bodies, env vars, or secret values. Inherited skills appear once on the defining agent. Agent summaries show the first line of description (≤ 140 chars, fallback to model) and non-inherited `builtin` read-only tools (schema allows `read`/`grep`/`glob`; `claude-cli` VM supports `read` only).
+Built from the active `ProfileCatalog` with 8 card kinds (profile, agent, skill, tool, trigger, binding, scope, secret) and 6 edge kinds (delegates, uses, owns, handles, wakes, needs) under a deterministic revision (`rev`). Exposes names, classifications, and counts only—never instructions, knowledge bodies, env vars, or secret values. **Directory** mode (default) groups agents and their bindings, triggers, skills, tools, and shared scopes/secrets into searchable cards; **Graph** mode renders the interactive pan/zoom topology canvas. Both modes share the same slide-out detail drawer. Inherited skills appear once on the defining agent. Agent summaries show the first line of description (≤ 140 chars, fallback to model) and non-inherited `builtin` read-only tools (schema allows `read`/`grep`/`glob`; `claude-cli` VM supports `read` only).
 
 ### Pre-Approvals UI
 

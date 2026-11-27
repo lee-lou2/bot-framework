@@ -27,9 +27,9 @@
     }
     const narrow = () => st.vp.w <= 720;
     function insets(withPanel) {
-      const bar = els.bar.offsetHeight || 40, dk = els.dock.offsetHeight || 0;
+      const bar = els.bar.offsetHeight || 40, dk = els.dock.offsetHeight || 44;
       const side = narrow() ? 8 : 24;
-      const ins = { top: 12 + bar + 16, bottom: 12 + (dk || 0) + 16, left: side, right: side };
+      const ins = { top: 16 + bar + 16, bottom: 20 + dk + 20, left: side, right: side };
       if (withPanel) {
         if (narrow()) ins.bottom += Math.min(els.detail.offsetHeight || 280, st.vp.h * 0.62) + 8;
         else ins.right += PANEL_W + 4;

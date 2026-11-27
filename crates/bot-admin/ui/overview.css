@@ -1,0 +1,73 @@
+/* Overview home dashboard: system health hero, action inbox cards, KPI strip, recent runs, and active bots. */
+.ov-hero { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--s3) var(--s4); padding: var(--s4) var(--s5); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--shadow-1); margin-bottom: var(--s5); }
+.ov-hero.is-ok { border-left: 4px solid var(--good); }
+.ov-hero.is-warn { border-left: 4px solid var(--warn); }
+.ov-hero.is-bad { border-left: 4px solid var(--bad); }
+.ov-hero-l { display: flex; align-items: center; gap: var(--s3); min-width: 0; }
+.ov-hero-ic { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--surface-2); color: var(--ink-2); flex: none; }
+.ov-hero.is-ok .ov-hero-ic { background: var(--good-wash); color: var(--good-ink); }
+.ov-hero.is-warn .ov-hero-ic { background: var(--warn-wash); color: var(--warn-ink); }
+.ov-hero.is-bad .ov-hero-ic { background: var(--bad-wash); color: var(--bad-ink); }
+.ov-hero h2 { font-size: 18px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.25; }
+.ov-hero p { margin-top: 2px; color: var(--ink-3); font-size: 13px; }
+.ov-hero-act { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); }
+
+.ov-inbox { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--s3); margin-bottom: var(--s5); }
+.ov-act { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); padding: 14px var(--s4); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); text-align: left; box-shadow: var(--shadow-1); transition: border-color 140ms var(--ease), background-color 140ms var(--ease), transform 80ms var(--ease); }
+.ov-act:active { transform: scale(0.99); }
+.ov-act-tx { display: grid; gap: 2px; min-width: 0; }
+.ov-act-tx strong { font-size: 13px; font-weight: 650; color: var(--ink); }
+.ov-act-tx span { font-size: 12px; color: var(--ink-3); }
+.ov-act-n { display: inline-flex; align-items: center; gap: 6px; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; flex: none; }
+.ov-act.is-warn { border-color: var(--warn); background: var(--warn-wash); }
+.ov-act.is-warn .ov-act-n, .ov-act.is-warn strong { color: var(--warn-ink); }
+.ov-act.is-bad { border-color: var(--bad); background: var(--bad-wash); }
+.ov-act.is-bad .ov-act-n, .ov-act.is-bad strong { color: var(--bad-ink); }
+.ov-act.is-accent { border-color: var(--accent-line); background: var(--accent-wash); }
+.ov-act.is-accent .ov-act-n, .ov-act.is-accent strong { color: var(--accent-ink); }
+
+.ov-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: var(--s5); margin-top: var(--s5); align-items: start; }
+.ov-card { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--shadow-1); overflow: hidden; }
+.ov-card-h { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); padding: var(--s4) var(--s4) var(--s3); border-bottom: 1px solid var(--line); }
+.ov-card-h h3 { font-size: 14px; font-weight: 650; letter-spacing: -0.01em; display: inline-flex; align-items: center; gap: var(--s2); }
+.ov-card-b { padding: var(--s3) var(--s4) var(--s4); }
+.ov-card-b.is-flush { padding: 0; }
+
+.ov-runs { list-style: none; margin: 0; padding: 0; }
+.ov-runs li + li { border-top: 1px solid var(--line); }
+.ov-run { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px var(--s3); width: 100%; padding: 11px var(--s4); border: 0; background: transparent; text-align: left; transition: background-color 130ms var(--ease); }
+.ov-run-top { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.ov-run-top code { font-weight: 650; color: var(--ink); font-size: 13px; }
+.ov-run-agent { color: var(--ink-2); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-run-sub { color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-run-r { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 4px; }
+.ov-run-r time { color: var(--ink-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.ov-profs { display: grid; gap: var(--s3); }
+.ov-prof { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--canvas); }
+.ov-prof-h { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
+.ov-prof-title { display: flex; align-items: center; gap: var(--s2); }
+.ov-prof-title strong { font-size: 15px; font-weight: 700; }
+.ov-prof-meta { color: var(--ink-3); font-size: 12px; }
+.ov-prof-stats { display: flex; flex-wrap: wrap; gap: 6px; }
+.ov-stat { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); font-size: 12px; color: var(--ink-2); }
+.ov-stat b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.ov-prof-act { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 4px; border-top: 1px solid var(--line); }
+
+.ov-bottom { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s5); margin-top: var(--s5); }
+.ov-mini-list { display: grid; gap: 8px; }
+.ov-mini-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--canvas); font-size: 13px; }
+.ov-mini-row-l { display: grid; gap: 2px; min-width: 0; }
+.ov-mini-row-l strong { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-mini-row-l span { font-size: 12px; color: var(--ink-3); }
+
+@media (hover: hover) {
+  .ov-act:hover { border-color: var(--line-strong); background: var(--surface-2); }
+  .ov-act.is-warn:hover { border-color: var(--warn); background: var(--warn-wash); }
+  .ov-act.is-bad:hover { border-color: var(--bad); background: var(--bad-wash); }
+  .ov-act.is-accent:hover { border-color: var(--accent); background: var(--accent-wash); }
+  .ov-run:hover { background: var(--surface-2); }
+}
+@media (max-width: 1040px) {
+  .ov-grid, .ov-bottom { grid-template-columns: 1fr; }
+}
