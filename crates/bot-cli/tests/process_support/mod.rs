@@ -125,11 +125,27 @@ impl Schema {
     }
 
     /// 문장 하나를 돌려 명령 결과(`INSERT 0 1` 등)나 오류 글을 그대로 돌려준다. `{s}`는 이 스키마 이름으로 바뀐다. 오류도 글로 받아 시험이 보여 줄 수 있다.
+    /// 큰 hex 번들 삽입 시 Linux 단일 argv 상한(`MAX_ARG_STRLEN`, 128 KiB)을 넘지 않도록 stdin(`-f -`)으로 넘긴다.
     pub fn exec(&self, sql: &str) -> String {
-        let out = Command::new("psql")
-            .args([&self.base, "-Atc", &sql.replace("{s}", &self.name)])
-            .output()
+        let mut rendered = sql.replace("{s}", &self.name);
+        if !rendered.trim_end().ends_with(';') {
+            rendered.push(';');
+        }
+        rendered.push('\n');
+        let mut child = Command::new("psql")
+            .args([&self.base, "-At", "-f", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(rendered.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
         format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout).trim(),
