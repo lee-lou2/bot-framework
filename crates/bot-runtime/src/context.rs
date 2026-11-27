@@ -407,6 +407,9 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
             .collect();
         sections.push(format!("## Reference Documents\n{}", body.join("\n\n")));
     }
+    if effective.contains(bot_core::builtin::MEMORY_SAVE_TOOL) {
+        sections.push(memory::TOOL_GUIDANCE.to_owned());
+    }
     // Keep recalled memory out of system instructions; place bodies in the untrusted user block below.
     let reference = memory::reference(input.memory);
     if reference.is_some() {

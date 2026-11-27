@@ -3,7 +3,7 @@ id: personal
 timezone: UTC
 model: assistant
 roles:
-  owner: [run, calendar.read, calendar.delete]
+  owner: [run, calendar.read, calendar.delete, memory.search, memory.save, memory.forget]
   reader: [calendar.read]
 members:
   - {identity: "local:owner", roles: [owner]}
@@ -12,7 +12,7 @@ bindings:
   - {id: desk, adapter: cli, account: owner, agent: main}
 secrets: []
 policy:
-  scopes: [run, calendar.read, calendar.delete]
+  scopes: [run, calendar.read, calendar.delete, memory.search, memory.save, memory.forget]
   agents:
     main/research: [run, calendar.read]
   approve: []

@@ -164,6 +164,11 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         deps.secrets.clone(),
         deps.active.clone(),
     )?;
+    let memory_judge = crate::memory_judge::build(
+        deps.host.memory_judge.as_ref(),
+        deps.secrets.clone(),
+        deps.active.clone(),
+    )?;
     let mut worker = Worker::new(
         RuntimeDeps {
             runs: Arc::new(
@@ -202,6 +207,9 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     )));
     if let Some(embedder) = embedder {
         worker = worker.with_embedder(embedder);
+    }
+    if let Some(judge) = memory_judge {
+        worker = worker.with_memory_judge(judge);
     }
     Ok(Prepared {
         worker,

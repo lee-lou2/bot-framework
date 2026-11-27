@@ -182,8 +182,14 @@ fn following_printed_guidance_passes_bot_validate() {
     let prof_path = profile.join("profile.yaml");
     let prof = fs::read_to_string(&prof_path)
         .unwrap()
-        .replace("lead: [run]", "lead: [run, notes.read, notes.save]")
-        .replace("scopes: [run]", "scopes: [run, notes.read, notes.save]")
+        .replace(
+            "lead: [run, memory.search, memory.save, memory.forget]",
+            "lead: [run, memory.search, memory.save, memory.forget, notes.read, notes.save]",
+        )
+        .replace(
+            "scopes: [run, memory.search, memory.save, memory.forget]",
+            "scopes: [run, memory.search, memory.save, memory.forget, notes.read, notes.save]",
+        )
         .replace(
             "main/developer: [run]",
             "main/developer: [run, notes.read, notes.save]",

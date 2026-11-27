@@ -56,6 +56,9 @@ pub fn model_secrets(snapshot: &Snapshot, host: &HostFile) -> BTreeSet<String> {
     if let Some(secret) = host.embeddings.as_ref().and_then(|e| e.secret.as_deref()) {
         names.insert(secret.to_owned());
     }
+    if let Some(secret) = host.memory_judge.as_ref().and_then(|j| j.secret.as_deref()) {
+        names.insert(secret.to_owned());
+    }
     names
 }
 

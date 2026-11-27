@@ -166,6 +166,42 @@ pub trait Embedder: Send + Sync {
     ) -> Reply<'a, Option<MemoryEmbedding>>;
 }
 
+/// Existing private memory passed to a System One decision model for supersede/forget matching.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryCandidate {
+    pub id: MemoryId,
+    pub text: String,
+}
+
+/// One memory item extracted for automatic persistence by a decision model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryDecisionItem {
+    pub text: String,
+    pub kind: MemoryKind,
+}
+
+/// Typed outcome returned by a System One memory judge (`d1.2-ultra`, `jev-latest`, etc.).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemoryDecision {
+    None,
+    Save {
+        items: Vec<MemoryDecisionItem>,
+        supersedes: Option<MemoryId>,
+    },
+    Forget(MemoryId),
+}
+
+/// Host System One decision port classifying whether a 1:1 user turn should save, supersede, or forget memory.
+pub trait MemoryJudge: Send + Sync {
+    fn model(&self) -> &str;
+    fn judge<'a>(
+        &'a self,
+        profile: &'a ProfileId,
+        user_message: &'a str,
+        existing: &'a [MemoryCandidate],
+    ) -> Reply<'a, MemoryDecision>;
+}
+
 /// Encodes `f32` values into little-endian IEEE-754 binary16 bytes.
 pub fn encode_f16(values: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(values.len() * 2);

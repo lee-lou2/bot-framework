@@ -12,6 +12,7 @@ pub mod lock;
 pub mod logging;
 pub mod map;
 pub mod mcp_sync;
+pub mod memory_judge;
 pub mod nonce;
 pub mod profile_bundle;
 pub mod scaffold;

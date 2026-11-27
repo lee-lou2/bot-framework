@@ -70,9 +70,9 @@ pub const MEMORY_SEARCH_TOOL: &str = MEMORY_SEARCH.id;
 pub const MEMORY_SAVE: ModelTool = ModelTool {
     id: "memory.save",
     class: Risk::Write,
-    external: true,
+    external: false,
     super_admin: false,
-    description: "Save a concise private memory entry in your own 1:1 DM or CLI conversation. Optionally set kind ('fact' or 'core') and supersedes (existing memory ID replaced by this update). Requires owner approval when the run is private-tainted or policy-gated.",
+    description: "Save a concise private memory entry in your own 1:1 DM or CLI conversation. Optionally set kind ('fact' or 'core') and supersedes (existing memory ID replaced by this update). Requires owner approval only when policy.approve includes memory.save.",
     schema: r#"{"additionalProperties":false,"properties":{"kind":{"enum":["fact","core"],"type":"string"},"supersedes":{"maxLength":128,"minLength":1,"type":"string"},"text":{"maxLength":8192,"minLength":1,"type":"string"}},"required":["text"],"type":"object"}"#,
 };
 pub const MEMORY_SAVE_TOOL: &str = MEMORY_SAVE.id;

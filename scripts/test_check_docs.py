@@ -34,6 +34,7 @@ GOOD = {
     "crates/bot-cli/src/execution.rs": 'only(fields, &["kind", "model"], path)?;\n',
     "crates/bot-cli/src/execution/provider.rs": "// no keys\n",
     "crates/bot-cli/src/embeddings.rs": "// no keys\n",
+    "crates/bot-cli/src/memory_judge.rs": "// no keys\n",
     "crates/bot-cli/src/install.rs": '#[cfg(test)]\nuse place::remove_tree;\nfn parse() { fields.keys().find(|k| !matches!(k.as_str(), "root")); matches!(part, "" | ".."); }\n#[cfg(test)]\nmod tests;\n',
     "crates/bot-cli/src/tool_limits.rs": 'match key.as_str() {\n    "tool_call_max_secs" => {}\n    other => {}\n}\n',
     "crates/bot-gateway/src/host.rs": "#[derive(Clone, Debug, Deserialize)]\n#[serde(deny_unknown_fields)]\npub struct SlackWorkspace {\n    /// the team\n    pub team_id: String,\n    #[serde(default, rename = \"renamed_key\")]\n    hidden_name: u8,\n}\n\n#[derive(Debug)]\nstruct NotConfig {\n    not_a_key: u8,\n}\n",

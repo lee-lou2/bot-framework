@@ -104,7 +104,7 @@ fn memory_search_taints_only_when_private_hits_return_and_calls_embedder() {
 }
 
 #[test]
-fn memory_save_runs_directly_when_untainted_and_gates_embedding_behind_approval_when_tainted() {
+fn memory_save_updates_smoothly_in_dm_and_gates_embedding_behind_policy_approval() {
     let (w, embedder) = mem_world();
 
     // Clean 1:1 CLI run saves immediately without approval.
@@ -131,28 +131,45 @@ fn memory_save_runs_directly_when_untainted_and_gates_embedding_behind_approval_
     assert!(matches!(err, Err(Error::Denied)));
     assert_eq!(embedder.count(), 1);
 
-    // Once private memory has been read, `memory.save` requires owner approval AND does not invoke
-    // the embedding API before the owner approves.
+    // Updating an existing recalled private memory in 1:1 DM/CLI works smoothly without an approval card
+    // unless the profile opts in via `policy.approve`.
     w.ledger.set_private_recall("r1");
-    let nonce = awaiting(w.call(
+    let updated = done(w.call(
         "c3",
         "memory.save",
         r#"{"text":"Moved to Pangyo","supersedes":"m1"}"#,
+    ));
+    assert!(updated.contains("\"deduplicated\":false"), "{updated}");
+    assert_eq!(embedder.count(), 2);
+    assert!(!w.memory.contains("m1"), "superseded entry replaced");
+
+    // When `policy.approve` gates `memory.save`, owner approval is required AND the embedding API
+    // is not called before the owner approves.
+    w.publish(
+        base("r1")
+            .role("owner", &WITH_MEM)
+            .policy_scopes(&WITH_MEM)
+            .approve(&["memory.save"])
+            .build(),
+    );
+    let nonce = awaiting(w.call(
+        "c4",
+        "memory.save",
+        r#"{"text":"Gated preference","kind":"core"}"#,
     ));
     assert_eq!(
         embedder.count(),
-        1,
-        "must not send tainted text to embedding API before human approval"
+        2,
+        "must not send unapproved text to embedding API before human approval"
     );
     w.decide(&nonce, OWNER, true).unwrap();
     let after = done(w.call(
-        "c3",
+        "c4",
         "memory.save",
-        r#"{"text":"Moved to Pangyo","supersedes":"m1"}"#,
+        r#"{"text":"Gated preference","kind":"core"}"#,
     ));
     assert!(after.contains("\"deduplicated\":false"), "{after}");
-    assert_eq!(embedder.count(), 2);
-    assert!(!w.memory.contains("m1"), "superseded entry replaced");
+    assert_eq!(embedder.count(), 3);
 }
 
 #[test]

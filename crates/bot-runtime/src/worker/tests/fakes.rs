@@ -228,6 +228,8 @@ impl DelegationStore for FakeDelegation {
 pub(super) struct FakeMemory {
     pub hits: Mutex<Vec<MemoryHit>>,
     pub fail: Mutex<bool>,
+    pub auto_saved: Mutex<Vec<bot_core::memory::MemorySave>>,
+    pub auto_forgotten: Mutex<Vec<MemoryId>>,
 }
 
 impl MemoryStore for FakeMemory {
@@ -240,6 +242,28 @@ impl MemoryStore for FakeMemory {
                 Ok(hits)
             }
         })
+    }
+    fn auto_save(
+        &self,
+        _: Attempt,
+        _: Revision,
+        spec: bot_core::memory::MemorySave,
+    ) -> Reply<'_, Option<bot_core::memory::MemorySaved>> {
+        let n = {
+            let mut saved = lock(&self.auto_saved);
+            saved.push(spec);
+            saved.len()
+        };
+        Box::pin(async move {
+            Ok(Some(bot_core::memory::MemorySaved {
+                id: MemoryId(format!("auto-{n}")),
+                deduplicated: false,
+            }))
+        })
+    }
+    fn auto_forget(&self, _: Attempt, _: Revision, id: MemoryId) -> Reply<'_, bool> {
+        lock(&self.auto_forgotten).push(id);
+        Box::pin(async { Ok(true) })
     }
     fn preview(&self, _: Attempt, _: MemoryId) -> Reply<'_, MemoryPreview> {
         Box::pin(async { Err(Error::Unavailable) })
