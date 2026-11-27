@@ -86,17 +86,20 @@ impl Store {
             // Never expose sensitive private-DM inputs on approval cards.
             return Err(Error::Denied.into());
         }
-        // Channel-origin owner-DM cards require requester == approver.
-        if routed && a.requester != a.approver {
-            let kind: String =
-                sqlx::query_scalar("select conv_kind from bot_runs where profile = $1 and id = $2")
-                    .bind(&run.profile)
-                    .bind(&run.id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            if kind == "channel" {
-                return Err(Error::Denied.into());
-            }
+        let (kind, binding, revision, transport): (String, String, String, Option<String>) =
+            sqlx::query_as(
+                "select conv_kind, binding, revision, reply_transport from bot_runs where profile = $1 and id = $2",
+            )
+            .bind(&run.profile)
+            .bind(&run.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let is_slack =
+            transport.as_deref() == Some(bot_core::intake::PushTransportId::SLACK.as_str());
+        let channel_dm = slack.is_none() && kind == "channel" && (routed || is_slack);
+        // Channel-origin owner-DM cards require Slack transport and requester == approver.
+        if channel_dm && (!is_slack || a.requester != a.approver) {
+            return Err(Error::Denied.into());
         }
         // API-origin requester must match the admission-verified root principal.
         if let Some((principal, _)) = &origin
@@ -182,13 +185,6 @@ impl Store {
             .bind(&a.tool_revision.0)
             .execute(&mut *tx)
             .await?;
-        let (kind, binding, revision, transport): (String, String, String, Option<String>) = sqlx::query_as(
-            "select conv_kind, binding, revision, reply_transport from bot_runs where profile = $1 and id = $2",
-        )
-        .bind(&run.profile)
-        .bind(&run.id)
-        .fetch_one(&mut *tx)
-        .await?;
         if let Some((delivery, team)) = slack {
             // API-origin Slack DM card job: pin origin binding, requester, revision, and verified team; stays closed until receipt is confirmed.
             ids_ok(&[&delivery.0])?;
@@ -208,11 +204,8 @@ impl Store {
             .bind(team)
             .execute(&mut *tx)
             .await?;
-        } else if kind == "channel" && routed {
-            if transport.as_deref() != Some(bot_core::intake::PushTransportId::SLACK.as_str()) {
-                return Err(Error::Denied.into());
-            }
-            // Channel-origin routed draft/create cards go via 1:1 owner DM only and stay closed until DM receipt is confirmed.
+        } else if channel_dm {
+            // Slack channel-origin approval cards go via 1:1 owner DM only and stay closed until DM receipt is confirmed.
             sqlx::query(
                 "insert into bot_card_jobs (nonce, profile, run, binding, owner, generation) values ($1, $2, $3, $4, $5, $6)",
             )

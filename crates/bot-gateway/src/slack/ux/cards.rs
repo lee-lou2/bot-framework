@@ -145,18 +145,11 @@ pub(super) fn describe_progress(
         return (2, Some("Stopping...".into()), "Stopping".into());
     }
     if progress.waiting_approval {
-        return match &progress.active_tool {
-            Some(tool) => (
-                2,
-                Some(format!("Waiting for approval ({tool})")),
-                format!("Waiting for approval ({tool})"),
-            ),
-            None => (
-                2,
-                Some("Waiting for approval".into()),
-                "Waiting for approval".into(),
-            ),
-        };
+        return (
+            2,
+            Some("Waiting for approval".into()),
+            "Waiting for approval".into(),
+        );
     }
     if let Some(tool) = &progress.active_tool {
         return (
@@ -281,12 +274,9 @@ mod tests {
             waiting_approval: true,
             ..with_tool.clone()
         };
-        assert!(
-            describe_progress(&waiting, 5)
-                .1
-                .as_deref()
-                .is_some_and(|s| s.contains("Waiting for approval"))
-        );
+        let (_, waiting_card, waiting_doing) = describe_progress(&waiting, 5);
+        assert_eq!(waiting_card.as_deref(), Some("Waiting for approval"));
+        assert_eq!(waiting_doing, "Waiting for approval");
         let cancelling = RunProgress {
             cancel_requested: true,
             ..waiting

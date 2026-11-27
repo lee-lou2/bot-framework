@@ -95,7 +95,7 @@ To decide via API, send `POST /v1/admin/approvals/{nonce}/decide` with `{"allow"
 
 ## Owner-Only Approval Cards
 
-Default `bot serve` signs into Admin UI as the local operator. In v2.0, Slack owners approve channel-origin schedules via their Slack 1:1 DM; Admin UI does not support Slack login ([Reliability](reliability.md)).
+Default `bot serve` signs into Admin UI as the local operator. In v2.0, Slack owners approve channel-origin requests via their Slack 1:1 DM; Admin UI does not support Slack login ([Reliability](reliability.md)).
 
 Memory share/save cards (`memory.share`, `memory.save`) contain private memory text, and scheduled delivery cards (`schedule.deliver`) contain full outbound drafts. Their body is visible **only when viewer == requester == designated approver** (including operators). All other viewers receive metadata with `render: []` and `render_hidden: true`. Run details, audit, status, and map never include card bodies.
 

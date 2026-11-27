@@ -367,3 +367,109 @@ fn channel_only_without_owner() -> bot_gateway::testing::Fixture {
         .role("owner", &["run"])
         .policy_scopes(&["run"])
 }
+
+#[tokio::test]
+async fn dm_approval_notice_keeps_stream_resumable_until_final_reply() {
+    use bot_core::{
+        cards::DM_SENT_NOTICE,
+        state::{Conversation, ConversationKind, RunState},
+    };
+    use bot_gateway::{
+        delivery::Sender,
+        reply::ReplyBody,
+        testing::{ports::outgoing, slack::mention_frame},
+    };
+    use std::time::Duration;
+
+    let rig = crate::support::ux::ux_rig(
+        vec![personal()],
+        None,
+        Some((Duration::from_millis(20), Duration::from_secs(30))),
+    )
+    .await;
+    rig.slack
+        .push(mention_frame(
+            "E1",
+            "T1",
+            "C1",
+            "U1",
+            "500.1",
+            "<@UBOT> img",
+        ))
+        .await;
+    assert!(
+        rig.slack
+            .until(|s| s.calls("chat.startStream").len() == 1)
+            .await
+    );
+    let run = rig.store.inner.accepted()[0].run.clone();
+    let snap = personal().build();
+    let sender = rig.gateway.sender();
+    let make = |seq: u32, text: &str| {
+        let mut item = outgoing(
+            "personal",
+            seq,
+            "team",
+            "slack:home/U1",
+            Conversation {
+                kind: ConversationKind::Channel,
+                id: "C1".into(),
+                thread: Some("500.1".into()),
+            },
+            &format!(r#"{{"text":"{text}"}}"#),
+        );
+        item.key.run = run.clone();
+        (
+            item,
+            ReplyBody {
+                text: Some(text.into()),
+                approval: None,
+                attachments: vec![],
+            },
+        )
+    };
+
+    // Posting the DM-sent notice closes the prior card with `processing` and reopens below it.
+    let (notice_item, notice_body) = make(0, DM_SENT_NOTICE);
+    let _ = sender.send(&snap, &notice_item, &notice_body).await;
+    assert!(
+        rig.slack
+            .until(|s| s.calls("chat.startStream").len() == 2)
+            .await
+    );
+    assert_eq!(
+        rig.slack.calls("chat.stopStream")[0].body["session_status"],
+        "processing"
+    );
+
+    // Resumed tool progress updates the reopened stream until the real final reply arrives.
+    rig.store.set_progress_detail(
+        &run,
+        RunState::Leased,
+        Some("main/media"),
+        Some("shuut.generate-image"),
+    );
+    assert!(
+        rig.slack
+            .until(|s| s
+                .calls("chat.appendStream")
+                .iter()
+                .any(|c| { c.body["chunks"][0]["title"] == "Running tool: shuut.generate-image" }))
+            .await
+    );
+
+    let (final_item, final_body) = make(1, "Here is your image.");
+    let _ = sender.send(&snap, &final_item, &final_body).await;
+    rig.store.set_progress(&run, RunState::Succeeded);
+    assert!(
+        rig.slack
+            .until(|s| s.calls("chat.stopStream").len() == 2)
+            .await
+    );
+    assert!(
+        rig.slack.calls("chat.stopStream")[1]
+            .body
+            .get("session_status")
+            .is_none()
+    );
+}

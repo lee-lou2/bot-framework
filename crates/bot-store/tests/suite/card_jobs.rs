@@ -1,10 +1,11 @@
-//! Owner-DM approval card delivery jobs (PG): channel-origin routed approvals stay closed
+//! Owner-DM approval card delivery jobs (PG): Slack channel-origin approvals stay closed
 //! until a confirmed DM receipt opens them and posts a single fixed notice in the origin channel.
 
 use crate::support::{admin::*, cards::*, delivery::*, *};
 use bot_core::{
     admin::AdminRead,
-    cards::{CardKey, DM_SENT_NOTICE},
+    cards::{CardKey, CardOutcome, DM_SENT_NOTICE, DM_UNAVAILABLE_NOTICE},
+    command::Delegate,
     id::*,
     ledger::*,
     port::*,
@@ -46,7 +47,7 @@ async fn a_channel_card_waits_closed_and_stays_off_the_public_channel() {
 }
 
 #[tokio::test]
-async fn a_direct_conversation_and_a_plain_channel_approval_are_unchanged() {
+async fn a_plain_slack_channel_approval_uses_owner_dm_while_direct_dm_stays_inline() {
     let Some(db) = TestDb::new().await else {
         return;
     };
@@ -57,15 +58,30 @@ async fn a_direct_conversation_and_a_plain_channel_approval_are_unchanged() {
         ..binding(&channel.attempt, "d1", "n2")
     };
     calls(&db)
-        .open_approval(open_approval(plain))
+        .open_approval(open_approval(plain.clone()))
         .await
         .unwrap();
-    assert_eq!(public_lines(&db, &channel).await.len(), 1);
+    assert!(public_lines(&db, &channel).await.is_empty());
+    assert_eq!(state(&db, "bot_card_jobs", "n2").await, "staged");
+    assert!(matches!(
+        decide_as_owner(&db, &plain).await,
+        Err(Error::Conflict)
+    ));
+    let job = sending(&db).await;
+    assert_eq!(job.key.nonce.0, "n2");
+    settle(&db.store, &job.key, posted()).await.unwrap();
     assert_eq!(
-        db.scalar::<i64>("select count(*) from bot_card_jobs").await,
-        0
+        public_lines(&db, &channel).await,
+        vec![serde_json::json!({"text": DM_SENT_NOTICE}).to_string()]
     );
+    assert_eq!(
+        decide_as_owner(&db, &plain).await.unwrap(),
+        ApprovalState::Approved
+    );
+    assert_eq!(state_of_run(&db, &channel.attempt.run).await, "ready");
 
+    // A 1:1 DM conversation already runs in owner DM and posts its card inline.
+    let db = TestDb::new().await.unwrap();
     let direct = destination_run_as(&db, "r1", ConversationKind::Direct).await;
     let (_, approval) = request_delivery(&db, &direct, answers(&["one"])).await;
     assert_eq!(public_lines(&db, &direct).await.len(), 1);
@@ -74,6 +90,52 @@ async fn a_direct_conversation_and_a_plain_channel_approval_are_unchanged() {
         0
     );
     assert!(decide_as_owner(&db, &approval).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_delegated_slack_channel_child_routes_general_tool_approvals_to_owner_dm() {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let parent = run_in(&db, "r-parent", OWNER, ConversationKind::Channel).await;
+    let child_id = db
+        .store
+        .delegate(Delegate {
+            parent: parent.attempt.clone(),
+            step: "media".into(),
+            child: AgentId("main/media".into()),
+            instruction: "generate image".into(),
+            scopes: scopes(&["run"]),
+            checked_revision: rev(),
+        })
+        .await
+        .unwrap();
+    let child = runs(&db).claim().await.unwrap().unwrap();
+    assert_eq!(child.attempt.run, child_id);
+    begin_call(&db, &child.attempt, "c1").await;
+    let approval = Approval {
+        tool: tool("shuut.generate-image"),
+        risk: Risk::Irreversible,
+        ..binding(&child.attempt, "c1", "n-child")
+    };
+    calls(&db)
+        .open_approval(open_approval(approval))
+        .await
+        .unwrap();
+    assert!(public_lines(&db, &child).await.is_empty());
+    assert_eq!(state(&db, "bot_card_jobs", "n-child").await, "staged");
+
+    // DM delivery failure closes the approval, wakes the child run, and posts one fixed channel notice.
+    let job = sending(&db).await;
+    settle(&db.store, &job.key, CardOutcome::Unavailable)
+        .await
+        .unwrap();
+    assert_eq!(state(&db, "bot_approvals", "n-child").await, "denied");
+    assert_eq!(state_of_run(&db, &child.attempt.run).await, "ready");
+    assert_eq!(
+        public_lines(&db, &child).await,
+        vec![serde_json::json!({"text": DM_UNAVAILABLE_NOTICE}).to_string()]
+    );
 }
 
 #[tokio::test]
@@ -277,6 +339,25 @@ async fn a_channel_card_whose_approver_is_not_the_requester_opens_nothing() {
         0
     );
     assert_eq!(state_of_run(&db, &run.attempt.run).await, "leased");
+
+    // Plain Slack channel tool approvals enforce the same requester == approver invariant.
+    let run2 = run_in(&db, "r2", OWNER, ConversationKind::Channel).await;
+    begin_call(&db, &run2.attempt, "c2").await;
+    let mismatched = Approval {
+        approver: PrincipalId(GUEST.into()),
+        ..binding(&run2.attempt, "c2", "n2")
+    };
+    let got = calls(&db).open_approval(open_approval(mismatched)).await;
+    assert!(matches!(got, Err(Error::Denied)), "{got:?}");
+    assert_eq!(
+        db.scalar::<i64>("select count(*) from bot_approvals").await,
+        0
+    );
+    assert_eq!(
+        db.scalar::<i64>("select count(*) from bot_card_jobs").await,
+        0
+    );
+    assert_eq!(state_of_run(&db, &run2.attempt.run).await, "leased");
 }
 
 #[tokio::test]

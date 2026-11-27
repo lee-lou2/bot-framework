@@ -95,7 +95,7 @@ API로 결정하려면 `GET /v1/admin/me`에서 받은 `X-Bot-Csrf`, `Content-Ty
 
 ## 소유자 전용 승인 카드
 
-기본 `bot serve`는 로컬 운영자로 Admin UI에 로그인합니다. v2.0에서 Slack 소유자는 채널 원본 예약을 Slack 1:1 DM으로 승인하며, Admin UI는 Slack 로그인을 지원하지 않습니다([신뢰성](reliability.md)).
+기본 `bot serve`는 로컬 운영자로 Admin UI에 로그인합니다. v2.0에서 Slack 소유자는 채널 기원 요청을 Slack 1:1 DM으로 승인하며, Admin UI는 Slack 로그인을 지원하지 않습니다([신뢰성](reliability.md)).
 
 메모리 공유/저장 카드(`memory.share`, `memory.save`)에는 비공개 메모리 본문이, 예약 전달 카드(`schedule.deliver`)에는 외부 발송 초안 전문이 담깁니다. 이 본문은 **뷰어 == 요청자 == 지정 승인자**일 때만(운영자 포함) 표시됩니다. 다른 모든 뷰어는 `render: []`와 `render_hidden: true`가 설정된 메타데이터만 받습니다. 실행 상세, 감사, 상태, 맵에는 카드 본문이 절대 포함되지 않습니다.
 
