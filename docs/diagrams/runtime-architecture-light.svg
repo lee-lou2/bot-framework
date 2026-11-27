@@ -184,7 +184,7 @@
         <text x="296" y="260" class="mono-ink">· Queue · Lease · Gen</text>
         <text x="296" y="280" class="mono-ink">· Approvals · Grants</text>
         <text x="296" y="300" class="mono-ink">· Effects · Holds (Held)</text>
-        <text x="296" y="320" class="mono-ink">· Memory · Child · Pass</text>
+        <text x="296" y="320" class="mono-ink">· Hybrid Memory (f16)</text>
         <text x="296" y="340" class="mono-ink">· Outbox reply ledger</text>
         <text x="296" y="360" class="mono-ink">· Audit chain · Revision</text>
         <text x="296" y="380" class="mono">Atomic TX (zero loss)</text>
@@ -201,8 +201,8 @@
         <text x="532" y="84" class="eye">EXECUTION · bot-runtime</text>
         <text x="532" y="106" class="ttl">Worker</text>
         <line x1="532" y1="116" x2="708" y2="116" class="div"/>
-        <text x="532" y="134" class="sub">Claim lease · Assemble context</text>
-        <text x="532" y="152" class="sub">Child delegation · Checkpoints</text>
+        <text x="532" y="134" class="sub">Claim lease · Hybrid recall</text>
+        <text x="532" y="152" class="sub">Memory judge · Delegation</text>
         <text x="532" y="174" class="mono">API: inject key on send</text>
         <text x="532" y="190" class="mono">CLI: spawn disposable VM</text>
       </g>
@@ -223,16 +223,16 @@
         <text x="848" y="84" class="eye-acc">UNTRUSTED · APPLE CONTAINER</text>
         <text x="848" y="106" class="ttl-sm">Model Sandbox VM</text>
         <line x1="848" y1="116" x2="1072" y2="116" class="div"/>
-        <text x="848" y="134" class="sub">Disposable claude-cli VM · No secrets</text>
+        <text x="848" y="134" class="sub">Disposable claude / codex / agy VM</text>
         <text x="848" y="150" class="mono">Session token only · bot-init firewall</text>
         <text x="848" y="166" class="mono">Isolated read · Egress = relay only</text>
       </g>
       <g id="node-providers">
         <rect x="836" y="204" width="248" height="92" rx="6" class="node-link"/>
         <text x="848" y="224" class="eye-lnk">UPSTREAM · HTTPS</text>
-        <text x="848" y="246" class="ttl-sm">Model Providers</text>
+        <text x="848" y="246" class="ttl-sm">Upstream AI APIs</text>
         <line x1="848" y1="256" x2="1072" y2="256" class="div"/>
-        <text x="848" y="274" class="sub">Anthropic · OpenAI · Gemini / Ollama</text>
+        <text x="848" y="274" class="sub">LLM · Embeddings · System One</text>
         <text x="848" y="288" class="mono">Host-only keys · Leak guard on reply</text>
       </g>
       <g id="node-mcp-srt">

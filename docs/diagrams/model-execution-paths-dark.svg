@@ -89,8 +89,8 @@
       <text x="52" y="32" class="zlbl">PATH A · DIRECT API (anthropic-api / openai-api · RECOMMENDED)</text>
 
       <rect x="24" y="256" width="1072" height="236" rx="8" class="zone"/>
-      <rect x="44" y="250" width="448" height="14" rx="2" class="lbl-bg"/>
-      <text x="52" y="260" class="zlbl-acc">PATH B · CLAUDE-CLI IN DISPOSABLE VM (macOS Apple container)</text>
+      <rect x="44" y="250" width="516" height="14" rx="2" class="lbl-bg"/>
+      <text x="52" y="260" class="zlbl-acc">PATH B · CLI HARNESSES IN DISPOSABLE VM (claude-cli / codex-cli / agy-cli)</text>
 
       <!-- PATH A ARROWS -->
       <line x1="340" y1="128" x2="264" y2="128" class="edge-lnk" marker-start="url(#ar-lr-pt-d)" marker-end="url(#ar-l-pt-d)"/>
@@ -154,7 +154,7 @@
         <text x="916" y="114" class="ttl-sm">MCP · Built-ins</text>
         <line x1="916" y1="124" x2="1060" y2="124" class="div"/>
         <text x="916" y="142" class="sub">srt sandbox · Remote MCP</text>
-        <text x="916" y="158" class="mono">memory · schedule</text>
+        <text x="916" y="158" class="mono">memory.* · schedule.*</text>
         <text x="916" y="174" class="mono">delegate (no read)</text>
       </g>
 
@@ -162,7 +162,7 @@
       <g id="pb-api">
         <rect x="48" y="296" width="216" height="112" rx="6" class="node-link"/>
         <text x="60" y="316" class="eye-lnk">UPSTREAM ENDPOINT</text>
-        <text x="60" y="338" class="ttl-sm">Anthropic API</text>
+        <text x="60" y="338" class="ttl-sm">Provider API</text>
         <line x1="60" y1="348" x2="252" y2="348" class="div"/>
         <text x="60" y="366" class="sub">Unreachable directly from VM</text>
         <text x="60" y="382" class="mono">Broker proxy connects only</text>
@@ -171,12 +171,12 @@
       <g id="pb-vm">
         <rect x="340" y="288" width="224" height="128" rx="6" class="node-dash"/>
         <text x="352" y="308" class="eye-acc">UNTRUSTED · DISPOSABLE VM</text>
-        <text x="352" y="330" class="ttl-sm">Claude CLI in VM</text>
+        <text x="352" y="330" class="ttl-sm">CLI Harness in VM</text>
         <line x1="352" y1="340" x2="552" y2="340" class="div"/>
         <text x="352" y="358" class="sub">Fresh VM per run · Zero secrets</text>
         <text x="352" y="374" class="mono">bot-init firewall + drop privs</text>
         <text x="352" y="390" class="mono">Read-only /bot/AGENTS.md</text>
-        <text x="352" y="406" class="mono">Isolated read · strict MCP cfg</text>
+        <text x="352" y="406" class="mono">claude / codex / agy · MCP cfg</text>
       </g>
       <g id="pb-broker">
         <rect x="640" y="288" width="196" height="128" rx="6" class="node-focal"/>
@@ -184,7 +184,7 @@
         <text x="652" y="330" class="ttl-acc">Broker</text>
         <line x1="652" y1="340" x2="824" y2="340" class="div-acc"/>
         <text x="652" y="358" class="sub">Verifies claim session token</text>
-        <text x="652" y="376" class="mono">POST /v1/messages proxy</text>
+        <text x="652" y="376" class="mono">Provider-pinned model proxy</text>
         <text x="652" y="394" class="mono">POST /mcp → Broker::call</text>
       </g>
       <g id="pb-tools">
@@ -193,7 +193,7 @@
         <text x="916" y="338" class="ttl-sm">MCP · Built-ins</text>
         <line x1="916" y1="348" x2="1060" y2="348" class="div"/>
         <text x="916" y="366" class="sub">srt sandbox · Remote MCP</text>
-        <text x="916" y="382" class="mono">memory · schedule</text>
+        <text x="916" y="382" class="mono">memory.* · schedule.*</text>
         <text x="916" y="398" class="mono">delegate + isolated read</text>
       </g>
     </g>
@@ -210,7 +210,7 @@
   <text x="306" y="641" class="fv">human approvals, effect ledger, and audit</text>
   <line x1="568" y1="596" x2="568" y2="644" class="bar"/>
   <text x="578" y="606" class="fk">ANCHOR VM</text>
-  <text x="578" y="625" class="fv">Holds host-only network for claude-cli</text>
+  <text x="578" y="625" class="fv">Holds host-only network for CLI VMs</text>
   <text x="578" y="641" class="fv">Passes only relay IP:Port to trusted init</text>
   <line x1="840" y1="596" x2="840" y2="644" class="bar"/>
   <text x="850" y="606" class="fk">STALE WORKER GUARD</text>

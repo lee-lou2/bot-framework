@@ -27,11 +27,12 @@ flowchart LR
   W --> A[Model Sandbox]
   A -->|Relay HTTP| B
   W -->|Direct tool call| B
+  W -->|API / Embed / Judge| M[AI APIs]
   B -->|stdio| P[MCP Tool Sandbox]
   B -->|Streamable HTTP, exact host:port only| R[Remote MCP Server]
   P -->|Allowed hosts| E[External API]
   P -. Optional step receipts .-> B
-  B -->|Model proxy| M[Model Provider]
+  B -->|Model proxy| M
   B <--> D
   W -->|Finish & outbox| D
   D -->|Reply to origin| G
@@ -130,6 +131,39 @@ From the relay listener's real address, the Rust adapter derives `BOT_RELAY_IP` 
 
 The demo model needs no VM or upstream key, while demo tools enforce the same install, sandbox, and approval rules as production tools.
 
+## Hybrid Memory and Automatic Capture
+
+Memory stays inside stock PostgreSQL (`bot_memories`, zero extensions required) and combines turn-start hybrid recall, broker-gated built-in tools, and optional System One automatic post-turn capture.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/memory-architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="diagrams/memory-architecture-light.svg">
+  <img alt="Bot Framework hybrid memory recall and System One auto-capture pipeline" src="diagrams/memory-architecture-light.svg" width="100%">
+</picture>
+
+<details>
+<summary>Text flow diagram (Mermaid)</summary>
+
+```mermaid
+flowchart LR
+  U[1:1 DM / CLI User Turn] --> R[Turn-Start Hybrid Recall]
+  R -->|Lazy backfill + query vec| E[EmbeddingClient /embeddings 3072d]
+  R <--> DB[(PostgreSQL bot_memories f16)]
+  R -->|Untrusted user block| M[Model Turn]
+  M -->|memory.search/save/forget/share| B[Broker Memory Gate]
+  B <--> DB
+  M -->|Done on root DM/CLI| F[Human Filter + Secret Check]
+  F -->|JSON state| J[MemoryJudgeClient /v1/systemone]
+  J -->|save / supersede / forget| A[auto_save / auto_forget]
+  A -->|Embed 3072d + private TX| DB
+```
+
+</details>
+
+- **Turn-start hybrid recall:** When `host.json` sets `embeddings`, the worker lazily backfills up to 16 unembedded rows (SHA-256 race-safe), embeds the query (default `3072` dims, IEEE-754 `f16` `bytea`), and ranks candidates with Unicode char-trigrams, ASCII word-boundary + Korean particle-stripped tokens, code-ID matches, zero-alloc `f16` cosine, z-score anti-false-taint gating, RRF, and 30-day recency decay. Omitting `embeddings` or transient API errors fall back cleanly to lexical recall.
+- **Built-in memory tools:** `memory.search`, `memory.save`, and `memory.forget` are enabled by default in starter templates (`bot init`) and example profiles; when `memory.save` is in scope, the runtime adds concise `## Memory` prompt guidance. `memory.save` writes private owner-only entries in 1:1 DM/CLI (500 active quota, exact + `cos >= 0.94` dedup, non-destructive `supersedes`, optional `policy.approve` opt-in). `memory.share` remains `irreversible` and always requires owner approval over the full body.
+- **System One auto-capture (`memory_judge`):** When `host.json` sets `memory_judge` (e.g., Liquid `d1.2-ultra` or TypeSafe `jev-latest`), the worker evaluates only the authenticated human's raw 1:1 DM/CLI message and their own recalled private memories in one zero-output-token pass (`save`, `supersede`, `forget`, or `none`), blocks credentials locally and via `contains_secret`, skips turns where the model already invoked `memory.save`/`memory.forget`, embeds new facts at `3072` dims, and commits only `private` owner-owned rows (failing open on transient errors).
+
 ## Rust Workspace Crates
 
 <picture>
@@ -142,8 +176,8 @@ The demo model needs no VM or upstream key, while demo tools enforce the same in
 |---|---|---|
 | `bot-core` | Shared IDs, state types, port traits, built-in tool table, deterministic algorithms | None |
 | `bot-profile` | Profile discovery, validation, bundle packing, and revision creation | `bot-core` |
-| `bot-store` | PostgreSQL queue, call/effect ledger, approvals, outbox, and audit chain | `bot-core` |
-| `bot-runtime` | Worker loop, scheduler, delegation, direct API (`anthropic-api`, `openai-api`), and Apple `container` VM CLI runners | `bot-core` |
+| `bot-store` | PostgreSQL queue, hybrid `f16` memory, call/effect ledger, approvals, outbox, and audit chain | `bot-core` |
+| `bot-runtime` | Worker loop, scheduler, delegation, embeddings/memory judge, direct API (`anthropic-api`, `openai-api`), and Apple `container` VM CLI runners | `bot-core` |
 | `bot-broker` | Tool authorization, approvals, model proxy, VM relay, and `srt`-sandboxed MCP runner | `bot-core` |
 | `bot-gateway` | CLI, Slack, and HTTP (OpenAI-compatible) intake and outbox delivery | `bot-core` |
 | `bot-admin` | Admin API/UI and OTLP trace/log + Sentry-compatible issue exporters (used by every role) | `bot-core` |

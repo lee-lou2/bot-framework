@@ -27,11 +27,12 @@ flowchart LR
   W --> A[모델 샌드박스]
   A -->|릴레이 HTTP| B
   W -->|직접 도구 호출| B
+  W -->|API / 임베딩 / 판단| M[AI API]
   B -->|stdio| P[MCP 도구 샌드박스]
   B -->|Streamable HTTP, 정확한 host:port만 허용| R[원격 MCP 서버]
   P -->|허용된 호스트| E[외부 API]
   P -. 선택적 단계 영수증 .-> B
-  B -->|모델 프록시| M[모델 프로바이더]
+  B -->|모델 프록시| M
   B <--> D
   W -->|완료 및 아웃박스| D
   D -->|원래 대화로 응답| G
@@ -130,6 +131,39 @@ Rust 어댑터는 릴레이 리스너의 실제 주소에서 `BOT_RELAY_IP`(RFC 
 
 데모 모델은 VM이나 업스트림 키가 필요 없지만, 데모 도구는 운영 도구와 동일한 설치·샌드박스·승인 규칙을 그대로 적용합니다.
 
+## 하이브리드 메모리와 자동 저장
+
+메모리는 추가 확장이 필요 없는 기본 PostgreSQL(`bot_memories`) 안에서 동작하며, 턴 시작 하이브리드 회상·브로커 게이트 내장 도구·선택적 System One 턴 종료 자동 저장을 결합합니다.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../diagrams/memory-architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="../diagrams/memory-architecture-light.svg">
+  <img alt="Bot Framework 하이브리드 메모리 회상 및 System One 자동 저장 파이프라인" src="../diagrams/memory-architecture-light.svg" width="100%">
+</picture>
+
+<details>
+<summary>텍스트 흐름 다이어그램 (Mermaid)</summary>
+
+```mermaid
+flowchart LR
+  U[1:1 DM / CLI 사용자 턴] --> R[턴 시작 하이브리드 회상]
+  R -->|지연 백필 + 질의 벡터| E[EmbeddingClient /embeddings 3072d]
+  R <--> DB[(PostgreSQL bot_memories f16)]
+  R -->|비신뢰 사용자 블록| M[모델 턴]
+  M -->|memory.search/save/forget/share| B[브로커 메모리 게이트]
+  B <--> DB
+  M -->|루트 DM/CLI 완료| F[사람 메시지 필터 + 시크릿 차단]
+  F -->|JSON state| J[MemoryJudgeClient /v1/systemone]
+  J -->|저장 / 갱신 / 삭제| A[auto_save / auto_forget]
+  A -->|3072d 임베딩 + 비공개 TX| DB
+```
+
+</details>
+
+- **턴 시작 하이브리드 회상:** `host.json`에 `embeddings`가 설정되면 워커가 미임베딩 행 최대 16건을 지연 백필(SHA-256 경합 안전)하고 질의를 임베딩(기본 `3072`차원, IEEE-754 `f16` `bytea`)한 뒤, 유니코드 트라이그램·ASCII 단어 경계 및 한국어 조사 분리 토큰·코드 ID·zero-alloc `f16` 코사인·z-score 오탐 방지 게이트·RRF·30일 최신성 감쇠로 순위를 매깁니다. `embeddings` 미설정 또는 일시적 API 오류 시 어휘 회상으로 깔끔하게 폴백합니다.
+- **내장 메모리 도구:** `bot init` 기본 템플릿과 예시 프로필에 `memory.search`, `memory.save`, `memory.forget` 권한이 기본 포함되며, `memory.save` 스코프가 허용되면 런타임이 간결한 `## Memory` 지침을 주입합니다. `memory.save`는 1:1 DM/CLI에서 소유자 전용 비공개 항목을 저장(활성 500건 쿼터, 정확 및 `cos >= 0.94` 중복 생략, 비파괴 `supersedes`, 선택적 `policy.approve`)하며, `memory.share`는 `irreversible`로서 항상 소유자의 전문 확인 승인을 요구합니다.
+- **System One 자동 저장(`memory_judge`):** `host.json`에 `memory_judge`(예: Liquid `d1.2-ultra`, TypeSafe `jev-latest`)를 설정하면 워커가 생성 토큰 없는 단일 호출로 인증된 사람의 1:1 DM/CLI 원문 메시지와 본인 회상 비공개 기억만 평가해 저장·갱신(`supersedes`)·삭제(`forget`)·무시 여부를 결정합니다. 로컬 패턴 및 `contains_secret`으로 자격 증명을 차단하고, 모델이 이미 `memory.save`/`memory.forget`을 실행한 턴은 건너뛰며, 새 항목을 3072차원으로 임베딩해 본인 `private` 행으로만 커밋합니다(일시 오류 시 응답을 중단하지 않음).
+
 ## Rust 워크스페이스 크레이트
 
 <picture>
@@ -142,8 +176,8 @@ Rust 어댑터는 릴레이 리스너의 실제 주소에서 `BOT_RELAY_IP`(RFC 
 |---|---|---|
 | `bot-core` | 공통 ID, 상태 타입, 포트 트레이트, 내장 도구 테이블, 결정적 알고리즘 | 없음 |
 | `bot-profile` | 프로필 탐색, 검증, 번들 패킹, 리비전 생성 | `bot-core` |
-| `bot-store` | PostgreSQL 큐, 호출/이펙트 원장, 승인, 아웃박스, 감사 체인 | `bot-core` |
-| `bot-runtime` | 워커 루프, 스케줄러, 위임, 직접 API(`anthropic-api`, `openai-api`) 및 Apple `container` VM CLI 러너 | `bot-core` |
+| `bot-store` | PostgreSQL 큐, 하이브리드 `f16` 메모리, 호출/이펙트 원장, 승인, 아웃박스, 감사 체인 | `bot-core` |
+| `bot-runtime` | 워커 루프, 스케줄러, 위임, 임베딩·메모리 판단기, 직접 API(`anthropic-api`, `openai-api`) 및 Apple `container` VM CLI 러너 | `bot-core` |
 | `bot-broker` | 도구 권한 검증, 승인, 모델 프록시, VM 릴레이, `srt` 샌드박스 MCP 러너 | `bot-core` |
 | `bot-gateway` | CLI, Slack, HTTP(OpenAI 호환) 접수 및 아웃박스 전달 | `bot-core` |
 | `bot-admin` | Admin API/UI 및 OTLP 트레이스/로그 + Sentry 호환 이슈 익스포터(모든 역할에서 사용) | `bot-core` |
