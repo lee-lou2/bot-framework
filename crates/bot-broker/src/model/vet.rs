@@ -3,6 +3,10 @@
 //! Rejects unknown top-level fields, server-side tools, and external attachments so every
 //! tool call and resource fetch remains under local approval, audit, and egress controls.
 
+mod gemini;
+mod responses;
+
+use super::Protocol;
 use bot_core::port::Error;
 use serde_json::{Map, Value};
 
@@ -39,9 +43,9 @@ const TOOL_FIELDS: [&str; 6] = [
 ];
 
 /// Maximum nesting depth when traversing `content` blocks.
-const MAX_DEPTH: usize = 8;
+pub(super) const MAX_DEPTH: usize = 8;
 
-fn tool_name_ok(name: &str) -> bool {
+pub(super) fn tool_name_ok(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name
@@ -49,7 +53,19 @@ fn tool_name_ok(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-pub(super) fn vet_request(map: &Map<String, Value>, extra: &[String]) -> Result<(), Error> {
+pub(super) fn vet_request(
+    protocol: Protocol,
+    map: &Map<String, Value>,
+    extra: &[String],
+) -> Result<(), Error> {
+    match protocol {
+        Protocol::Anthropic => vet_anthropic(map, extra),
+        Protocol::OpenAiResponses => responses::vet_request(map, extra),
+        Protocol::Gemini => gemini::vet_request(map, extra),
+    }
+}
+
+fn vet_anthropic(map: &Map<String, Value>, extra: &[String]) -> Result<(), Error> {
     if map.keys().any(|k| {
         RESERVED.contains(&k.as_str())
             || (!BODY_FIELDS.contains(&k.as_str()) && !extra.iter().any(|e| e == k))
@@ -204,7 +220,7 @@ fn vet_source(source: &Map<String, Value>, base64_only: bool, depth: usize) -> R
     }
 }
 
-fn media_type_ok(value: Option<&Value>) -> bool {
+pub(super) fn media_type_ok(value: Option<&Value>) -> bool {
     value.and_then(Value::as_str).is_some_and(|m| {
         m.len() <= 100
             && m.split_once('/')
@@ -218,7 +234,7 @@ fn media_type_ok(value: Option<&Value>) -> bool {
 }
 
 /// Standard base64 without whitespace; rejects URL-like strings since `:` is outside the alphabet.
-fn base64_ok(data: &str) -> bool {
+pub(super) fn base64_ok(data: &str) -> bool {
     let body = data.trim_end_matches('=');
     !body.is_empty()
         && data.len() - body.len() <= 2
@@ -227,5 +243,7 @@ fn base64_ok(data: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
 }
 
+#[cfg(test)]
+mod multi_protocol_tests;
 #[cfg(test)]
 mod tests;

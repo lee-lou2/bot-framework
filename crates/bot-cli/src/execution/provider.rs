@@ -1,7 +1,7 @@
 //! Model provider parsing, validation, display, and authority hashing for `host.json`.
 use super::{field, object, only, text};
 use bot_core::id::SecretName;
-use bot_runtime::model::{ApiEndpoint, ApiKind, Effort, LimitField};
+use bot_runtime::model::{ApiEndpoint, ApiKind, CliKind, Effort, LimitField};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -9,13 +9,18 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Provider {
     Demo,
-    ClaudeCli {
-        model: String,
-        endpoint: String,
-        secret: String,
-        effort: Option<Effort>,
-    },
+    Cli(CliProvider),
     Api(ApiProvider),
+}
+
+/// VM-hosted CLI provider config (`claude-cli`, `codex-cli`, `agy-cli`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CliProvider {
+    pub kind: CliKind,
+    pub model: String,
+    pub endpoint: String,
+    pub secret: String,
+    pub effort: Option<Effort>,
 }
 
 /// Direct API provider config (`anthropic-api` / `openai-api`); keeps raw endpoint text for authority hashing.
@@ -36,15 +41,19 @@ impl Provider {
     pub fn secret(&self) -> Option<&str> {
         match self {
             Provider::Demo => None,
-            Provider::ClaudeCli { secret, .. } => Some(secret),
+            Provider::Cli(cli) => Some(&cli.secret),
             Provider::Api(api) => api.secret.as_deref(),
         }
     }
 
     pub fn needs_model_vm(&self) -> bool {
+        matches!(self, Provider::Cli(_))
+    }
+
+    pub fn cli_kind(&self) -> Option<CliKind> {
         match self {
-            Provider::Demo | Provider::Api(_) => false,
-            Provider::ClaudeCli { .. } => true,
+            Provider::Cli(cli) => Some(cli.kind),
+            Provider::Demo | Provider::Api(_) => None,
         }
     }
 
@@ -52,16 +61,16 @@ impl Provider {
     pub fn describe(&self, alias: &str) -> String {
         match self {
             Provider::Demo => format!("{alias}: demo (local demo model, no external calls)"),
-            Provider::ClaudeCli {
-                model,
-                endpoint,
-                secret,
-                effort,
-            } => {
-                let effort_note = effort.map_or_else(String::new, |e| format!(" · effort {e}"));
+            Provider::Cli(cli) => {
+                let effort_note = cli
+                    .effort
+                    .map_or_else(String::new, |e| format!(" · effort {e}"));
                 format!(
-                    "{alias}: claude-cli · model {model} · upstream {} · secret {secret}{effort_note}",
-                    upstream_host(endpoint)
+                    "{alias}: {} · model {} · upstream {} · secret {}{effort_note}",
+                    cli.kind.as_str(),
+                    cli.model,
+                    upstream_host(&cli.endpoint),
+                    cli.secret
                 )
             }
             Provider::Api(api) => {
@@ -95,13 +104,19 @@ impl Provider {
     pub(super) fn authority(&self, hash: &mut Sha256) {
         match self {
             Provider::Demo => hash.update([0]),
-            Provider::ClaudeCli {
+            // Destructure every field explicitly so new fields force an authority review; `Claude` stays tag `1`.
+            Provider::Cli(CliProvider {
+                kind,
                 model,
                 endpoint,
                 secret,
                 effort: _,
-            } => {
-                hash.update([1]);
+            }) => {
+                hash.update([match kind {
+                    CliKind::Claude => 1,
+                    CliKind::Codex => 4,
+                    CliKind::Agy => 5,
+                }]);
                 for part in [model, endpoint, secret] {
                     field(hash, part.as_bytes());
                 }
@@ -141,7 +156,7 @@ fn upstream_host(endpoint: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or_default()
 }
 
-/// Validates `claude-cli` upstream URLs with the same `HostPort::parse` rules as broker egress; rejects alternative IP encodings (`0x`, numeric final label).
+/// Validates VM CLI (`claude-cli`, `codex-cli`, `agy-cli`) upstream URLs with the same `HostPort::parse` rules as broker egress; rejects alternative IP encodings (`0x`, numeric final label).
 fn endpoint_ok(endpoint: &str) -> bool {
     let Some(rest) = endpoint.strip_prefix("https://") else {
         return false;
@@ -265,6 +280,36 @@ fn parse_api(
     })
 }
 
+fn parse_cli(
+    fields: &Map<String, Value>,
+    path: &str,
+    kind: CliKind,
+) -> Result<CliProvider, String> {
+    only(
+        fields,
+        &["kind", "model", "endpoint", "secret", "effort"],
+        path,
+    )?;
+    let endpoint = text(fields, "endpoint", path)?;
+    if !endpoint_ok(endpoint) {
+        return Err(format!(
+            "{path}.endpoint: must be `https://host[:port][/path]` (no credentials, query, or fragment)"
+        ));
+    }
+    let secret = text(fields, "secret", path)?;
+    if SecretName::parse(secret).is_none() {
+        return Err(format!("{path}.secret: invalid secret name"));
+    }
+    let effort = parse_effort(fields, path)?;
+    Ok(CliProvider {
+        kind,
+        model: text(fields, "model", path)?.to_owned(),
+        endpoint: endpoint.to_owned(),
+        secret: secret.to_owned(),
+        effort,
+    })
+}
+
 pub fn parse_providers(value: &Value) -> Result<BTreeMap<String, Provider>, String> {
     let mut out = BTreeMap::new();
     for (alias, entry) in object(value, "providers")? {
@@ -280,30 +325,9 @@ pub fn parse_providers(value: &Value) -> Result<BTreeMap<String, Provider>, Stri
                 only(fields, &["kind"], &path)?;
                 Provider::Demo
             }
-            "claude-cli" => {
-                only(
-                    fields,
-                    &["kind", "model", "endpoint", "secret", "effort"],
-                    &path,
-                )?;
-                let endpoint = text(fields, "endpoint", &path)?;
-                if !endpoint_ok(endpoint) {
-                    return Err(format!(
-                        "{path}.endpoint: must be `https://host[:port][/path]` (no credentials, query, or fragment)"
-                    ));
-                }
-                let secret = text(fields, "secret", &path)?;
-                if SecretName::parse(secret).is_none() {
-                    return Err(format!("{path}.secret: invalid secret name"));
-                }
-                let effort = parse_effort(fields, &path)?;
-                Provider::ClaudeCli {
-                    model: text(fields, "model", &path)?.to_owned(),
-                    endpoint: endpoint.to_owned(),
-                    secret: secret.to_owned(),
-                    effort,
-                }
-            }
+            "claude-cli" => Provider::Cli(parse_cli(fields, &path, CliKind::Claude)?),
+            "codex-cli" => Provider::Cli(parse_cli(fields, &path, CliKind::Codex)?),
+            "agy-cli" => Provider::Cli(parse_cli(fields, &path, CliKind::Agy)?),
             "anthropic-api" => Provider::Api(parse_api(fields, &path, ApiKind::Anthropic)?),
             "openai-api" => Provider::Api(parse_api(fields, &path, ApiKind::OpenAi)?),
             "pi" => {
@@ -313,7 +337,7 @@ pub fn parse_providers(value: &Value) -> Result<BTreeMap<String, Provider>, Stri
             }
             other => {
                 return Err(format!(
-                    "{path}.kind: unsupported kind `{other}` (expected demo, claude-cli, anthropic-api, or openai-api)"
+                    "{path}.kind: unsupported kind `{other}` (expected demo, claude-cli, codex-cli, agy-cli, anthropic-api, or openai-api)"
                 ));
             }
         };

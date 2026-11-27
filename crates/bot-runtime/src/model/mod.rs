@@ -4,9 +4,11 @@
 //! runners run inside a host-only VM with egress restricted to the per-attempt broker relay.
 //! Errors carry fixed vocabulary codes only.
 
+mod agy;
 pub mod api;
 mod claude_code;
 mod cli;
+mod codex;
 pub mod container;
 mod demo;
 mod driver;
@@ -17,9 +19,11 @@ mod relay;
 mod sandbox;
 pub mod session;
 
+pub use agy::AgyRunner;
 pub use api::{ApiClient, ApiEndpoint, ApiKind, ApiRunner, ApiSettings, Effort, LimitField};
 pub use claude_code::ClaudeCodeRunner;
-pub use cli::{CliConfig, CliModel};
+pub use cli::{CliConfig, CliKind, CliModel};
+pub use codex::CodexRunner;
 pub use demo::DemoModel;
 pub use driver::{Event, Output, Parser, classify, is_transient};
 pub use exchange::{CallEnd, DoneCall, Exchange};

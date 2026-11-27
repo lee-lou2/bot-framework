@@ -1,4 +1,4 @@
-//! Resolves allowed profile model aliases into `DemoModel`, `ClaudeCodeRunner`, or `ApiRunner`.
+//! Resolves allowed profile model aliases into `DemoModel`, VM CLI runners (`claude-cli`, `codex-cli`, `agy-cli`), or `ApiRunner`.
 use super::watched::Watched;
 use crate::{
     execution::{ApiProvider, Provider},
@@ -10,7 +10,7 @@ use bot_core::{
 };
 use bot_runtime::{
     Models,
-    model::{ApiEndpoint, ApiRunner, ApiSettings, DemoModel, ModelRunner},
+    model::{ApiEndpoint, ApiRunner, ApiSettings, CliKind, DemoModel, ModelRunner},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -73,7 +73,7 @@ fn api_runner(
 /// Builds runners for every profile-allowed alias; refuses to start rather than falling back if a runner is missing.
 pub fn build(
     host: &HostFile,
-    claude: Option<Arc<dyn ModelRunner>>,
+    cli_runners: &BTreeMap<CliKind, Arc<dyn ModelRunner>>,
     api: Option<&ApiParts>,
 ) -> Result<ProviderModels, String> {
     let mut runners: BTreeMap<String, Arc<dyn ModelRunner>> = BTreeMap::new();
@@ -89,9 +89,10 @@ pub fn build(
             })?;
             let runner: Arc<dyn ModelRunner> = match provider {
                 Provider::Demo => Arc::new(DemoModel),
-                Provider::ClaudeCli { .. } => claude.clone().ok_or_else(|| {
+                Provider::Cli(cfg) => cli_runners.get(&cfg.kind).cloned().ok_or_else(|| {
                     format!(
-                        "model alias {alias}: claude-cli runner is not assembled (sandbox.apple is required in host config)"
+                        "model alias {alias}: {} runner is not assembled (sandbox.apple is required in host config)",
+                        cfg.kind.as_str()
                     )
                 })?,
                 Provider::Api(config) => api_runner(alias, config, api)?,
@@ -121,9 +122,10 @@ mod tests {
 
     #[test]
     fn only_the_aliases_a_profile_allows_resolve_and_each_needs_a_provider() {
+        let empty = BTreeMap::new();
         let host =
             parsed(r#", "providers": {"assistant": {"kind": "demo"}, "other": {"kind": "demo"}}"#);
-        let models = build(&host, None, None).unwrap();
+        let models = build(&host, &empty, None).unwrap();
         let personal = ProfileId("personal".into());
         assert!(models.runner(&personal, "assistant").is_some());
         assert!(models.runner(&personal, "other").is_none());
@@ -138,12 +140,12 @@ mod tests {
                 .is_none()
         );
         let missing = parsed(r#", "providers": {"assistant": {"kind": "demo"}}"#);
-        let error = build(&missing, None, None).err().unwrap();
+        let error = build(&missing, &empty, None).err().unwrap();
         assert!(
             error.contains("other") && error.contains("providers.other"),
             "{error}"
         );
-        assert!(build(&host::parse(r#"{"version": 1}"#).unwrap(), None, None).is_ok());
+        assert!(build(&host::parse(r#"{"version": 1}"#).unwrap(), &empty, None).is_ok());
     }
 
     struct NoSecrets;
@@ -171,17 +173,18 @@ mod tests {
 
     #[test]
     fn api_aliases_start_only_with_the_assembled_parts_and_resolve_to_step_runners() {
+        let empty = BTreeMap::new();
         let host = parsed(
             r#", "providers": {
                 "assistant": {"kind": "anthropic-api", "model": "m", "endpoint": "https://api.example", "secret": "key"},
                 "other": {"kind": "openai-api", "model": "m", "endpoint": "http://127.0.0.1:11434/v1"}}"#,
         );
-        let error = build(&host, None, None).err().unwrap();
+        let error = build(&host, &empty, None).err().unwrap();
         assert!(
             error.contains("direct API") && error.contains("assistant"),
             "{error}"
         );
-        let models = build(&host, None, Some(&parts())).unwrap();
+        let models = build(&host, &empty, Some(&parts())).unwrap();
         let personal = ProfileId("personal".into());
         let runner = models.runner(&personal, "assistant").unwrap();
         assert_eq!(runner.kind(), bot_runtime::model::RunnerKind::Step);
@@ -192,6 +195,7 @@ mod tests {
 
     #[test]
     fn an_api_alias_with_a_remote_endpoint_and_no_key_cannot_start() {
+        let empty = BTreeMap::new();
         let host =
             parsed(r#", "providers": {"assistant": {"kind": "demo"}, "other": {"kind": "demo"}}"#);
         let mut forced = host;
@@ -207,7 +211,7 @@ mod tests {
                 effort: None,
             }),
         );
-        let error = build(&forced, None, Some(&parts())).err().unwrap();
+        let error = build(&forced, &empty, Some(&parts())).err().unwrap();
         assert!(
             error.contains("assistant") && error.contains("loopback"),
             "{error}"
@@ -224,7 +228,7 @@ mod tests {
                 effort: None,
             }),
         );
-        let error = build(&forced, None, Some(&parts())).err().unwrap();
+        let error = build(&forced, &empty, Some(&parts())).err().unwrap();
         assert!(error.contains("providers.assistant.endpoint"), "{error}");
     }
 
@@ -242,34 +246,51 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_cli_alias_is_refused_without_an_assembled_cli_runner() {
-        let host = parsed(
-            r#", "providers": {"assistant": {"kind": "claude-cli", "model": "m", "endpoint": "https://up.example/v1", "secret": "key"},
-                "other": {"kind": "demo"}}"#,
-        );
-        let error = build(&host, None, None).err().unwrap();
+    fn cli_aliases_fail_without_their_matching_runner_and_dispatch_by_kind() {
+        let empty = BTreeMap::new();
+        let host = host::parse(
+            r#"{"version": 1, "models": {"personal": ["claude", "codex", "agy"], "work": ["other"]},
+                "providers": {
+                    "claude": {"kind": "claude-cli", "model": "m", "endpoint": "https://up.example/v1", "secret": "key"},
+                    "codex": {"kind": "codex-cli", "model": "m", "endpoint": "https://api.openai.com/v1", "secret": "key"},
+                    "agy": {"kind": "agy-cli", "model": "m", "endpoint": "https://generativelanguage.googleapis.com", "secret": "key"},
+                    "other": {"kind": "demo"}}}"#,
+        )
+        .unwrap();
+        let error = build(&host, &empty, None).err().unwrap();
         assert!(
-            error.contains("claude-cli") && error.contains("assistant"),
+            error.contains("claude-cli")
+                || error.contains("codex-cli")
+                || error.contains("agy-cli"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn a_claude_cli_alias_runs_on_the_given_cli_runner_only() {
-        let host = parsed(
-            r#", "providers": {"assistant": {"kind": "claude-cli", "model": "m", "endpoint": "https://up.example/v1", "secret": "key"},
-                "other": {"kind": "demo"}}"#,
-        );
-        let cli: Arc<dyn ModelRunner> = Arc::new(DemoModel);
-        let models = build(&host, Some(cli.clone()), None).unwrap();
+        let r_claude: Arc<dyn ModelRunner> = Arc::new(DemoModel);
+        let r_codex: Arc<dyn ModelRunner> = Arc::new(DemoModel);
+        let r_agy: Arc<dyn ModelRunner> = Arc::new(DemoModel);
+        let partial = BTreeMap::from([(CliKind::Claude, r_claude.clone())]);
+        assert!(build(&host, &partial, None).is_err());
+        let all = BTreeMap::from([
+            (CliKind::Claude, r_claude.clone()),
+            (CliKind::Codex, r_codex.clone()),
+            (CliKind::Agy, r_agy.clone()),
+        ]);
+        let models = build(&host, &all, None).unwrap();
         let personal = ProfileId("personal".into());
         assert!(Arc::ptr_eq(
-            &models.runner(&personal, "assistant").unwrap(),
-            &cli
+            &models.runner(&personal, "claude").unwrap(),
+            &r_claude
+        ));
+        assert!(Arc::ptr_eq(
+            &models.runner(&personal, "codex").unwrap(),
+            &r_codex
+        ));
+        assert!(Arc::ptr_eq(
+            &models.runner(&personal, "agy").unwrap(),
+            &r_agy
         ));
         assert!(!Arc::ptr_eq(
             &models.runner(&ProfileId("work".into()), "other").unwrap(),
-            &cli
+            &r_claude
         ));
     }
 
@@ -277,7 +298,7 @@ mod tests {
     fn the_built_in_demo_host_runs_the_demo_model() {
         let demo =
             load::load_host(&crate::settings::Settings::read(&|_| None).unwrap(), 501).unwrap();
-        let models = build(&demo, None, None).unwrap();
+        let models = build(&demo, &BTreeMap::new(), None).unwrap();
         assert!(
             models
                 .runner(&ProfileId("personal".into()), "assistant")

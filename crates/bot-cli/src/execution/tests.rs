@@ -24,13 +24,21 @@ fn providers_are_demo_or_a_claude_cli_with_an_https_upstream_and_a_secret_name()
     assert_eq!(ok["assistant"], Provider::Demo);
     assert_eq!(
         ok["claude"],
-        Provider::ClaudeCli {
+        Provider::Cli(CliProvider {
+            kind: CliKind::Claude,
             model: "claude-x".into(),
             endpoint: "https://api.example.com:8443/v1/messages".into(),
             secret: "upstream-key".into(),
             effort: None,
-        }
+        })
     );
+    let multi = parse_providers(&json!({
+        "codex": {"kind": "codex-cli", "model": "gpt-5", "endpoint": "https://api.openai.com/v1", "secret": "openai-key", "effort": "high"},
+        "agy": {"kind": "agy-cli", "model": "gemini-3.1-pro-preview", "endpoint": "https://generativelanguage.googleapis.com", "secret": "gemini-key"}
+    }))
+    .unwrap();
+    assert_eq!(multi["codex"].cli_kind(), Some(CliKind::Codex));
+    assert_eq!(multi["agy"].cli_kind(), Some(CliKind::Agy));
     assert!(parse_providers(&json!({})).unwrap().is_empty());
     let claude = |patch: Value| {
         let mut base = json!({"kind": "claude-cli", "model": "m", "endpoint": "https://h.example/v1", "secret": "k"});
@@ -199,6 +207,40 @@ fn sandbox_paths_are_absolute_and_the_vm_image_is_pinned_to_a_digest() {
         full.binary,
         Some(PathBuf::from("/opt/homebrew/bin/container"))
     );
+    let multi_img = parse_sandbox(&json!({
+        "apple": {
+            "images": {
+                "codex": format!("codex-img@sha256:{digest}"),
+                "agy": format!("agy-img@sha256:{}", "b".repeat(64))
+            },
+            "network": "bot-internal"
+        }
+    }))
+    .unwrap()
+    .apple
+    .unwrap();
+    assert_eq!(multi_img.image, None);
+    assert_eq!(multi_img.image_for(CliKind::Claude), None);
+    assert_eq!(
+        multi_img.image_for(CliKind::Codex),
+        Some(format!("codex-img@sha256:{digest}").as_str())
+    );
+    assert_eq!(
+        multi_img.image_for(CliKind::Agy),
+        Some(format!("agy-img@sha256:{}", "b".repeat(64)).as_str())
+    );
+    assert!(parse_sandbox(&json!({"apple": {"network": "n"}})).is_err());
+    assert!(parse_sandbox(&json!({"apple": {"images": {}, "network": "n"}})).is_err());
+    assert!(
+        parse_sandbox(
+            &json!({"apple": {"images": {"pi": format!("img@sha256:{digest}")}, "network": "n"}})
+        )
+        .is_err()
+    );
+    assert!(
+        parse_sandbox(&json!({"apple": {"images": {"codex": "codex:latest"}, "network": "n"}}))
+            .is_err()
+    );
     assert_eq!(parse_sandbox(&json!({})).unwrap(), Sandbox::default());
     let apple = |patch: Value| {
         let mut base = json!({"image": format!("img@sha256:{digest}"), "network": "n", "relay_bind": "192.168.64.1:9300"});
@@ -298,12 +340,13 @@ fn catalog() -> HostCatalog {
 fn claude(endpoint: &str, secret: &str) -> BTreeMap<String, Provider> {
     [(
         "assistant".to_owned(),
-        Provider::ClaudeCli {
+        Provider::Cli(CliProvider {
+            kind: CliKind::Claude,
             model: "m".into(),
             endpoint: endpoint.into(),
             secret: secret.into(),
             effort: None,
-        },
+        }),
     )]
     .into()
 }
@@ -320,7 +363,8 @@ fn sandbox(image: &str, work: &str, relay: &str) -> Sandbox {
             extra_path: Vec::new(),
         }),
         apple: Some(Apple {
-            image: image.into(),
+            image: Some(image.into()),
+            images: BTreeMap::new(),
             network: "net".into(),
             relay_bind: Some(relay.parse().unwrap()),
             work_root: None,

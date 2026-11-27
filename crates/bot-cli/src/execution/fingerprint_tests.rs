@@ -31,6 +31,14 @@ fn claude() -> Value {
     json!({"kind": "claude-cli", "model": "claude-x", "endpoint": "https://api.example.com/v1", "secret": "claude-key"})
 }
 
+fn codex() -> Value {
+    json!({"kind": "codex-cli", "model": "gpt-x", "endpoint": "https://api.openai.com/v1", "secret": "openai-key"})
+}
+
+fn agy() -> Value {
+    json!({"kind": "agy-cli", "model": "gemini-x", "endpoint": "https://generativelanguage.googleapis.com", "secret": "gemini-key"})
+}
+
 fn anthropic() -> Value {
     json!({"kind": "anthropic-api", "model": "claude-x", "endpoint": "https://api.anthropic.com", "secret": "anthropic-key"})
 }
@@ -59,6 +67,16 @@ fn every_provider_kind_keeps_its_fingerprint_bytes() {
             "claude-cli",
             claude(),
             "a334ba03ed95ccf087a2a4166fee34595c971b6907df06eeaef0d2d2eda0b0f0",
+        ),
+        (
+            "codex-cli",
+            codex(),
+            "8854346e8b95184443cad13cfa9ced6bbb57323c1bf09b5dfe1e5d90c6d173eb",
+        ),
+        (
+            "agy-cli",
+            agy(),
+            "f6976b7e03e0f06382e88fbf1d269a15c683fe5b1db7814af5ca3887baf7700d",
         ),
         (
             "anthropic-api",
@@ -112,9 +130,55 @@ fn output_limits_are_not_authority_so_they_leave_the_bytes_alone() {
 
 #[test]
 fn effort_is_not_authority_so_it_leaves_the_bytes_alone() {
-    for base in [claude(), anthropic(), openai()] {
+    for base in [claude(), codex(), agy(), anthropic(), openai()] {
         let mut tuned = base.clone();
         tuned["effort"] = json!("medium");
         assert_eq!(print(json!({"a": tuned})), print(json!({"a": base})));
     }
+}
+
+#[test]
+fn codex_and_agy_cli_kinds_have_distinct_stable_fingerprint_tags_and_apple_images_bind_authority() {
+    let same_claude = print(
+        json!({"a": json!({"kind": "claude-cli", "model": "m", "endpoint": "https://api.example.com/v1", "secret": "k"})}),
+    );
+    let same_codex = print(
+        json!({"a": json!({"kind": "codex-cli", "model": "m", "endpoint": "https://api.example.com/v1", "secret": "k"})}),
+    );
+    let same_agy = print(
+        json!({"a": json!({"kind": "agy-cli", "model": "m", "endpoint": "https://api.example.com/v1", "secret": "k"})}),
+    );
+    assert_ne!(same_claude, same_codex);
+    assert_ne!(same_claude, same_agy);
+    assert_ne!(same_codex, same_agy);
+
+    let digest_a = format!("img@sha256:{}", "a".repeat(64));
+    let digest_b = format!("img@sha256:{}", "b".repeat(64));
+    let fp = |sandbox: Value| {
+        let sandbox = parse_sandbox(&sandbox).unwrap();
+        authority_fingerprint(
+            &GATEWAY,
+            &HostCatalog::default(),
+            &BTreeMap::new(),
+            &sandbox,
+            &BTreeMap::new(),
+        )
+    };
+    let hex = |bytes: [u8; 32]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    let legacy = fp(json!({"apple": {"image": digest_a, "network": "net"}}));
+    let multi = fp(json!({"apple": {"images": {"codex": digest_a}, "network": "net"}}));
+    let multi_changed = fp(json!({"apple": {"images": {"codex": digest_b}, "network": "net"}}));
+    let multi_both =
+        fp(json!({"apple": {"images": {"codex": digest_a, "agy": digest_b}, "network": "net"}}));
+    assert_eq!(
+        hex(legacy),
+        "4638d136a15ae0b212f30bb4c898e02c6b874223a0cfdae85be521ed0ecbfd14"
+    );
+    assert_eq!(
+        hex(multi),
+        "3d3945b01c2995d21919505e7b680598647fcc7404792d538bb4bd9aeecdd121"
+    );
+    assert_ne!(legacy, multi);
+    assert_ne!(multi, multi_changed);
+    assert_ne!(multi, multi_both);
 }

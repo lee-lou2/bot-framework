@@ -3,16 +3,23 @@
 #   1. Apply nftables rules allowing only relay TCP (BOT_RELAY_IP:BOT_RELAY_PORT) and its replies; drop all else (incl. IPv6).
 #   2. Read back and verify the applied nftables rules.
 #   3. Self-check privilege drop (10001:10001, no groups, zero caps, no_new_privs) via /proc/self/status.
-#   4. Exec /usr/local/bin/claude with the same dropped privileges.
-# Requires host-provided BOT_RELAY_IP (RFC 1918 IPv4), BOT_RELAY_PORT (1..65535), args `claude <args...>`,
+#   4. Exec /usr/local/bin/<cli> (`claude`, `codex`, or `agy`) with the same dropped privileges.
+#      For `agy`, also materialize RAM-only /tmp/mcp_config.json (0600, 10001:10001) from /work/mcp.agy.template.json
+#      after dropping privileges so the session token never touches disk.
+# Requires host-provided BOT_RELAY_IP (RFC 1918 IPv4), BOT_RELAY_PORT (1..65535), args `<cli> <args...>`,
 # and only NET_ADMIN, SETUID, SETGID, SETPCAP. Missing SETPCAP causes setpriv to silently skip clearing the
 # bounding set, which step 3 catches. Fails closed with exit 1 and single-word stderr `vm_init_failed`.
 unset ENV BASH_ENV LD_PRELOAD LD_LIBRARY_PATH
 PATH=/usr/sbin:/usr/bin:/bin
 fail() { echo vm_init_failed >&2; exit 1; }
 
-[ "${1-}" = claude ] || fail
+cli=${1-}
+case $cli in
+  claude | codex | agy) ;;
+  *) fail ;;
+esac
 shift
+[ -x "/usr/local/bin/$cli" ] || fail
 ip=${BOT_RELAY_IP-}
 port=${BOT_RELAY_PORT-}
 
@@ -69,7 +76,7 @@ for fragment in \
   case $rules in *"$fragment"*) ;; *) fail ;; esac
 done
 
-# 3. Verify dropped privileges via /proc/self/status before execing Claude.
+# 3. Verify dropped privileges via /proc/self/status before execing the model CLI.
 unset BOT_RELAY_IP BOT_RELAY_PORT
 privs="--reuid=10001 --regid=10001 --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs"
 # shellcheck disable=SC2086
@@ -84,7 +91,42 @@ privs="--reuid=10001 --regid=10001 --clear-groups --inh-caps=-all --ambient-caps
   [ "$state" = " Uid:10001,10001,10001,10001 Gid:10001,10001,10001,10001 Groups: CapInh:0000000000000000 CapPrm:0000000000000000 CapEff:0000000000000000 CapBnd:0000000000000000 CapAmb:0000000000000000 NoNewPrivs:1" ]
 ' >/dev/null 2>&1 || fail
 
-# 4. Exec pinned Claude with the image PATH.
+# 4. Exec pinned model CLI with the image PATH.
 PATH=/usr/local/bin:/usr/bin:/bin
+if [ "$cli" = agy ]; then
+  # Expand ${RELAY_TOKEN} into RAM-only /tmp/mcp_config.json (0600, 10001:10001) using POSIX shell builtins only.
+  # shellcheck disable=SC2086
+  exec /bin/setpriv $privs -- /bin/sh -c '
+    umask 077
+    tpl=/work/mcp.agy.template.json
+    if [ -f "$tpl" ]; then
+      [ ! -L "$tpl" ] || { echo vm_init_failed >&2; exit 1; }
+      tok=${RELAY_TOKEN-}
+      [ -n "$tok" ] || { echo vm_init_failed >&2; exit 1; }
+      line=
+      IFS= read -r line <"$tpl" || [ -n "$line" ] || { echo vm_init_failed >&2; exit 1; }
+      placeholder=\$\{RELAY_TOKEN\}
+      replaced=0
+      out=
+      rest=$line
+      while :; do
+        case $rest in
+          *"$placeholder"*)
+            out=$out${rest%%"$placeholder"*}$tok
+            rest=${rest#*"$placeholder"}
+            replaced=1
+            ;;
+          *)
+            out=$out$rest
+            break
+            ;;
+        esac
+      done
+      [ "$replaced" = 1 ] || { echo vm_init_failed >&2; exit 1; }
+      printf "%s\n" "$out" >/tmp/mcp_config.json || { echo vm_init_failed >&2; exit 1; }
+    fi
+    exec /usr/local/bin/agy "$@"
+  ' agy "$@"
+fi
 # shellcheck disable=SC2086
-exec /bin/setpriv $privs -- /usr/local/bin/claude "$@"
+exec /bin/setpriv $privs -- "/usr/local/bin/$cli" "$@"

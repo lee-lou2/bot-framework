@@ -2,15 +2,19 @@
 // VM boot order is type-enforced (`ContainerSandbox::start` -> `Anchored` -> bind relay on gateway IP -> `relay`),
 // because the host-only gateway address is only bindable while the anchor VM is up.
 use crate::{
-    execution::Apple,
+    execution::{Apple, Provider},
     host::HostFile,
     install,
     serve::{runner::default_work, upstream::HttpsUpstream},
 };
 use bot_broker::model::Upstream;
 use bot_core::sandbox::ModelSandbox;
-use bot_runtime::model::container::{Anchored, ContainerConfig, ContainerSandbox, Entry, Health};
+use bot_runtime::model::{
+    CliKind,
+    container::{Anchored, ContainerConfig, ContainerSandbox, Entry, Health},
+};
 use std::{
+    collections::BTreeSet,
     fs::DirBuilder,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     os::unix::fs::{DirBuilderExt, MetadataExt},
@@ -35,15 +39,44 @@ pub enum Launch {
     },
 }
 
-/// Builds production Apple VM parts from host config; refuses fallback if `sandbox.apple` is missing.
+/// Builds production Apple VM parts from host config; refuses fallback if `sandbox.apple` or any required CLI image is missing.
 pub fn operational(
     host: &HostFile,
     installs: Option<&Path>,
     uid: u32,
 ) -> Result<super::ClaudeParts, String> {
-    let apple = host.sandbox.apple.as_ref().ok_or(
-        "claude-cli alias is configured but host config is missing sandbox.apple (digest-pinned image and host-only network) — see docs/model-image.md",
-    )?;
+    let required: BTreeSet<CliKind> = host
+        .catalog
+        .models
+        .values()
+        .flatten()
+        .filter_map(|alias| host.providers.get(alias).and_then(Provider::cli_kind))
+        .collect();
+    let apple = host.sandbox.apple.as_ref().ok_or_else(|| {
+        let names = required
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let label = if names.is_empty() {
+            "claude-cli".to_owned()
+        } else {
+            names
+        };
+        format!(
+            "{label} alias is configured but host config is missing sandbox.apple (digest-pinned image and host-only network) — see docs/model-image.md"
+        )
+    })?;
+    for kind in &required {
+        if apple.image_for(*kind).is_none() {
+            return Err(format!(
+                "{} alias is configured but sandbox.apple is missing an image for `{}` (`sandbox.apple.images.{}`) — see docs/model-image.md",
+                kind.as_str(),
+                kind.program(),
+                kind.program()
+            ));
+        }
+    }
     let workspace = match &apple.work_root {
         Some(path) => path.clone(),
         None => {
@@ -54,7 +87,7 @@ pub fn operational(
     private_dir(&workspace, uid)?;
     Ok(super::ClaudeParts {
         launch: Launch::Container {
-            config: Box::new(container_config(apple, &workspace)),
+            config: Box::new(container_config(apple, &workspace)?),
             relay_bind: apple.relay_bind,
         },
         upstream: Arc::new(HttpsUpstream::new()?) as Arc<dyn Upstream>,
@@ -63,16 +96,24 @@ pub fn operational(
     })
 }
 
-fn container_config(apple: &Apple, workspace: &Path) -> ContainerConfig {
-    let mut config = ContainerConfig::new(&apple.image, &apple.network, workspace)
-        .with_entry(Entry::model_image());
+fn container_config(apple: &Apple, workspace: &Path) -> Result<ContainerConfig, String> {
+    let anchor = apple.anchor_image().ok_or_else(|| {
+        "sandbox.apple is missing a digest-pinned VM image (`image` or `images`)".to_owned()
+    })?;
+    let mut config =
+        ContainerConfig::new(anchor, &apple.network, workspace).with_entry(Entry::model_image());
+    for kind in [CliKind::Claude, CliKind::Codex, CliKind::Agy] {
+        if let Some(image) = apple.image_for(kind) {
+            config = config.with_image_for(kind.program(), image);
+        }
+    }
     if let Some(binary) = apple.binary.as_ref().and_then(|path| path.to_str()) {
         config.program = binary.to_owned();
     }
-    match &apple.instance {
+    Ok(match &apple.instance {
         Some(name) => config.named(name),
         None => config,
-    }
+    })
 }
 
 fn private_dir(path: &Path, uid: u32) -> Result<(), String> {

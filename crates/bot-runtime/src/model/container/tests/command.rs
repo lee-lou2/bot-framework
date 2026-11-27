@@ -341,3 +341,137 @@ fn the_image_entry_preset_matches_the_published_contract_and_builds_both_vms() {
     assert!(build(&config, &fake.spec(), &plan(Some(relay()))).is_ok());
     assert!(build_anchor(&config, &plan(None)).is_ok());
 }
+
+#[test]
+fn firewalled_entry_allows_codex_and_agy_and_pins_their_relay_targets() {
+    let fake = Fake::new("multi-cli");
+    let config = fake.firewalled();
+
+    // AGY: GOOGLE_GEMINI_BASE_URL pinned by host, arbitrary base URLs refused, GEMINI_API_KEY kept secret.
+    let mut agy = fake.spec();
+    agy.program = "agy".into();
+    agy.args = vec!["--print=".into()];
+    agy.env = vec![
+        ("HOME".into(), "/work/home".into()),
+        (
+            "GOOGLE_GEMINI_BASE_URL".into(),
+            "http://192.168.99.1:8787".into(),
+        ),
+        ("GEMINI_API_KEY".into(), "sess-token-agy".into()),
+        ("RELAY_TOKEN".into(), "sess-token-agy".into()),
+    ];
+    let cmd = build(&config, &agy, &plan(Some(relay()))).unwrap();
+    assert!(
+        cmd.args
+            .windows(2)
+            .any(|w| w == ["-e", "GOOGLE_GEMINI_BASE_URL=http://192.168.99.1:8787"])
+    );
+    assert!(
+        !cmd.args
+            .iter()
+            .any(|a| a.starts_with("ANTHROPIC_BASE_URL="))
+    );
+    assert!(cmd.args.iter().all(|a| !a.contains("sess-token-agy")));
+    assert_eq!(
+        cmd.secret_env
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect::<Vec<_>>(),
+        ["GEMINI_API_KEY", "RELAY_TOKEN"]
+    );
+    let mut bad_agy = agy.clone();
+    bad_agy.env[1].1 = "https://generativelanguage.googleapis.com".into();
+    assert_eq!(
+        build(&config, &bad_agy, &plan(Some(relay()))).unwrap_err(),
+        Refused("relay")
+    );
+
+    // Codex: -c relay URLs must match the host-pinned relay; neither Anthropic nor Gemini base URL env is injected.
+    let mut codex = fake.spec();
+    codex.program = "codex".into();
+    codex.args = vec![
+        "exec".into(),
+        "-c".into(),
+        "model_provider=\"relay\"".into(),
+        "-c".into(),
+        "model_providers.relay.base_url=\"http://192.168.99.1:8787/v1\"".into(),
+        "-c".into(),
+        "mcp_servers.relay.url=\"http://192.168.99.1:8787/mcp\"".into(),
+        "-".into(),
+    ];
+    codex.env = vec![
+        ("HOME".into(), "/work/home".into()),
+        ("RELAY_TOKEN".into(), "sess-token-codex".into()),
+    ];
+    let cmd = build(&config, &codex, &plan(Some(relay()))).unwrap();
+    assert!(!cmd.args.iter().any(|a| {
+        a.starts_with("ANTHROPIC_BASE_URL=") || a.starts_with("GOOGLE_GEMINI_BASE_URL=")
+    }));
+    for bad_arg in [
+        "model_provider=\"openai\"",
+        "model_providers.relay.base_url=\"https://api.openai.com/v1\"",
+        "mcp_servers.relay.url=\"http://10.0.0.9:8787/mcp\"",
+        "model_providers.relay.base_url = \"http://192.168.99.1:8787/v1\"",
+        "model_providers.relay.base_url= \"http://192.168.99.1:8787/v1\"",
+        "model_providers={relay={base_url=\"https://evil.example/v1\"}}",
+        "model_providers.relay={base_url=\"https://evil.example/v1\"}",
+        "model_providers.other.base_url=\"https://evil.example/v1\"",
+        "mcp_servers={relay={url=\"https://evil.example/mcp\"}}",
+        "mcp_servers.relay={url=\"https://evil.example/mcp\"}",
+        "mcp_servers.other.url=\"https://evil.example/mcp\"",
+        "mcp_servers.relay.command=\"sh\"",
+        "\"model_providers\".relay.base_url=\"https://evil.example/v1\"",
+    ] {
+        let mut bad_codex = codex.clone();
+        bad_codex.args.push("-c".into());
+        bad_codex.args.push(bad_arg.into());
+        assert_eq!(
+            build(&config, &bad_codex, &plan(Some(relay()))).unwrap_err(),
+            Refused("relay"),
+            "{bad_arg}"
+        );
+    }
+    // Missing any required relay override must fail closed.
+    for missing in [
+        vec!["exec".into(), "-".into()],
+        vec![
+            "exec".into(),
+            "-c".into(),
+            "model_providers.relay.base_url=\"http://192.168.99.1:8787/v1\"".into(),
+            "-c".into(),
+            "mcp_servers.relay.url=\"http://192.168.99.1:8787/mcp\"".into(),
+            "-".into(),
+        ],
+        vec![
+            "exec".into(),
+            "-c".into(),
+            "model_provider=\"relay\"".into(),
+            "-c".into(),
+            "model_providers.relay.base_url=\"http://192.168.99.1:8787/v1\"".into(),
+            "-".into(),
+        ],
+        vec![
+            "exec".into(),
+            "-c".into(),
+            "model_provider=\"relay\"".into(),
+            "-c".into(),
+            "mcp_servers.relay.url=\"http://192.168.99.1:8787/mcp\"".into(),
+            "-".into(),
+        ],
+    ] {
+        let mut incomplete = codex.clone();
+        incomplete.args = missing.clone();
+        assert_eq!(
+            build(&config, &incomplete, &plan(Some(relay()))).unwrap_err(),
+            Refused("relay"),
+            "{missing:?}"
+        );
+    }
+
+    // Invalid per-program image entries fail config validation.
+    let bad_img = fake.config().with_image_for("codex", "--privileged");
+    assert_eq!(
+        build(&bad_img, &fake.spec(), &plan(Some(relay()))).unwrap_err(),
+        Refused("image")
+    );
+}

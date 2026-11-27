@@ -1,0 +1,79 @@
+# Model VM image: minimal Apple container VM image for Antigravity CLI (`agy`).
+# Built locally and pinned by digest (`images/model/build.sh --cli agy`; see docs/model-image.md). Not distributed.
+#
+# - Layout: digest-pinned Alpine + nftables/setpriv + pinned `agy` (linux-arm64), stripped of apk and unused busybox
+#   links, flattened to a single layer. `bot-init` applies the relay-only nftables firewall, drops privileges to
+#   10001:10001, expands `${RELAY_TOKEN}` from `/work/mcp.agy.template.json` into RAM-only `/tmp/mcp_config.json`
+#   (0600), and execs `/usr/local/bin/agy`.
+# - Supply chain: base image pinned by digest; `AGY_VERSION`, `AGY_URL`, and `AGY_SHA256` must be pinned explicitly
+#   via `--build-arg` (fail-closed if empty or mismatched). Set `AGY_GLIBC_COMPAT=1` if the pinned Linux arm64 binary
+#   dynamically links glibc instead of musl.
+
+ARG BUILDER=docker.io/library/alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+
+# ---- Stage 1 (discarded): fetch AGY CLI and verify pinned SHA-256 --------------------------------------------------
+FROM ${BUILDER} AS fetch
+ARG AGY_VERSION=
+ARG AGY_URL=
+ARG AGY_SHA256=
+
+RUN set -eu; \
+    [ "$(uname -m)" = aarch64 ] || { echo "arm64 (Apple silicon) only: $(uname -m)" >&2; exit 1; }; \
+    [ -n "$AGY_VERSION" ] || { echo "AGY_VERSION must be pinned (--build-arg AGY_VERSION=...)" >&2; exit 1; }; \
+    [ -n "$AGY_URL" ] || { echo "AGY_URL must be pinned (--build-arg AGY_URL=...)" >&2; exit 1; }; \
+    [ -n "$AGY_SHA256" ] || { echo "AGY_SHA256 must be pinned (--build-arg AGY_SHA256=...)" >&2; exit 1; }; \
+    apk add --no-cache curl tar >/dev/null; \
+    cd /tmp; \
+    curl -fsSL "$AGY_URL" -o agy.download; \
+    echo "$AGY_SHA256  agy.download" | sha256sum -c - >/dev/null || { echo "downloaded agy checksum mismatch" >&2; exit 1; }; \
+    case "$AGY_URL" in \
+      *.tar.gz | *.tgz) \
+        tar -xzf agy.download; \
+        bin="$(find . -maxdepth 3 -type f -name 'agy' | head -n 1)"; \
+        [ -n "$bin" ] || { echo "agy binary not found in archive" >&2; exit 1; }; \
+        install -m 0555 "$bin" /agy ;; \
+      *) \
+        install -m 0555 agy.download /agy ;; \
+    esac
+
+# ---- Stage 2 (discarded): assemble rootfs and strip unused tools ---------------------------------------------------
+FROM ${BUILDER} AS rootfs
+ARG AGY_VERSION=
+ARG AGY_GLIBC_COMPAT=0
+RUN set -eu; \
+    pkgs="nftables setpriv"; \
+    [ "$AGY_GLIBC_COMPAT" = "1" ] && pkgs="$pkgs gcompat libstdc++"; \
+    apk add --no-cache $pkgs >/dev/null; \
+    { echo "agy-cli $AGY_VERSION"; echo "alpine $(cat /etc/alpine-release)"; apk list -I 2>/dev/null | sort; } > /etc/bot-model-image
+COPY --from=fetch /agy /usr/local/bin/agy
+COPY bot-init bot-anchor /usr/local/bin/
+RUN set -eu; \
+    chmod 0555 /usr/local/bin/bot-init /usr/local/bin/bot-anchor; \
+    printf 'bot:x:10001:10001:model:/work/home:/nonexistent\n' >> /etc/passwd; \
+    printf 'bot:x:10001:\n' >> /etc/group; \
+    mkdir -p /bot /work; \
+    chmod 1777 /tmp; \
+    chmod 0700 /usr/sbin/nft /bin/setpriv; \
+    rm -rf /sbin/apk /etc/apk /lib/apk /var/cache/apk /usr/share/apk; \
+    /bin/busybox find /bin /sbin /usr/bin /usr/sbin -type l | while read -r link; do \
+      case "$(/bin/busybox readlink "$link")" in \
+        *busybox) case "$link" in /bin/sh | /bin/sleep) ;; *) /bin/busybox rm -f "$link" ;; esac ;; \
+      esac; \
+    done
+
+# ---- Stage 3 (final image): flatten rootfs into a single layer -----------------------------------------------------
+FROM scratch
+ARG AGY_VERSION=
+COPY --from=rootfs / /
+LABEL org.opencontainers.image.title="bot-model-agy" \
+      org.opencontainers.image.description="Antigravity CLI for the bot-framework model VM (locally built; not distributed)" \
+      org.opencontainers.image.licenses="NOASSERTION" \
+      bot.agy-cli.version="${AGY_VERSION}"
+
+ENV PATH=/usr/local/bin:/usr/bin:/bin \
+    HOME=/work/home \
+    DO_NOT_TRACK=1
+
+USER 0:0
+ENTRYPOINT ["/usr/local/bin/bot-init"]
+CMD ["agy", "--version"]

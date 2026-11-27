@@ -3,12 +3,11 @@
 use super::{
     CliConfig, CliModel, ModelError, ModelMeta, ModelRequest, ModelRunner, RelayChannel,
     RunnerKind, StepFuture, TOKEN_ENV, ToolOutput, Usage,
-    cli::{self, BOT_MOUNT, CallDir, WORK_MOUNT},
-    driver::{self, Event, Output, Parser, classify},
+    cli::{self, BOT_MOUNT, CallDir, WORK_MOUNT, session_error, timestamp},
+    driver::{self, Event, Output, Parser, SessionWatcher, classify},
     prompt,
     session::{
-        Journal, Session, SessionError, Slot, Tail, project_dir, rec_step, restore, result_line,
-        session_id,
+        Journal, Session, Slot, Tail, project_dir, rec_step, restore, result_line, session_id,
     },
 };
 use bot_core::{
@@ -19,12 +18,10 @@ use bot_core::{
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
+    pin::Pin,
     sync::Arc,
-    time::Duration,
 };
-use tokio::sync::watch;
-
-const TAIL_EVERY: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Mode {
@@ -199,8 +196,15 @@ impl ModelRunner for ClaudeCodeRunner {
                     .await
                 }
                 Some(tail) => {
-                    self.drive_watched(spec, parser, request.limits, request.cancel.clone(), tail)
-                        .await
+                    driver::drive_watched(
+                        self.sandbox.as_ref(),
+                        spec,
+                        parser,
+                        request.limits,
+                        request.cancel.clone(),
+                        tail,
+                    )
+                    .await
                 }
             };
             drop(call);
@@ -216,66 +220,14 @@ impl ModelRunner for ClaudeCodeRunner {
     }
 }
 
-impl ClaudeCodeRunner {
-    async fn drive_watched(
-        &self,
-        spec: ModelSpec,
-        parser: Box<Tracker>,
-        limits: super::Limits,
-        cancel: watch::Receiver<bool>,
-        mut tail: Tail,
-    ) -> Result<Output, ModelError> {
-        let (abort, aborted) = watch::channel(false);
-        // Final session verification shares the same total deadline and cancel signal as the CLI run.
-        let deadline = tokio::time::Instant::now() + limits.total;
-        let mut finish_cancel = cancel.clone();
-        let driven =
-            driver::drive_with(self.sandbox.as_ref(), spec, parser, limits, cancel, aborted);
-        let output = {
-            let watching = async {
-                loop {
-                    tokio::time::sleep(TAIL_EVERY).await;
-                    if let Err(error) = tail.poll().await {
-                        return error;
-                    }
-                }
-            };
-            tokio::pin!(driven, watching);
-            tokio::select! {
-                output = &mut driven => output,
-                error = &mut watching => {
-                    let _ = abort.send(true);
-                    let _ = driven.await;
-                    return Err(error);
-                }
-            }
-        }?;
-        // Refuse to emit a final answer if any relay call was unsaved or unfinished in the ledger.
-        tokio::select! {
-            biased;
-            () = driver::cancelled(&mut finish_cancel) => Err(ModelError::Cancelled),
-            checked = tokio::time::timeout_at(deadline, tail.finish()) => match checked {
-                Ok(Ok(())) => Ok(output),
-                Ok(Err(error)) => Err(error),
-                Err(_) => Err(ModelError::Timeout),
-            },
-        }
+impl SessionWatcher for Tail {
+    fn poll(&mut self) -> Pin<Box<dyn Future<Output = Result<(), ModelError>> + Send + '_>> {
+        Box::pin(Tail::poll(self))
     }
-}
 
-fn session_error(error: SessionError) -> ModelError {
-    match error {
-        SessionError::Lost => ModelError::Lost,
-        SessionError::Unavailable => ModelError::Failed {
-            code: "session_unavailable",
-            transient: true,
-        },
-        SessionError::Permanent(code) => cli::failed(code),
+    fn finish(&mut self) -> Pin<Box<dyn Future<Output = Result<(), ModelError>> + Send + '_>> {
+        Box::pin(Tail::finish(self))
     }
-}
-
-fn timestamp() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 async fn prepare_session(
@@ -437,6 +389,11 @@ impl Parser for Tracker {
 }
 
 mod usage;
+
+#[cfg(test)]
+use super::SessionError;
+#[cfg(test)]
+use tokio::sync::watch;
 
 #[cfg(test)]
 mod session_tests;

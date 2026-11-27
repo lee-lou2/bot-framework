@@ -12,6 +12,15 @@ pub(crate) use stream::error_event;
 pub use stream::{ChunkSource, ModelStream, UpstreamStream};
 use vet::vet_request;
 
+/// Wire protocol spoken between the model sandbox and the broker front/proxy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Protocol {
+    #[default]
+    Anthropic,
+    OpenAiResponses,
+    Gemini,
+}
+
 use crate::{
     canon::canonicalize,
     guard::contains_credential,
@@ -36,6 +45,7 @@ use tokio::time::timeout;
 
 #[derive(Clone, Debug)]
 pub struct Provider {
+    pub protocol: Protocol,
     pub endpoint: HostPort,
     pub path: String,
     /// Profile-scoped secret name attached only to upstream request headers.
@@ -135,8 +145,62 @@ pub struct ModelProxy {
 /// Holds the concurrency slot until the upstream call finishes.
 struct Prepared {
     slot: Slot,
+    protocol: Protocol,
     request: UpstreamRequest,
     key: Vec<u8>,
+}
+
+fn gemini_model_ok(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 128
+        && model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Builds the host-pinned Gemini GenerateContent upstream path, ignoring any sandbox URL model segment.
+fn gemini_upstream_path(base_path: &str, model: &str, streaming: bool) -> Result<String, Error> {
+    if !gemini_model_ok(model) {
+        return Err(Error::Invalid);
+    }
+    let trimmed = base_path.trim_end_matches('/');
+    let prefix = if trimmed.is_empty() {
+        "/v1beta"
+    } else {
+        trimmed
+    };
+    if streaming {
+        Ok(format!(
+            "{prefix}/models/{model}:streamGenerateContent?alt=sse"
+        ))
+    } else {
+        Ok(format!("{prefix}/models/{model}:generateContent"))
+    }
+}
+
+/// Fixed-vocabulary non-2xx upstream error body (strips raw upstream text; ProtoJSON for Gemini).
+pub(super) fn upstream_error_body(protocol: Protocol, status: u16) -> String {
+    match protocol {
+        Protocol::Anthropic | Protocol::OpenAiResponses => {
+            format!("{{\"error\":{{\"status\":{status}}}}}")
+        }
+        Protocol::Gemini => {
+            let rpc = match status {
+                400 => "INVALID_ARGUMENT",
+                401 => "UNAUTHENTICATED",
+                403 => "PERMISSION_DENIED",
+                404 => "NOT_FOUND",
+                429 => "RESOURCE_EXHAUSTED",
+                503 => "UNAVAILABLE",
+                504 => "DEADLINE_EXCEEDED",
+                500..=599 => "INTERNAL",
+                _ => "UNKNOWN",
+            };
+            format!(
+                "{{\"error\":{{\"code\":{status},\"message\":\"upstream_error\",\"status\":\"{rpc}\"}}}}"
+            )
+        }
+    }
 }
 
 /// Printable ASCII only, up to 512 bytes.
@@ -189,7 +253,17 @@ impl ModelProxy {
             .map_err(|limit| match limit {
                 Limit::Rate | Limit::Concurrency => Error::Unavailable,
             })?;
-        let body = self.request_body(&req.body, model, streaming, &provider.body_fields)?;
+        let body = self.request_body(
+            provider.protocol,
+            &req.body,
+            model,
+            streaming,
+            &provider.body_fields,
+        )?;
+        let path = match provider.protocol {
+            Protocol::Gemini => gemini_upstream_path(&provider.path, model, streaming)?,
+            Protocol::Anthropic | Protocol::OpenAiResponses => provider.path.clone(),
+        };
         let key = self
             .secrets
             .for_profile(profile)
@@ -225,9 +299,10 @@ impl ModelProxy {
         }
         Ok(Prepared {
             slot,
+            protocol: provider.protocol,
             request: UpstreamRequest {
                 endpoint: provider.endpoint.clone(),
-                path: provider.path.clone(),
+                path,
                 headers,
                 body: body.into_bytes(),
             },
@@ -238,27 +313,34 @@ impl ModelProxy {
     pub async fn forward(&self, req: ModelRequest) -> Result<ModelResponse, Error> {
         let Prepared {
             slot: _slot,
+            protocol,
             request,
             key,
         } = self.prepare(req, false).await?;
         let response = timeout(self.limits.timeout, self.upstream.send(request))
             .await
             .map_err(|_| Error::Unavailable)??;
-        self.response_body(response, &key)
+        self.response_body(protocol, response, &key)
     }
 
-    /// Relays a streaming (`stream: true`) request; upstream errors collapse to a fixed status payload.
+    /// Relays a streaming request; upstream errors collapse to a fixed status payload.
     pub async fn forward_stream(&self, req: ModelRequest) -> Result<ModelStream, Error> {
-        let Prepared { slot, request, key } = self.prepare(req, true).await?;
+        let Prepared {
+            slot,
+            protocol,
+            request,
+            key,
+        } = self.prepare(req, true).await?;
         let upstream = timeout(self.limits.timeout, self.upstream.stream(request))
             .await
             .map_err(|_| Error::Unavailable)??;
-        Ok(ModelStream::new(upstream, key, self.limits, slot))
+        Ok(ModelStream::new(upstream, key, self.limits, slot, protocol))
     }
 
-    /// Parses strictly, validates fields, pins the upstream model, enforces streaming mode, and canonicalizes.
+    /// Parses strictly, validates protocol fields, pins the upstream model, enforces streaming mode, and canonicalizes.
     fn request_body(
         &self,
+        protocol: Protocol,
         body: &JsonPayload,
         model: &str,
         streaming: bool,
@@ -270,22 +352,31 @@ impl ModelProxy {
         let Some(Value::Object(mut map)) = parse(&body.0) else {
             return Err(Error::Invalid);
         };
-        let wants_stream = match map.get("stream") {
-            None | Some(Value::Bool(false)) => false,
-            Some(Value::Bool(true)) => true,
-            Some(_) => return Err(Error::Invalid),
-        };
-        if wants_stream != streaming {
-            return Err(Error::Invalid);
+        if protocol != Protocol::Gemini {
+            let wants_stream = match map.get("stream") {
+                None | Some(Value::Bool(false)) => false,
+                Some(Value::Bool(true)) => true,
+                Some(_) => return Err(Error::Invalid),
+            };
+            if wants_stream != streaming {
+                return Err(Error::Invalid);
+            }
         }
-        vet_request(&map, extra)?;
-        map.insert("model".into(), Value::String(model.to_owned()));
+        vet_request(protocol, &map, extra)?;
+        if protocol != Protocol::Gemini {
+            map.insert("model".into(), Value::String(model.to_owned()));
+        }
+        // OpenAI Responses defaults omitted `store` to `true`; pin `false` on every upstream request.
+        if protocol == Protocol::OpenAiResponses {
+            map.insert("store".into(), Value::Bool(false));
+        }
         canonicalize(&Value::Object(map)).ok_or(Error::Invalid)
     }
 
     /// Checks response size, JSON validity, and credential leaks; strips upstream error bodies to status only.
     fn response_body(
         &self,
+        protocol: Protocol,
         response: UpstreamResponse,
         key: &[u8],
     ) -> Result<ModelResponse, Error> {
@@ -299,7 +390,7 @@ impl ModelProxy {
             let status = response.status;
             return Ok(ModelResponse {
                 status,
-                body: JsonPayload(format!("{{\"error\":{{\"status\":{status}}}}}")),
+                body: JsonPayload(upstream_error_body(protocol, status)),
             });
         }
         let text = String::from_utf8(response.body).map_err(|_| Error::Unavailable)?;

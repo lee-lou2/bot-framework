@@ -3,7 +3,7 @@
 //! Each invocation exclusively creates a `0700` directory with random suffix (`in/` read-only mount,
 //! `work/` scratch mount) so concurrent claims never collide and drop removes only its own directory.
 
-use super::{ModelError, ModelRequest, ModelStep, Output, RelayChannel};
+use super::{ModelError, ModelRequest, ModelStep, Output, RelayChannel, SessionError};
 use bot_core::id::Attempt;
 use std::{
     collections::BTreeMap,
@@ -13,6 +13,39 @@ use std::{
 
 pub(crate) const BOT_MOUNT: &str = "/bot";
 pub(crate) const WORK_MOUNT: &str = "/work";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum CliKind {
+    Claude,
+    Codex,
+    Agy,
+}
+
+impl CliKind {
+    pub fn program(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Agy => "agy",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude-cli",
+            Self::Codex => "codex-cli",
+            Self::Agy => "agy-cli",
+        }
+    }
+
+    pub fn provider_name(self) -> &'static str {
+        match self {
+            Self::Claude => "anthropic",
+            Self::Codex => "openai",
+            Self::Agy => "google",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CliModel {
@@ -145,6 +178,30 @@ impl CallDir {
     pub(crate) fn write_work(&self, relative: &str, content: &str) -> io::Result<()> {
         write_under(&self.work, relative, content)
     }
+
+    #[cfg(unix)]
+    pub(crate) fn symlink_work(&self, relative: &str, target: &str) -> io::Result<()> {
+        let path = self.work.join(relative);
+        if let Some(parent) = path.parent() {
+            make_dir(parent)?;
+        }
+        std::os::unix::fs::symlink(target, path)
+    }
+}
+
+pub(crate) fn session_error(error: SessionError) -> ModelError {
+    match error {
+        SessionError::Lost => ModelError::Lost,
+        SessionError::Unavailable => ModelError::Failed {
+            code: "session_unavailable",
+            transient: true,
+        },
+        SessionError::Permanent(code) => failed(code),
+    }
+}
+
+pub(crate) fn timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 fn write_under(base: &Path, relative: &str, content: &str) -> io::Result<()> {

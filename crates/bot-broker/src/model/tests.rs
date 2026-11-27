@@ -13,6 +13,7 @@ fn provider(name: &str, host: &str, secret: &str, aliases: &[(&str, &str)]) -> (
     (
         name.to_owned(),
         Provider {
+            protocol: Protocol::Anthropic,
             endpoint: HostPort {
                 host: host.into(),
                 port: 443,

@@ -59,6 +59,8 @@ fn agent_builtin_tools_are_checked_against_the_configured_provider_kind() {
             "api": {"kind": "anthropic-api", "model": "m", "endpoint": "https://api.example", "secret": "a-key"},
             "openai": {"kind": "openai-api", "model": "m", "endpoint": "http://127.0.0.1:11434/v1"},
             "cli": {"kind": "claude-cli", "model": "m", "endpoint": "https://api.example", "secret": "c-key"},
+            "codex": {"kind": "codex-cli", "model": "gpt-5", "endpoint": "https://api.openai.com/v1", "secret": "o-key"},
+            "agy": {"kind": "agy-cli", "model": "gemini-3.1-pro-preview", "endpoint": "https://generativelanguage.googleapis.com", "secret": "g-key"},
             "plain": {"kind": "demo"}}"#,
     );
     for alias in ["api", "openai"] {
@@ -68,6 +70,16 @@ fn agent_builtin_tools_are_checked_against_the_configured_provider_kind() {
         assert_eq!(probs.len(), 1, "{alias}: {probs:?}");
         assert!(
             probs[0].contains("read") && probs[0].contains("API"),
+            "{probs:?}"
+        );
+    }
+    for (alias, label) in [("codex", "codex-cli"), ("agy", "agy-cli")] {
+        assert!(unsupported_builtin_tools(&snapshot_with_builtin(alias, &[]), &host).is_empty());
+        let probs =
+            unsupported_builtin_tools(&snapshot_with_builtin(alias, &[Builtin::Read]), &host);
+        assert_eq!(probs.len(), 1, "{alias}: {probs:?}");
+        assert!(
+            probs[0].contains(label) && probs[0].contains("read"),
             "{probs:?}"
         );
     }

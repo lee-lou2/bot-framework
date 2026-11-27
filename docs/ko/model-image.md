@@ -2,30 +2,30 @@
 
 [English](../model-image.md) | 한국어
 
-모델 CLI(Claude Code)는 운영자가 로컬에서 빌드하고 다이제스트로 고정한 Apple container VM 안에서 실행됩니다. 이 저장소는 이미지 정의(`images/model/`)와 빌드·검증 스크립트만 제공하며 사전 빌드 이미지는 배포하지 않습니다. Claude Code는 독점 소프트웨어이므로 로컬 빌드 중 `images/model/Containerfile`이 Anthropic 공식 릴리스 스토리지에서 직접 내려받습니다.
+VM 호스팅 모델 CLI(`claude-cli`, `codex-cli`, `agy-cli`)는 운영자가 로컬에서 빌드하고 다이제스트로 고정한 Apple container VM 안에서 실행됩니다. 이 저장소는 이미지 정의(`images/model/`)와 빌드·검증 스크립트만 제공하며 사전 빌드 이미지는 배포하지 않습니다. 각 CLI는 전용 Containerfile(`claude`용 `images/model/Containerfile`, `codex`용 `images/model/Containerfile.codex`, `agy`용 `images/model/Containerfile.agy`)을 사용합니다.
 
-- **공급망:** 베이스 Alpine 이미지는 다이제스트로 고정되고, Claude Code는 정확한 버전(`2.1.331`)과 SHA-256으로 고정됩니다. 고정된 Anthropic 릴리스 서명 키 핑거프린트에 대한 `manifest.json` GPG 서명, 서명된 매니페스트의 체크섬, `Containerfile`의 `CLAUDE_SHA256`, 다운로드된 바이너리의 SHA-256 네 가지가 모두 일치하지 않으면 빌드가 실패합니다.
+- **공급망:** 베이스 Alpine 이미지는 다이제스트로 고정되고, Claude Code(`images/model/Containerfile`)는 고정된 Anthropic 릴리스 서명 키 핑거프린트 GPG 검증과 정확한 버전(`2.1.331`)·SHA-256으로 고정됩니다. `Containerfile.codex`와 `Containerfile.agy`도 운영자가 고정한 Linux arm64 릴리스를 사용해 동일한 다이제스트 고정 빌드 계약을 따릅니다.
 - **이미지 구성:** 다이제스트 고정 Alpine + `nftables` + `setpriv`로 만든 단일 평탄 레이어(`FROM scratch`)이며 `apk`와 사용하지 않는 모든 BusyBox 심볼릭 링크를 제거했습니다(`/bin/sh`와 `/bin/sleep`만 유지).
-- **런타임 자세:** 읽기 전용 루트 파일시스템에서 비루트(`10001:10001`)로 실행되며 공식 환경 변수로 자동 업데이트, 텔레메트리, 오류 보고 및 기타 비필수 트래픽을 비활성화합니다. 신뢰된 `bot-init`이 root로 시작해 릴레이 전용 방화벽을 적용하고 모든 권한을 내려놓은 뒤 Claude를 `exec`합니다.
+- **런타임 자세:** 읽기 전용 루트 파일시스템에서 비루트(`10001:10001`)로 실행되며 공식 환경 변수로 자동 업데이트, 텔레메트리, 오류 보고 및 기타 비필수 트래픽을 비활성화합니다. 신뢰된 `bot-init`이 root로 시작해 릴레이 전용 방화벽을 적용하고 모든 권한을 내려놓은 뒤 선택한 CLI를 `exec`합니다.
 
 ```sh
-ref=$(images/model/build.sh)         # 빌드 및 다이제스트 고정 후 stdout에 `name@sha256:...` 출력(진행 로그는 stderr)
-images/model/verify.sh "$ref"        # 가짜 업스트림으로 실제 이미지 검증(실제 모델·API 키 불필요)
+ref=$(images/model/build.sh --cli claude)   # `--cli claude|codex|agy` (기본값 `claude`); `name@sha256:...` 출력
+images/model/verify.sh "$ref"               # 가짜 업스트림으로 실제 이미지 검증(실제 모델·API 키 불필요)
 ```
 
-`host.json`의 `sandbox.apple.image`에 `build.sh`가 출력한 다이제스트 참조를 설정하세요. `container build`는 가변 `name:tag` 참조만 생성하므로 `build.sh`가 `127.0.0.1`에 바인딩된 다이제스트 고정 CNCF Distribution 레지스트리를 임시로 띄워 이미지를 푸시한 뒤 **다이제스트로 다시 풀**해 불변 로컬 참조를 저장하고 종료 시 레지스트리를 삭제합니다(런타임에는 불필요). `container image prune -a`는 사용하지 않는 다이제스트 참조를 삭제하므로 실행하지 마세요.
+`host.json`의 `sandbox.apple.image`(`claude-cli` 전용 호스트) 또는 `sandbox.apple.images`(`{"claude": "...", "codex": "...", "agy": "..."}`)에 `build.sh`가 출력한 다이제스트 참조를 설정하세요. `container build`는 가변 `name:tag` 참조만 생성하므로 `build.sh`가 `127.0.0.1`에 바인딩된 다이제스트 고정 CNCF Distribution 레지스트리를 임시로 띄워 이미지를 푸시한 뒤 **다이제스트로 다시 풀**해 불변 로컬 참조를 저장하고 종료 시 레지스트리를 삭제합니다(런타임에는 불필요). `container image prune -a`는 사용하지 않는 다이제스트 참조를 삭제하므로 실행하지 마세요.
 
 ## 어댑터 계약
 
 | 항목 | 계약 |
 |---|---|
-| 엔트리포인트 | `ENTRYPOINT`는 `/usr/local/bin/bot-init`이고 인자는 `claude <args...>`입니다. CLI 인자로 바이너리 경로, 사용자, 릴레이 주소를 절대 받지 않습니다. |
+| 엔트리포인트 | `ENTRYPOINT`는 `/usr/local/bin/bot-init`이고 첫 인자는 `claude`, `codex`, `agy` 중 하나여야 하며 `/usr/local/bin/<cli>`로 고정 매핑됩니다. CLI 인자로 바이너리 경로, 사용자, 릴레이 주소를 절대 받지 않습니다. |
 | Capabilities | `--cap-drop ALL`에 `CAP_NET_ADMIN`(`nft`), `CAP_SETUID`, `CAP_SETGID`, `CAP_SETPCAP`(바운딩 세트 초기화)만 추가합니다. 하나라도 빠지면 fail-closed로 종료합니다. |
-| 호스트 전용 환경 변수 | 어댑터가 바인딩된 리스너에서 `BOT_RELAY_IP`(RFC 1918 IPv4)와 `BOT_RELAY_PORT`(`1..65535`)를 설정합니다(`ANTHROPIC_BASE_URL`도 같은 `http://` 주소 사용). `bot-init`은 둘을 재검증하고 Claude 실행 전에 해제합니다. |
-| 초기화 순서 | 릴레이 TCP와 established 응답만 허용하는 `nftables` 규칙을 적용하고 다시 읽어 검증한 뒤, 별도 검사로 UID/GID `10001`, 보조 그룹 없음, capability 0개, `no_new_privs`를 확인하고 동일한 강등 권한으로 Claude를 `exec`합니다(실패 시 `vm_init_failed`). |
-| 실패 처리 | 초기화 실패 시 stderr에 한 단어 `vm_init_failed`만 출력하고 종료 코드 `1`로 끝나며 Claude를 시작하지 않습니다. Claude가 시작된 뒤에는 Claude의 종료 코드를 그대로 전달합니다. |
+| 호스트 전용 환경 변수 | 어댑터가 바인딩된 리스너에서 `BOT_RELAY_IP`(RFC 1918 IPv4)와 `BOT_RELAY_PORT`(`1..65535`)를 설정하고 CLI별 릴레이 URL(`ANTHROPIC_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`, 또는 검증된 Codex `-c` URL)을 전달합니다. `bot-init`은 둘을 재검증하고 CLI 실행 전에 해제합니다. |
+| 초기화 순서 | 릴레이 TCP와 established 응답만 허용하는 `nftables` 규칙을 적용하고 다시 읽어 검증한 뒤, 별도 검사로 UID/GID `10001`, 보조 그룹 없음, capability 0개, `no_new_privs`를 확인하고 권한을 강등해 CLI를 `exec`합니다(`agy`는 `exec` 전 UID `10001` 권한으로 `/work/mcp.agy.template.json`을 RAM 전용 `/tmp/mcp_config.json`(`0600`)으로 확장). |
+| 실패 처리 | 초기화 실패 시 stderr에 한 단어 `vm_init_failed`만 출력하고 종료 코드 `1`로 끝나며 모델 CLI를 시작하지 않습니다. CLI가 시작된 뒤에는 종료 코드를 그대로 전달합니다. |
 | 앵커 | `--entrypoint /usr/local/bin/bot-anchor --user 10001:10001 --cap-drop ALL`: 비루트이고 capability가 0개일 때만 유휴 대기하며, 아니면 `vm_anchor_failed`와 종료 코드 `1`로 종료합니다. `bot-init`과 분리되어 있습니다. |
-| 마운트와 경로 | 읽기 전용 루트 파일시스템, tmpfs `/tmp`, 읽기 전용 `/bot`(작업 디렉터리), 실행별 쓰기 가능 `/work`(호스트가 준비·정리, init은 `chown`하지 않음). `HOME=/work/home`, `CLAUDE_CONFIG_DIR=/work/claude`, 재개 로그 `/work/claude/projects/-bot/<id>.jsonl`, MCP 설정 `/work/mcp.claude.json`(`Bearer ${RELAY_TOKEN}` 플레이스홀더만 사용 — 세션 토큰은 디스크가 아닌 `RELAY_TOKEN`과 `ANTHROPIC_API_KEY` 환경 변수로만 전달). |
+| 마운트와 경로 | 읽기 전용 루트 파일시스템, tmpfs `/tmp`, 읽기 전용 `/bot`(작업 디렉터리), 실행별 쓰기 가능 `/work`(호스트가 준비·정리, init은 `chown`하지 않음). 세션 토큰은 환경 변수(`RELAY_TOKEN`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`)로만 전달되며 호스트 디스크에는 절대 기록되지 않습니다(`/work/mcp.claude.json`과 `/work/mcp.agy.template.json`에는 `${RELAY_TOKEN}` 플레이스홀더만 포함, `codex`는 `RELAY_TOKEN`을 직접 읽음). |
 | 네트워크 | 호스트 전용(`--internal`), `--no-dns`. 호스트의 `http://` 릴레이만 도달 가능합니다. |
 
 ## `verify.sh` 검증 항목

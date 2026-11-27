@@ -44,16 +44,23 @@ fn the_relay_goes_where_the_anchor_confirmed_and_nowhere_else() {
 
 #[test]
 fn the_host_config_becomes_a_firewalled_adapter_config_with_this_workers_name() {
+    let img = format!("img@sha256:{}", digest());
     let apple = Apple {
-        image: format!("img@sha256:{}", digest()),
+        image: Some(img.clone()),
+        images: Default::default(),
         network: "bot-internal".into(),
         relay_bind: None,
         work_root: None,
         instance: Some("worker-a".into()),
         binary: Some("/opt/homebrew/bin/container".into()),
     };
-    let config = container_config(&apple, Path::new("/var/bot/models"));
-    assert_eq!(config.image, apple.image);
+    let config = container_config(&apple, Path::new("/var/bot/models")).unwrap();
+    assert_eq!(config.image, img);
+    assert_eq!(
+        config.images.get("claude").map(String::as_str),
+        Some(img.as_str())
+    );
+    assert!(!config.images.contains_key("codex"));
     assert_eq!(config.network, "bot-internal");
     assert_eq!(config.mount_root, PathBuf::from("/var/bot/models"));
     assert_eq!(
@@ -69,7 +76,8 @@ fn the_host_config_becomes_a_firewalled_adapter_config_with_this_workers_name() 
             ..apple
         },
         Path::new("/m"),
-    );
+    )
+    .unwrap();
     assert_eq!(
         (default.instance.as_str(), default.program.as_str()),
         ("botvm", "container")
@@ -146,4 +154,20 @@ fn operational_parts_need_the_vm_config_and_never_fall_back_to_another_sandbox()
         panic!("production must use the VM adapter");
     };
     assert_eq!(relay_bind, None);
+
+    // Codex alias requires explicit `sandbox.apple.images.codex` (never falls back to legacy `image`).
+    let codex_missing = host::parse(&format!(
+        r#"{{"version": 1, "models": {{"personal": ["codex"]}},
+            "providers": {{"codex": {{"kind": "codex-cli", "model": "gpt-5", "endpoint": "https://api.openai.com/v1", "secret": "k"}}}},
+            "sandbox": {{"apple": {{"image": "claude@sha256:{}", "network": "n"}}}}}}"#,
+        digest()
+    ))
+    .unwrap();
+    let err = operational(&codex_missing, Some(&installs), me())
+        .err()
+        .unwrap();
+    assert!(
+        err.contains("codex-cli") && err.contains("images.codex"),
+        "{err}"
+    );
 }

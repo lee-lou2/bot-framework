@@ -5,7 +5,7 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 ## Non-Negotiable Invariants
 
 1. **Models cannot reach the host or see service keys.** Both execution paths enforce this (`docs/architecture.md`):
-   - `claude-cli`: runs the model CLI inside a disposable VM with no secrets (session token only) and one egress path through the broker relay.
+   - `claude-cli`, `codex-cli`, `agy-cli`: run the model CLI inside a disposable VM with no secrets (session token only) and one egress path through the broker relay.
    - `anthropic-api` / `openai-api`: no VM or relay; the worker sends conversation messages to the configured host `endpoint` and receives text/tool calls only. No host filesystem or shell exists, and the worker reads the provider key from `SecretStore` solely to attach the request header.
 2. **All tool authorization, approval, and auditing pass through the broker (`crates/bot-broker/src/service.rs`).** Never add a direct model-to-tool execution path. Both paths route tool calls through `Broker::call` (`Broker::call_for_model` for model-planned calls).
 3. **Durable intake first.** A request is accepted only after the PostgreSQL transaction commits.
@@ -60,7 +60,7 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 | Operator run resume/cancel | `crates/bot-store/src/admin.rs`, `crates/bot-store/migrations/0027_run_command_receipt.sql`, `crates/bot-admin/src/{run_control,lib}.rs`, `crates/bot-admin/ui/{runs,runctl}.js` |
 | Effect ledger & holds | `crates/bot-store/src/{effects,effect_lookup}.rs`, `crates/bot-broker/src/effects.rs` |
 | MCP execution & sandbox | `crates/bot-broker/src/{runner,srt,sandbox,egress,proxy}.rs`, `crates/bot-broker/src/mcp/` |
-| Model execution | `crates/bot-runtime/src/model/` (`api/`, `claude_code.rs`+`container.rs`, `demo.rs`), `crates/bot-broker/src/{model,front}.rs` |
+| Model execution | `crates/bot-runtime/src/model/` (`api/`, `claude_code.rs`, `codex.rs`, `agy.rs`, `container.rs`, `demo.rs`), `crates/bot-broker/src/{model,front}.rs` |
 | Profile loading, bundles, schemas | `crates/bot-profile/src/{lib,frontmatter,parse,snapshot,restore}.rs`, `schemas/v1/`, `examples/profiles/` |
 | Scaffolding (`bot init`, `bot add`) | `crates/bot-cli/src/scaffold/{mod,add,tool}.rs` |
 | Host config (`host.json`) | `crates/bot-cli/src/{host,execution,execution/provider,install,tool_limits}.rs`, `crates/bot-gateway/src/host.rs`, `crates/bot-admin/src/settings.rs` |

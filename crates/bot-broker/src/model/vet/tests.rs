@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 fn check(body: Value) -> Result<(), Error> {
-    vet_request(body.as_object().expect("object"), &[])
+    vet_request(Protocol::Anthropic, body.as_object().expect("object"), &[])
 }
 
 fn user(content: Value) -> Value {
@@ -124,12 +124,15 @@ fn fields_that_open_execution_outside_the_boundary_stay_closed_even_if_the_opera
     ] {
         let map = body.as_object().unwrap();
         assert!(
-            matches!(vet_request(map, &extra), Err(Error::Invalid)),
+            matches!(
+                vet_request(Protocol::Anthropic, map, &extra),
+                Err(Error::Invalid)
+            ),
             "{body}"
         );
     }
     let ok = json!({"messages": [], "x_extra": 1});
-    assert!(vet_request(ok.as_object().unwrap(), &extra).is_ok());
+    assert!(vet_request(Protocol::Anthropic, ok.as_object().unwrap(), &extra).is_ok());
 }
 
 #[test]

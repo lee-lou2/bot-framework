@@ -16,7 +16,7 @@ Declare agents, skills, tools, and approval rules in a profile directory, and a 
 
 Assume the model can hallucinate or be subverted by prompt injection, and prevent damage structurally rather than through prompts. ([Why this design](docs/why.md) · [Security](docs/security.md))
 
-- **Model isolation & zero secret exposure:** Models never touch host files, shells, or service keys. Standard chat and tool-calling runs use **direct APIs (`anthropic-api`, `openai-api`)**, where the worker attaches the provider key only to the outbound request header; workspace file reading runs inside a **disposable VM (`claude-cli`)** holding only a session token.
+- **Model isolation & zero secret exposure:** Models never touch host files, shells, or service keys. Standard chat and tool-calling runs use **direct APIs (`anthropic-api`, `openai-api`)**, where the worker attaches the provider key only to the outbound request header; CLI harnesses (`claude-cli`, `codex-cli`, `agy-cli`) run inside a **disposable VM** holding only a session token.
 - **Single broker gate:** Every tool call passes through `Broker::call`, which enforces `caller scope ∩ agent cap ∩ tool scope` before running inside an `srt` sandbox or calling a registered remote MCP server.
 - **DB-first durability:** A request is accepted only after its PostgreSQL transaction commits. Crashes, restarts, and approval waits never lose requests, checkpoints, effect ledgers, outbox replies, or the audit chain.
 - **Human approval for irreversible actions:** External writes and deletions (effects) bind to exact arguments on an approval card and require human confirmation. Models can never approve actions.

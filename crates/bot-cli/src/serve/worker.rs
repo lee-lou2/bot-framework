@@ -140,10 +140,11 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         secrets: deps.secrets.clone(),
         gate: deps.active.clone(),
     };
+    let empty_cli = std::collections::BTreeMap::new();
     // Tear down any started VM front if model assembly fails afterwards.
     let models = match models::build(
         &deps.host,
-        claude.as_ref().map(|c| c.runner.clone()),
+        claude.as_ref().map_or(&empty_cli, |c| &c.runners),
         Some(&api),
     ) {
         Ok(models) => models,

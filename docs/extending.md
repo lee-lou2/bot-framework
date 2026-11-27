@@ -32,10 +32,11 @@ Zero Rust changes. Build an MCP server and update four configuration sites (`bot
   - **New file:** request/response codec under `crates/bot-runtime/src/model/api/wire/`.
   - **Silent:** `kind` string `match` in `parse_providers` (`provider.rs`) and `docs/architecture.md`.
   - **Trap:** assign a **new** fingerprint tag byte and never change existing bytes (doing so forces re-activation across all deployments). Pin it with a fixed-input test in `crates/bot-cli/src/execution/fingerprint_tests.rs`.
-- **New VM-hosted CLI provider** (new `Provider` variant):
-  - **Compiler:** `impl Provider` in `crates/bot-cli/src/execution/provider.rs` (credential name, VM flag, description, fingerprint inputs) and `build` in `crates/bot-cli/src/serve/models.rs`.
-  - **Silent:** proxy table and CLI config in `crates/bot-cli/src/serve/claude.rs` read only `Provider::ClaudeCli` (missing additions reject the alias for lacking an upstream).
-  - **Limitation:** the broker front (`crates/bot-broker/src/front.rs`) relays Anthropic `/v1/messages` only; other CLI protocols must extend the front first.
+- **New VM-hosted CLI provider** (new `CliKind` variant in `bot-runtime` + `Provider::Cli`):
+  - **Compiler:** `CliKind` in `crates/bot-runtime/src/model/cli.rs`, `Protocol` in `crates/bot-broker/src/model.rs`, `impl Provider` in `crates/bot-cli/src/execution/provider.rs` (fingerprint tag byte), `Apple::image_for` in `crates/bot-cli/src/execution.rs`, `crates/bot-cli/src/serve/claude.rs`, `crates/bot-cli/src/serve/models.rs`, and `crates/bot-cli/src/validate.rs`.
+  - **Broker protocol:** if the CLI uses a new wire protocol beyond `Anthropic` (`/v1/messages`), `OpenAiResponses` (`/v1/responses`), and `Gemini` (`/v1beta/models/...`), add a request vetter under `crates/bot-broker/src/model/vet/`, SSE termination + error formatting in `crates/bot-broker/src/model/stream.rs`, a strict observer under `crates/bot-broker/src/front/observe/`, and session-pinned route/MCP call-ID handling in `crates/bot-broker/src/front.rs` and `crates/bot-broker/src/front/mcp.rs`.
+  - **Runtime & VM:** implement `ModelRunner` under `crates/bot-runtime/src/model/` (reusing `model/cli.rs` and `model/driver.rs`), allow the binary name in `FIREWALLED_PROGRAMS` (`crates/bot-runtime/src/model/container/args.rs`) and `images/model/bot-init`, add its Containerfile and `build.sh` target, and pin its new fingerprint tag in `crates/bot-cli/src/execution/fingerprint_tests.rs`.
+  - **Silent:** `parse_providers` (`provider.rs`), `parse_sandbox` `images` keys (`execution.rs`), `docs/architecture.md`, `docs/model-image.md`, and synced `docs/ko/*.md`.
 
 ## Chat Channels
 

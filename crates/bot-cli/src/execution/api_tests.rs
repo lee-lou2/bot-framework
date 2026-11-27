@@ -239,12 +239,13 @@ fn the_activation_fingerprint_binds_kind_model_whole_base_url_and_credential_nam
         print(base.clone()),
         print(api(0, "m", "https://h.example/v1", Some("key"), Some(8192)))
     );
-    let cli = Provider::ClaudeCli {
+    let cli = Provider::Cli(CliProvider {
+        kind: CliKind::Claude,
         model: "m".into(),
         endpoint: "https://h.example/v1".into(),
         secret: "key".into(),
         effort: None,
-    };
+    });
     assert_ne!(print(base.clone()), print(cli));
     assert_ne!(print(base), print(Provider::Demo));
     // Absent secret vs. empty name must remain distinct via tag byte.
@@ -346,12 +347,13 @@ fn effort_accepts_five_levels_on_non_demo_providers_and_refuses_bad_values() {
                 "effort": raw
             }))
             .unwrap(),
-            Provider::ClaudeCli {
+            Provider::Cli(CliProvider {
+                kind: CliKind::Claude,
                 model: "claude-x".into(),
                 endpoint: "https://api.example.com/v1".into(),
                 secret: "claude-key".into(),
                 effort: Some(expected),
-            }
+            })
         );
     }
     for bad in [

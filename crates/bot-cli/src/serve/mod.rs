@@ -66,12 +66,17 @@ pub(crate) fn check_model_aliases(host: &HostFile) -> Result<(), String> {
             Box::pin(async { Ok(()) })
         }
     }
-    let claude: Arc<dyn bot_runtime::model::ModelRunner> = Arc::new(bot_runtime::model::DemoModel);
+    let demo: Arc<dyn bot_runtime::model::ModelRunner> = Arc::new(bot_runtime::model::DemoModel);
+    let cli_runners = BTreeMap::from([
+        (bot_runtime::model::CliKind::Claude, demo.clone()),
+        (bot_runtime::model::CliKind::Codex, demo.clone()),
+        (bot_runtime::model::CliKind::Agy, demo),
+    ]);
     let api = models::ApiParts {
         secrets: trace::inert_secrets(),
         gate: Arc::new(Open),
     };
-    models::build(host, Some(claude), Some(&api)).map(|_| ())
+    models::build(host, &cli_runners, Some(&api)).map(|_| ())
 }
 
 fn not_assembled(role: Role) -> Option<&'static str> {

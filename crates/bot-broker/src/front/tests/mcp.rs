@@ -380,6 +380,7 @@ async fn a_revoked_session_starts_nothing_even_if_the_request_got_in() {
         attempt: r.attempt.clone(),
         agent: AgentId("main".into()),
         alias: "assistant".into(),
+        protocol: Protocol::Anthropic,
     };
     let call = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo_say","arguments":{"text":"hi"},"_meta":{"claudecode/toolUseId":"toolu_late"}}}"#;
     let (status, body) =

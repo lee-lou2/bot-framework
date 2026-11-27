@@ -1,7 +1,7 @@
-//! Host assembly for `claude-cli` model runs (broker relay front, Apple VM, and park tracking).
+//! Host assembly for VM-hosted CLI model runs (`claude-cli`, `codex-cli`, `agy-cli`): broker relay front, Apple VM, and park tracking.
 use super::{guard::GuardedUpstream, watched::Watched};
 use crate::{
-    execution::Provider,
+    execution::{CliProvider, Provider},
     host::HostFile,
     settings::SecretsKind,
     validate::{missing_named, model_secrets},
@@ -13,7 +13,7 @@ use bot_broker::{
         observe::CheckpointSink,
         park::{Park, ParkReason},
     },
-    model::{ModelHost, ModelLimits, ModelProxy, Provider as UpstreamProvider, Upstream},
+    model::{ModelHost, ModelLimits, ModelProxy, Protocol, Provider as UpstreamProvider, Upstream},
     resolve::HostPort,
     service::preflight::Preflight,
     sys::{OsEntropy, SystemClock},
@@ -29,7 +29,10 @@ use bot_core::{
 use bot_profile::Registry;
 use bot_runtime::{
     Relays,
-    model::{ClaudeCodeRunner, CliConfig, CliModel, ModelRunner, RelayChannel, RelayGrant},
+    model::{
+        AgyRunner, ClaudeCodeRunner, CliConfig, CliKind, CliModel, CodexRunner, ModelRunner,
+        RelayChannel, RelayGrant,
+    },
 };
 use bot_store::Store;
 use std::{
@@ -47,7 +50,9 @@ const EFFORT: &str = "medium";
 const MAX_OUTPUT_TOKENS: u32 = 8192;
 const RETRIES: u32 = 1;
 const CONTEXT_WINDOW: u64 = 200_000;
-const DEFAULT_PATH: &str = "/v1/messages";
+const CLAUDE_DEFAULT_PATH: &str = "/v1/messages";
+const CODEX_DEFAULT_PATH: &str = "/v1/responses";
+const AGY_DEFAULT_PATH: &str = "/v1beta";
 const PLANNED_WAIT: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
@@ -98,12 +103,47 @@ pub fn needed(host: &HostFile) -> bool {
     })
 }
 
-fn upstream_target(endpoint: &str) -> Option<(HostPort, String)> {
+fn cli_protocol(kind: CliKind) -> Protocol {
+    match kind {
+        CliKind::Claude => Protocol::Anthropic,
+        CliKind::Codex => Protocol::OpenAiResponses,
+        CliKind::Agy => Protocol::Gemini,
+    }
+}
+
+fn upstream_target(kind: CliKind, endpoint: &str) -> Option<(HostPort, String)> {
     let rest = endpoint.strip_prefix("https://")?;
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, path)) if !path.is_empty() => (authority, format!("/{path}")),
-        Some((authority, _)) => (authority, DEFAULT_PATH.to_owned()),
-        None => (rest, DEFAULT_PATH.to_owned()),
+    let (authority, raw_path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, path),
+        None => (rest, ""),
+    };
+    let path = match kind {
+        CliKind::Claude => {
+            if raw_path.is_empty() {
+                CLAUDE_DEFAULT_PATH.to_owned()
+            } else {
+                format!("/{raw_path}")
+            }
+        }
+        CliKind::Codex => {
+            let trimmed = raw_path.trim_end_matches('/');
+            if trimmed.is_empty() || trimmed == "v1" {
+                CODEX_DEFAULT_PATH.to_owned()
+            } else if trimmed.ends_with("/v1") {
+                format!("/{trimmed}/responses")
+            } else {
+                format!("/{raw_path}")
+            }
+        }
+        CliKind::Agy => {
+            let trimmed = raw_path.trim_end_matches('/');
+            let base = trimmed.strip_suffix("/models").unwrap_or(trimmed);
+            if base.is_empty() {
+                AGY_DEFAULT_PATH.to_owned()
+            } else {
+                format!("/{base}")
+            }
+        }
     };
     let target = if authority.contains(':') {
         authority.to_owned()
@@ -116,29 +156,44 @@ fn upstream_target(endpoint: &str) -> Option<(HostPort, String)> {
 pub fn model_host(host: &HostFile) -> Result<ModelHost, String> {
     let mut providers = BTreeMap::new();
     for (alias, provider) in &host.providers {
-        let Provider::ClaudeCli {
+        let Provider::Cli(CliProvider {
+            kind,
             model,
             endpoint,
             secret,
             effort: _,
-        } = provider
+        }) = provider
         else {
             continue;
         };
-        let (target, path) = upstream_target(endpoint)
+        let (target, path) = upstream_target(*kind, endpoint)
             .ok_or_else(|| format!("cannot parse providers.{alias}.endpoint"))?;
         let secret = SecretName::parse(secret)
             .ok_or_else(|| format!("providers.{alias}.secret is not a valid secret name"))?;
+        let (header, scheme, forward_headers) = match kind {
+            CliKind::Claude => (
+                "x-api-key".into(),
+                None,
+                vec!["anthropic-version".into(), "anthropic-beta".into()],
+            ),
+            CliKind::Codex => (
+                "authorization".into(),
+                Some("Bearer".into()),
+                vec!["openai-beta".into()],
+            ),
+            CliKind::Agy => ("x-goog-api-key".into(), None, Vec::new()),
+        };
         providers.insert(
             alias.clone(),
             UpstreamProvider {
+                protocol: cli_protocol(*kind),
                 endpoint: target,
                 path,
                 secret,
-                header: "x-api-key".into(),
-                scheme: None,
+                header,
+                scheme,
                 headers: Vec::new(),
-                forward_headers: vec!["anthropic-version".into(), "anthropic-beta".into()],
+                forward_headers,
                 models: BTreeMap::from([(alias.clone(), model.clone())]),
                 body_fields: Vec::new(),
             },
@@ -219,6 +274,7 @@ impl Park for HostPark {
 struct FrontRelays {
     sessions: Arc<SessionTable>,
     addr: SocketAddr,
+    protocols: BTreeMap<String, Protocol>,
 }
 
 struct Revoke {
@@ -234,10 +290,12 @@ impl Drop for Revoke {
 
 impl Relays for FrontRelays {
     fn open(&self, attempt: &Attempt, agent: &AgentId, alias: &str) -> Option<RelayGrant> {
+        let protocol = *self.protocols.get(alias)?;
         let token = self.sessions.issue(Session {
             attempt: attempt.clone(),
             agent: agent.clone(),
             alias: alias.to_owned(),
+            protocol,
         })?;
         Some(RelayGrant::new(
             RelayChannel {
@@ -254,7 +312,7 @@ impl Relays for FrontRelays {
 }
 
 pub struct Claude {
-    pub runner: Arc<dyn ModelRunner>,
+    pub runners: BTreeMap<CliKind, Arc<dyn ModelRunner>>,
     pub relays: Arc<dyn Relays>,
     pub park: Arc<HostPark>,
     pub sessions: Arc<SessionTable>,
@@ -323,32 +381,56 @@ pub async fn start(parts: ClaudeParts, input: Input<'_>) -> Result<Claude, Strin
             return Err(error);
         }
     };
-    let mut config = CliConfig::new(parts.workspace);
-    if confined_reads {
-        config = config.with_confined_reads();
-    }
+    let mut configs: BTreeMap<CliKind, CliConfig> = BTreeMap::new();
+    let mut protocols: BTreeMap<String, Protocol> = BTreeMap::new();
     for (alias, provider) in &input.host.providers {
-        if let Provider::ClaudeCli { model, effort, .. } = provider {
-            config = config.with_model(
-                alias,
-                CliModel {
-                    id: model.clone(),
-                    effort: effort
-                        .map_or(EFFORT, bot_runtime::model::Effort::as_str)
-                        .into(),
-                    max_output_tokens: MAX_OUTPUT_TOKENS,
-                    retries: RETRIES,
-                    context_window: CONTEXT_WINDOW,
-                },
-            );
-        }
+        let Provider::Cli(CliProvider {
+            kind,
+            model,
+            effort,
+            ..
+        }) = provider
+        else {
+            continue;
+        };
+        protocols.insert(alias.clone(), cli_protocol(*kind));
+        let entry = configs.entry(*kind).or_insert_with(|| {
+            let cfg = CliConfig::new(parts.workspace.clone());
+            if confined_reads {
+                cfg.with_confined_reads()
+            } else {
+                cfg
+            }
+        });
+        entry.models.insert(
+            alias.clone(),
+            CliModel {
+                id: model.clone(),
+                effort: effort
+                    .map_or(EFFORT, bot_runtime::model::Effort::as_str)
+                    .into(),
+                max_output_tokens: MAX_OUTPUT_TOKENS,
+                retries: RETRIES,
+                context_window: CONTEXT_WINDOW,
+            },
+        );
+    }
+    let mut runners: BTreeMap<CliKind, Arc<dyn ModelRunner>> = BTreeMap::new();
+    for (kind, config) in configs {
+        let runner: Arc<dyn ModelRunner> = match kind {
+            CliKind::Claude => Arc::new(ClaudeCodeRunner::new(sandbox.clone(), config)),
+            CliKind::Codex => Arc::new(CodexRunner::new(sandbox.clone(), config)),
+            CliKind::Agy => Arc::new(AgyRunner::new(sandbox.clone(), config)),
+        };
+        runners.insert(kind, runner);
     }
     let relays = Arc::new(FrontRelays {
         sessions: sessions.clone(),
         addr: front.addr(),
+        protocols,
     });
     Ok(Claude {
-        runner: Arc::new(ClaudeCodeRunner::new(sandbox.clone(), config)),
+        runners,
         relays,
         park,
         sessions,
@@ -372,40 +454,91 @@ mod tests {
 
     #[test]
     fn the_upstream_endpoint_is_split_into_target_and_path() {
-        let (target, path) = upstream_target("https://api.example").unwrap();
+        let (target, path) = upstream_target(CliKind::Claude, "https://api.example").unwrap();
         assert_eq!((target.host.as_str(), target.port), ("api.example", 443));
         assert_eq!(path, "/v1/messages");
-        let (target, path) = upstream_target("https://api.example:8443/proxy/v1/messages").unwrap();
+        let (target, path) = upstream_target(
+            CliKind::Claude,
+            "https://api.example:8443/proxy/v1/messages",
+        )
+        .unwrap();
         assert_eq!((target.host.as_str(), target.port), ("api.example", 8443));
         assert_eq!(path, "/proxy/v1/messages");
         assert_eq!(
-            upstream_target("https://api.example/").unwrap().1,
-            DEFAULT_PATH
+            upstream_target(CliKind::Claude, "https://api.example/")
+                .unwrap()
+                .1,
+            CLAUDE_DEFAULT_PATH
         );
-        assert!(upstream_target("http://api.example").is_none());
-        assert!(upstream_target("https://api.example:99999").is_none());
+        assert_eq!(
+            upstream_target(CliKind::Codex, "https://api.openai.com/v1")
+                .unwrap()
+                .1,
+            "/v1/responses"
+        );
+        assert_eq!(
+            upstream_target(CliKind::Codex, "https://api.openai.com")
+                .unwrap()
+                .1,
+            "/v1/responses"
+        );
+        assert_eq!(
+            upstream_target(CliKind::Agy, "https://generativelanguage.googleapis.com")
+                .unwrap()
+                .1,
+            "/v1beta"
+        );
+        assert_eq!(
+            upstream_target(
+                CliKind::Agy,
+                "https://generativelanguage.googleapis.com/v1beta/models"
+            )
+            .unwrap()
+            .1,
+            "/v1beta"
+        );
+        assert!(upstream_target(CliKind::Claude, "http://api.example").is_none());
+        assert!(upstream_target(CliKind::Claude, "https://api.example:99999").is_none());
     }
 
     #[test]
-    fn only_claude_aliases_become_upstream_providers_and_profiles_keep_their_own_allow_list() {
-        let host = parsed(
-            r#", "providers": {
-                "assistant": {"kind": "claude-cli", "model": "model-large", "endpoint": "https://api.example", "secret": "model-key"},
-                "plain": {"kind": "demo"},
-                "other": {"kind": "claude-cli", "model": "model-small", "endpoint": "https://api.example:8443/v1/messages", "secret": "other-key"}}"#,
-        );
+    fn cli_aliases_become_protocol_pinned_upstream_providers_per_profile() {
+        let host = host::parse(
+            r#"{"version": 1, "models": {"personal": ["assistant", "codex", "agy", "plain"], "work": ["other"]},
+                "providers": {
+                    "assistant": {"kind": "claude-cli", "model": "model-large", "endpoint": "https://api.example", "secret": "model-key"},
+                    "codex": {"kind": "codex-cli", "model": "gpt-5", "endpoint": "https://api.openai.com/v1", "secret": "openai-key"},
+                    "agy": {"kind": "agy-cli", "model": "gemini-3.1-pro-preview", "endpoint": "https://generativelanguage.googleapis.com", "secret": "gemini-key"},
+                    "plain": {"kind": "demo"},
+                    "other": {"kind": "claude-cli", "model": "model-small", "endpoint": "https://api.example:8443/v1/messages", "secret": "other-key"}}}"#,
+        )
+        .unwrap();
         assert!(needed(&host));
         let table = model_host(&host).unwrap();
         assert_eq!(
             table.providers.keys().cloned().collect::<Vec<_>>(),
-            ["assistant", "other"]
+            ["agy", "assistant", "codex", "other"]
         );
         let assistant = &table.providers["assistant"];
+        assert_eq!(assistant.protocol, Protocol::Anthropic);
         assert_eq!(assistant.models["assistant"], "model-large");
         assert_eq!(assistant.secret, SecretName::parse("model-key").unwrap());
         assert_eq!(assistant.header, "x-api-key");
+        let codex = &table.providers["codex"];
+        assert_eq!(codex.protocol, Protocol::OpenAiResponses);
+        assert_eq!(codex.path, "/v1/responses");
+        assert_eq!(codex.header, "authorization");
+        assert_eq!(codex.scheme.as_deref(), Some("Bearer"));
+        let agy = &table.providers["agy"];
+        assert_eq!(agy.protocol, Protocol::Gemini);
+        assert_eq!(agy.path, "/v1beta");
+        assert_eq!(agy.header, "x-goog-api-key");
+        assert_eq!(agy.scheme, None);
         let personal = &table.allow[&ProfileId("personal".into())];
-        assert_eq!(personal.iter().cloned().collect::<Vec<_>>(), ["assistant"]);
+        assert_eq!(
+            personal.iter().cloned().collect::<Vec<_>>(),
+            ["agy", "assistant", "codex"]
+        );
         let work = &table.allow[&ProfileId("work".into())];
         assert_eq!(work.iter().cloned().collect::<Vec<_>>(), ["other"]);
     }

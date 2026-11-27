@@ -4,7 +4,7 @@
 //! - Holds events while any rolling window ends with a key prefix (`>= MIN_HOLD` bytes); drops held events on key completion, early EOF, error, or timeout, and releases them only once all windows clear or on valid `message_stop`.
 //! - Non-2xx upstream responses collapse to a single fixed status-only body; mid-stream failures emit one fixed-vocabulary Anthropic SSE error event.
 
-use super::ModelLimits;
+use super::{ModelLimits, Protocol};
 use crate::{guard::contains_bytes, json::parse, rate::Slot};
 use bot_core::port::Reply;
 use serde_json::Value;
@@ -142,6 +142,7 @@ impl Scanner {
 
 pub struct ModelStream {
     status: u16,
+    protocol: Protocol,
     source: Option<Box<dyn ChunkSource>>,
     pending: Vec<u8>,
     held: Vec<Vec<u8>>,
@@ -151,19 +152,13 @@ pub struct ModelStream {
     started: Instant,
     total: usize,
     fixed: Option<Vec<u8>>,
+    seen_finish: bool,
     ended: bool,
     _slot: Slot,
 }
 
-/// Matches `front::observe`'s `message_stop` rule (exact single `event:` and `data:` lines with top-level `"type":"message_stop"`)
-/// so stream termination and turn observation always agree.
-fn is_message_stop(event: &[u8]) -> bool {
-    if !contains_bytes(event, b"message_stop") {
-        return false;
-    }
-    let Ok(text) = std::str::from_utf8(event) else {
-        return false;
-    };
+fn single_event_type(event: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(event).ok()?;
     let (mut names, mut datas) = (Vec::new(), Vec::new());
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("event:") {
@@ -172,11 +167,58 @@ fn is_message_stop(event: &[u8]) -> bool {
             datas.push(rest.strip_prefix(' ').unwrap_or(rest));
         }
     }
-    matches!((names.as_slice(), datas.as_slice()), ([name], [data])
-    if *name == "message_stop"
-        && parse(data).is_some_and(|value| {
-            value.get("type") == Some(&Value::String("message_stop".into()))
-        }))
+    match (names.as_slice(), datas.as_slice()) {
+        ([name], [data]) => {
+            let value = parse(data)?;
+            (value.get("type").and_then(Value::as_str) == Some(*name)).then(|| (*name).to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// Matches `front::observe`'s terminal SSE event rules so stream termination and turn observation always agree.
+fn is_hard_stop(protocol: Protocol, event: &[u8]) -> bool {
+    match protocol {
+        Protocol::Anthropic => {
+            contains_bytes(event, b"message_stop")
+                && single_event_type(event).as_deref() == Some("message_stop")
+        }
+        Protocol::OpenAiResponses => {
+            (contains_bytes(event, b"response.completed")
+                || contains_bytes(event, b"response.incomplete")
+                || contains_bytes(event, b"response.failed"))
+                && matches!(
+                    single_event_type(event).as_deref(),
+                    Some("response.completed" | "response.incomplete" | "response.failed")
+                )
+        }
+        Protocol::Gemini => false,
+    }
+}
+
+fn gemini_has_finish(event: &[u8]) -> bool {
+    if !contains_bytes(event, b"finishReason") {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(event) else {
+        return false;
+    };
+    let mut data = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("data:")
+            && data
+                .replace(rest.strip_prefix(' ').unwrap_or(rest))
+                .is_some()
+        {
+            return false;
+        }
+    }
+    data.and_then(parse).is_some_and(|value| {
+        value
+            .pointer("/candidates/0/finishReason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| !reason.is_empty())
+    })
 }
 
 fn event_end(buffer: &[u8]) -> Option<usize> {
@@ -191,15 +233,43 @@ fn event_end(buffer: &[u8]) -> Option<usize> {
     }
 }
 
-/// Fixed-vocabulary Anthropic SSE error event. Maps permanent failures (`blocked`, `stale`, `too_large`)
-/// to non-retryable client error types and transient failures to retryable `api_error`.
-pub(crate) fn error_event(class: &str) -> Vec<u8> {
-    let kind = match class {
-        "blocked" | "stale" => "permission_error",
-        "too_large" => "invalid_request_error",
-        _ => "api_error",
-    };
-    format!("event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":\"{class}\"}}}}\n\n").into_bytes()
+/// Fixed-vocabulary protocol SSE error event; maps permanent failures to non-retryable error codes.
+pub(crate) fn error_event(protocol: Protocol, class: &str) -> Vec<u8> {
+    match protocol {
+        Protocol::Anthropic => {
+            let kind = match class {
+                "blocked" | "stale" => "permission_error",
+                "too_large" => "invalid_request_error",
+                _ => "api_error",
+            };
+            format!(
+                "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":\"{class}\"}}}}\n\n"
+            )
+            .into_bytes()
+        }
+        Protocol::OpenAiResponses => {
+            let code = match class {
+                "blocked" | "stale" => "permission_denied",
+                "too_large" => "invalid_request",
+                _ => "server_error",
+            };
+            format!(
+                "event: error\ndata: {{\"type\":\"error\",\"code\":\"{code}\",\"message\":\"{class}\"}}\n\n"
+            )
+            .into_bytes()
+        }
+        Protocol::Gemini => {
+            let (code, status) = match class {
+                "blocked" | "stale" => (403, "PERMISSION_DENIED"),
+                "too_large" => (400, "INVALID_ARGUMENT"),
+                _ => (503, "UNAVAILABLE"),
+            };
+            format!(
+                "data: {{\"error\":{{\"code\":{code},\"message\":\"{class}\",\"status\":\"{status}\"}}}}\n\n"
+            )
+            .into_bytes()
+        }
+    }
 }
 
 impl ModelStream {
@@ -208,12 +278,14 @@ impl ModelStream {
         key: Vec<u8>,
         limits: ModelLimits,
         slot: Slot,
+        protocol: Protocol,
     ) -> Self {
         let failed = !(200..300).contains(&upstream.status);
         Self {
             status: upstream.status,
+            protocol,
             fixed: failed
-                .then(|| format!("{{\"error\":{{\"status\":{}}}}}", upstream.status).into_bytes()),
+                .then(|| super::upstream_error_body(protocol, upstream.status).into_bytes()),
             source: (!failed).then_some(upstream.body),
             pending: Vec::new(),
             held: Vec::new(),
@@ -222,6 +294,7 @@ impl ModelStream {
             limits,
             started: Instant::now(),
             total: 0,
+            seen_finish: false,
             ended: false,
             _slot: slot,
         }
@@ -236,7 +309,7 @@ impl ModelStream {
         self.ended = true;
         self.source = None;
         self.held.clear();
-        Some(error_event(class))
+        Some(error_event(self.protocol, class))
     }
 
     pub async fn next(&mut self) -> Option<Vec<u8>> {
@@ -260,7 +333,11 @@ impl ModelStream {
                 if verdict == Verdict::Block {
                     return self.fail("blocked");
                 }
-                let stop = is_message_stop(&event);
+                let stop = is_hard_stop(self.protocol, &event);
+                if self.protocol == Protocol::Gemini && gemini_has_finish(&event) {
+                    self.seen_finish = true;
+                }
+                // Keep holding key-prefix chunks until hard stop or clean Gemini EOF so trailing chunks cannot complete a leaked key.
                 if verdict == Verdict::Hold && !stop {
                     self.held.push(event);
                 } else {
@@ -268,7 +345,7 @@ impl ModelStream {
                     self.ready.push_back(event);
                 }
                 if stop {
-                    // Close upstream on `message_stop`; anything trailing is out-of-protocol.
+                    // Close upstream on terminal event; anything trailing is out-of-protocol.
                     self.ended = true;
                     self.source = None;
                 }
@@ -297,8 +374,18 @@ impl ModelStream {
                     }
                     self.pending.extend_from_slice(&chunk);
                 }
-                // Normal completion closes `source` at `message_stop`; reaching EOF here means truncation.
-                Ok(Ok(None)) => return self.fail("truncated"),
+                Ok(Ok(None)) => {
+                    if self.protocol == Protocol::Gemini
+                        && self.seen_finish
+                        && self.pending.iter().all(|b| b.is_ascii_whitespace())
+                    {
+                        self.ended = true;
+                        self.source = None;
+                        self.ready.extend(self.held.drain(..));
+                        continue;
+                    }
+                    return self.fail("truncated");
+                }
                 Ok(Err(_)) => return self.fail("unavailable"),
                 Err(_) => return self.fail("timeout"),
             }
