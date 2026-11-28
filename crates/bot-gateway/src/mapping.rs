@@ -332,6 +332,10 @@ mod tests {
                 "admin_url",
                 changed(|v| v["admin_url"] = json!("http://127.0.0.1:9/ui")),
             ),
+            (
+                "dm_sent_notice",
+                changed(|v| v["slack"]["dm_sent_notice"] = json!("Approval sent in DM")),
+            ),
         ] {
             assert_eq!(print, original, "{name}");
         }

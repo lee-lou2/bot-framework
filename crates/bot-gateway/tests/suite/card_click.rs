@@ -1,7 +1,7 @@
 //! Owner-DM approval card click verification against confirmed delivery receipts.
 use crate::support::*;
 use bot_core::{
-    cards::{CardJob, CardKey, LABEL_RECIPIENT},
+    cards::{CardJob, CardKey, CardSource, LABEL_RECIPIENT},
     command::JsonPayload,
     id::{ApprovalId, BindingId, Generation, PrincipalId, ProfileId},
     ledger::ApprovalState,
@@ -54,6 +54,11 @@ fn job() -> CardJob {
         owner: PrincipalId("slack:home/U1".into()),
         card: JsonPayload(card_json()),
         generation: Generation(1),
+        source: Some(CardSource {
+            channel: "C1".into(),
+            thread_ts: Some("1700000000.000100".into()),
+            message_ts: Some("1700000000.000250".into()),
+        }),
     }
 }
 
@@ -108,6 +113,19 @@ async fn the_owner_decides_on_the_dm_card_even_when_plain_dm_input_is_closed() {
     assert_eq!(
         (update.body["channel"].as_str(), update.body["ts"].as_str()),
         (Some(dm.as_str()), Some(ts.as_str()))
+    );
+    let expected_source = "Requested in <#C1> · <https://slack.com/archives/C1/p1700000000000250?thread_ts=1700000000.000100&cid=C1|View thread>";
+    assert_eq!(
+        rig.slack.calls("chat.postMessage")[0].body["blocks"][1]["elements"][0]["text"],
+        expected_source
+    );
+    assert_eq!(
+        update.body["blocks"][1]["elements"][0]["text"], expected_source,
+        "resolved DM card must keep the originating thread link"
+    );
+    assert_eq!(
+        update.body["blocks"][3]["elements"][0]["text"],
+        "✅ Approved"
     );
     assert!(ephemerals(&rig).is_empty());
 }

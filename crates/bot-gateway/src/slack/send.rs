@@ -17,7 +17,7 @@ use bot_core::{
     state::ConversationKind,
 };
 use serde_json::{Value, json};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{borrow::Cow, future::Future, pin::Pin, sync::Arc};
 
 /// Block-format rejections where Slack guarantees nothing was posted, making plain-text fallback safe.
 const FORMAT_ERRORS: [&str; 3] = [
@@ -207,6 +207,24 @@ fn unique_ids(ids: &[&str]) -> bool {
 }
 
 impl SlackSender {
+    fn display_body<'a>(&self, body: &'a ReplyBody) -> Cow<'a, ReplyBody> {
+        if body.approval.is_none()
+            && body.attachments.is_empty()
+            && body.text.as_deref() == Some(DM_SENT_NOTICE)
+            && let Some(custom) = self.creds.host().slack.dm_sent_notice.as_deref()
+        {
+            let trimmed = custom.trim();
+            if !trimmed.is_empty() {
+                return Cow::Owned(ReplyBody {
+                    text: Some(trimmed.to_owned()),
+                    attachments: Vec::new(),
+                    approval: None,
+                });
+            }
+        }
+        Cow::Borrowed(body)
+    }
+
     fn workspace<'a>(&self, snapshot: &'a Snapshot, item: &Outgoing) -> Option<&'a str> {
         match &snapshot.bindings.get(&item.binding)?.source {
             Adapter::SlackChannel { workspace, .. } | Adapter::SlackDm { workspace } => {
@@ -238,7 +256,7 @@ impl SlackSender {
             None => Vec::new(),
         };
         match card {
-            Some(card) if card_fits(card) => blocks.extend(card_blocks(card)),
+            Some(card) if card_fits(card) => blocks.extend(card_blocks(card, None)),
             Some(_) => {
                 // Cards that cannot fit intact never render buttons; direct the user to the admin UI.
                 let notice = self.notice();
@@ -430,7 +448,8 @@ impl Sender for SlackSender {
             let Some(workspace) = self.workspace(snapshot, item) else {
                 return Delivery::Rejected;
             };
-            if !sendable(body) {
+            let effective = self.display_body(body);
+            if !sendable(&effective) {
                 return Delivery::Rejected;
             }
             let (token, bot) = match self.creds.check_bot(&item.key.profile, workspace).await {
@@ -453,9 +472,9 @@ impl Sender for SlackSender {
                 ),
                 _ => None,
             };
-            let delivery = match (body.attachments.is_empty(), &body.approval) {
-                (true, _) => self.post(&token, channel, thread, body).await,
-                (false, None) => self.upload(&token, channel, thread, body).await,
+            let delivery = match (effective.attachments.is_empty(), &effective.approval) {
+                (true, _) => self.post(&token, channel, thread, &effective).await,
+                (false, None) => self.upload(&token, channel, thread, &effective).await,
                 (false, Some(_)) => Delivery::Rejected,
             };
             if let Some(guard) = reply_guard {

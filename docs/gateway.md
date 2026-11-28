@@ -26,6 +26,7 @@ The active set binds profile revisions together with authority-affecting host se
 |---|---|
 | `cli.accounts.<alias>` | Exactly one of `{"os_user": "name"}` or `{"uid": 501}`. `cli.socket` must be an absolute path ≤ 100 bytes. |
 | `slack.workspaces.<alias>` | `team_id`, optional `app_id` (checked on Socket Mode hello), `channels` (alias → channel ID; `D…` DM IDs forbidden here), `dm` (default `false`), `receive`, and secret **names** `bot_token`, `app_token`, `signing_secret`. |
+| `slack.dm_sent_notice` | Optional single-line copy (≤ 200 chars, no control characters; excluded from activation fingerprint) replacing the default `"Approval request sent via DM"` channel notice after an owner-DM approval card is posted. |
 | `http.listen`, `http.remote` | Default `127.0.0.1:8788` (distinct from Admin UI's `127.0.0.1:8787`). Plaintext HTTP: non-loopback binds require explicit `http.remote: true` (default `false`) behind a TLS proxy, else `bot validate` and `bot serve` reject `gateway.http.listen` and bind nothing. |
 | `http.endpoints.<alias>` (webhook) | `kind: "webhook"` (or omitted): `issuer`, `audience`, `key` (HS256 secret name), `sync_wait_ms` (default 10s, 1–60000 ms), `max_token_age_secs` (≥ 1). |
 | `http.endpoints.<alias>` (OpenAI) | `kind: "openai"`: `keys` (1–16 slots mapping slot → `{secret, subject}`), `wait_ms` (default 120s, 1–300000 ms), `max_active_runs` (default 32, 1–256). Must use a separate alias from webhooks (`v1` is reserved when any OpenAI endpoint is configured). |
@@ -243,7 +244,7 @@ Any channel registered in the profile is selectable as a schedule destination (r
 2. **Fire**: re-verifies the route against the current registry. Removed routes close the schedule and notify the origin once; transient errors retry.
 3. **Delivery**: quiet runs returning `<quiet>` with no attachments suppress origin replies; explicit-destination drafts require separate owner approval (`Delivery draft`), re-checked before outbox enqueue and again by the Slack adapter before posting by channel ID ([Reliability](reliability.md)).
 
-For all Slack channel-origin approvals (general tool calls, delegated children, and schedules), v2.0 opens a 1:1 DM with the owner via the channel binding's Slack installation (reusing the DM if the origin is already a DM) and posts a single fixed notice in the channel after confirming DM delivery. This path is approval-only and never changes normal reply routing or DM intake ([Reliability](reliability.md)).
+For all Slack channel-origin approvals (general tool calls, delegated children, and schedules), v2.0 opens a 1:1 DM with the owner via the channel binding's Slack installation (reusing the DM if the origin is already a DM), includes a link back to the originating channel thread in the DM card, and posts a single fixed notice in the channel after confirming DM delivery. This path is approval-only and never changes normal reply routing or DM intake ([Reliability](reliability.md)).
 
 ### In-Flight Model Requests During Deployments
 

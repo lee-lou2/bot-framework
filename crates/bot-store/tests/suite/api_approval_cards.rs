@@ -97,6 +97,7 @@ async fn an_api_origin_card_is_staged_closed_keeps_the_original_evidence_and_pos
         (job.binding.0.as_str(), job.owner.0.as_str()),
         ("team", APPROVER)
     );
+    assert_eq!(job.source, None);
     card(&db)
         .begin(job.key.clone(), Revision("r1".into()))
         .await
@@ -112,6 +113,16 @@ async fn an_api_origin_card_is_staged_closed_keeps_the_original_evidence_and_pos
         )
         .await
         .unwrap();
+    assert_eq!(
+        calls(&db)
+            .approval(job.key.nonce.clone())
+            .await
+            .unwrap()
+            .delivery
+            .unwrap()
+            .source,
+        None
+    );
     assert_eq!(
         outbox_rows(&db).await,
         0,

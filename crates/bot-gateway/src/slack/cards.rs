@@ -229,8 +229,13 @@ impl CardDeliverer {
         }
         let posted = tokio::time::timeout(
             SEND_TIMEOUT,
-            self.sender
-                .post_owner_card(&job.profile, &workspace, &job.owner, &card),
+            self.sender.post_owner_card(
+                &job.profile,
+                &workspace,
+                &job.owner,
+                &card,
+                job.source.as_ref(),
+            ),
         )
         .await
         .unwrap_or(CardPost::Held);

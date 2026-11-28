@@ -42,6 +42,16 @@ pub struct CardKey {
     pub attempt: u32,
 }
 
+/// Originating Slack channel and thread metadata for a channel-started owner-DM approval card.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CardSource {
+    pub channel: String,
+    /// Thread root timestamp when the originating conversation is a thread.
+    pub thread_ts: Option<String>,
+    /// Triggering message timestamp when known (differs from `thread_ts` for replies inside a thread).
+    pub message_ts: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CardJob {
     pub key: CardKey,
@@ -53,6 +63,8 @@ pub struct CardJob {
     /// Exact `{nonce,title,lines}` card payload bytes.
     pub card: JsonPayload,
     pub generation: Generation,
+    /// Originating Slack channel/thread for channel-started cards (`None` for HTTP-origin cards).
+    pub source: Option<CardSource>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +94,8 @@ pub struct CardReceipt {
     pub owner: PrincipalId,
     pub profile: ProfileId,
     pub binding: BindingId,
+    /// Originating Slack channel/thread for channel-started cards (`None` for HTTP-origin cards).
+    pub source: Option<CardSource>,
 }
 
 /// Admission-time evidence inherited by HTTP-origin approval cards (absent for channel-origin cards).

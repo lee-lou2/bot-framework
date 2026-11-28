@@ -73,6 +73,7 @@ struct Shared {
     hello_app: Mutex<Option<String>>,
     team: Mutex<String>,
     bot_user: Mutex<String>,
+    url: Mutex<Option<String>>,
     users: Mutex<HashMap<String, Value>>,
     counter: AtomicU64,
     base: Mutex<String>,
@@ -191,8 +192,14 @@ fn default_reply(shared: &Shared, method: &str, request: &Value) -> Value {
         "apps.connections.open" => {
             json!({"ok": true, "url": shared.ws_url.lock().unwrap().clone()})
         }
-        "auth.test" => json!({"ok": true, "user_id": shared.bot_user.lock().unwrap().clone(),
-            "team_id": shared.team.lock().unwrap().clone()}),
+        "auth.test" => {
+            let mut reply = json!({"ok": true, "user_id": shared.bot_user.lock().unwrap().clone(),
+                "team_id": shared.team.lock().unwrap().clone()});
+            if let Some(url) = shared.url.lock().unwrap().clone() {
+                reply["url"] = json!(url);
+            }
+            reply
+        }
         // Maps user `U...` to deterministic DM channel `D...` for tests.
         "conversations.open" => match request["users"].as_str().filter(|users| users.len() > 1) {
             Some(users) => json!({"ok": true, "channel": {"id": format!("D{}", &users[1..])}}),
@@ -299,6 +306,7 @@ impl FakeSlack {
             hello_app: Mutex::new(Some("A1".into())),
             team: Mutex::new("T1".into()),
             bot_user: Mutex::new("UBOT".into()),
+            url: Mutex::new(None),
             users: Mutex::default(),
             counter: AtomicU64::new(0),
             base: Mutex::default(),
@@ -384,6 +392,10 @@ impl FakeSlack {
     pub fn set_auth(&self, team: &str, bot_user: &str) {
         *self.shared.team.lock().unwrap() = team.to_owned();
         *self.shared.bot_user.lock().unwrap() = bot_user.to_owned();
+    }
+
+    pub fn set_url(&self, url: Option<&str>) {
+        *self.shared.url.lock().unwrap() = url.map(str::to_owned);
     }
 
     pub async fn until(&self, mut condition: impl FnMut(&Self) -> bool) -> bool {

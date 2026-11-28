@@ -100,6 +100,7 @@ fn receipt(owner: &str, binding: &str) -> CardReceipt {
         owner: PrincipalId(owner.into()),
         profile: ProfileId("personal".into()),
         binding: BindingId(binding.into()),
+        source: None,
     }
 }
 

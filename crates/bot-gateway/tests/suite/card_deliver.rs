@@ -2,7 +2,7 @@
 
 use crate::delivery_support::*;
 use bot_core::{
-    cards::{CardJob, CardKey, CardOutcome, CardReceipt, LABEL_RECIPIENT},
+    cards::{CardJob, CardKey, CardOutcome, CardReceipt, CardSource, LABEL_RECIPIENT},
     command::JsonPayload,
     id::{ApprovalId, BindingId, Generation, PrincipalId, ProfileId},
     intake::NotSentReason,
@@ -38,6 +38,7 @@ fn job(nonce: &str, owner: &str, binding: &str) -> CardJob {
             .to_string(),
         ),
         generation: Generation(1),
+        source: None,
     }
 }
 
@@ -48,8 +49,15 @@ fn posted(rig: &Rig) -> usize {
 #[tokio::test]
 async fn the_first_sender_posts_the_card_to_the_owners_dm_and_the_receipt_is_settled() {
     let rig = fresh().await;
+    rig.slack.set_url(Some("https://home.slack.com/"));
     let cards = MemoryCards::new();
-    cards.push(job("n-1", "slack:home/U1", "team"));
+    let mut card_job = job("n-1", "slack:home/U1", "team");
+    card_job.source = Some(CardSource {
+        channel: "C1".into(),
+        thread_ts: Some("1700000000.000100".into()),
+        message_ts: None,
+    });
+    cards.push(card_job);
     let deliverer = rig.card_deliverer(cards.clone());
     assert_eq!(deliverer.tick().await.unwrap(), 1);
     assert_eq!(
@@ -60,6 +68,10 @@ async fn the_first_sender_posts_the_card_to_the_owners_dm_and_the_receipt_is_set
     assert_eq!(posted(&rig), 1);
     let sent = &rig.slack.calls("chat.postMessage")[0];
     assert_eq!(sent.body["channel"], "D1");
+    assert_eq!(
+        sent.body["blocks"][1]["elements"][0]["text"],
+        "Requested in <#C1> · <https://home.slack.com/archives/C1/p1700000000000100|View thread>"
+    );
     let (dm, ts) = sent.posted().unwrap();
     assert_eq!(
         cards.settled(),
@@ -82,6 +94,14 @@ async fn the_first_sender_posts_the_card_to_the_owners_dm_and_the_receipt_is_set
         ("T1", "D1", "slack:home/U1")
     );
     assert_eq!(receipt.binding.0, "team");
+    assert_eq!(
+        receipt.source,
+        Some(CardSource {
+            channel: "C1".into(),
+            thread_ts: Some("1700000000.000100".into()),
+            message_ts: None,
+        })
+    );
     assert_eq!(deliverer.tick().await.unwrap(), 0);
     assert_eq!(posted(&rig), 1);
 }
@@ -264,6 +284,7 @@ fn receipt() -> CardReceipt {
         owner: PrincipalId("slack:home/U1".into()),
         profile: ProfileId("personal".into()),
         binding: BindingId("team".into()),
+        source: None,
     }
 }
 

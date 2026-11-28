@@ -4,11 +4,12 @@
 use crate::support::{admin::*, cards::*, delivery::*, *};
 use bot_core::{
     admin::AdminRead,
-    cards::{CardKey, CardOutcome, DM_SENT_NOTICE, DM_UNAVAILABLE_NOTICE},
-    command::Delegate,
+    cards::{CardKey, CardOutcome, CardSource, DM_SENT_NOTICE, DM_UNAVAILABLE_NOTICE},
+    command::{AcceptExtras, Delegate},
     id::*,
     ledger::*,
     port::*,
+    slack::{SlackSource, SourceKind},
     state::*,
 };
 use std::collections::BTreeSet;
@@ -378,4 +379,65 @@ async fn begin_refuses_a_card_that_expired_after_the_claim() {
     };
     let none = begin(&db.store, &key, rev()).await;
     assert!(matches!(none, Err(Error::Missing)), "{none:?}");
+}
+
+#[tokio::test]
+async fn claimed_jobs_and_receipts_carry_slack_channel_thread_source_for_root_and_delegated_children()
+ {
+    let Some(db) = TestDb::new().await else {
+        return;
+    };
+    let mut cmd = accept_as(
+        "personal",
+        "slack-reply",
+        OWNER,
+        ConversationKind::Channel,
+        "C12345678",
+        "run tool",
+    );
+    cmd.event.conversation.thread = Some("1700000000.000100".into());
+    let extras = AcceptExtras {
+        source: Some(SlackSource {
+            kind: SourceKind::Message,
+            team: "T1".into(),
+            channel: "C12345678".into(),
+            ts: "1700000000.000250".into(),
+            thread_ts: Some("1700000000.000100".into()),
+            event_id: "Ev1".into(),
+            reaction: None,
+        }),
+        chain: None,
+    };
+    db.store.accept_with(cmd, extras).await.unwrap();
+    let parent = runs(&db).claim().await.unwrap().unwrap();
+    let child_id = db
+        .store
+        .delegate(Delegate {
+            parent: parent.attempt.clone(),
+            step: "worker".into(),
+            child: AgentId("main/worker".into()),
+            instruction: "execute".into(),
+            scopes: scopes(&["run"]),
+            checked_revision: rev(),
+        })
+        .await
+        .unwrap();
+    let child = runs(&db).claim().await.unwrap().unwrap();
+    assert_eq!(child.attempt.run, child_id);
+    begin_call(&db, &child.attempt, "c1").await;
+    calls(&db)
+        .open_approval(open_approval(binding(&child.attempt, "c1", "n-src")))
+        .await
+        .unwrap();
+
+    let expected = Some(CardSource {
+        channel: "C12345678".into(),
+        thread_ts: Some("1700000000.000100".into()),
+        message_ts: Some("1700000000.000250".into()),
+    });
+    let job = sending(&db).await;
+    assert_eq!(job.source, expected);
+    settle(&db.store, &job.key, posted()).await.unwrap();
+    let got_receipt = receipt(&db, &job.key.nonce).await.expect("receipt");
+    assert_eq!(got_receipt.source, expected);
 }
