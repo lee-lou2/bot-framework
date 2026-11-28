@@ -4,8 +4,9 @@
 use super::{
     SlackGateway,
     api::Body,
-    blocks::{APPROVE, DENY, resolved_blocks},
+    blocks::{APPROVE, DENY, resolved_blocks, source_link},
     cards::is_the_card,
+    creds::BotCheck,
     events::SlackAdmission,
     frame::{Button, Frame, Message, StopRequested},
     socket::Installation,
@@ -419,17 +420,25 @@ impl SlackGateway {
         if button.message_ts.is_empty() {
             return;
         }
+        let BotCheck::Verified(token, auth) =
+            self.creds.check_bot(&install.profile, &install.alias).await
+        else {
+            return;
+        };
+        let source_mrkdwn = stored
+            .delivery
+            .as_ref()
+            .and_then(|receipt| receipt.source.as_ref())
+            .and_then(|source| source_link(auth.url.as_deref(), source))
+            .map(|link| link.mrkdwn);
         let card = serde_json::from_str::<Value>(&stored.card.0)
             .ok()
             .and_then(|value| parse_card(&value).ok());
         let blocks = match card {
-            Some(card) => resolved_blocks(&card, status),
+            Some(card) => resolved_blocks(&card, source_mrkdwn.as_deref(), status),
             None => vec![
                 json!({"type": "context", "elements": [{"type": "plain_text", "text": status}]}),
             ],
-        };
-        let Some(token) = self.creds.bot_token(&install.profile, &install.alias).await else {
-            return;
         };
         let body = json!({"channel": button.channel, "ts": button.message_ts, "blocks": blocks, "text": status});
         let result = self

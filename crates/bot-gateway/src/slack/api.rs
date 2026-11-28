@@ -160,16 +160,39 @@ impl SlackApi {
             Raw::Ok(value) => Some(AuthInfo {
                 user_id: value["user_id"].as_str()?.to_owned(),
                 team_id: value["team_id"].as_str()?.to_owned(),
+                url: value["url"].as_str().and_then(slack_base_url),
             }),
             _ => None,
         }
     }
 }
 
+/// Validates and normalizes a Slack workspace base URL from `auth.test` (e.g. `https://team.slack.com/`).
+pub(crate) fn slack_base_url(raw: &str) -> Option<String> {
+    let rest = raw.strip_prefix("https://")?;
+    let host = rest.strip_suffix('/').unwrap_or(rest);
+    if host.is_empty() || host.len() > 253 {
+        return None;
+    }
+    let lower = host.to_ascii_lowercase();
+    let valid_labels = lower.split('.').all(|label| {
+        !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    });
+    let slack_domain =
+        lower == "slack.com" || lower.ends_with(".slack.com") || lower.ends_with(".slack-gov.com");
+    (valid_labels && slack_domain).then(|| format!("https://{lower}/"))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthInfo {
     pub user_id: String,
     pub team_id: String,
+    pub url: Option<String>,
 }
 
 #[cfg(test)]
@@ -260,6 +283,41 @@ mod tests {
                 Raw::Error("unknown_error".into()),
                 "{odd}"
             );
+        }
+    }
+
+    #[test]
+    fn slack_base_url_accepts_only_clean_https_slack_hosts() {
+        assert_eq!(
+            slack_base_url("https://acme.slack.com/").as_deref(),
+            Some("https://acme.slack.com/")
+        );
+        assert_eq!(
+            slack_base_url("https://Acme-Org.Enterprise.Slack.COM").as_deref(),
+            Some("https://acme-org.enterprise.slack.com/")
+        );
+        assert_eq!(
+            slack_base_url("https://slack.com/").as_deref(),
+            Some("https://slack.com/")
+        );
+        assert_eq!(
+            slack_base_url("https://agency.slack-gov.com/").as_deref(),
+            Some("https://agency.slack-gov.com/")
+        );
+        for bad in [
+            "",
+            "http://acme.slack.com/",
+            "https://evil.example/",
+            "https://slack.com.evil.example/",
+            "https://acme.slack.com/extra",
+            "https://acme.slack.com/?q=1",
+            "https://acme.slack.com:443/",
+            "https://user@acme.slack.com/",
+            "https://-bad.slack.com/",
+            "https://acme..slack.com/",
+            "https://acme.slack.com|<script>",
+        ] {
+            assert_eq!(slack_base_url(bad), None, "{bad}");
         }
     }
 }

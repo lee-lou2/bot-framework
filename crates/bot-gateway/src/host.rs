@@ -47,6 +47,8 @@ pub struct CliAccount {
 pub struct SlackHost {
     #[serde(default)]
     pub workspaces: BTreeMap<String, SlackWorkspace>,
+    /// Optional single-line channel notice replacing the default `DM_SENT_NOTICE` copy when an approval card is delivered via DM.
+    pub dm_sent_notice: Option<String>,
 }
 
 /// Kept private because `validate` rejects `http`; all validated workspaces use Socket Mode.
@@ -245,6 +247,16 @@ impl HostConfig {
                     ));
                 }
             }
+        }
+        if let Some(notice) = &self.slack.dm_sent_notice
+            && (notice.trim().is_empty()
+                || notice.chars().count() > 200
+                || notice.chars().any(char::is_control))
+        {
+            return Err(bad(
+                "slack.dm_sent_notice",
+                "must be a non-empty single-line string of at most 200 chars without control characters",
+            ));
         }
         if let Some(url) = &self.admin_url
             && (!(url.starts_with("https://") || url.starts_with("http://"))
@@ -505,5 +517,29 @@ mod tests {
                 "b":{"team_id":"T1","bot_token":"b","app_token":"t"}}}}"#,
         );
         assert!(message.contains("duplicate team_id"), "{message}");
+    }
+
+    #[test]
+    fn slack_dm_sent_notice_validates_single_line_text_within_limit() {
+        let ok = HostConfig::from_json(r#"{"slack":{"dm_sent_notice":"Approval sent via DM."}}"#)
+            .unwrap();
+        assert_eq!(
+            ok.slack.dm_sent_notice.as_deref(),
+            Some("Approval sent via DM.")
+        );
+        let max_len = format!(r#"{{"slack":{{"dm_sent_notice":"{}"}}}}"#, "a".repeat(200));
+        assert!(HostConfig::from_json(&max_len).is_ok());
+        for bad in [
+            r#"{"slack":{"dm_sent_notice":""}}"#,
+            r#"{"slack":{"dm_sent_notice":"   "}}"#,
+            r#"{"slack":{"dm_sent_notice":"line1\nline2"}}"#,
+            &format!(r#"{{"slack":{{"dm_sent_notice":"{}"}}}}"#, "a".repeat(201)),
+        ] {
+            let message = rejects(bad);
+            assert!(
+                message.contains("slack.dm_sent_notice"),
+                "{bad} -> {message}"
+            );
+        }
     }
 }

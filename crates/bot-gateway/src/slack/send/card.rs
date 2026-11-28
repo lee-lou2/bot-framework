@@ -8,11 +8,12 @@ use crate::{
     reply::Card,
     slack::{
         api::{Body, Raw},
-        blocks::{card_blocks, card_fits, card_text, neutralize},
+        blocks::{card_blocks, card_fits, card_text, neutralize, source_link},
         creds::BotCheck,
     },
 };
 use bot_core::{
+    cards::CardSource,
     id::{PrincipalId, ProfileId},
     intake::NotSentReason,
 };
@@ -53,6 +54,7 @@ impl SlackSender {
         workspace: &str,
         owner: &PrincipalId,
         card: &Card,
+        source: Option<&CardSource>,
     ) -> CardPost {
         let Some((alias, user)) = slack_user(owner) else {
             return CardPost::Unavailable;
@@ -81,10 +83,15 @@ impl SlackSender {
             },
             raw => return open_failed(raw),
         };
+        let link = source.and_then(|src| source_link(auth.url.as_deref(), src));
+        let text = match &link {
+            Some(link) => format!("{}\n{}", neutralize(&card_text(card)), link.fallback),
+            None => neutralize(&card_text(card)),
+        };
         let message = json!({
             "channel": dm,
-            "blocks": card_blocks(card),
-            "text": neutralize(&card_text(card)),
+            "blocks": card_blocks(card, link.as_ref().map(|l| l.mrkdwn.as_str())),
+            "text": text,
             "unfurl_links": false,
             "unfurl_media": false,
         });

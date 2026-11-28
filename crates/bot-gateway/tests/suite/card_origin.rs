@@ -92,6 +92,7 @@ fn job(nonce: &str, binding: &str, owner: &str) -> CardJob {
             json!({"nonce": nonce, "title": "Tool approval", "lines": ["Send email"]}).to_string(),
         ),
         generation: Generation(1),
+        source: None,
     }
 }
 
@@ -128,7 +129,16 @@ async fn a_card_whose_route_and_installation_are_unchanged_is_posted_once() {
         cards.begun(),
         [("n-1".to_owned(), "personal-r1".to_owned())]
     );
-    assert_eq!(rig.slack.calls("chat.postMessage").len(), 1);
+    let posts = rig.slack.calls("chat.postMessage");
+    assert_eq!(posts.len(), 1);
+    assert!(
+        posts[0].body["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["type"] != "context"),
+        "HTTP-origin DM cards carry no Slack channel source link"
+    );
     assert!(matches!(
         cards.settled().as_slice(),
         [(_, CardOutcome::Posted { .. })]
@@ -272,7 +282,16 @@ async fn the_same_route_in_a_newer_revision_still_posts() {
         cards.begun(),
         [("n-1".to_owned(), "personal-r2".to_owned())]
     );
-    assert_eq!(rig.slack.calls("chat.postMessage").len(), 1);
+    let posts = rig.slack.calls("chat.postMessage");
+    assert_eq!(posts.len(), 1);
+    assert!(
+        posts[0].body["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["type"] != "context"),
+        "HTTP-origin DM cards carry no Slack channel source link"
+    );
 }
 
 #[tokio::test]

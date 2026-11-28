@@ -26,6 +26,7 @@
 |---|---|
 | `cli.accounts.<alias>` | `{"os_user": "name"}` 또는 `{"uid": 501}` 중 정확히 하나만 지정합니다. `cli.socket`은 100바이트 이하의 절대 경로여야 합니다. |
 | `slack.workspaces.<alias>` | `team_id`, 선택적 `app_id`(Socket Mode hello 시 검증), `channels`(별칭 → 채널 ID; `D…` DM ID는 금지), `dm`(기본 `false`), `receive`, 시크릿 **이름** `bot_token`, `app_token`, `signing_secret`. |
+| `slack.dm_sent_notice` | 소유자 DM 승인 카드 게시 후 원 채널에 남기는 기본 `"Approval request sent via DM"` 안내를 대체하는 선택적 한 줄 문구(200자 이하, 제어 문자 금지, 활성화 지문 제외). |
 | `http.listen`, `http.remote` | 기본값 `127.0.0.1:8788`(Admin UI의 `127.0.0.1:8787`과 구분). 평문 HTTP이므로 비루프백 바인딩은 TLS 프록시 뒤에서 명시적 `http.remote: true`(기본 `false`)가 필요하며, 그렇지 않으면 `bot validate`와 `bot serve`가 `gateway.http.listen`을 거부하고 아무 포트도 열지 않습니다. |
 | `http.endpoints.<alias>` (웹훅) | `kind: "webhook"`(또는 생략): `issuer`, `audience`, `key`(HS256 시크릿 이름), `sync_wait_ms`(기본 10초, 1–60000 ms), `max_token_age_secs`(≥ 1). |
 | `http.endpoints.<alias>` (OpenAI) | `kind: "openai"`: `keys`(슬롯 → `{secret, subject}` 매핑 1–16개), `wait_ms`(기본 120초, 1–300000 ms), `max_active_runs`(기본 32, 1–256). 웹훅과 별도 별칭을 사용해야 합니다(OpenAI 엔드포인트가 하나라도 설정되면 `v1`은 예약됨). |
@@ -243,7 +244,7 @@ Slack 버튼과 Admin UI는 동일한 브로커 승인 경로를 공유합니다
 2. **발동**: 현재 레지스트리에서 경로를 재검증합니다. 제거된 경로는 예약을 닫고 원본 대화에 한 번 알리며, 일시적 오류는 재시도합니다.
 3. **전달**: 첨부 없이 `<quiet>`만 반환하는 조용한 실행은 원본 응답을 생략합니다. 명시적 대상 초안은 별도의 소유자 승인(`Delivery draft`)이 필요하며, 아웃박스 적재 전과 Slack 어댑터가 채널 ID로 게시하기 직전에 다시 검증됩니다([신뢰성](reliability.md)).
 
-모든 Slack 채널 기원 승인(일반 도구 호출, 위임 하위 실행, 예약)의 경우 v2.0은 채널 바인딩의 Slack 설치를 통해 소유자와 1:1 DM을 열고(원본이 이미 DM이면 기존 DM 재사용) DM 전달을 확인한 뒤 채널에 고정 안내 문구를 한 번 게시합니다. 이 경로는 승인 전용이며 일반 응답 라우팅이나 DM 접수를 변경하지 않습니다([신뢰성](reliability.md)).
+모든 Slack 채널 기원 승인(일반 도구 호출, 위임 하위 실행, 예약)의 경우 v2.0은 채널 바인딩의 Slack 설치를 통해 소유자와 1:1 DM을 열고(원본이 이미 DM이면 기존 DM 재사용), DM 카드에 원 요청 채널·스레드 링크를 함께 표시하며, DM 전달을 확인한 뒤 채널에 고정 안내 문구를 한 번 게시합니다. 이 경로는 승인 전용이며 일반 응답 라우팅이나 DM 접수를 변경하지 않습니다([신뢰성](reliability.md)).
 
 ### 배포 중 진행 중인 모델 요청
 

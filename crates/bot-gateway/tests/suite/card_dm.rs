@@ -2,7 +2,7 @@
 use crate::delivery_support::*;
 use crate::support;
 use bot_core::{
-    cards::LABEL_RECIPIENT,
+    cards::{CardSource, LABEL_RECIPIENT},
     id::{PrincipalId, ProfileId},
     intake::NotSentReason,
 };
@@ -39,7 +39,9 @@ fn personal() -> ProfileId {
 
 async fn post(rig: &Rig, who: &PrincipalId, card: &Card) -> CardPost {
     let sender = rig.sender();
-    sender.post_owner_card(&personal(), "home", who, card).await
+    sender
+        .post_owner_card(&personal(), "home", who, card, None)
+        .await
 }
 
 fn open_calls(rig: &Rig) -> Vec<bot_gateway::testing::slack::Call> {
@@ -348,4 +350,119 @@ async fn each_owner_gets_only_their_own_dm_and_the_card_never_goes_to_the_channe
         .map(|call| call.body["channel"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(channels, ["D1", "D2"], "must not post to channels");
+}
+
+#[tokio::test]
+async fn channel_origin_dm_card_includes_a_validated_thread_link_using_workspace_url_or_fallback() {
+    let rig = fresh().await;
+    rig.slack.set_url(Some("https://acme.slack.com/"));
+    let reply_source = CardSource {
+        channel: "C2".into(),
+        thread_ts: Some("1700000000.000100".into()),
+        message_ts: Some("1700000000.000250".into()),
+    };
+    let sender = rig.sender();
+    let got = sender
+        .post_owner_card(
+            &personal(),
+            "home",
+            &owner("slack:home/U1"),
+            &card(),
+            Some(&reply_source),
+        )
+        .await;
+    assert!(matches!(got, CardPost::Posted { .. }));
+    let sent = &card_posts(&rig)[0];
+    let expected_url =
+        "https://acme.slack.com/archives/C2/p1700000000000250?thread_ts=1700000000.000100&cid=C2";
+    let blocks = sent.body["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(blocks[0]["type"], "header");
+    assert_eq!(blocks[1]["type"], "context");
+    assert_eq!(
+        blocks[1]["elements"][0]["text"],
+        format!("Requested in <#C2> · <{expected_url}|View thread>")
+    );
+    assert_eq!(blocks[2]["text"]["type"], "plain_text");
+    assert_eq!(blocks[3]["type"], "actions");
+    assert!(
+        sent.body["text"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("\nThread: {expected_url}")),
+        "{}",
+        sent.body["text"]
+    );
+    assert_eq!(sent.body["unfurl_links"], false);
+
+    // Without auth.test `url`, thread root links fall back cleanly to `https://slack.com/`.
+    let rig = fresh().await;
+    let root_source = CardSource {
+        channel: "C2".into(),
+        thread_ts: Some("1700000000.000100".into()),
+        message_ts: None,
+    };
+    let sender = rig.sender();
+    assert!(matches!(
+        sender
+            .post_owner_card(
+                &personal(),
+                "home",
+                &owner("slack:home/U1"),
+                &card(),
+                Some(&root_source),
+            )
+            .await,
+        CardPost::Posted { .. }
+    ));
+    let sent = &card_posts(&rig)[0];
+    assert_eq!(
+        sent.body["blocks"][1]["elements"][0]["text"],
+        "Requested in <#C2> · <https://slack.com/archives/C2/p1700000000000100|View thread>"
+    );
+}
+
+#[tokio::test]
+async fn configured_slack_dm_sent_notice_overrides_the_channel_notice_copy() {
+    use bot_core::{
+        cards::DM_SENT_NOTICE,
+        state::{Conversation, ConversationKind},
+    };
+    use bot_gateway::{
+        delivery::{Delivery, Sender},
+        reply::ReplyBody,
+        testing::ports::outgoing,
+    };
+
+    let host = r#"{"slack":{"dm_sent_notice":"Approval sent via DM (custom)","workspaces":{"home":{
+        "team_id":"T1","dm":true,"bot_token":"bot-token","app_token":"app-token",
+        "channels":{"planning":"C1"}}}}}"#;
+    let rig = rig_on(host, support::personal(), support::default_secrets(), None).await;
+    let snap = support::personal().build();
+    let item = outgoing(
+        "personal",
+        0,
+        "team",
+        "slack:home/U1",
+        Conversation {
+            kind: ConversationKind::Channel,
+            id: "C1".into(),
+            thread: Some("1700000000.000100".into()),
+        },
+        &json!({"text": DM_SENT_NOTICE}).to_string(),
+    );
+    let body = ReplyBody {
+        text: Some(DM_SENT_NOTICE.into()),
+        attachments: vec![],
+        approval: None,
+    };
+    let sent = rig.sender().send(&snap, &item, &body).await;
+    assert!(matches!(sent, Delivery::Sent { .. }), "{sent:?}");
+    let posts = card_posts(&rig);
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].body["text"], "Approval sent via DM (custom)");
+    assert_eq!(
+        posts[0].body["blocks"][0]["text"],
+        "Approval sent via DM (custom)"
+    );
 }

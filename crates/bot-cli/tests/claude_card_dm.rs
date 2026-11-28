@@ -68,8 +68,14 @@ async fn a_channel_started_schedule_asks_the_owner_in_a_dm_and_only_that_card_de
         .unwrap();
     assert!(dm_post.body.get("thread_ts").is_none_or(|t| t.is_null()));
     assert!(has_buttons(&dm_post));
+    let expected_url = format!("https://slack.com/archives/C2/p{}", first.replace('.', ""));
+    assert_eq!(
+        dm_post.body["blocks"][1]["elements"][0]["text"],
+        format!("Requested in <#C2> · <{expected_url}|View thread>")
+    );
     let body = dm_post.body["text"].as_str().unwrap();
     assert!(body.contains("T1/C1"), "{body}");
+    assert!(body.contains(&expected_url), "{body}");
 
     // 3) Once posted, origin thread gets a single buttonless notice line with no draft/recipient/nonce.
     rig.until("card delivery did not confirm", 60, |rig| {

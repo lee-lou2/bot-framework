@@ -276,7 +276,7 @@ async fn a_rejected_token_never_makes_the_dm_card_unavailable() {
     );
     let sender = rig.sender();
     let got = sender
-        .post_owner_card(&profile, "home", &owner, &card())
+        .post_owner_card(&profile, "home", &owner, &card(), None)
         .await;
     assert_eq!(got, not_sent());
     assert!(posts(&rig).is_empty());
@@ -288,14 +288,14 @@ async fn a_rejected_token_never_makes_the_dm_card_unavailable() {
     );
     let sender = rig.sender();
     let got = sender
-        .post_owner_card(&profile, "home", &owner, &card())
+        .post_owner_card(&profile, "home", &owner, &card(), None)
         .await;
     assert_eq!(got, not_sent());
     assert_eq!(rig.slack.calls("conversations.open").len(), 1);
     assert_eq!(posts(&rig).len(), 1);
     assert_eq!(auth_checks(&rig).len(), 1);
     let got = sender
-        .post_owner_card(&profile, "home", &owner, &card())
+        .post_owner_card(&profile, "home", &owner, &card(), None)
         .await;
     assert!(matches!(got, CardPost::Posted { .. }), "{got:?}");
     assert_eq!(auth_checks(&rig).len(), 2);
@@ -319,6 +319,7 @@ fn job() -> CardJob {
             .to_string(),
         ),
         generation: Generation(1),
+        source: None,
     }
 }
 

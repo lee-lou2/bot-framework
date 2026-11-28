@@ -1,8 +1,13 @@
 //! Pure Slack Block Kit builders for markdown replies, trailing note context blocks, and non-truncated `plain_text` approval cards.
 //!
 //! Card lines use `plain_text` so injected mentions or links cannot render; oversized cards are rejected rather than truncated.
-use crate::reply::Card;
+//! Originating thread links are built solely from validated host/store Slack IDs and timestamps in a separate `context` block.
+use super::api::slack_base_url;
+use crate::{host::is_slack_id, reply::Card, schedule_routes::is_ts};
+use bot_core::cards::CardSource;
 use serde_json::{Value, json};
+
+const DEFAULT_SLACK_BASE: &str = "https://slack.com/";
 
 pub const APPROVE: &str = "bot_approve";
 pub const DENY: &str = "bot_deny";
@@ -206,6 +211,59 @@ fn links(s: &str) -> String {
     out
 }
 
+/// Rendered Slack channel/thread link derived strictly from validated IDs, timestamps, and workspace URL.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceLink {
+    pub url: String,
+    pub mrkdwn: String,
+    pub fallback: String,
+}
+
+/// Builds a canonical Slack permalink and `context` `mrkdwn` line for a channel-origin DM approval card.
+/// Returns `None` if `source.channel` is not a valid Slack channel ID (`C…` or `G…`).
+pub fn source_link(base_url: Option<&str>, source: &CardSource) -> Option<SourceLink> {
+    let channel = source.channel.as_str();
+    if !((channel.starts_with('C') || channel.starts_with('G')) && is_slack_id(channel)) {
+        return None;
+    }
+    let base = base_url
+        .and_then(slack_base_url)
+        .unwrap_or_else(|| DEFAULT_SLACK_BASE.to_owned());
+    let thread_ts = source.thread_ts.as_deref().filter(|ts| is_ts(ts));
+    let message_ts = source.message_ts.as_deref().filter(|ts| is_ts(ts));
+    match thread_ts {
+        Some(root) => {
+            let url = match message_ts.filter(|msg| *msg != root) {
+                Some(msg) => {
+                    let p = msg.replace('.', "");
+                    format!("{base}archives/{channel}/p{p}?thread_ts={root}&cid={channel}")
+                }
+                None => {
+                    let p = root.replace('.', "");
+                    format!("{base}archives/{channel}/p{p}")
+                }
+            };
+            let mrkdwn = format!("Requested in <#{channel}> · <{url}|View thread>");
+            let fallback = format!("Thread: {url}");
+            Some(SourceLink {
+                url,
+                mrkdwn,
+                fallback,
+            })
+        }
+        None => {
+            let url = format!("{base}archives/{channel}");
+            let mrkdwn = format!("Requested in <#{channel}>");
+            let fallback = format!("Channel: {url}");
+            Some(SourceLink {
+                url,
+                mrkdwn,
+                fallback,
+            })
+        }
+    }
+}
+
 pub fn card_fits(card: &Card) -> bool {
     card.title.chars().count() <= TITLE_LIMIT && card_body(card).chars().count() <= SECTION_LIMIT
 }
@@ -214,10 +272,13 @@ fn card_body(card: &Card) -> String {
     card.lines.join("\n")
 }
 
-fn card_parts(card: &Card) -> Vec<Value> {
+fn card_parts(card: &Card, source_mrkdwn: Option<&str>) -> Vec<Value> {
     let mut blocks = vec![
         json!({"type": "header", "text": {"type": "plain_text", "text": card.title, "emoji": false}}),
     ];
+    if let Some(mrkdwn) = source_mrkdwn {
+        blocks.push(context_block(mrkdwn));
+    }
     let body = card_body(card);
     if !body.is_empty() {
         blocks.push(json!({"type": "section", "text": {"type": "plain_text", "text": body, "emoji": false}}));
@@ -225,8 +286,8 @@ fn card_parts(card: &Card) -> Vec<Value> {
     blocks
 }
 
-pub fn card_blocks(card: &Card) -> Vec<Value> {
-    let mut blocks = card_parts(card);
+pub fn card_blocks(card: &Card, source_mrkdwn: Option<&str>) -> Vec<Value> {
+    let mut blocks = card_parts(card, source_mrkdwn);
     blocks.push(json!({"type": "actions", "elements": [
         {"type": "button", "text": {"type": "plain_text", "text": "Approve"}, "style": "primary",
          "action_id": APPROVE, "value": card.nonce},
@@ -236,8 +297,8 @@ pub fn card_blocks(card: &Card) -> Vec<Value> {
     blocks
 }
 
-pub fn resolved_blocks(card: &Card, status: &str) -> Vec<Value> {
-    let mut blocks = card_parts(card);
+pub fn resolved_blocks(card: &Card, source_mrkdwn: Option<&str>, status: &str) -> Vec<Value> {
+    let mut blocks = card_parts(card, source_mrkdwn);
     blocks.push(json!({"type": "context", "elements": [{"type": "plain_text", "text": status, "emoji": false}]}));
     blocks
 }
@@ -288,7 +349,7 @@ mod tests {
 
     #[test]
     fn cards_use_plain_text_and_carry_the_nonce_on_both_buttons() {
-        let blocks = card_blocks(&card());
+        let blocks = card_blocks(&card(), None);
         assert_eq!(blocks[0]["type"], "header");
         assert_eq!(blocks[1]["text"]["type"], "plain_text");
         assert!(
@@ -308,7 +369,7 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, [(APPROVE, "n-1"), (DENY, "n-1")]);
-        let resolved = resolved_blocks(&card(), "Approved");
+        let resolved = resolved_blocks(&card(), None, "Approved");
         assert!(resolved.iter().all(|b| b["type"] != "actions"));
         assert_eq!(resolved.last().unwrap()["elements"][0]["text"], "Approved");
     }
@@ -406,5 +467,84 @@ mod tests {
 
         let oversized_body = format!("{}\n\n※ note", "a".repeat(MARKDOWN_LIMIT + 1));
         assert!(text_blocks(&oversized_body).is_none());
+    }
+
+    #[test]
+    fn source_link_builds_canonical_thread_and_reply_permalinks_and_rejects_untrusted_ids() {
+        let root = CardSource {
+            channel: "C12345".into(),
+            thread_ts: Some("1700000000.000100".into()),
+            message_ts: Some("1700000000.000100".into()),
+        };
+        let got = source_link(Some("https://acme.slack.com/"), &root).unwrap();
+        assert_eq!(
+            got.url,
+            "https://acme.slack.com/archives/C12345/p1700000000000100"
+        );
+        assert_eq!(
+            got.mrkdwn,
+            "Requested in <#C12345> · <https://acme.slack.com/archives/C12345/p1700000000000100|View thread>"
+        );
+        assert_eq!(
+            got.fallback,
+            "Thread: https://acme.slack.com/archives/C12345/p1700000000000100"
+        );
+
+        // Reply inside a thread targets the reply with thread_ts + cid query parameters.
+        let reply = CardSource {
+            channel: "G999".into(),
+            thread_ts: Some("1700000000.000100".into()),
+            message_ts: Some("1700000000.000250".into()),
+        };
+        let got = source_link(None, &reply).unwrap();
+        assert_eq!(
+            got.url,
+            "https://slack.com/archives/G999/p1700000000000250?thread_ts=1700000000.000100&cid=G999"
+        );
+        assert_eq!(
+            got.mrkdwn,
+            "Requested in <#G999> · <https://slack.com/archives/G999/p1700000000000250?thread_ts=1700000000.000100&cid=G999|View thread>"
+        );
+
+        // Channel-only origin (e.g. top-level reaction) links the channel without inventing a thread.
+        let channel_only = CardSource {
+            channel: "C12345".into(),
+            thread_ts: None,
+            message_ts: Some("1700000000.000250".into()),
+        };
+        let got = source_link(Some("https://evil.example/"), &channel_only).unwrap();
+        assert_eq!(got.url, "https://slack.com/archives/C12345");
+        assert_eq!(got.mrkdwn, "Requested in <#C12345>");
+        assert_eq!(got.fallback, "Channel: https://slack.com/archives/C12345");
+
+        // DMs and malformed channel IDs never produce links.
+        for bad in ["D12345", "C1|evil", "c12345", "", "T1/C1"] {
+            let src = CardSource {
+                channel: bad.into(),
+                thread_ts: Some("1700000000.000100".into()),
+                message_ts: None,
+            };
+            assert!(
+                source_link(Some("https://acme.slack.com/"), &src).is_none(),
+                "{bad}"
+            );
+        }
+
+        // Source context sits under header while untrusted card lines remain plain_text on both active and resolved cards.
+        let link = source_link(Some("https://acme.slack.com/"), &root).unwrap();
+        let active = card_blocks(&card(), Some(&link.mrkdwn));
+        assert_eq!(active.len(), 4);
+        assert_eq!(active[0]["type"], "header");
+        assert_eq!(active[1]["type"], "context");
+        assert_eq!(active[1]["elements"][0]["type"], "mrkdwn");
+        assert_eq!(active[1]["elements"][0]["text"], link.mrkdwn);
+        assert_eq!(active[2]["text"]["type"], "plain_text");
+        assert_eq!(active[3]["type"], "actions");
+
+        let resolved = resolved_blocks(&card(), Some(&link.mrkdwn), "✅ Approved");
+        assert_eq!(resolved.len(), 4);
+        assert_eq!(resolved[1]["elements"][0]["text"], link.mrkdwn);
+        assert_eq!(resolved[2]["text"]["type"], "plain_text");
+        assert_eq!(resolved[3]["elements"][0]["text"], "✅ Approved");
     }
 }

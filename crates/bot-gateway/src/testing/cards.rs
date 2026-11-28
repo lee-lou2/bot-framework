@@ -196,6 +196,7 @@ impl CardOutbox for MemoryCards {
                     owner: job.owner.clone(),
                     profile: job.profile.clone(),
                     binding: job.binding.clone(),
+                    source: job.source.clone(),
                 };
                 if let Some(ledger) = &self.ledger {
                     ledger.deliver(&key.nonce.0, receipt.clone());
