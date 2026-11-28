@@ -291,6 +291,7 @@ mod tests {
             principal: PrincipalId(principal.to_owned()),
             binding: BindingId("cli".to_owned()),
             api: None,
+            intake: crate::state::IntakeMeta::default(),
             conversation: Conversation {
                 kind: ConversationKind::Cli,
                 id: "c".to_owned(),

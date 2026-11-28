@@ -23,7 +23,7 @@ fn rejected(code: i64) -> bool {
     (-32602..=-32600).contains(&code) || (-32022..=-32020).contains(&code)
 }
 
-/// Remote `_meta` carries only idempotency keys (`profile-id`, `run-id`, `call-id`) and never principal, origin, or destination.
+/// Remote `_meta` carries only idempotency keys (`profile-id`, `run-id`, `call-id`) and never principal, origin, conversation, or destination.
 fn meta_members(job: &ToolJob) -> String {
     format!(
         "\"bot/call-id\":{},\"bot/profile-id\":{},\"bot/run-id\":{}",

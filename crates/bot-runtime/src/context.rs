@@ -26,6 +26,7 @@ mod chat;
 pub use chat::is_chat;
 mod memory;
 pub use memory::REFERENCE_HEADER;
+mod request;
 
 pub const MAX_KNOWLEDGE_DOCS: usize = 8;
 pub const MAX_KNOWLEDGE_BYTES: usize = 32 * 1024;
@@ -370,6 +371,7 @@ pub fn assemble(input: &ContextInput<'_>) -> Result<Assembled, ContextError> {
         "## Current Time\n{}",
         clock(input.now, &snapshot.timezone)
     ));
+    sections.push(request::section(snapshot, run));
     if chat.is_some() {
         sections.push(chat::NOTICE.to_owned());
     }

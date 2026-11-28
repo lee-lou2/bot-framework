@@ -34,7 +34,9 @@ pub struct ToolJob {
     pub args: String,
     /// Non-secret agent env vars selected by `Tool.env` only when pinned and current revisions agree.
     pub env: Vec<(String, String)>,
-    /// Fixed origin conversation for `Destination::Reply`.
+    /// Host-verified conversation of the run (injected into local `_meta["bot/conversation"]`, never remote).
+    pub conversation: Conversation,
+    /// Fixed origin conversation for `Destination::Reply` (injected into local `_meta["bot/destination"]`).
     pub reply_to: Option<Conversation>,
     pub owner: String,
 }

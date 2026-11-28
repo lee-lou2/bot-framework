@@ -110,6 +110,15 @@ pub struct TriggerRef {
     pub id: String,
 }
 
+/// Host-authenticated per-adapter intake details loaded from the root request (inherited by children).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IntakeMeta {
+    /// Triggering Slack message timestamp (`ts`), distinct from `conversation.thread` on thread replies.
+    pub message_ts: Option<String>,
+    /// Authenticated HTTP webhook method and mount-relative path (`None` for non-HTTP and OpenAI API runs).
+    pub http_route: Option<(String, String)>,
+}
+
 /// Share scope is bound to the original request's profile, principal, and conversation.
 #[derive(Clone, Debug)]
 pub struct RunContext {
@@ -124,6 +133,8 @@ pub struct RunContext {
     pub binding: BindingId,
     /// OpenAI-compatible intake origin when root entered via HTTP API (inherited by children).
     pub api: Option<crate::api::ApiOrigin>,
+    /// Root intake metadata (Slack message timestamp, HTTP webhook route), inherited by children.
+    pub intake: IntakeMeta,
     pub scopes: std::collections::BTreeSet<String>,
     pub private_memory_read: bool,
     pub work: Work,

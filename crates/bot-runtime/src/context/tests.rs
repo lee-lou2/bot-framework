@@ -136,6 +136,7 @@ fn run_context(agent: &str, scope_list: &[&str], text: &str) -> RunContext {
         },
         binding: BindingId("desk".into()),
         api: None,
+        intake: bot_core::state::IntakeMeta::default(),
         scopes: scopes(scope_list),
         private_memory_read: false,
         work: Work {
@@ -180,6 +181,7 @@ const FULL: [&str; 3] = ["run", "calendar.read", "calendar.delete"];
 
 mod builtin;
 mod chat;
+mod request;
 
 #[test]
 fn system_has_a_fixed_shape_and_the_conversation_ends_with_the_input() {
@@ -191,6 +193,7 @@ fn system_has_a_fixed_shape_and_the_conversation_ends_with_the_input() {
         out.system,
         "Summarize the user's tasks for today briefly.\n\n\
          ## Current Time\n2026-11-24(Tue) 11:30 (Asia/Seoul)\n\n\
+         ## Request Context\n- channel: cli\n- origin: message\n- binding: desk\n- account: owner\n- requester: local:owner\n\n\
          ## Skills\n### agenda\nUse list to view events. Use delete only on a single event ID confirmed by the user.\n\n\
          ## Delegation\nYou may delegate work only to direct child agents using the `delegate` tool.\n- main/research: Look up events delegated by the parent agent."
     );

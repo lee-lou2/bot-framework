@@ -79,19 +79,27 @@ fn kind_name(kind: &ConversationKind) -> &'static str {
     }
 }
 
+fn conversation_json(conv: &bot_core::state::Conversation) -> String {
+    let thread = conv
+        .thread
+        .as_deref()
+        .map_or_else(|| "null".to_owned(), json_quote);
+    format!(
+        "{{\"id\":{},\"kind\":{},\"thread\":{thread}}}",
+        json_quote(&conv.id),
+        json_quote(kind_name(&conv.kind)),
+    )
+}
+
 /// Host-supplied `params._meta` injected into `tools/call`; models cannot override these keys.
 fn meta(job: &ToolJob) -> String {
-    let mut out = format!("{{\"bot/call-id\":{}", json_quote(&job.call.0));
+    let mut out = format!(
+        "{{\"bot/call-id\":{},\"bot/conversation\":{}",
+        json_quote(&job.call.0),
+        conversation_json(&job.conversation),
+    );
     if let Some(to) = &job.reply_to {
-        let thread = to
-            .thread
-            .as_deref()
-            .map_or_else(|| "null".to_owned(), json_quote);
-        out.push_str(&format!(
-            ",\"bot/destination\":{{\"id\":{},\"kind\":{},\"thread\":{thread}}}",
-            json_quote(&to.id),
-            json_quote(kind_name(&to.kind)),
-        ));
+        out.push_str(&format!(",\"bot/destination\":{}", conversation_json(to)));
     }
     // External idempotency keys use [profile-id, run-id, call-id] (excluding generation/claim so handovers preserve logical identity).
     out.push_str(&format!(

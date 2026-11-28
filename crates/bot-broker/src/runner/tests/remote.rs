@@ -517,3 +517,41 @@ async fn a_digits_only_bearer_is_caught_in_a_number_token_of_a_structured_result
     tool.revision = Revision(format!("t1@{}", numeric.revision()));
     assert_eq!(blocked(&go(&r, tool).await), "result_credential");
 }
+
+#[tokio::test]
+async fn remote_calls_never_send_conversation_destination_principal_or_trigger_in_meta() {
+    for era in [Era::Modern, Era::Legacy] {
+        let r = remotes(server(era), |_| {});
+        let mut j = job(declared(OK), r#"{"event":"e1"}"#);
+        j.conversation = Conversation {
+            kind: ConversationKind::Channel,
+            id: "C01234567".into(),
+            thread: Some("1700000000.000100".into()),
+        };
+        j.reply_to = Some(j.conversation.clone());
+        let ran = run(&r.rig, j).await;
+        assert!(matches!(ran, Ran::Done(_)), "{era:?}: {ran:?}");
+        let call = r
+            .server
+            .requests()
+            .into_iter()
+            .find(|q| q.rpc() == "tools/call")
+            .expect("tools/call request");
+        let body: serde_json::Value = serde_json::from_str(&call.body).unwrap();
+        let meta = body["params"]["_meta"].as_object().expect("_meta object");
+        let bot_keys: std::collections::BTreeMap<&str, &serde_json::Value> = meta
+            .iter()
+            .filter(|(k, _)| k.starts_with("bot/"))
+            .map(|(k, v)| (k.as_str(), v))
+            .collect();
+        assert_eq!(
+            bot_keys,
+            std::collections::BTreeMap::from([
+                ("bot/call-id", &json!("c1")),
+                ("bot/profile-id", &json!("personal")),
+                ("bot/run-id", &json!("r1")),
+            ]),
+            "{era:?}: {meta:?}"
+        );
+    }
+}

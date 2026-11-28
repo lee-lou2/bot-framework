@@ -59,6 +59,7 @@ struct Exec {
     env: Vec<(String, String)>,
     fingerprint: [u8; 32],
     checked_revision: Revision,
+    conversation: Conversation,
     reply_to: Option<Conversation>,
     private_pass: bool,
 }
@@ -221,7 +222,7 @@ impl PrivateGate {
                 *label = "accepted";
                 let origin = RunOrigin::from_ingress(&conversation.kind, &key.principal);
                 let reply_to = matches!(runnable.destination, Some(Destination::Reply))
-                    .then_some(conversation);
+                    .then(|| conversation.clone());
                 let run = Exec {
                     attempt,
                     origin,
@@ -232,6 +233,7 @@ impl PrivateGate {
                     env,
                     fingerprint,
                     checked_revision: snapshot.revision.clone(),
+                    conversation,
                     reply_to,
                     private_pass: allow_pass,
                 };
@@ -307,6 +309,7 @@ impl PrivateGate {
             tool: run.resolved,
             args: run.canonical,
             env: run.env,
+            conversation: run.conversation,
             reply_to: run.reply_to,
             owner: format!(
                 "private.{}.{}.{tag}",

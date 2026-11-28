@@ -92,6 +92,8 @@ mod http_accept_fence;
 mod http_intake;
 #[path = "suite/human_approval.rs"]
 mod human_approval;
+#[path = "suite/intake_meta.rs"]
+mod intake_meta;
 #[path = "suite/ledger_approvals.rs"]
 mod ledger_approvals;
 #[path = "suite/ledger_calls.rs"]

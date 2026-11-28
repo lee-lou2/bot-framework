@@ -148,6 +148,11 @@ async fn run(runner: &McpRunner, tool: Tool, args: &str) -> Ran {
         tool: Resolved::new(ToolId("weather.get-forecast".into()), tool).unwrap(),
         args: args.into(),
         env: Vec::new(),
+        conversation: bot_core::state::Conversation {
+            kind: bot_core::state::ConversationKind::Http,
+            id: "inbox".into(),
+            thread: Some("r1".into()),
+        },
         reply_to: None,
         owner: "r1.1.c1".into(),
     };

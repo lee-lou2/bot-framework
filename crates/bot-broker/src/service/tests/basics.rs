@@ -265,6 +265,29 @@ fn the_progress_origin_of_a_run_reaches_its_tool_jobs_unchanged_for_every_kind()
 }
 
 #[test]
+fn read_tools_receive_host_conversation_without_reply_destination() {
+    use bot_core::state::{Conversation, ConversationKind};
+    let w = World::new();
+    let mut ctx = owner_run("c-conv", 1);
+    ctx.conversation = Conversation {
+        kind: ConversationKind::Channel,
+        id: "C01234567".into(),
+        thread: Some("1700000000.000100".into()),
+    };
+    w.ledger.add_run(ctx);
+    let result = w.call_on(&w.broker, "c-conv", 1, "c1", "agenda.list", "{}");
+    assert!(matches!(result, Ok(CallResult::Done(_))), "{result:?}");
+    let job = &w.runner.jobs()[0];
+    assert_eq!(job.conversation.kind, ConversationKind::Channel);
+    assert_eq!(job.conversation.id, "C01234567");
+    assert_eq!(
+        job.conversation.thread.as_deref(),
+        Some("1700000000.000100")
+    );
+    assert!(job.reply_to.is_none());
+}
+
+#[test]
 fn a_server_the_host_cannot_run_is_refused_before_the_call_is_recorded_and_the_audit_says_why() {
     let w = World::new();
     w.runner.refuse_server("demo-agenda"); // Server requires a state volume unsupported by the host.
