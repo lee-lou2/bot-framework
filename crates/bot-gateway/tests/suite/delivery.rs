@@ -523,9 +523,22 @@ async fn the_run_loop_delivers_and_a_deliver_signal_wakes_it() {
 
 #[tokio::test]
 async fn trailing_note_lines_render_in_a_context_block_without_truncation() {
-    let rig = rig().await;
     let reply =
         "**Done.**\n- Item one\n\n※ Based on **docs** (`v2`), [guide](https://example.com) <!here>";
+    let default_rig = rig().await;
+    to_channel(&default_rig, 1, json!({"text": reply}));
+    default_rig.deliverer.tick().await.unwrap();
+    let default_posts = posts(&default_rig);
+    let default_types: Vec<_> = default_posts[0].body["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(default_types, ["markdown"]);
+
+    let host_with_note = HOST.replace(r#""workspaces""#, r#""note_prefix": "※", "workspaces""#);
+    let rig = rig_on(&host_with_note, personal(), default_secrets(), None).await;
     to_channel(&rig, 1, json!({"text": reply}));
     rig.deliverer.tick().await.unwrap();
     let body = &posts(&rig)[0].body;

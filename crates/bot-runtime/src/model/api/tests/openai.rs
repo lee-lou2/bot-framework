@@ -232,14 +232,22 @@ fn the_upstreams_call_ids_and_signatures_go_back_in_the_same_slots() {
 
 #[test]
 fn the_key_goes_only_in_a_secret_authorization_header() {
-    let headers = KIND.headers(Some("sk-test-key-123"));
+    let headers = KIND.headers(
+        Some(bot_core::auth::HeaderMode::Bearer),
+        Some("sk-test-key-123"),
+        &[],
+    );
     let secret: Vec<_> = headers.iter().filter(|(_, _, secret)| *secret).collect();
     assert_eq!(secret.len(), 1);
     assert_eq!(
-        (secret[0].0, secret[0].1.as_str()),
+        (secret[0].0.as_str(), secret[0].1.as_str()),
         ("authorization", "Bearer sk-test-key-123")
     );
-    assert!(KIND.headers(None).iter().all(|(_, _, secret)| !secret));
+    assert!(
+        KIND.headers(None, None, &[])
+            .iter()
+            .all(|(_, _, secret)| !secret)
+    );
     assert_eq!(KIND.path(), "/chat/completions");
 }
 

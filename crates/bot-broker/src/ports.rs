@@ -75,6 +75,16 @@ pub trait ToolRunner: Send + Sync {
         Vec::new()
     }
 
+    /// Whether `server` requires a host-managed credential pre-check before opening approval cards.
+    fn has_server_auth(&self, _server: &str) -> bool {
+        false
+    }
+
+    /// Checks whether a host-managed server credential (e.g., remote MCP OAuth) is usable before opening an approval card.
+    fn admit_server_auth(&self, _profile: &ProfileId, _server: &str) -> Reply<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn run(&self, job: ToolJob) -> Reply<'_, Ran>;
 
     /// Proves all processes from an earlier attempt have exited; returns `Unavailable` if unconfirmed.

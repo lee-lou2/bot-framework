@@ -78,6 +78,7 @@ pub(super) fn settings(kind: ApiKind) -> ApiSettings {
         endpoint: ApiEndpoint::parse("https://api.example.com/v1").unwrap(),
         model: "model-x".into(),
         secret: SecretName::parse("model-key"),
+        auth: None,
         max_tokens: None,
         limit_field: Default::default(),
         effort: None,

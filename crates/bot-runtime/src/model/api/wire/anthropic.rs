@@ -6,7 +6,7 @@ use super::{
 };
 use crate::model::{
     ModelError, ModelRequest, ModelStep, PendingCall, ToolSpec,
-    api::{names::NameTable, runner::ApiSettings, transport::Header},
+    api::{names::NameTable, runner::ApiSettings},
     call_id,
 };
 use bot_core::command::{JsonPayload, RunOutcome, TokenUsage};
@@ -132,16 +132,12 @@ fn pick_id(saved: Option<&str>, turn: usize, index: usize, used: &mut HashSet<St
     candidate
 }
 
-pub(super) fn headers(key: Option<&str>) -> Vec<Header> {
-    let mut headers: Vec<Header> = vec![
-        ("content-type", "application/json".to_owned(), false),
-        ("accept", "application/json".to_owned(), false),
-        ("anthropic-version", VERSION.to_owned(), false),
-    ];
-    if let Some(key) = key {
-        headers.push(("x-api-key", key.to_owned(), true));
-    }
-    headers
+pub(super) fn base_headers() -> Vec<(String, String)> {
+    vec![
+        ("content-type".into(), "application/json".into()),
+        ("accept".into(), "application/json".into()),
+        ("anthropic-version".into(), VERSION.into()),
+    ]
 }
 
 pub(super) fn build(settings: &ApiSettings, request: &ModelRequest) -> Result<Built, ModelError> {

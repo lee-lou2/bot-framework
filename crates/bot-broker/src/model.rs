@@ -21,6 +21,17 @@ pub enum Protocol {
     Gemini,
 }
 
+impl Protocol {
+    /// Maps the relay wire protocol to its host credential vendor surface.
+    pub fn vendor(self) -> bot_core::auth::CliVendor {
+        match self {
+            Self::Anthropic => bot_core::auth::CliVendor::Claude,
+            Self::OpenAiResponses => bot_core::auth::CliVendor::Codex,
+            Self::Gemini => bot_core::auth::CliVendor::Google,
+        }
+    }
+}
+
 use crate::{
     canon::canonicalize,
     guard::contains_credential,
@@ -30,6 +41,10 @@ use crate::{
     sys::Clock,
 };
 use bot_core::{
+    auth::{
+        AuthError, AuthResolver, AuthSource, CallerSurface, HeaderMode, StaticAuthResolver,
+        apply_auth_headers,
+    },
     command::JsonPayload,
     id::*,
     ledger::CallLedger,
@@ -48,11 +63,10 @@ pub struct Provider {
     pub protocol: Protocol,
     pub endpoint: HostPort,
     pub path: String,
-    /// Profile-scoped secret name attached only to upstream request headers.
-    pub secret: SecretName,
-    /// Header name (e.g. `authorization`, `x-api-key`) and optional value prefix (e.g. `Bearer`).
-    pub header: String,
-    pub scheme: Option<String>,
+    /// Profile-scoped static secret or managed host credential attached only to upstream headers.
+    pub auth: AuthSource,
+    /// Host auth header attachment mode (API key, bearer, or bearer with merged CSV header).
+    pub header_mode: HeaderMode,
     /// Fixed non-secret upstream headers (e.g. API version).
     pub headers: Vec<(String, String)>,
     /// Lowercase sandbox header names permitted to pass through (all others are dropped).
@@ -136,7 +150,7 @@ pub trait Upstream: Send + Sync {
 pub struct ModelProxy {
     host: ModelHost,
     ledger: Arc<dyn CallLedger>,
-    secrets: Arc<dyn SecretStore>,
+    auth: Arc<dyn AuthResolver>,
     upstream: Arc<dyn Upstream>,
     limiter: Arc<Limiter>,
     limits: ModelLimits,
@@ -147,7 +161,7 @@ struct Prepared {
     slot: Slot,
     protocol: Protocol,
     request: UpstreamRequest,
-    key: Vec<u8>,
+    keys: Vec<Vec<u8>>,
 }
 
 fn gemini_model_ok(model: &str) -> bool {
@@ -203,11 +217,6 @@ pub(super) fn upstream_error_body(protocol: Protocol, status: u16) -> String {
     }
 }
 
-/// Printable ASCII only, up to 512 bytes.
-fn header_value_ok(value: &str) -> bool {
-    value.len() <= 512 && value.bytes().all(|b| (0x20..0x7f).contains(&b))
-}
-
 impl ModelProxy {
     pub fn new(
         host: ModelHost,
@@ -217,10 +226,28 @@ impl ModelProxy {
         clock: Arc<dyn Clock>,
         limits: ModelLimits,
     ) -> Self {
+        Self::with_auth(
+            host,
+            ledger,
+            Arc::new(StaticAuthResolver::new(secrets)),
+            upstream,
+            clock,
+            limits,
+        )
+    }
+
+    pub fn with_auth(
+        host: ModelHost,
+        ledger: Arc<dyn CallLedger>,
+        auth: Arc<dyn AuthResolver>,
+        upstream: Arc<dyn Upstream>,
+        clock: Arc<dyn Clock>,
+        limits: ModelLimits,
+    ) -> Self {
         Self {
             host,
             ledger,
-            secrets,
+            auth,
             upstream,
             limiter: Limiter::new(limits.rate, clock),
             limits,
@@ -264,39 +291,40 @@ impl ModelProxy {
             Protocol::Gemini => gemini_upstream_path(&provider.path, model, streaming)?,
             Protocol::Anthropic | Protocol::OpenAiResponses => provider.path.clone(),
         };
-        let key = self
-            .secrets
-            .for_profile(profile)
-            .await?
-            .resolve(provider.secret.clone())
+        let resolved = self
+            .auth
+            .resolve(
+                profile,
+                provider.auth.clone(),
+                CallerSurface::CliRelay(provider.protocol.vendor()),
+                false,
+            )
             .await
-            .map_err(|_| Error::Unavailable)?
-            .0;
-        let secret = String::from_utf8(key.clone()).map_err(|_| Error::Unavailable)?;
-        let mut headers = vec![
-            (
-                provider.header.clone(),
-                match &provider.scheme {
-                    Some(scheme) => format!("{scheme} {secret}"),
-                    None => secret,
-                },
-            ),
-            ("content-type".to_owned(), "application/json".to_owned()),
-        ];
+            .map_err(|err| match err {
+                AuthError::Denied => Error::Denied,
+                AuthError::Stale => Error::Stale,
+                AuthError::Missing
+                | AuthError::Invalid
+                | AuthError::NeedsLogin
+                | AuthError::Unavailable
+                | AuthError::Conflict => Error::Unavailable,
+            })?;
+        let secret =
+            String::from_utf8(resolved.secret.0.clone()).map_err(|_| Error::Unavailable)?;
+        let keys = resolved.scan_values();
+        let mut fixed = vec![("content-type".to_owned(), "application/json".to_owned())];
         if streaming {
-            headers.push(("accept".to_owned(), "text/event-stream".to_owned()));
+            fixed.push(("accept".to_owned(), "text/event-stream".to_owned()));
         }
-        headers.extend(provider.headers.iter().cloned());
-        for (name, value) in &req.headers {
-            let name = name.to_ascii_lowercase();
-            let fixed = provider
-                .headers
-                .iter()
-                .any(|(fixed, _)| fixed.eq_ignore_ascii_case(&name));
-            if provider.forward_headers.contains(&name) && !fixed && header_value_ok(value) {
-                headers.push((name, value.clone()));
-            }
-        }
+        fixed.extend(provider.headers.iter().cloned());
+        let headers = apply_auth_headers(
+            provider.header_mode,
+            &secret,
+            &resolved.headers,
+            &fixed,
+            &req.headers,
+            &provider.forward_headers,
+        );
         Ok(Prepared {
             slot,
             protocol: provider.protocol,
@@ -306,7 +334,7 @@ impl ModelProxy {
                 headers,
                 body: body.into_bytes(),
             },
-            key,
+            keys,
         })
     }
 
@@ -315,12 +343,12 @@ impl ModelProxy {
             slot: _slot,
             protocol,
             request,
-            key,
+            keys,
         } = self.prepare(req, false).await?;
         let response = timeout(self.limits.timeout, self.upstream.send(request))
             .await
             .map_err(|_| Error::Unavailable)??;
-        self.response_body(protocol, response, &key)
+        self.response_body(protocol, response, &keys)
     }
 
     /// Relays a streaming request; upstream errors collapse to a fixed status payload.
@@ -329,12 +357,19 @@ impl ModelProxy {
             slot,
             protocol,
             request,
-            key,
+            keys,
         } = self.prepare(req, true).await?;
         let upstream = timeout(self.limits.timeout, self.upstream.stream(request))
             .await
             .map_err(|_| Error::Unavailable)??;
-        Ok(ModelStream::new(upstream, key, self.limits, slot, protocol))
+        let primary = keys.into_iter().next().unwrap_or_default();
+        Ok(ModelStream::new(
+            upstream,
+            primary,
+            self.limits,
+            slot,
+            protocol,
+        ))
     }
 
     /// Parses strictly, validates protocol fields, pins the upstream model, enforces streaming mode, and canonicalizes.
@@ -378,12 +413,12 @@ impl ModelProxy {
         &self,
         protocol: Protocol,
         response: UpstreamResponse,
-        key: &[u8],
+        keys: &[Vec<u8>],
     ) -> Result<ModelResponse, Error> {
         if response.body.len() > self.limits.max_response {
             return Err(Error::Unavailable);
         }
-        if contains_credential(&response.body, &[key.to_vec()]) {
+        if contains_credential(&response.body, keys) {
             return Err(Error::Denied);
         }
         if !(200..300).contains(&response.status) {
@@ -396,7 +431,7 @@ impl ModelProxy {
         let text = String::from_utf8(response.body).map_err(|_| Error::Unavailable)?;
         let decoded = parse(&text).ok_or(Error::Unavailable)?;
         // Scan decoded strings and keys as well so JSON-escaped credentials cannot bypass the raw byte check.
-        if decoded_leaks(&decoded, key) {
+        if keys.iter().any(|key| decoded_leaks(&decoded, key)) {
             return Err(Error::Denied);
         }
         Ok(ModelResponse {

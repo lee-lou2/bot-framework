@@ -10,6 +10,7 @@ publish.workspace = true
 testing = []
 
 [dependencies]
+base64.workspace = true
 bot-core.workspace = true
 bot-profile.workspace = true
 bot-store.workspace = true
@@ -19,7 +20,9 @@ bot-gateway.workspace = true
 bot-admin.workspace = true
 clap.workspace = true
 reqwest.workspace = true
+ring.workspace = true
 rustix = { workspace = true, features = ["process"] }
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true

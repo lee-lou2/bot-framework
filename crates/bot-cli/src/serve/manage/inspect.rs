@@ -205,6 +205,7 @@ impl LiveManager {
                         "alias": alias,
                         "url": url,
                         "auth_secret": remote.bearer.as_ref().map(|s| s.as_str()),
+                        "auth_oauth": remote.oauth.as_ref().map(|s| s.as_str()),
                     }));
                 }
                 let stdio_list: Vec<&str> = host.servers.keys().map(String::as_str).collect();

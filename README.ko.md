@@ -37,6 +37,12 @@
 - **OpenAI 호환 엔드포인트:** 공식 Python 또는 Node SDK의 `base_url`을 `http://127.0.0.1:8788/v1`로 지정하고 발급된 키를 넣으면 `models.list()`와 `chat.completions.create()`를 호출할 수 있습니다. ([SDK 예제](docs/ko/gateway.md#openai-호환-api) · [모델 바인딩](docs/ko/profile-spec.md#openai-모델-바인딩))
 - **프로필 단위 격리:** 개인·팀·조직 봇을 별도 프로필 디렉터리로 분리하고 활성화 전에 `bot validate`로 검증합니다. ([개인 예제](examples/profiles/personal) · [팀 템플릿](examples/profiles/team))
 
+| 영역 | 지원 범위 | 비고 |
+|---|---|---|
+| **플랫폼** | Linux·macOS (직접 API + `srt` 도구); macOS Apple Silicon (VM CLI 하니스) | `anthropic-api`와 `openai-api`는 Linux/macOS 모두 지원; `claude-cli`/`codex-cli`/`agy-cli`는 Apple `container` VM 필요 |
+| **채널** | CLI 소켓, OpenAI 호환 HTTP(`/v1`), JWT HTTP 웹훅, Slack Socket Mode | 축소 전용 드리프트 가드로 코어 채널 중립성 유지; 새 채널은 게이트웨이 접수/전달로 추가 |
+| **인증** | 정적 시크릿, 원격 MCP OAuth 2.0(PKCE), 실험적 Google 서비스 계정(RS256) 및 옵트인 CLI 구독 | PostgreSQL(`bot_credentials`) 호스트 암호화; 모델은 키나 토큰에 절대 접근 불가 ([인증 가이드](docs/ko/auth.md)) |
+
 ## 빠른 시작 (로컬 데모)
 
 데모 모델과 합성 일정 MCP 서버([demo-agenda](examples/servers/demo-agenda))를 사용해 외부 계정 없이 전체 파이프라인을 로컬에서 체험할 수 있습니다.
@@ -103,7 +109,7 @@ bot validate && bot doctor                 # 설정 및 호스트 사전 요구 
 |---|---|
 | 설계 및 아키텍처 | [설계 배경](docs/ko/why.md) · [아키텍처](docs/ko/architecture.md) · [용어집](docs/ko/glossary.md) · [로드맵](docs/ko/roadmap.md) |
 | 프로필 및 도구 | [프로필 명세](docs/ko/profile-spec.md) · [첫 번째 도구](docs/ko/first-tool.md) · [팀 템플릿](docs/ko/team-template.md) · [MCP 도구](docs/ko/plugins.md) |
-| 보안 및 복구 | [보안](docs/ko/security.md) · [신뢰성](docs/ko/reliability.md) · [모델 이미지](docs/ko/model-image.md) |
+| 보안 및 복구 | [보안](docs/ko/security.md) · [인증 및 OAuth](docs/ko/auth.md) · [신뢰성](docs/ko/reliability.md) · [모델 이미지](docs/ko/model-image.md) |
 | 운영 및 확장 | [게이트웨이](docs/ko/gateway.md) · [관리자 및 관측성](docs/ko/admin.md) · [확장 가이드](docs/ko/extending.md) · [릴리스 체크리스트](docs/ko/release.md) |
 
 ## 라이선스

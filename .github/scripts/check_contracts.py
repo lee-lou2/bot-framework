@@ -565,10 +565,11 @@ def npm_problems(tokens):
 
 def check_docs():
     """Documents must name what the code defines and cite only paths that exist (the rules live in docs_contract.py next to this file; `-I` drops this folder from `sys.path`, so load it by path)."""
-    spec = importlib.util.spec_from_file_location("docs_contract", Path(__file__).with_name("docs_contract.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    module.check()
+    for name in ("docs_contract", "drift_guard"):
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.check()
 
 
 def main():

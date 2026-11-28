@@ -222,6 +222,7 @@ dependencies = [
 name = "bot-cli"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bot-admin",
  "bot-broker",
  "bot-cli",
@@ -232,7 +233,9 @@ dependencies = [
  "bot-store",
  "clap",
  "reqwest",
+ "ring",
  "rustix",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",

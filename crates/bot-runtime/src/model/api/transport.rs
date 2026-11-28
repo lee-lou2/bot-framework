@@ -15,7 +15,7 @@ pub(crate) const MAX_BODY: usize = 8 << 20;
 pub(crate) const ERROR_BODY_MAX: usize = 16 << 10;
 
 /// Request header tuple: `(lowercase_name, value, is_sensitive)`.
-pub(crate) type Header = (&'static str, String, bool);
+pub(crate) type Header = (String, String, bool);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Fault {

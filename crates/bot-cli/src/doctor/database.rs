@@ -85,23 +85,75 @@ pub async fn check(settings: &Settings, check_db: bool, items: &mut Vec<Item>) {
     let attempt = tokio::time::timeout(CONNECT_LIMIT, Store::connect(url, Config::default())).await;
     let hint = "Check the URL, credentials, and network (raw error omitted to avoid leaking URL)"
         .to_owned();
-    items.push(match attempt {
+    match attempt {
         Ok(Ok(store)) => {
-            store.pool().close().await;
-            Item::new(
+            items.push(Item::new(
                 State::Pass,
                 CONNECTION,
-                "connected (closed immediately — no writes or migrations)",
-            )
+                "connected (read-only — no writes or migrations)",
+            ));
+            check_credentials(&store, items).await;
+            store.pool().close().await;
         }
-        Ok(Err(_)) => Item::new(State::Fail, CONNECTION, "failed to connect").with([hint]),
-        Err(_) => Item::new(
-            State::Fail,
-            CONNECTION,
-            format!("timed out after {}s", CONNECT_LIMIT.as_secs()),
-        )
-        .with([hint]),
-    });
+        Ok(Err(_)) => {
+            items.push(Item::new(State::Fail, CONNECTION, "failed to connect").with([hint]))
+        }
+        Err(_) => items.push(
+            Item::new(
+                State::Fail,
+                CONNECTION,
+                format!("timed out after {}s", CONNECT_LIMIT.as_secs()),
+            )
+            .with([hint]),
+        ),
+    }
+}
+
+async fn check_credentials(store: &Store, items: &mut Vec<Item>) {
+    use bot_core::auth::{CredentialState, CredentialStore};
+    match store.list_credentials(None).await {
+        Ok(rows) if rows.is_empty() => {
+            items.push(Item::new(State::Pass, "Managed credentials", "none stored"));
+        }
+        Ok(rows) => {
+            let needs_login = rows
+                .iter()
+                .filter(|r| r.state == CredentialState::NeedsLogin)
+                .count();
+            let details: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{}/{} · {} · state={} · v{}",
+                        r.profile.0,
+                        r.name.as_str(),
+                        r.kind.config_str(),
+                        r.state.as_str(),
+                        r.version
+                    )
+                })
+                .collect();
+            let state = if needs_login > 0 {
+                State::Warn
+            } else {
+                State::Pass
+            };
+            items.push(
+                Item::new(
+                    state,
+                    "Managed credentials",
+                    format!("{} stored ({} needs_login)", rows.len(), needs_login),
+                )
+                .with(super::capped(details, 20)),
+            );
+        }
+        Err(_) => {
+            items.push(Item::skipped(
+                "Managed credentials",
+                "skipped (bot_credentials table not yet migrated)",
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

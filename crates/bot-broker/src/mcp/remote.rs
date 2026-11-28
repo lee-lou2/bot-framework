@@ -5,7 +5,10 @@
 //! - Connections target only this `host:port` with redirects disabled.
 
 use crate::{egress::canon_host, resolve::HostPort};
-use bot_core::id::SecretName;
+use bot_core::{
+    auth::{AuthSource, CredentialKind},
+    id::SecretName,
+};
 use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
 
@@ -20,8 +23,12 @@ pub struct Remote {
     pub port: u16,
     /// Path and query beginning with `/`.
     pub path: String,
-    /// Profile-scoped secret name sent only in the Authorization header when set.
+    /// Profile-scoped static bearer secret name sent only in the Authorization header when set.
     pub bearer: Option<SecretName>,
+    /// Managed host OAuth credential name (mutually exclusive with `bearer`).
+    pub oauth: Option<SecretName>,
+    /// Optional pinned OAuth issuer URL (`https://...`) bound into approvals for OAuth remotes.
+    pub oauth_issuer: Option<String>,
 }
 
 fn field(hash: &mut Sha256, bytes: &[u8]) {
@@ -31,6 +38,38 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
 
 impl Remote {
     pub fn parse(url: &str, bearer: Option<SecretName>) -> Result<Self, String> {
+        Self::parse_parts(url, bearer, None, None)
+    }
+
+    pub fn parse_oauth(url: &str, credential: SecretName) -> Result<Self, String> {
+        Self::parse_parts(url, None, Some(credential), None)
+    }
+
+    pub fn parse_oauth_pinned(
+        url: &str,
+        credential: SecretName,
+        issuer: Option<&str>,
+    ) -> Result<Self, String> {
+        let pinned = match issuer {
+            Some(raw) => {
+                let parsed = Self::parse(raw, None)
+                    .map_err(|why| format!("oauth issuer is invalid: {why}"))?;
+                if !parsed.tls {
+                    return Err("oauth issuer must use https".to_owned());
+                }
+                Some(parsed.url().trim_end_matches('/').to_owned())
+            }
+            None => None,
+        };
+        Self::parse_parts(url, None, Some(credential), pinned)
+    }
+
+    fn parse_parts(
+        url: &str,
+        bearer: Option<SecretName>,
+        oauth: Option<SecretName>,
+        oauth_issuer: Option<String>,
+    ) -> Result<Self, String> {
         if url.is_empty()
             || url.len() > MAX_URL
             || !url.is_ascii()
@@ -112,7 +151,30 @@ impl Remote {
             port,
             path,
             bearer,
+            oauth,
+            oauth_issuer,
         })
+    }
+
+    pub fn auth_source(&self) -> Option<AuthSource> {
+        if let Some(name) = &self.oauth {
+            Some(AuthSource::Credential {
+                name: name.clone(),
+                expected_kind: CredentialKind::OAuth,
+            })
+        } else {
+            self.bearer.clone().map(AuthSource::Secret)
+        }
+    }
+
+    pub fn url(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        let default_port = if self.tls { 443 } else { 80 };
+        if self.port == default_port {
+            format!("{scheme}://{}{}", self.host, self.path)
+        } else {
+            format!("{scheme}://{}:{}{}", self.host, self.port, self.path)
+        }
     }
 
     pub fn target(&self) -> HostPort {
@@ -141,6 +203,15 @@ impl Remote {
             bearer,
         ] {
             field(&mut hash, part.as_bytes());
+        }
+        // Append OAuth credential (and optional pinned issuer) after base fields so existing `None` and `Bearer` hashes remain byte-identical.
+        if let Some(oauth) = &self.oauth {
+            hash.update(b"oauth\0");
+            field(&mut hash, oauth.as_str().as_bytes());
+            if let Some(issuer) = &self.oauth_issuer {
+                hash.update(b"issuer\0");
+                field(&mut hash, issuer.as_bytes());
+            }
         }
         format!("{:x}", hash.finalize())
     }
@@ -302,5 +373,36 @@ mod tests {
         }
         assert_eq!(base.revision().len(), 64);
         assert_eq!(base.target_text(), "mcp.example:443");
+        // Fixed golden hashes pinned before OAuth support so existing `None` and `Bearer` deployments never change.
+        assert_eq!(
+            Remote::parse("https://mcp.example/mcp", None)
+                .unwrap()
+                .revision(),
+            "a807ff945a1c77445e8f303b06fdbe05a9bb5d77bbaf41e542b1971580b5923d"
+        );
+        assert_eq!(
+            base.revision(),
+            "e42ab6b1ea711d14c565d8d36b867a919372471f55b49dc5a61b815fcffc2faf"
+        );
+        let oauth =
+            Remote::parse_oauth("https://mcp.example/mcp", secret("bearer").unwrap()).unwrap();
+        assert_ne!(oauth.revision(), base.revision());
+        assert_ne!(
+            oauth.revision(),
+            Remote::parse("https://mcp.example/mcp", None)
+                .unwrap()
+                .revision()
+        );
+        let oauth_pinned = Remote::parse_oauth_pinned(
+            "https://mcp.example/mcp",
+            secret("bearer").unwrap(),
+            Some("https://auth.example/"),
+        )
+        .unwrap();
+        assert_eq!(
+            oauth_pinned.oauth_issuer.as_deref(),
+            Some("https://auth.example")
+        );
+        assert_ne!(oauth_pinned.revision(), oauth.revision());
     }
 }

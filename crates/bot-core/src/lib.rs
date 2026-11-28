@@ -5,7 +5,7 @@
 //! | Category | Modules |
 //! |---|---|
 //! | Data vocabulary | `id`, `command`, `state`, `profile`, `identity`, `grant`, `pass`, `mcp`, `install`, `attachments`, `builtin`, `memory` |
-//! | Port traits | `port` (core), `active`, `ledger`, `intake`, `schedule`, `manage`, `admin`, `trace`, `issue`, `sandbox` (model VM), `memory` (`Embedder`, `MemoryJudge`) |
+//! | Port traits | `port` (core), `auth` (`AuthResolver`, `CredentialStore`), `active`, `ledger`, `intake`, `schedule`, `manage`, `admin`, `trace`, `issue`, `sandbox` (model VM), `memory` (`Embedder`, `MemoryJudge`) |
 //! | Adapter contracts | `slack`, `cards` (owner-DM approval cards), `api` (OpenAI-compatible ingress), `cli` (VM model CLI invocation, not CLI ingress) |
 //! | Bit-exact algorithms | `cron`, `canon` (RFC 8785), `json` (strict parser), `scope`, `random`, `redact` |
 //!
@@ -15,6 +15,7 @@ pub mod active;
 pub mod admin;
 pub mod api;
 pub mod attachments;
+pub mod auth;
 pub mod builtin;
 pub mod canon;
 pub mod cards;

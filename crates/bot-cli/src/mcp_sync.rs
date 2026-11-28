@@ -1,5 +1,8 @@
-//! Remote MCP tool definition sync (`bot mcp sync`) into deterministic `tools.lock.yaml`.
+//! Local stdio and remote HTTP MCP tool definition sync (`bot mcp sync`) into deterministic `tools.lock.yaml`.
+mod stdio;
+
 use crate::{
+    auth::{HostAuthResolver, cli::host_egress_map, http::AuthHttp},
     load::{load_host, secret_store},
     serve::remote::ReqwestWire,
     settings::Settings,
@@ -7,21 +10,24 @@ use crate::{
 use bot_broker::{
     egress::EgressPolicy,
     guard::{blocks_output, contains_credential},
-    mcp::{McpError, header, http::Http},
+    mcp::{McpError, header, http::Http, remote::Remote},
     proxy::SystemResolver,
     resolve::HostPort,
 };
 use bot_core::{
+    active::ActiveCheck,
+    auth::{AuthResolver, AuthSource, CallerSurface, CredentialStore},
     mcp::{entry_description, entry_sha256},
-    port::{Error, SecretStore},
+    port::{Error, Reply, SecretStore},
 };
 use bot_gateway::cli::socket::current_uid;
 use bot_profile::{
     Limits, Schema, SchemaProblem,
     issue::Issue,
-    locate::locate_skill,
+    locate::{Located, locate_skill},
     lock::{self, Entry},
 };
+use bot_store::{Config as StoreConfig, Store};
 use serde_json::Value;
 use std::{
     collections::BTreeMap, io::Write, os::unix::fs::OpenOptionsExt, path::Path, sync::Arc,
@@ -268,7 +274,6 @@ pub async fn run_with(
             fixed_lines(&issues)
         )
     })?;
-    let profile = located.profile.0.clone();
     let text = String::from_utf8(located.tools_yaml.clone())
         .map_err(|_| "tools.yaml is not valid UTF-8".to_owned())?;
     let declared = lock::read_declared("tools.yaml", &text).map_err(|issues| {
@@ -283,83 +288,19 @@ pub async fn run_with(
     }
     let uid = current_uid().map_err(|e| e.to_string())?;
     let host = load_host(settings, uid)?;
-    let Some(remote) = host.remote_servers.get(&declared.server) else {
-        return Err(if host.servers.contains_key(&declared.server) {
-            format!(
-                "server `{}` is a local (stdio) server — `bot mcp sync` currently supports remote (`transport: \"http\"`) servers only",
-                declared.server
-            )
-        } else {
-            format!(
-                "server is not registered in host config: {}",
-                declared.server
-            )
-        });
-    };
-    let cap: Option<Vec<HostPort>> = host
-        .catalog
-        .egress
-        .get(&profile)
-        .map(|set| set.iter().filter_map(|t| HostPort::parse(t)).collect());
-    let blocked: Vec<String> = declared
-        .tools
-        .iter()
-        .filter(|tool| {
-            let wanted: Vec<HostPort> = tool
-                .egress
-                .iter()
-                .filter_map(|t| HostPort::parse(t))
-                .collect();
-            !EgressPolicy::new(&wanted, cap.as_deref()).permits(&remote.host, remote.port)
-        })
-        .map(|tool| tool.id.clone())
-        .collect();
-    if !blocked.is_empty() {
+    let (listed, credentials) = if let Some(remote) = host.remote_servers.get(&declared.server) {
+        fetch_remote_tools(settings, &host, &located, &declared, remote, make_store).await?
+    } else if host.servers.contains_key(&declared.server) {
+        let tools =
+            stdio::list_stdio_tools(&host, settings, &located, &declared.server, uid, LIMIT)
+                .await?;
+        (tools, Vec::new())
+    } else {
         return Err(format!(
-            "server target `{}` is not permitted by `egress` for {} (and host cap `egress.{}`) — list the exact `host:port`",
-            remote.target_text(),
-            blocked.join(", "),
-            profile
+            "server is not registered in host config: {}",
+            declared.server
         ));
-    }
-    let (mut credentials, mut bearer) = (Vec::new(), None);
-    if let Some(name) = &remote.bearer {
-        let store = make_store()?;
-        let handle = store
-            .for_profile(located.profile.clone())
-            .await
-            .map_err(|_| format!("could not open secret store for profile {profile}"))?;
-        let value = handle.resolve(name.clone()).await.map_err(|e| match e {
-            Error::Missing => {
-                format!(
-                    "secret `{}` is missing from profile `{profile}` store",
-                    name.as_str()
-                )
-            }
-            _ => format!("could not read secret `{}` (store error)", name.as_str()),
-        })?;
-        let text = String::from_utf8(value.0.clone())
-            .ok()
-            .filter(|t| !t.is_empty() && !t.contains(['\0', '\r', '\n']))
-            .ok_or_else(|| {
-                format!(
-                    "secret `{}` has a value that cannot be used as a bearer token",
-                    name.as_str()
-                )
-            })?;
-        credentials.push(value.0);
-        bearer = Some(text);
-    }
-    let wire = Arc::new(ReqwestWire::new(Arc::new(SystemResolver))?);
-    let mut http = Http::new(wire, remote.clone(), bearer, false);
-    let listed = async {
-        http.connect(LIMIT).await?;
-        http.tools(LIMIT).await
-    }
-    .await;
-    http.close().await;
-    let listed =
-        listed.map_err(|e| format!("failed to fetch tool definitions: {}", describe(&e)))?;
+    };
     let wanted: Vec<(String, String)> = declared
         .tools
         .iter()
@@ -404,6 +345,157 @@ pub async fn run_with(
         "Note: locked tool descriptions are included in model prompts. Review `description` fields in tools.lock.yaml before deploying."
     );
     Ok(())
+}
+
+struct SyncActive;
+impl ActiveCheck for SyncActive {
+    fn verify(&self) -> Reply<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+async fn fetch_remote_tools(
+    settings: &Settings,
+    host: &crate::host::HostFile,
+    located: &Located,
+    declared: &lock::Declared,
+    remote: &Remote,
+    make_store: impl FnOnce() -> Result<Arc<dyn SecretStore>, String>,
+) -> Result<(Vec<Value>, Vec<Vec<u8>>), String> {
+    let profile = &located.profile.0;
+    let cap: Option<Vec<HostPort>> = host
+        .catalog
+        .egress
+        .get(profile)
+        .map(|set| set.iter().filter_map(|t| HostPort::parse(t)).collect());
+    let blocked: Vec<String> = declared
+        .tools
+        .iter()
+        .filter(|tool| {
+            let wanted: Vec<HostPort> = tool
+                .egress
+                .iter()
+                .filter_map(|t| HostPort::parse(t))
+                .collect();
+            !EgressPolicy::new(&wanted, cap.as_deref()).permits(&remote.host, remote.port)
+        })
+        .map(|tool| tool.id.clone())
+        .collect();
+    if !blocked.is_empty() {
+        return Err(format!(
+            "server target `{}` is not permitted by `egress` for {} (and host cap `egress.{}`) — list the exact `host:port`",
+            remote.target_text(),
+            blocked.join(", "),
+            profile
+        ));
+    }
+    let mut credentials = Vec::new();
+    let mut bearer = None;
+    let mut oauth_resolver: Option<HostAuthResolver> = None;
+    if let Some(name) = &remote.bearer {
+        let store = make_store()?;
+        let handle = store
+            .for_profile(located.profile.clone())
+            .await
+            .map_err(|_| format!("could not open secret store for profile {profile}"))?;
+        let value = handle.resolve(name.clone()).await.map_err(|e| match e {
+            Error::Missing => {
+                format!(
+                    "secret `{}` is missing from profile `{profile}` store",
+                    name.as_str()
+                )
+            }
+            _ => format!("could not read secret `{}` (store error)", name.as_str()),
+        })?;
+        let text = String::from_utf8(value.0.clone())
+            .ok()
+            .filter(|t| !t.is_empty() && !t.contains(['\0', '\r', '\n']))
+            .ok_or_else(|| {
+                format!(
+                    "secret `{}` has a value that cannot be used as a bearer token",
+                    name.as_str()
+                )
+            })?;
+        credentials.push(value.0);
+        bearer = Some(text);
+    } else if let Some(source) = remote.auth_source() {
+        let url = settings
+            .database_url
+            .as_deref()
+            .ok_or("BOT_DATABASE_URL is required to sync an OAuth remote MCP server")?;
+        let db = Store::connect(url, StoreConfig::default())
+            .await
+            .map_err(|_| "failed to connect to PostgreSQL store for OAuth credential".to_owned())?;
+        let resolver = HostAuthResolver::new(
+            make_store()?,
+            Some(Arc::new(db) as Arc<dyn CredentialStore>),
+            Arc::new(SyncActive),
+            AuthHttp::new()?,
+            host_egress_map(host)?,
+            BTreeMap::new(),
+            Arc::new(|_| {}),
+        );
+        let resolved = resolver
+            .resolve(
+                located.profile.clone(),
+                source,
+                CallerSurface::RemoteMcp,
+                false,
+            )
+            .await
+            .map_err(|e| format!("failed to resolve OAuth credential: {}", e.code()))?;
+        let text = String::from_utf8(resolved.secret.0.clone())
+            .ok()
+            .filter(|t| !t.is_empty() && !t.contains(['\0', '\r', '\n']))
+            .ok_or_else(|| "OAuth credential resolved to an invalid bearer token".to_owned())?;
+        credentials.extend(resolved.scan_values());
+        bearer = Some(text);
+        oauth_resolver = Some(resolver);
+    }
+    let wire = Arc::new(ReqwestWire::new(Arc::new(SystemResolver))?);
+    let mut http = Http::new(wire.clone(), remote.clone(), bearer, false);
+    let listed = async {
+        http.connect(LIMIT).await?;
+        http.tools(LIMIT).await
+    }
+    .await;
+    let challenged = http.auth_challenge();
+    http.close().await;
+    let listed = match listed {
+        Ok(tools) => Ok(tools),
+        Err(McpError::Status { status: 401, .. }) if challenged && oauth_resolver.is_some() => {
+            let resolver = oauth_resolver.as_ref().unwrap();
+            let source: AuthSource = remote.auth_source().unwrap();
+            let refreshed = resolver
+                .resolve(
+                    located.profile.clone(),
+                    source,
+                    CallerSurface::RemoteMcp,
+                    true,
+                )
+                .await
+                .map_err(|e| format!("failed to refresh OAuth credential: {}", e.code()))?;
+            let text = String::from_utf8(refreshed.secret.0.clone())
+                .map_err(|_| "refreshed OAuth token is not valid UTF-8".to_owned())?;
+            credentials.extend(refreshed.scan_values());
+            let mut retry_http = Http::new(wire, remote.clone(), Some(text), false);
+            let retry = async {
+                retry_http.connect(LIMIT).await?;
+                retry_http.tools(LIMIT).await
+            }
+            .await;
+            retry_http.close().await;
+            retry.map_err(|e| format!("failed to fetch tool definitions: {}", describe(&e)))
+        }
+        Err(e) => Err(format!(
+            "failed to fetch tool definitions: {}",
+            describe(&e)
+        )),
+    };
+    if let Some(resolver) = oauth_resolver {
+        resolver.shutdown().await;
+    }
+    Ok((listed?, credentials))
 }
 
 #[cfg(test)]

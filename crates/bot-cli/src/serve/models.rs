@@ -1,11 +1,11 @@
 //! Resolves allowed profile model aliases into `DemoModel`, VM CLI runners (`claude-cli`, `codex-cli`, `agy-cli`), or `ApiRunner`.
-use super::watched::Watched;
 use crate::{
     execution::{ApiProvider, Provider, fallback_chain, reachable_aliases},
     host::HostFile,
 };
 use bot_core::{
     active::ActiveCheck,
+    auth::{AuthResolver, AuthSource},
     id::{ProfileId, SecretName},
 };
 use bot_runtime::{
@@ -19,8 +19,8 @@ use std::{
 
 #[derive(Clone)]
 pub struct ApiParts {
-    /// Accepts `Watched` only so every read provider key enters the redactor before use.
-    pub secrets: Arc<Watched>,
+    /// Host auth resolver backed by the redactor-wrapped `Watched` store and `bot_credentials`.
+    pub auth: Arc<dyn AuthResolver>,
     pub gate: Arc<dyn ActiveCheck>,
 }
 
@@ -61,23 +61,35 @@ fn api_runner(
     })?;
     let endpoint = ApiEndpoint::parse(&config.endpoint)
         .map_err(|reason| format!("providers.{alias}.endpoint: {reason}"))?;
-    let secret = match config.secret.as_deref() {
-        Some(name) => Some(
+    let auth = match (&config.secret, &config.auth) {
+        (Some(name), None) => Some(AuthSource::Secret(
             SecretName::parse(name)
                 .ok_or_else(|| format!("providers.{alias}.secret is not a valid secret name"))?,
-        ),
-        None => None,
+        )),
+        (None, Some(managed)) => Some(AuthSource::Credential {
+            name: SecretName::parse(&managed.credential).ok_or_else(|| {
+                format!("providers.{alias}.auth.credential is not a valid credential name")
+            })?,
+            expected_kind: managed.kind,
+        }),
+        (None, None) => None,
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "providers.{alias}: cannot set both secret and auth"
+            ));
+        }
     };
     let settings = ApiSettings {
         kind: config.kind,
         endpoint,
         model: config.model.clone(),
-        secret,
+        secret: None,
+        auth,
         max_tokens: config.max_tokens,
         limit_field: config.limit_field,
         effort: config.effort,
     };
-    let runner = ApiRunner::new(settings, parts.secrets.clone(), parts.gate.clone())
+    let runner = ApiRunner::with_resolver(settings, parts.auth.clone(), parts.gate.clone())
         .map_err(|reason| format!("model alias {alias}: {reason}"))?;
     Ok(Arc::new(runner))
 }
@@ -187,7 +199,9 @@ mod tests {
 
     fn parts() -> ApiParts {
         ApiParts {
-            secrets: Watched::plain(Arc::new(NoSecrets)),
+            auth: Arc::new(bot_core::auth::StaticAuthResolver::new(
+                crate::serve::watched::Watched::plain(Arc::new(NoSecrets)),
+            )),
             gate: Arc::new(Open),
         }
     }
@@ -227,6 +241,7 @@ mod tests {
                 model: "m".into(),
                 endpoint: "https://api.example/v1".into(),
                 secret: None,
+                auth: None,
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
                 effort: None,
@@ -245,6 +260,7 @@ mod tests {
                 model: "m".into(),
                 endpoint: "http://api.example/v1".into(),
                 secret: Some("key".into()),
+                auth: None,
                 max_tokens: None,
                 limit_field: LimitField::MaxTokens,
                 effort: None,

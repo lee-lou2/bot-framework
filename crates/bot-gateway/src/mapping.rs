@@ -336,6 +336,10 @@ mod tests {
                 "dm_sent_notice",
                 changed(|v| v["slack"]["dm_sent_notice"] = json!("Approval sent in DM")),
             ),
+            (
+                "note_prefix",
+                changed(|v| v["slack"]["note_prefix"] = json!("Note:")),
+            ),
         ] {
             assert_eq!(print, original, "{name}");
         }

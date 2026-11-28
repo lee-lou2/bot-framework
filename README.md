@@ -37,6 +37,12 @@ Run all four roles on one host with `bot serve --role all`, or split them into s
 - **OpenAI-compatible endpoint:** Point the official Python or Node SDK's `base_url` to `http://127.0.0.1:8788/v1` with an issued key to call `models.list()` and `chat.completions.create()`. ([SDK example](docs/gateway.md#openai-compatible-api) · [Model bindings](docs/profile-spec.md#openai-model-bindings))
 - **Profile-level isolation:** Separate personal, team, or org bots into profile directories validated with `bot validate` before activation. ([Personal example](examples/profiles/personal) · [Team template](examples/profiles/team))
 
+| Surface | Support | Notes |
+|---|---|---|
+| **Platforms** | Linux & macOS (Direct API + `srt` tools); macOS Apple Silicon (VM CLI harnesses) | `anthropic-api` and `openai-api` run on both Linux and macOS; `claude-cli`/`codex-cli`/`agy-cli` require Apple `container` VM |
+| **Channels** | CLI socket, OpenAI-compatible HTTP (`/v1`), JWT HTTP webhooks, Slack Socket Mode | Channel-neutral core with shrink-only drift checks; new channels implement gateway intake/delivery |
+| **Authentication** | Static secrets, Remote MCP OAuth 2.0 (PKCE), experimental Google Service Account (RS256) & opt-in CLI subscriptions | Host-encrypted in PostgreSQL (`bot_credentials`); models never see keys or tokens ([Auth guide](docs/auth.md)) |
+
 ## Quick Start (Local Demo)
 
 Walk through the full pipeline locally with no external accounts using the demo model and synthetic agenda MCP server ([demo-agenda](examples/servers/demo-agenda)).
@@ -103,7 +109,7 @@ See [First Tool](docs/first-tool.md), [Team Template](docs/team-template.md), an
 |---|---|
 | Design & Architecture | [Why This Design](docs/why.md) · [Architecture](docs/architecture.md) · [Glossary](docs/glossary.md) · [Roadmap](docs/roadmap.md) |
 | Profiles & Tools | [Profile Spec](docs/profile-spec.md) · [First Tool](docs/first-tool.md) · [Team Template](docs/team-template.md) · [MCP Tools](docs/plugins.md) |
-| Security & Recovery | [Security](docs/security.md) · [Reliability](docs/reliability.md) · [Model Image](docs/model-image.md) |
+| Security & Recovery | [Security](docs/security.md) · [Auth & OAuth](docs/auth.md) · [Reliability](docs/reliability.md) · [Model Image](docs/model-image.md) |
 | Operations & Extending | [Gateway](docs/gateway.md) · [Admin & Observability](docs/admin.md) · [Extending](docs/extending.md) · [Release Checklist](docs/release.md) |
 
 ## License

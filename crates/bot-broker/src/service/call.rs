@@ -242,7 +242,8 @@ impl BrokerService {
         // avoid opening approval cards. Unreadable stores are left to the runner; recorded replays proceed normally.
         let mut held = None;
         let bound = self.parts.runner.server_secrets(&resolved.tool.server);
-        if (!resolved.tool.secrets.is_empty() || !bound.is_empty())
+        let has_server_auth = self.parts.runner.has_server_auth(&resolved.tool.server);
+        if (!resolved.tool.secrets.is_empty() || !bound.is_empty() || has_server_auth)
             && forbidden_secret(&resolved.tool, &snapshot).is_none()
             && ledger
                 .lookup(attempt.clone(), call.clone())
@@ -258,13 +259,24 @@ impl BrokerService {
             );
             let mut names: Vec<_> = resolved.tool.secrets.values().cloned().collect();
             names.extend(bound);
-            if matches!(
-                self.parts
-                    .runner
-                    .admit_secrets(&attempt.profile, &names)
-                    .await,
-                Err(Error::Missing)
-            ) {
+            let missing_secret = !names.is_empty()
+                && matches!(
+                    self.parts
+                        .runner
+                        .admit_secrets(&attempt.profile, &names)
+                        .await,
+                    Err(Error::Missing)
+                );
+            let missing_server_auth = !missing_secret
+                && has_server_auth
+                && matches!(
+                    self.parts
+                        .runner
+                        .admit_server_auth(&attempt.profile, &resolved.tool.server)
+                        .await,
+                    Err(Error::Missing)
+                );
+            if missing_secret || missing_server_auth {
                 let _ = self
                     .note(
                         &attempt.profile,

@@ -20,8 +20,8 @@ use std::{
 mod lists;
 
 use lists::{
-    bind_private_egress, bind_super_admins, is_egress, is_super_admin, private_egress_map,
-    profile_map,
+    bind_private_egress, bind_subscription_auth, bind_super_admins, is_egress,
+    is_subscription_vendor, is_super_admin, private_egress_map, profile_map,
 };
 
 const MAX_BYTES: u64 = 1024 * 1024;
@@ -56,6 +56,7 @@ pub struct HostFile {
     pub sandbox: Sandbox,
     pub limits: HostLimits,
     pub private_egress: PrivateEgressMap,
+    pub allow_subscription_auth: BTreeMap<String, BTreeSet<String>>,
     pub demo: bool,
 }
 
@@ -88,6 +89,10 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
     };
     let private_egress = match top.remove("private_egress") {
         Some(value) => private_egress_map(&value)?,
+        None => BTreeMap::new(),
+    };
+    let allow_subscription_auth = match top.remove("allow_subscription_auth") {
+        Some(value) => profile_map(&value, "allow_subscription_auth", is_subscription_vendor)?,
         None => BTreeMap::new(),
     };
     let providers = match top.remove("providers") {
@@ -144,6 +149,7 @@ pub fn parse(text: &str) -> Result<HostFile, HostFileError> {
         sandbox,
         limits,
         private_egress,
+        allow_subscription_auth,
         demo: false,
     })
 }
@@ -168,6 +174,7 @@ impl HostFile {
         let base = crate::memory_judge::bind(base, self.memory_judge.as_ref());
         let base = bind_private_egress(base, &self.private_egress);
         let base = bind_super_admins(base, &self.catalog.super_admins);
+        let base = bind_subscription_auth(base, &self.allow_subscription_auth);
         Ok(bot_admin::obs_fingerprint(base, &self.admin))
     }
 
@@ -303,6 +310,7 @@ pub fn demo(uid: u32) -> HostFile {
         sandbox: Sandbox::default(),
         limits: HostLimits::default(),
         private_egress: BTreeMap::new(),
+        allow_subscription_auth: BTreeMap::new(),
         demo: true,
     }
 }

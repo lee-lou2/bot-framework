@@ -34,6 +34,8 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Lock MCP server tool definitions into a skill directory
     Mcp(McpArgs),
+    /// Manage host-encrypted OAuth, service-account, and opt-in CLI subscription credentials
+    Auth(AuthArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -135,10 +137,114 @@ pub struct McpArgs {
 
 #[derive(Subcommand)]
 pub enum McpAction {
-    /// Fetch tool definitions declared in tools.yaml from a remote HTTP MCP server into tools.lock.yaml
+    /// Fetch tool definitions declared in tools.yaml from a local stdio or remote HTTP MCP server into tools.lock.yaml
     Sync {
         /// Skill directory under BOT_PROFILES (e.g. `<profile>/skills/<name>`)
         dir: std::path::PathBuf,
+    },
+}
+
+#[derive(Args)]
+pub struct AuthArgs {
+    #[command(subcommand)]
+    pub action: AuthAction,
+}
+
+#[derive(Subcommand)]
+pub enum AuthAction {
+    /// Store an opt-in static subscription setup-token (read from non-TTY stdin)
+    SetToken {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "claude")]
+        provider: String,
+    },
+    /// Store an operator-owned OAuth 2.0 token bundle (read JSON from non-TTY stdin)
+    SetOauth {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        token_endpoint: String,
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        scope: Option<String>,
+        /// Allowlisted extra header (`Name=Value`), repeatable
+        #[arg(long)]
+        header: Vec<String>,
+        /// Send refresh body as JSON instead of x-www-form-urlencoded
+        #[arg(long)]
+        json_body: bool,
+    },
+    /// Store a Google service-account JSON key for RS256 JWT-bearer token exchange
+    SetServiceAccount {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long, default_value = "https://www.googleapis.com/auth/cloud-platform")]
+        scope: String,
+    },
+    /// Import a dedicated Codex CLI auth.json (refuses live ~/.codex/auth.json; deletes source by default)
+    ImportCodex {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        from: PathBuf,
+        /// Keep the dedicated source auth.json file after importing
+        #[arg(long)]
+        keep_source: bool,
+    },
+    /// Authorize a remote HTTP MCP server or OAuth provider using PKCE S256
+    Login {
+        #[arg(long)]
+        profile: String,
+        /// Remote HTTP server alias from host.json (uses RFC 9728 + RFC 8414 discovery)
+        #[arg(long)]
+        server: Option<String>,
+        /// Credential name (defaults to servers.<alias>.auth.credential when --server is set)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        authorize_url: Option<String>,
+        #[arg(long)]
+        token_url: Option<String>,
+        #[arg(long)]
+        client_id: Option<String>,
+        #[arg(long)]
+        scope: Option<String>,
+        /// Read pasted callback URL from stdin instead of listening on loopback
+        #[arg(long)]
+        paste: bool,
+    },
+    /// List stored managed credentials without printing secret values
+    Status {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Force-refresh a stored OAuth or service-account credential
+    Refresh {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Delete a stored managed credential from PostgreSQL
+    Logout {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        name: String,
     },
 }
 

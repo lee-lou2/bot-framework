@@ -209,6 +209,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "memory hybrid",
         include_str!("../migrations/0029_memory_hybrid.sql"),
     ),
+    (
+        30,
+        "credentials",
+        include_str!("../migrations/0030_credentials.sql"),
+    ),
 ];
 
 fn migrator() -> Migrator {

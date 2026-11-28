@@ -73,10 +73,22 @@ async fn private_intake(deps: &Deps) -> Result<Arc<dyn PrivateIntake>, String> {
     {
         return Ok(Arc::new(UnwiredPrivate));
     }
+    let egress = crate::auth::cli::host_egress_map(&deps.host)?;
+    let watched = deps.secrets.clone();
+    let auth: Arc<dyn bot_core::auth::AuthResolver> = Arc::new(crate::auth::HostAuthResolver::new(
+        deps.secrets.clone(),
+        Some(deps.store.clone() as Arc<dyn bot_core::auth::CredentialStore>),
+        deps.active.clone(),
+        crate::auth::http::AuthHttp::new()?,
+        egress,
+        std::collections::BTreeMap::new(),
+        Arc::new(move |secret| watched.register(secret)),
+    ));
     let live_runner = runner::build(
         &deps.host,
         &deps.settings,
         &deps.secrets,
+        auth,
         deps.store.clone() as Arc<dyn EffectJournal>,
         deps.uid,
         deps.active.clone(),

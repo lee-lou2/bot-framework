@@ -19,9 +19,8 @@ fn provider(name: &str, host: &str, secret: &str, aliases: &[(&str, &str)]) -> (
                 port: 443,
             },
             path: "/v1/messages".into(),
-            secret: SecretName::parse(secret).unwrap(),
-            header: "authorization".into(),
-            scheme: Some("Bearer".into()),
+            auth: AuthSource::Secret(SecretName::parse(secret).unwrap()),
+            header_mode: HeaderMode::Bearer,
             headers: vec![("x-api-version".into(), "1".into())],
             forward_headers: vec!["anthropic-version".into(), "anthropic-beta".into()],
             // Only "other" allows an extra operator-configured top-level body field.
@@ -481,4 +480,107 @@ async fn a_remote_attachment_never_reaches_the_upstream_but_an_inline_one_does()
     let inline = r#"{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}]}"#;
     ask(&r, "personal", "assistant", inline).await.unwrap();
     assert_eq!(r.upstream.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn bearer_merge_header_merges_forwarded_anthropic_beta_and_attaches_extra_headers() {
+    use bot_core::{
+        auth::{AuthReply, CredentialKind, ResolvedAuth},
+        port::SecretValue,
+    };
+    struct CustomAuth;
+    impl AuthResolver for CustomAuth {
+        fn resolve(
+            &self,
+            _profile: ProfileId,
+            source: AuthSource,
+            surface: CallerSurface,
+            _force_refresh: bool,
+        ) -> AuthReply<'_, ResolvedAuth> {
+            Box::pin(async move {
+                assert_eq!(
+                    surface,
+                    CallerSurface::CliRelay(bot_core::auth::CliVendor::Claude)
+                );
+                assert!(matches!(
+                    source,
+                    AuthSource::Credential {
+                        expected_kind: CredentialKind::SubscriptionToken,
+                        ..
+                    }
+                ));
+                Ok(ResolvedAuth {
+                    secret: SecretValue(b"sk-ant-oat-relay-secret".to_vec()),
+                    headers: vec![("x-host-account".into(), "acct-7".into())],
+                })
+            })
+        }
+    }
+    let host = ModelHost {
+        providers: [(
+            "sub".to_owned(),
+            Provider {
+                protocol: Protocol::Anthropic,
+                endpoint: HostPort {
+                    host: "api.anthropic.com".into(),
+                    port: 443,
+                },
+                path: "/v1/messages".into(),
+                auth: AuthSource::Credential {
+                    name: SecretName::parse("claude-sub").unwrap(),
+                    expected_kind: CredentialKind::SubscriptionToken,
+                },
+                header_mode: HeaderMode::BearerMergeHeader {
+                    header: "anthropic-beta",
+                    token: "oauth-2025-04-20",
+                },
+                headers: vec![],
+                forward_headers: vec!["anthropic-version".into(), "anthropic-beta".into()],
+                body_fields: vec![],
+                models: [("assistant".to_owned(), "claude-sonnet-4".to_owned())].into(),
+            },
+        )]
+        .into(),
+        allow: [(ProfileId("personal".into()), ["sub".to_owned()].into())].into(),
+    };
+    let clock = Arc::new(ManualClock::new(1_000));
+    let ledger = Arc::new(MemLedger::new(clock.clone()));
+    ledger.add_run(run_context(
+        "personal",
+        "run-personal",
+        1,
+        "local:owner",
+        "main",
+        &["run"],
+    ));
+    let upstream = Arc::new(FakeUpstream::new());
+    let proxy = ModelProxy::with_auth(
+        host,
+        ledger,
+        Arc::new(CustomAuth),
+        upstream.clone(),
+        clock,
+        ModelLimits::default(),
+    );
+    let mut req = request("personal", "assistant", "{}");
+    req.headers = vec![
+        ("anthropic-beta".into(), "claude-code-20250219".into()),
+        ("authorization".into(), "Bearer spoof".into()),
+    ];
+    proxy.forward(req).await.unwrap();
+    let sent = upstream.requests();
+    let headers = &sent[0].2;
+    assert!(headers.contains(&(
+        "authorization".into(),
+        "Bearer sk-ant-oat-relay-secret".into()
+    )));
+    assert!(headers.contains(&("x-host-account".into(), "acct-7".into())));
+    assert!(headers.contains(&(
+        "anthropic-beta".into(),
+        "claude-code-20250219,oauth-2025-04-20".into()
+    )));
+    assert_eq!(
+        headers.iter().filter(|(k, _)| k == "authorization").count(),
+        1
+    );
 }

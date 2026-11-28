@@ -126,6 +126,9 @@ fn output_limits_are_not_authority_so_they_leave_the_bytes_alone() {
     let mut limited = openai();
     limited["max_tokens"] = json!(2048);
     assert_eq!(print(json!({"a": limited})), print(json!({"a": openai()})));
+    let mut limited = claude();
+    limited["max_tokens"] = json!(16384);
+    assert_eq!(print(json!({"a": limited})), print(json!({"a": claude()})));
 }
 
 #[test]
@@ -204,4 +207,53 @@ fn fallback_target_binds_activation_fingerprint_while_omitting_it_preserves_lega
         api_with,
         "b9821298f232a7557405ae874bcc8488e55cc3204c3817131abb9384f919b7f1"
     );
+}
+
+#[test]
+fn managed_provider_auth_binds_authority_distinct_from_static_secrets() {
+    assert!(
+        parse_providers(&json!({"a": {
+            "kind": "claude-cli",
+            "model": "claude-x",
+            "endpoint": "https://api.example.com/v1",
+            "auth": {"kind": "subscription-token", "credential": "claude-key"}
+        }}))
+        .is_err()
+    );
+    let claude_secret = print(json!({"a": {
+        "kind": "claude-cli",
+        "model": "claude-x",
+        "endpoint": "https://api.anthropic.com",
+        "secret": "claude-key"
+    }}));
+    let claude_sub = print(json!({"a": {
+        "kind": "claude-cli",
+        "model": "claude-x",
+        "endpoint": "https://api.anthropic.com",
+        "auth": {"kind": "subscription-token", "credential": "claude-key"}
+    }}));
+    let claude_oauth = print(json!({"a": {
+        "kind": "claude-cli",
+        "model": "claude-x",
+        "endpoint": "https://api.anthropic.com",
+        "auth": {"kind": "oauth", "credential": "claude-key"}
+    }}));
+    assert_ne!(claude_secret, claude_sub);
+    assert_ne!(claude_sub, claude_oauth);
+
+    let api_secret = print(json!({"a": openai()}));
+    let api_oauth = print(json!({"a": {
+        "kind": "openai-api",
+        "model": "gpt-x",
+        "endpoint": "https://api.openai.com/v1",
+        "auth": {"kind": "oauth", "credential": "openai-key"}
+    }}));
+    let api_sa = print(json!({"a": {
+        "kind": "openai-api",
+        "model": "gpt-x",
+        "endpoint": "https://api.openai.com/v1",
+        "auth": {"kind": "service-account", "credential": "openai-key"}
+    }}));
+    assert_ne!(api_secret, api_oauth);
+    assert_ne!(api_oauth, api_sa);
 }

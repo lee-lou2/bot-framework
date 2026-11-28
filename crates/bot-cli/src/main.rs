@@ -1,6 +1,6 @@
 //! `bot` binary entry point (exit codes: 0 ok, 1 error, 2 config/usage, 3 retryable chat error).
 use bot_cli::{
-    chat,
+    auth, chat,
     cli::{AddArgs, AddKind, BundleAction, Cli, Command, McpAction},
     doctor, map, mcp_sync, profile_bundle, scaffold, serve,
     settings::Settings,
@@ -49,6 +49,7 @@ async fn main() -> ExitCode {
         Command::Mcp(args) => match args.action {
             McpAction::Sync { dir } => report(mcp_sync::run(&settings, &dir).await),
         },
+        Command::Auth(args) => report(auth::cli::run(&settings, args).await),
     }
 }
 

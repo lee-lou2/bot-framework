@@ -4,7 +4,7 @@
 //! 1. Intake succeeds only when the transaction commits.
 //! 2. All timestamps come solely from the DB clock (`bot_now_ms()`).
 //! 3. Every owner mutation verifies generation and lease in the same transaction.
-//! 4. Never hold DB locks across external I/O.
+//! 4. Never hold DB locks across external I/O (narrow exception: `credentials` holds a dedicated closed-on-drop session advisory lock across OAuth refresh, never nested with tx locks).
 //! 5. State-changing transactions append to the audit chain last.
 //!
 //! Lock order: parent run -> child run -> audit head (violating this causes deadlocks).
@@ -26,6 +26,7 @@ mod calls;
 mod cards;
 mod codec;
 mod cols;
+mod credentials;
 mod db;
 mod delegate;
 mod delegate_result;

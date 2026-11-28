@@ -1,12 +1,21 @@
-//! Model provider parsing, validation, display, and authority hashing for `host.json`.
-use super::{field, object, only, text};
-use bot_core::id::SecretName;
+//! Model provider parsing and validation for `host.json`.
+use super::{object, only, text};
+use bot_core::{
+    auth::{AuthSource, CredentialKind},
+    id::SecretName,
+};
 use bot_runtime::model::{ApiEndpoint, ApiKind, CliKind, Effort, LimitField};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_FALLBACK_DEPTH: usize = 8;
+
+/// Host-managed credential reference (`oauth`, `service-account`, or `subscription-token`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderAuth {
+    pub kind: CredentialKind,
+    pub credential: String,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Provider {
@@ -21,7 +30,12 @@ pub struct CliProvider {
     pub kind: CliKind,
     pub model: String,
     pub endpoint: String,
-    pub secret: String,
+    /// Static profile secret name (mutually exclusive with `auth`).
+    pub secret: Option<String>,
+    /// Managed host credential reference (mutually exclusive with `secret`).
+    pub auth: Option<ProviderAuth>,
+    /// Optional output-token cap (`claude-cli` only; operational tuning, not authority).
+    pub max_tokens: Option<u32>,
     pub effort: Option<Effort>,
     pub fallback: Option<String>,
 }
@@ -32,8 +46,10 @@ pub struct ApiProvider {
     pub kind: ApiKind,
     pub model: String,
     pub endpoint: String,
-    /// Profile secret name; may be omitted only for loopback endpoints.
+    /// Profile secret name; may be omitted only for loopback endpoints or when `auth` is set.
     pub secret: Option<String>,
+    /// Managed host credential reference (`oauth` or `service-account`; mutually exclusive with `secret`).
+    pub auth: Option<ProviderAuth>,
     pub max_tokens: Option<u32>,
     /// Upstream field name (`max_tokens` or OpenAI-only `max_completion_tokens`).
     pub limit_field: LimitField,
@@ -45,8 +61,37 @@ impl Provider {
     pub fn secret(&self) -> Option<&str> {
         match self {
             Provider::Demo => None,
-            Provider::Cli(cli) => Some(&cli.secret),
+            Provider::Cli(cli) => cli.secret.as_deref(),
             Provider::Api(api) => api.secret.as_deref(),
+        }
+    }
+
+    pub fn auth(&self) -> Option<&ProviderAuth> {
+        match self {
+            Provider::Demo => None,
+            Provider::Cli(cli) => cli.auth.as_ref(),
+            Provider::Api(api) => api.auth.as_ref(),
+        }
+    }
+
+    pub fn auth_source(&self, alias: &str) -> Result<Option<AuthSource>, String> {
+        if let Some(auth) = self.auth() {
+            let name = SecretName::parse(&auth.credential).ok_or_else(|| {
+                format!("providers.{alias}.auth.credential is not a valid credential name")
+            })?;
+            return Ok(Some(AuthSource::Credential {
+                name,
+                expected_kind: auth.kind,
+            }));
+        }
+        match self.secret() {
+            Some(secret) => {
+                let name = SecretName::parse(secret).ok_or_else(|| {
+                    format!("providers.{alias}.secret is not a valid secret name")
+                })?;
+                Ok(Some(AuthSource::Secret(name)))
+            }
+            None => Ok(None),
         }
     }
 
@@ -68,122 +113,6 @@ impl Provider {
             Provider::Demo | Provider::Api(_) => None,
         }
     }
-
-    /// Operator summary line: exposes only secret names (never values) and upstream host (never path/query).
-    pub fn describe(&self, alias: &str) -> String {
-        match self {
-            Provider::Demo => format!("{alias}: demo (local demo model, no external calls)"),
-            Provider::Cli(cli) => {
-                let effort_note = cli
-                    .effort
-                    .map_or_else(String::new, |e| format!(" · effort {e}"));
-                let fallback_note = cli
-                    .fallback
-                    .as_deref()
-                    .map_or_else(String::new, |fb| format!(" · fallback {fb}"));
-                format!(
-                    "{alias}: {} · model {} · upstream {} · secret {}{effort_note}{fallback_note}",
-                    cli.kind.as_str(),
-                    cli.model,
-                    upstream_host(&cli.endpoint),
-                    cli.secret
-                )
-            }
-            Provider::Api(api) => {
-                let kind = match api.kind {
-                    ApiKind::Anthropic => "anthropic-api",
-                    ApiKind::OpenAi => "openai-api",
-                };
-                let key = api.secret.as_deref().map_or_else(
-                    || "no service key (loopback only)".to_owned(),
-                    |name| format!("secret {name}"),
-                );
-                let limit =
-                    api.max_tokens
-                        .map_or_else(String::new, |tokens| match api.limit_field {
-                            LimitField::MaxTokens => format!(" · max tokens {tokens}"),
-                            other => format!(" · max tokens {tokens} ({})", other.name()),
-                        });
-                let effort_note = api
-                    .effort
-                    .map_or_else(String::new, |e| format!(" · effort {e}"));
-                let fallback_note = api
-                    .fallback
-                    .as_deref()
-                    .map_or_else(String::new, |fb| format!(" · fallback {fb}"));
-                format!(
-                    "{alias}: {kind} · model {} · upstream {} · {key}{limit}{effort_note}{fallback_note}",
-                    api.model,
-                    upstream_host(&api.endpoint)
-                )
-            }
-        }
-    }
-
-    /// Hashes authority-relevant fields into the activation fingerprint (byte-pinned by `fingerprint_tests.rs`).
-    pub(super) fn authority(&self, hash: &mut Sha256) {
-        match self {
-            Provider::Demo => hash.update([0]),
-            // Destructure every field explicitly so new fields force an authority review; `Claude` stays tag `1`.
-            Provider::Cli(CliProvider {
-                kind,
-                model,
-                endpoint,
-                secret,
-                effort: _,
-                fallback,
-            }) => {
-                hash.update([match kind {
-                    CliKind::Claude => 1,
-                    CliKind::Codex => 4,
-                    CliKind::Agy => 5,
-                }]);
-                for part in [model, endpoint, secret] {
-                    field(hash, part.as_bytes());
-                }
-                if let Some(target) = fallback {
-                    hash.update(b"fallback\0");
-                    field(hash, target.as_bytes());
-                }
-            }
-            // Output limits and effort are operational tuning, not authority. Destructure every field explicitly so new fields force a review.
-            Provider::Api(ApiProvider {
-                kind,
-                model,
-                endpoint,
-                secret,
-                max_tokens: _,
-                limit_field: _,
-                effort: _,
-                fallback,
-            }) => {
-                hash.update([match kind {
-                    ApiKind::Anthropic => 2,
-                    ApiKind::OpenAi => 3,
-                }]);
-                field(hash, model.as_bytes());
-                field(hash, endpoint.as_bytes());
-                match secret {
-                    Some(name) => {
-                        hash.update([1]);
-                        field(hash, name.as_bytes());
-                    }
-                    None => hash.update([0]),
-                }
-                if let Some(target) = fallback {
-                    hash.update(b"fallback\0");
-                    field(hash, target.as_bytes());
-                }
-            }
-        }
-    }
-}
-
-fn upstream_host(endpoint: &str) -> &str {
-    let rest = endpoint
-        .split_once("://")
-        .map_or(endpoint, |(_, rest)| rest);
-    rest.split(['/', '?', '#']).next().unwrap_or_default()
 }
 
 /// Validates VM CLI (`claude-cli`, `codex-cli`, `agy-cli`) upstream URLs with the same `HostPort::parse` rules as broker egress; rejects alternative IP encodings (`0x`, numeric final label).
@@ -245,6 +174,75 @@ fn parse_fallback(fields: &Map<String, Value>, path: &str) -> Result<Option<Stri
     Ok(Some(raw.to_owned()))
 }
 
+fn parse_secret(fields: &Map<String, Value>, path: &str) -> Result<Option<String>, String> {
+    let Some(_) = fields.get("secret") else {
+        return Ok(None);
+    };
+    let name = text(fields, "secret", path)?;
+    SecretName::parse(name)
+        .map(|_| Some(name.to_owned()))
+        .ok_or_else(|| format!("{path}.secret: invalid secret name"))
+}
+
+fn parse_auth(
+    fields: &Map<String, Value>,
+    path: &str,
+    allow_sub: bool,
+) -> Result<Option<ProviderAuth>, String> {
+    let Some(value) = fields.get("auth") else {
+        return Ok(None);
+    };
+    let p = format!("{path}.auth");
+    let map = object(value, &p)?;
+    only(map, &["kind", "credential"], &p)?;
+    let kind = match text(map, "kind", &p)? {
+        "oauth" => CredentialKind::OAuth,
+        "service-account" => CredentialKind::ServiceAccount,
+        "subscription-token" if allow_sub => CredentialKind::SubscriptionToken,
+        "subscription-token" => {
+            return Err(format!(
+                "{p}.kind: subscription-token is permitted only on `claude-cli`"
+            ));
+        }
+        other => {
+            let want = if allow_sub {
+                "oauth, service-account, or subscription-token"
+            } else {
+                "oauth or service-account"
+            };
+            return Err(format!(
+                "{p}.kind: unsupported auth kind `{other}` (expected {want})"
+            ));
+        }
+    };
+    let cred = text(map, "credential", &p)?;
+    let parsed = SecretName::parse(cred)
+        .filter(|n| !bot_broker::private::reserved_secret(n))
+        .ok_or_else(|| format!("{p}.credential: invalid or reserved credential name"))?;
+    Ok(Some(ProviderAuth {
+        kind,
+        credential: parsed.as_str().to_owned(),
+    }))
+}
+
+fn parse_max_tokens(
+    fields: &Map<String, Value>,
+    path: &str,
+    field_name: &str,
+) -> Result<Option<u32>, String> {
+    match fields.get(field_name) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .filter(|tokens| (1..=1_000_000).contains(tokens))
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .map(Some)
+            .ok_or_else(|| {
+                format!("{path}.{field_name}: must be an integer between 1 and 1000000")
+            }),
+    }
+}
+
 fn parse_api(
     fields: &Map<String, Value>,
     path: &str,
@@ -256,6 +254,7 @@ fn parse_api(
             "model",
             "endpoint",
             "secret",
+            "auth",
             "max_tokens",
             "effort",
             "fallback",
@@ -265,6 +264,7 @@ fn parse_api(
             "model",
             "endpoint",
             "secret",
+            "auth",
             "max_tokens",
             "max_completion_tokens",
             "effort",
@@ -276,19 +276,14 @@ fn parse_api(
     let endpoint_text = text(fields, "endpoint", path)?;
     let endpoint =
         ApiEndpoint::parse(endpoint_text).map_err(|reason| format!("{path}.endpoint: {reason}"))?;
-    let secret = match fields.get("secret") {
-        None => None,
-        Some(_) => {
-            let name = text(fields, "secret", path)?;
-            if SecretName::parse(name).is_none() {
-                return Err(format!("{path}.secret: invalid secret name"));
-            }
-            Some(name.to_owned())
-        }
-    };
-    if secret.is_none() && !endpoint.is_loopback() {
+    let secret = parse_secret(fields, path)?;
+    let auth = parse_auth(fields, path, false)?;
+    if secret.is_some() && auth.is_some() {
+        return Err(format!("{path}: cannot set both `secret` and `auth`"));
+    }
+    if secret.is_none() && auth.is_none() && !endpoint.is_loopback() {
         return Err(format!(
-            "{path}.secret: service key secret name is required (omitting secret is only allowed for loopback IP addresses)"
+            "{path}.secret: service key secret name or `auth` is required (omitting both is only allowed for loopback IP addresses)"
         ));
     }
     if fields.contains_key("max_tokens") && fields.contains_key("max_completion_tokens") {
@@ -301,29 +296,16 @@ fn parse_api(
     } else {
         ("max_tokens", LimitField::MaxTokens)
     };
-    let max_tokens = match fields.get(name) {
-        None => None,
-        Some(value) => Some(
-            value
-                .as_u64()
-                .filter(|tokens| (1..=1_000_000).contains(tokens))
-                .and_then(|tokens| u32::try_from(tokens).ok())
-                .ok_or_else(|| {
-                    format!("{path}.{name}: must be an integer between 1 and 1000000")
-                })?,
-        ),
-    };
-    let effort = parse_effort(fields, path)?;
-    let fallback = parse_fallback(fields, path)?;
     Ok(ApiProvider {
         kind,
         model: model.to_owned(),
         endpoint: endpoint_text.to_owned(),
         secret,
-        max_tokens,
+        auth,
+        max_tokens: parse_max_tokens(fields, path, name)?,
         limit_field,
-        effort,
-        fallback,
+        effort: parse_effort(fields, path)?,
+        fallback: parse_fallback(fields, path)?,
     })
 }
 
@@ -332,30 +314,60 @@ fn parse_cli(
     path: &str,
     kind: CliKind,
 ) -> Result<CliProvider, String> {
-    only(
-        fields,
-        &["kind", "model", "endpoint", "secret", "effort", "fallback"],
-        path,
-    )?;
+    let allowed: &[&str] = match kind {
+        CliKind::Claude => &[
+            "kind",
+            "model",
+            "endpoint",
+            "secret",
+            "auth",
+            "max_tokens",
+            "effort",
+            "fallback",
+        ],
+        CliKind::Codex | CliKind::Agy => &[
+            "kind", "model", "endpoint", "secret", "auth", "effort", "fallback",
+        ],
+    };
+    only(fields, allowed, path)?;
     let endpoint = text(fields, "endpoint", path)?;
     if !endpoint_ok(endpoint) {
         return Err(format!(
             "{path}.endpoint: must be `https://host[:port][/path]` (no credentials, query, or fragment)"
         ));
     }
-    let secret = text(fields, "secret", path)?;
-    if SecretName::parse(secret).is_none() {
-        return Err(format!("{path}.secret: invalid secret name"));
+    let secret = parse_secret(fields, path)?;
+    let auth = parse_auth(fields, path, kind == CliKind::Claude)?;
+    match (&secret, &auth) {
+        (Some(_), Some(_)) => return Err(format!("{path}: cannot set both `secret` and `auth`")),
+        (None, None) => return Err(format!("{path}: either `secret` or `auth` is required")),
+        _ => {}
     }
-    let effort = parse_effort(fields, path)?;
-    let fallback = parse_fallback(fields, path)?;
+    if let Some(auth) = &auth
+        && auth.kind == CredentialKind::SubscriptionToken
+    {
+        let rest = endpoint.strip_prefix("https://").unwrap_or("");
+        let authority = rest.split('/').next().unwrap_or("");
+        let host = authority.split(':').next().unwrap_or("");
+        if !host.eq_ignore_ascii_case("api.anthropic.com") {
+            return Err(format!(
+                "{path}.endpoint: `subscription-token` auth is restricted to first-party `https://api.anthropic.com`"
+            ));
+        }
+    }
     Ok(CliProvider {
         kind,
         model: text(fields, "model", path)?.to_owned(),
         endpoint: endpoint.to_owned(),
-        secret: secret.to_owned(),
-        effort,
-        fallback,
+        secret,
+        auth,
+        max_tokens: if kind == CliKind::Claude {
+            parse_max_tokens(fields, path, "max_tokens")?
+        } else {
+            None
+        },
+        effort: parse_effort(fields, path)?,
+        fallback: parse_fallback(fields, path)?,
     })
 }
 

@@ -36,10 +36,12 @@ fn context_block(mrkdwn: &str) -> Value {
 }
 
 /// Builds Slack Block Kit blocks for a markdown reply, returning `None` if it exceeds block limits.
-/// Trailing `※` note lines split into a smaller `context` block when both body and note fit intact;
-/// oversized notes stay inside the main markdown block rather than being truncated.
-pub fn text_blocks(text: &str) -> Option<Vec<Value>> {
-    if let Some((body, note)) = split_trailing_notes(text) {
+/// When `note_prefix` is configured, trailing lines starting with that prefix split into a smaller
+/// `context` block if both body and note fit intact; oversized notes stay inside the main block.
+pub fn text_blocks(text: &str, note_prefix: Option<&str>) -> Option<Vec<Value>> {
+    if let Some(prefix) = note_prefix.filter(|p| !p.is_empty())
+        && let Some((body, note)) = split_trailing_notes(text, prefix)
+    {
         let rendered = neutralize(&md_to_mrkdwn(&note));
         if fits_block(&body) && rendered.chars().count() <= SECTION_LIMIT {
             return Some(vec![markdown_block(&body), context_block(&rendered)]);
@@ -48,17 +50,20 @@ pub fn text_blocks(text: &str) -> Option<Vec<Value>> {
     fits_block(text).then(|| vec![markdown_block(text)])
 }
 
-/// Splits trailing `※` footnote lines (skipping blank lines between them) from a reply body.
+/// Splits trailing footnote lines starting with `prefix` (skipping blank lines between them) from a reply body.
 /// Returns `None` when no trailing notes exist, the remaining body would be empty, or the split
 /// would fall inside an unclosed fenced code block.
-pub fn split_trailing_notes(text: &str) -> Option<(String, String)> {
+pub fn split_trailing_notes(text: &str, prefix: &str) -> Option<(String, String)> {
+    if prefix.is_empty() {
+        return None;
+    }
     let mut lines: Vec<&str> = text.trim_end().lines().collect();
     let mut notes = Vec::new();
     while let Some(&last) = lines.last() {
         let trimmed = last.trim();
         if trimmed.is_empty() {
             lines.pop();
-        } else if trimmed.starts_with('※') {
+        } else if trimmed.starts_with(prefix) {
             notes.push(trimmed);
             lines.pop();
         } else {
@@ -392,14 +397,17 @@ mod tests {
     #[test]
     fn trailing_note_lines_split_off_without_affecting_middle_or_note_only_text() {
         assert_eq!(
-            split_trailing_notes("**Summary**\n- Item\n\n※ Source: A\n\n※ Caveat: today\n"),
+            split_trailing_notes(
+                "**Summary**\n- Item\n\n※ Source: A\n\n※ Caveat: today\n",
+                "※"
+            ),
             Some((
                 "**Summary**\n- Item".into(),
                 "※ Source: A\n※ Caveat: today".into()
             ))
         );
         assert_eq!(
-            split_trailing_notes("```txt\nline\n```\n\n※ After code"),
+            split_trailing_notes("```txt\nline\n```\n\n※ After code", "※"),
             Some(("```txt\nline\n```".into(), "※ After code".into()))
         );
         for untouched in [
@@ -409,7 +417,7 @@ mod tests {
             "before\n※ middle\nafter",
             "```txt\nunclosed\n※ inside fence",
         ] {
-            assert_eq!(split_trailing_notes(untouched), None, "{untouched}");
+            assert_eq!(split_trailing_notes(untouched, "※"), None, "{untouched}");
         }
     }
 
@@ -437,10 +445,14 @@ mod tests {
 
     #[test]
     fn text_blocks_place_trailing_notes_in_a_context_block_without_truncating() {
-        let blocks = text_blocks(
-            "Done.\n\n※ Verified with **tool** (`ok`), [ref](https://example.com), <!here> <@U1>",
-        )
-        .unwrap();
+        let sample =
+            "Done.\n\n※ Verified with **tool** (`ok`), [ref](https://example.com), <!here> <@U1>";
+        // Default off: never splits without an explicit configured prefix.
+        let unsplit = text_blocks(sample, None).unwrap();
+        assert_eq!(unsplit.len(), 1);
+        assert_eq!(unsplit[0]["type"], "markdown");
+
+        let blocks = text_blocks(sample, Some("※")).unwrap();
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "markdown");
         assert_eq!(blocks[0]["text"], "Done.");
@@ -453,20 +465,20 @@ mod tests {
 
         // Oversized notes stay intact inside the main markdown block instead of truncating.
         let long_note = format!("Done.\n\n※ {}", "x".repeat(SECTION_LIMIT));
-        let fallback = text_blocks(&long_note).unwrap();
+        let fallback = text_blocks(&long_note, Some("※")).unwrap();
         assert_eq!(fallback.len(), 1);
         assert_eq!(fallback[0]["type"], "markdown");
         assert_eq!(fallback[0]["text"], long_note);
 
         // Body and note are each checked against their respective Slack block limits.
         let split_fit = format!("{}\n\n※ {}", "a".repeat(10_500), "b".repeat(1_000));
-        let split_blocks = text_blocks(&split_fit).unwrap();
+        let split_blocks = text_blocks(&split_fit, Some("※")).unwrap();
         assert_eq!(split_blocks.len(), 2);
         assert_eq!(split_blocks[0]["type"], "markdown");
         assert_eq!(split_blocks[1]["type"], "context");
 
         let oversized_body = format!("{}\n\n※ note", "a".repeat(MARKDOWN_LIMIT + 1));
-        assert!(text_blocks(&oversized_body).is_none());
+        assert!(text_blocks(&oversized_body, Some("※")).is_none());
     }
 
     #[test]

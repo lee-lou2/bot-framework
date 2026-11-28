@@ -35,11 +35,29 @@ impl ApiKind {
         }
     }
 
-    pub(crate) fn headers(self, key: Option<&str>) -> Vec<Header> {
-        match self {
-            ApiKind::Anthropic => anthropic::headers(key),
-            ApiKind::OpenAi => openai::headers(key),
-        }
+    pub(crate) fn headers(
+        self,
+        mode: Option<bot_core::auth::HeaderMode>,
+        key: Option<&str>,
+        extra: &[(String, String)],
+    ) -> Vec<Header> {
+        let fixed = match self {
+            ApiKind::Anthropic => anthropic::base_headers(),
+            ApiKind::OpenAi => openai::base_headers(),
+        };
+        let built = match (mode, key) {
+            (Some(mode), Some(key)) => {
+                bot_core::auth::apply_auth_headers(mode, key, extra, &fixed, &[], &[])
+            }
+            _ => fixed,
+        };
+        built
+            .into_iter()
+            .map(|(name, value)| {
+                let sensitive = bot_core::auth::is_auth_header(&name);
+                (name, value, sensitive)
+            })
+            .collect()
     }
 
     pub(crate) fn build(

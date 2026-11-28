@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
 mod provider;
+mod provider_view;
 pub use provider::{
     ApiProvider, CliProvider, Provider, fallback_chain, parse_providers, reachable_aliases,
 };

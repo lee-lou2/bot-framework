@@ -1,6 +1,11 @@
 use super::*;
 
-fn rig_for(protocol: Protocol, path: &str, header: &str, scheme: Option<&str>) -> Rig {
+fn rig_for(protocol: Protocol, path: &str, header: &'static str, scheme: Option<&str>) -> Rig {
+    let header_mode = if scheme.is_some() {
+        bot_core::auth::HeaderMode::Bearer
+    } else {
+        bot_core::auth::HeaderMode::ApiKey(header)
+    };
     let host = ModelHost {
         providers: [(
             "main".to_owned(),
@@ -11,9 +16,8 @@ fn rig_for(protocol: Protocol, path: &str, header: &str, scheme: Option<&str>) -
                     port: 443,
                 },
                 path: path.into(),
-                secret: SecretName::parse("model-key").unwrap(),
-                header: header.into(),
-                scheme: scheme.map(str::to_owned),
+                auth: bot_core::auth::AuthSource::Secret(SecretName::parse("model-key").unwrap()),
+                header_mode,
                 headers: vec![],
                 forward_headers: vec![],
                 body_fields: vec![],

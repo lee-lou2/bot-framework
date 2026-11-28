@@ -10,15 +10,15 @@
 
 `host.json`은 프로필 별칭을 OS 계정, 서비스, 실행 파일에 매핑합니다. `BOT_HOST_CONFIG`를 생략하면 예제 프로필용 내장 데모 기본값이 사용됩니다. 사용자 정의 프로필은 모델과 입구를 직접 등록해야 합니다([새 프로필의 호스트 설정](profile-spec.md#새-프로필의-호스트-설정)).
 
-최상위 키: `version` (`1`), `gateway`, `servers`, `models`, `providers`, `egress`, `private_egress`, `super_admins`, `sandbox`, `limits`, `embeddings`, `memory_judge`, `admin`.
+최상위 키: `version` (`1`), `gateway`, `servers`, `models`, `providers`, `egress`, `private_egress`, `super_admins`, `allow_subscription_auth`, `sandbox`, `limits`, `embeddings`, `memory_judge`, `admin`.
 
-- `models` / `providers`: 프로필별 허용 모델 별칭을 `demo`, `claude-cli`, `codex-cli`, `agy-cli`, `anthropic-api`, `openai-api`에 바인딩합니다. 업스트림 엔드포인트는 자격 증명, 쿼리, 프래그먼트가 없는 `https://` URL이어야 합니다(직접 API 제공자는 루프백 IP 리터럴의 `http://`도 허용하며, 이 경우에만 `secret`을 생략할 수 있습니다).
+- `models` / `providers`: 프로필별 허용 모델 별칭을 `demo`, `claude-cli`, `codex-cli`, `agy-cli`, `anthropic-api`, `openai-api`에 바인딩합니다. 업스트림 엔드포인트는 자격 증명, 쿼리, 프래그먼트가 없는 `https://` URL이어야 합니다(직접 API 제공자는 루프백 IP 리터럴의 `http://`도 허용하며, 이 경우에만 `secret`과 `auth`를 모두 생략할 수 있습니다). 프로바이더는 정적 `secret` 또는 호스트 관리형 `auth`(`{"kind": "oauth" | "service-account" | "subscription-token", "credential": "<name>"}`)를 받으며, `claude-cli`도 선택적 `max_tokens`를 지원합니다([인증](auth.md)).
 - `egress` / `private_egress`: 프로필별 허용 외부 `host:port` 상한과 고정된 사설/로컬 대상 매핑입니다.
-- `super_admins`: 프로필별 슈퍼 관리자 주체의 호스트 수준 상한입니다(비어 있지 않으면 활성화 지문에 포함).
-- `servers`: 로컬 MCP 패키지(`root`, 명령) 또는 원격 HTTP 서버(`transport: "http"`, `url`)를 등록합니다. `bot validate`는 서버 파일과 명령에서 서버 리비전을 계산합니다. 도구 러너는 `BOT_INSTALLS` 아래 읽기 전용 설치본을 사용합니다. 기본 `state`는 `ephemeral`이며, `required` 서버는 현재 `srt` 호스트에서 시작할 수 없습니다([MCP 도구](plugins.md)).
+- `super_admins` / `allow_subscription_auth`: 프로필별 슈퍼 관리자 주체와 옵트인 VM CLI 구독 릴레이(`"claude"`, `"codex"` 전용)의 호스트 수준 상한입니다(둘 다 비어 있지 않으면 활성화 지문에 포함).
+- `servers`: 로컬 MCP 패키지(`root`, 명령) 또는 원격 HTTP 서버(`transport: "http"`, `url`, 선택적 `bearer` 또는 `oauth` `auth`)를 등록합니다. `bot validate`는 서버 파일과 명령에서 서버 리비전을 계산합니다. 도구 러너는 `BOT_INSTALLS` 아래 읽기 전용 설치본을 사용합니다. 기본 `state`는 `ephemeral`이며, `required` 서버는 현재 `srt` 호스트에서 시작할 수 없습니다([MCP 도구](plugins.md)).
 - `sandbox` / `limits` / `embeddings` / `memory_judge` / `admin`: 모델 VM 및 샌드박스 설정(`instance`, `image`/`images`, `network` — [아키텍처](architecture.md) 참고), 도구 제한, 선택적 하이브리드 메모리 `/embeddings` 및 System One `memory_judge` 엔드포인트, Admin UI/관측성 설정(`bind`, `hosts`, `max_failures`, `trace`, `logs`, `issues` — [Admin UI](admin.md) 참고)입니다.
 
-활성 세트(active set)는 프로필 리비전과 권한에 영향을 주는 호스트 설정(CLI 사용자 매핑, Slack 팀/채널, HTTP 인증, 허용 모델/업스트림/시크릿 이름, 서버 리비전, `egress`, `private_egress`, `super_admins`, VM `image`/`images`/네트워크, 비기본값 `limits.tool_call_max_secs`, 설정된 `embeddings`/`memory_judge`, 활성화된 `admin.trace`/`logs`/`issues`)을 함께 묶습니다. 시크릿 값은 절대 포함되지 않습니다. 호스트 매핑 변경을 적용하려면 `bot serve --activate`를 실행합니다.
+활성 세트(active set)는 프로필 리비전과 권한에 영향을 주는 호스트 설정(CLI 사용자 매핑, Slack 팀/채널, HTTP 인증, 허용 모델/업스트림/시크릿 또는 관리형 자격 증명 이름, 서버 리비전, `egress`, `private_egress`, `super_admins`, `allow_subscription_auth`, VM `image`/`images`/네트워크, 비기본값 `limits.tool_call_max_secs`, 설정된 `embeddings`/`memory_judge`, 활성화된 `admin.trace`/`logs`/`issues`)을 함께 묶습니다. 시크릿 값은 절대 포함되지 않습니다. 호스트 매핑 변경을 적용하려면 `bot serve --activate`를 실행합니다.
 
 ### `gateway` 키
 
@@ -27,6 +27,7 @@
 | `cli.accounts.<alias>` | `{"os_user": "name"}` 또는 `{"uid": 501}` 중 정확히 하나만 지정합니다. `cli.socket`은 100바이트 이하의 절대 경로여야 합니다. |
 | `slack.workspaces.<alias>` | `team_id`, 선택적 `app_id`(Socket Mode hello 시 검증), `channels`(별칭 → 채널 ID; `D…` DM ID는 금지), `dm`(기본 `false`), `receive`, 시크릿 **이름** `bot_token`, `app_token`, `signing_secret`. |
 | `slack.dm_sent_notice` | 소유자 DM 승인 카드 게시 후 원 채널에 남기는 기본 `"Approval request sent via DM"` 안내를 대체하는 선택적 한 줄 문구(200자 이하, 제어 문자 금지, 활성화 지문 제외). |
+| `slack.note_prefix` | 선택적 공백 없는 각주 접두사(출력 가능 문자 1–16자, `-`, `*`, `>`, `#`, ASCII 숫자로 시작 불가; 활성화 지문 제외). 설정하면 이 접두사로 시작하는 말미 문단을 작은 Slack `context` 블록으로 렌더링하며, 생략하면 응답을 그대로 표시합니다. |
 | `http.listen`, `http.remote` | 기본값 `127.0.0.1:8788`(Admin UI의 `127.0.0.1:8787`과 구분). 평문 HTTP이므로 비루프백 바인딩은 TLS 프록시 뒤에서 명시적 `http.remote: true`(기본 `false`)가 필요하며, 그렇지 않으면 `bot validate`와 `bot serve`가 `gateway.http.listen`을 거부하고 아무 포트도 열지 않습니다. |
 | `http.endpoints.<alias>` (웹훅) | `kind: "webhook"`(또는 생략): `issuer`, `audience`, `key`(HS256 시크릿 이름), `sync_wait_ms`(기본 10초, 1–60000 ms), `max_token_age_secs`(≥ 1). |
 | `http.endpoints.<alias>` (OpenAI) | `kind: "openai"`: `keys`(슬롯 → `{secret, subject}` 매핑 1–16개), `wait_ms`(기본 120초, 1–300000 ms), `max_active_runs`(기본 32, 1–256). 웹훅과 별도 별칭을 사용해야 합니다(OpenAI 엔드포인트가 하나라도 설정되면 `v1`은 예약됨). |

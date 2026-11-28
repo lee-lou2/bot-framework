@@ -6,7 +6,7 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 
 1. **Models cannot reach the host or see service keys.** Both execution paths enforce this (`docs/architecture.md`):
    - `claude-cli`, `codex-cli`, `agy-cli`: run the model CLI inside a disposable VM with no secrets (session token only) and one egress path through the broker relay.
-   - `anthropic-api` / `openai-api` (plus host-configured `embeddings` and `memory_judge`): no VM or relay; the worker (and broker for `embeddings`) sends messages/inputs to the configured host `endpoint` and receives structured responses only. No host filesystem or shell exists, and the host reads the profile key from `SecretStore` solely to attach the outbound request header (checking active revision twice and scanning responses for key leaks).
+   - `anthropic-api` / `openai-api` (plus host-configured `embeddings` and `memory_judge`): no VM or relay; the worker (and broker for `embeddings`) sends messages/inputs to the configured host `endpoint` and receives structured responses only. No host filesystem or shell exists, and the host resolves profile credentials through `AuthResolver` (static `SecretStore` or host-managed AEAD `bot_credentials`) solely to attach outbound request headers (checking active revision twice and scanning responses for credential leaks).
 2. **All tool authorization, approval, and auditing pass through the broker (`crates/bot-broker/src/service.rs`).** Never add a direct model-to-tool execution path. Both paths route tool calls through `Broker::call` (`Broker::call_for_model` for model-planned calls).
 3. **Durable intake first.** A request is accepted only after the PostgreSQL transaction commits.
 4. **Humans approve irreversible actions.** Models can never approve actions.
@@ -70,7 +70,7 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 | Schedules | Static cron `crates/bot-runtime/src/scheduler.rs`+`crates/bot-core/src/cron.rs`, chat schedules `crates/bot-store/src/user_schedule.rs`+`crates/bot-broker/src/service/schedule.rs` |
 | Memory & private DM | `crates/bot-core/src/memory.rs`, `crates/bot-store/src/{memory,memory_search,memory_ops,memory_auto,share,private}.rs`, `crates/bot-runtime/src/{embeddings.rs,memory_judge.rs,context/memory.rs}`, `crates/bot-broker/src/{private.rs,service/memory.rs}` |
 | Pre-approval grants | `crates/bot-core/src/grant.rs`, `crates/bot-store/src/grants.rs`, `crates/bot-broker/src/preapproval.rs`, `crates/bot-admin/src/preapproval.rs` |
-| Secrets | `SecretStore` in `crates/bot-core/src/port.rs`, `crates/bot-cli/src/secrets/`, `crates/bot-cli/src/serve/watched.rs` |
+| Secrets & managed OAuth | `SecretStore` in `crates/bot-core/src/port.rs`, `AuthResolver`/`CredentialStore` in `crates/bot-core/src/auth.rs`, `crates/bot-store/src/credentials.rs`, `crates/bot-store/migrations/0030_credentials.sql`, `crates/bot-cli/src/auth/`, `crates/bot-cli/src/secrets/`, `crates/bot-cli/src/serve/watched.rs`, `docs/auth.md` |
 | Observability, logs, issues, audit | `crates/bot-core/src/{trace,issue}.rs`, `crates/bot-admin/src/{obs,trace,logs,issues}/`, `crates/bot-cli/src/logging.rs`, `crates/bot-store/src/audit.rs` |
 | Admin API & UI | `crates/bot-admin/src/{lib,api}.rs`, `crates/bot-admin/ui/`, `docs/admin.md` |
 | Extension guide | `docs/extending.md`, `scripts/parity_audit.py` |
@@ -82,4 +82,4 @@ Rust workspace that runs bots from declarative profile directories (agents, skil
 - Gateway ingress sequence (`verify → normalize → durable accept → ack`): `crates/bot-gateway/src/lib.rs` header
 - Activation fingerprint: `HostFile::authority_fingerprint` in `crates/bot-cli/src/host.rs` (folding `crates/bot-gateway/src/mapping.rs` `fingerprint`, `crates/bot-cli/src/{execution,execution/provider,tool_limits,embeddings,memory_judge,host/lists}.rs`, and `bot_admin::obs_fingerprint` in `crates/bot-admin/src/lib.rs`)
 - Legacy restore compatibility: tightening profile validation must never break `BOTPROFILE1` (`SkillMode::Legacy`) restore; add regression cases to `crates/bot-cli/tests/legacy_v1_corpus.rs` first.
-- Migration immutability: never modify bytes of deployed files in `crates/bot-store/migrations/` (checksums are verified on startup); write new migrations (0030+) in English as the next numbered file.
+- Migration immutability: never modify bytes of deployed files in `crates/bot-store/migrations/` (checksums are verified on startup); write new migrations (0031+) in English as the next numbered file.
