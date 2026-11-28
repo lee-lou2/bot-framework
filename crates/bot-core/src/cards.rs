@@ -8,7 +8,7 @@ use crate::{
     api::ApprovalBlock,
     command::JsonPayload,
     id::{ApprovalId, BindingId, Generation, PrincipalId, ProfileId, Revision},
-    intake::NotSentReason,
+    intake::{NotSentReason, PushTransportId},
     port::Reply,
 };
 use std::time::Duration;
@@ -111,8 +111,14 @@ pub struct CardOrigin {
 }
 
 pub trait CardOutbox: Send + Sync {
-    /// Claims pending jobs with a lease; skips ambiguous in-flight `sending` jobs.
+    /// Claims pending jobs for the default transport with a lease; skips ambiguous in-flight `sending` jobs.
     fn claim(&self, limit: u32) -> Reply<'_, Vec<CardJob>>;
+    /// Claims pending owner-DM card jobs scoped to a specific push transport.
+    fn claim_for<'a>(
+        &'a self,
+        transport: &'a PushTransportId,
+        limit: u32,
+    ) -> Reply<'a, Vec<CardJob>>;
     /// Verifies lease, active set, validity, generation, and revision before marking `sending`; only the first sender gets `Ok`.
     fn begin(&self, key: CardKey, checked_revision: Revision) -> Reply<'_, ()>;
     /// Records the delivery outcome idempotently (`Posted` opens the card and enqueues `DM_SENT_NOTICE`; failures close it).

@@ -96,9 +96,14 @@ impl Store {
             .await?;
         let is_slack =
             transport.as_deref() == Some(bot_core::intake::PushTransportId::SLACK.as_str());
-        let channel_dm = slack.is_none() && kind == "channel" && (routed || is_slack);
-        // Channel-origin owner-DM cards require Slack transport and requester == approver.
-        if channel_dm && (!is_slack || a.requester != a.approver) {
+        let is_telegram =
+            transport.as_deref() == Some(bot_core::intake::PushTransportId::TELEGRAM.as_str());
+        let channel_dm =
+            slack.is_none() && kind == "channel" && (routed || is_slack || is_telegram);
+        // Explicit-destination routed approvals remain Slack-only; channel-origin owner-DM cards support Slack and Telegram when requester == approver.
+        if channel_dm
+            && ((routed && !is_slack) || (!is_slack && !is_telegram) || a.requester != a.approver)
+        {
             return Err(Error::Denied.into());
         }
         // API-origin requester must match the admission-verified root principal.

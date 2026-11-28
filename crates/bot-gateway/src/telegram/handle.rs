@@ -1,11 +1,17 @@
-//! Telegram update dispatch: private DM messages to `Ingress` and approval callbacks to `Broker::decide`.
+//! Telegram update dispatch: private DM and group mention/reply intake plus DM approval callbacks.
 //!
 //! Never falls back across profiles: updates whose bot or route does not match this installation are ignored.
 use super::{
     Installation, TelegramGateway,
     api::Raw,
+    cards::is_the_card,
     creds::BotCheck,
+    parse::{
+        extract_attachments, forum_topic_id, mentions_bot, negative_i64, positive_u64,
+        replies_to_bot, reply_context_prefix, strip_bot_mention,
+    },
     render::{parse_callback, resolved_card_text, status_line},
+    ux::TrackedRun,
 };
 use crate::{
     entrance::Real,
@@ -16,25 +22,17 @@ use crate::{
     reply::parse_card,
 };
 use bot_core::{
-    id::{ApprovalId, ProfileId, RequestId, RunId},
+    id::{ApprovalId, ProfileId, RequestId},
+    ledger::ApprovalState,
     port::Error,
-    state::{Conversation, ConversationKind, RunState},
+    state::{Conversation, ConversationKind},
     trace::now_nano,
 };
 use serde_json::{Value, json};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-const TYPING_EVERY: Duration = Duration::from_secs(4);
-const TYPING_MAX: Duration = Duration::from_secs(300);
 const RETRY_NOTICE: &str = "Could not process right now — please try clicking again shortly.";
-
-fn positive_u64(value: &Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
-        .filter(|id| *id > 0)
-}
 
 impl TelegramGateway {
     /// Processes one Telegram Update object and returns whether it is settled (safe to advance `offset`).
@@ -62,35 +60,70 @@ impl TelegramGateway {
         let Some(chat) = message.get("chat") else {
             return true;
         };
-        if chat["type"].as_str() != Some("private") {
+        let Some(chat_type) = chat["type"].as_str() else {
             return true;
-        }
+        };
+        let is_group = match chat_type {
+            "private" => false,
+            "group" | "supergroup" => true,
+            _ => return true,
+        };
         let Some(from) = message.get("from") else {
             return true;
         };
         if from["is_bot"].as_bool() == Some(true) {
             return true;
         }
-        let (Some(user_id), Some(chat_id), Some(message_id)) = (
+        let (Some(user_id), Some(message_id)) = (
             positive_u64(&from["id"]),
-            positive_u64(&chat["id"]),
             positive_u64(&message["message_id"]),
         ) else {
             return true;
         };
-        if user_id != chat_id {
-            return true;
-        }
-        let text = message["text"]
-            .as_str()
-            .or_else(|| message["caption"].as_str())
-            .map(str::trim)
-            .filter(|t| !t.is_empty());
-        let Some(text) = text else {
-            return true;
+        let chat_id: i64 = if is_group {
+            let Some(id) = negative_i64(&chat["id"]) else {
+                return true;
+            };
+            id
+        } else {
+            let Some(id) = positive_u64(&chat["id"]).filter(|id| *id == user_id) else {
+                return true;
+            };
+            let Ok(signed) = i64::try_from(id) else {
+                return true;
+            };
+            signed
         };
-        let real = Real::TelegramDm {
-            bot_id: install.bot_id,
+
+        let (raw_text, entities) = if let Some(text) = message["text"].as_str() {
+            (Some(text), message.get("entities"))
+        } else if let Some(caption) = message["caption"].as_str() {
+            (Some(caption), message.get("caption_entities"))
+        } else {
+            (None, None)
+        };
+
+        if is_group {
+            let mentioned = raw_text.is_some_and(|text| {
+                install
+                    .username
+                    .as_deref()
+                    .is_some_and(|username| mentions_bot(text, entities, username))
+            });
+            let replied = replies_to_bot(message, install.bot_id);
+            if !mentioned && !replied {
+                return true;
+            }
+        }
+
+        let real = if is_group {
+            Real::TelegramGroups {
+                bot_id: install.bot_id,
+            }
+        } else {
+            Real::TelegramDm {
+                bot_id: install.bot_id,
+            }
         };
         let Ok(routes) = self.ingress.routes() else {
             return false;
@@ -102,6 +135,32 @@ impl TelegramGateway {
         let Some(principal) = identity::telegram(user_id) else {
             return true;
         };
+
+        let attachments =
+            extract_attachments(message, &install.alias, self.ingress.limits().attachments);
+        let cleaned_text = raw_text.map(|t| {
+            if is_group {
+                install
+                    .username
+                    .as_deref()
+                    .map_or_else(|| t.trim().to_owned(), |u| strip_bot_mention(t, u))
+            } else {
+                t.trim().to_owned()
+            }
+        });
+        let base_text = match cleaned_text.filter(|t| !t.is_empty()) {
+            Some(text) => text,
+            None => match attachments.summary {
+                Some(summary) => summary,
+                None => return true,
+            },
+        };
+        let text = match reply_context_prefix(message, install.bot_id) {
+            Some(prefix) => format!("{prefix}\n{base_text}"),
+            None => base_text,
+        };
+
+        let thread_id = is_group.then(|| forum_topic_id(message)).flatten();
         let request = format!("tg.{chat_id}.{message_id}");
         if !valid_request_id(&request) {
             return true;
@@ -111,60 +170,38 @@ impl TelegramGateway {
             principal,
             request: RequestId(request),
             conversation: Conversation {
-                kind: ConversationKind::Direct,
+                kind: if is_group {
+                    ConversationKind::Channel
+                } else {
+                    ConversationKind::Direct
+                },
                 id: format!("{}/{chat_id}", install.bot_id),
-                thread: None,
+                thread: thread_id.map(|id| id.to_string()),
             },
-            attachments: Vec::new(),
+            attachments: attachments.refs,
             body: json!({"text": text}),
             event: Event::Message,
         };
         let admission = self.ingress.admit_with(&routes, inbound).await;
         if let Admission::Accepted { run, .. } = &admission {
-            self.spawn_typing(install.clone(), chat_id, run.clone(), stop.clone());
+            if is_group {
+                self.reply_targets.record(run.clone(), message_id);
+            }
+            if let Some(ux) = &self.ux {
+                ux.track(
+                    TrackedRun {
+                        profile: install.profile.clone(),
+                        alias: install.alias.clone(),
+                        chat_id,
+                        message_id,
+                        thread_id,
+                        run: run.clone(),
+                    },
+                    stop.clone(),
+                );
+            }
         }
         admission.settled()
-    }
-
-    fn spawn_typing(
-        &self,
-        install: Installation,
-        chat_id: u64,
-        run: RunId,
-        stop: CancellationToken,
-    ) {
-        let Some(runs) = self.runs.clone() else {
-            return;
-        };
-        let creds = self.creds.clone();
-        tokio::spawn(async move {
-            let started = Instant::now();
-            loop {
-                if let Some(token) = creds.bot_token(&install.profile, &install.alias).await {
-                    let _ = creds
-                        .api()
-                        .call_json(
-                            "sendChatAction",
-                            &token,
-                            &json!({"chat_id": chat_id, "action": "typing"}),
-                        )
-                        .await;
-                }
-                tokio::select! {
-                    _ = stop.cancelled() => return,
-                    _ = tokio::time::sleep(TYPING_EVERY) => {}
-                }
-                if started.elapsed() >= TYPING_MAX {
-                    return;
-                }
-                match runs.progress(install.profile.clone(), run.clone()).await {
-                    Ok(Some(progress))
-                        if matches!(progress.state, RunState::Ready | RunState::Leased)
-                            && !progress.waiting_approval => {}
-                    _ => return,
-                }
-            }
-        });
     }
 
     async fn on_callback(&self, install: &Installation, callback: &Value) -> bool {
@@ -216,21 +253,101 @@ impl TelegramGateway {
             self.answer_callback(install, callback_id, None).await;
             return true;
         };
+        if self.ingress.verify_active().await.is_err() {
+            self.answer_callback(install, callback_id, Some(RETRY_NOTICE))
+                .await;
+            observe::record_approval(
+                &**self.ingress.tracer(),
+                &install.profile,
+                &principal.0,
+                "unavailable",
+                started,
+            );
+            return false;
+        }
         let Ok(routes) = self.ingress.routes() else {
             self.answer_callback(install, callback_id, Some(RETRY_NOTICE))
                 .await;
             return false;
         };
-        let real = Real::TelegramDm {
-            bot_id: install.bot_id,
+        let approval = ApprovalId(nonce.to_owned());
+        let stored = match self.ledger.approval(approval.clone()).await {
+            Ok(stored) => Some(stored),
+            Err(Error::Unavailable | Error::Stale) => {
+                self.answer_callback(install, callback_id, Some(RETRY_NOTICE))
+                    .await;
+                return false;
+            }
+            Err(_) => None,
         };
-        let Some(snapshot) = routes
-            .find(&real)
-            .filter(|route| route.snapshot.id == install.profile)
-            .map(|route| route.snapshot.clone())
-        else {
-            self.answer_callback(install, callback_id, None).await;
-            return true;
+        // Group-origin owner-DM cards carry a delivery receipt and work even without a DM input binding.
+        let snapshot = match stored.as_ref().and_then(|s| s.delivery.as_ref()) {
+            Some(receipt) => {
+                let Some(snapshot) = routes.snapshot(&install.profile).cloned() else {
+                    self.answer_callback(install, callback_id, None).await;
+                    return true;
+                };
+                if !is_the_card(receipt, install, &snapshot, chat_id, message_id, user_id) {
+                    self.answer_callback(
+                        install,
+                        callback_id,
+                        Some("Cannot approve using this card."),
+                    )
+                    .await;
+                    observe::record_approval(
+                        &**self.ingress.tracer(),
+                        &install.profile,
+                        &principal.0,
+                        "wrong_card",
+                        started,
+                    );
+                    return true;
+                }
+                snapshot
+            }
+            None => {
+                let real = Real::TelegramDm {
+                    bot_id: install.bot_id,
+                };
+                match routes
+                    .find(&real)
+                    .filter(|route| route.snapshot.id == install.profile)
+                {
+                    Some(route) => route.snapshot.clone(),
+                    None => {
+                        let state = stored
+                            .as_ref()
+                            .filter(|s| s.approval.attempt.profile == install.profile)
+                            .map(|s| s.state);
+                        let member = routes
+                            .snapshot(&install.profile)
+                            .is_some_and(|s| s.members.contains_key(&principal));
+                        drop(routes);
+                        if let (Some(state), true) = (state, member) {
+                            let (outcome, toast) = if state == ApprovalState::Pending {
+                                (
+                                    "not_open",
+                                    "This card is not open yet — please try again shortly.",
+                                )
+                            } else {
+                                ("closed", "This request is already closed.")
+                            };
+                            self.answer_callback(install, callback_id, Some(toast))
+                                .await;
+                            observe::record_approval(
+                                &**self.ingress.tracer(),
+                                &install.profile,
+                                &principal.0,
+                                outcome,
+                                started,
+                            );
+                        } else {
+                            self.answer_callback(install, callback_id, None).await;
+                        }
+                        return true;
+                    }
+                }
+            }
         };
         drop(routes);
         if !snapshot.members.contains_key(&principal) {
@@ -245,6 +362,21 @@ impl TelegramGateway {
                 &install.profile,
                 &principal.0,
                 "unregistered",
+                started,
+            );
+            return true;
+        }
+        if !stored
+            .as_ref()
+            .is_some_and(|s| s.approval.attempt.profile == install.profile)
+        {
+            self.answer_callback(install, callback_id, Some("Unknown approval card."))
+                .await;
+            observe::record_approval(
+                &**self.ingress.tracer(),
+                &install.profile,
+                &principal.0,
+                "unknown_card",
                 started,
             );
             return true;
@@ -281,30 +413,7 @@ impl TelegramGateway {
         chat_id: u64,
         message_id: u64,
     ) -> &'static str {
-        if self.ingress.verify_active().await.is_err() {
-            self.answer_callback(install, callback_id, Some(RETRY_NOTICE))
-                .await;
-            return "unavailable";
-        }
         let approval = ApprovalId(nonce.to_owned());
-        let stored = match self.ledger.approval(approval.clone()).await {
-            Ok(stored) => stored,
-            Err(Error::Unavailable | Error::Stale) => {
-                self.answer_callback(install, callback_id, Some(RETRY_NOTICE))
-                    .await;
-                return "unavailable";
-            }
-            Err(_) => {
-                self.answer_callback(install, callback_id, Some("Unknown approval card."))
-                    .await;
-                return "unknown_card";
-            }
-        };
-        if stored.approval.attempt.profile != install.profile {
-            self.answer_callback(install, callback_id, Some("Unknown approval card."))
-                .await;
-            return "unknown_card";
-        }
         let (outcome, toast, refresh) =
             match self.broker.decide(approval, principal.clone(), allow).await {
                 Ok(()) if allow => ("approved", "Approved", true),

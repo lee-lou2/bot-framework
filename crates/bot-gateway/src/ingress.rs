@@ -254,7 +254,7 @@ impl Ingress {
         let adapter = match inbound.real {
             Real::Cli { .. } => "cli",
             Real::SlackChannel { .. } | Real::SlackDm { .. } => "slack",
-            Real::TelegramDm { .. } => "telegram",
+            Real::TelegramDm { .. } | Real::TelegramGroups { .. } => "telegram",
             Real::Http { .. } | Real::HttpModel { .. } => "http",
         };
         let mut seen = Seen::default();

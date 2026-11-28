@@ -57,6 +57,7 @@ fn slack_destination(adapter: &Adapter) -> Result<(&str, &str, PushTransportId),
         }
         Adapter::SlackDm { .. }
         | Adapter::TelegramDm { .. }
+        | Adapter::TelegramGroups { .. }
         | Adapter::Cli { .. }
         | Adapter::Http { .. }
         | Adapter::OpenAi { .. } => Err(Error::Denied),

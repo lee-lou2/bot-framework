@@ -65,6 +65,12 @@ impl UxStore {
             },
         );
     }
+
+    pub fn set_waiting_approval(&self, run: &RunId, waiting_approval: bool) {
+        if let Some(entry) = self.progress.lock().unwrap().get_mut(run) {
+            entry.waiting_approval = waiting_approval;
+        }
+    }
 }
 
 impl RunStore for UxStore {

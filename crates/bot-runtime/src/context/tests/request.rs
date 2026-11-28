@@ -298,3 +298,69 @@ fn request_context_scrubs_control_characters_and_caps_attachments() {
     assert!(block.contains("(+4 more)"), "{block}");
     assert!(!block.contains("F16"), "{block}");
 }
+
+#[test]
+fn telegram_dm_and_group_render_plain_text_format_and_topic_metadata() {
+    let mut snap = snapshot();
+    with_binding(
+        &mut snap,
+        "tg-dm",
+        Adapter::TelegramDm { bot: "ops".into() },
+    );
+    with_binding(
+        &mut snap,
+        "tg-groups",
+        Adapter::TelegramGroups { bot: "ops".into() },
+    );
+
+    let mut dm = run_context("main", &FULL, "ping");
+    dm.principal = PrincipalId("telegram:42".into());
+    dm.binding = BindingId("tg-dm".into());
+    dm.conversation = Conversation {
+        kind: ConversationKind::Direct,
+        id: "100200/42".into(),
+        thread: None,
+    };
+    let dm_out = build(&snap, &dm, &[], &[]);
+    assert!(
+        dm_out.system.contains(
+            "## Request Context\n\
+             - channel: telegram-dm\n\
+             - origin: message\n\
+             - bot: ops\n\
+             - binding: tg-dm\n\
+             - chat_id: 42\n\
+             - requester: telegram:42\n\
+             - format: plain text only (no Markdown; keep replies brief and direct)"
+        ),
+        "{}",
+        dm_out.system
+    );
+
+    let mut group = run_context("main", &FULL, "status");
+    group.principal = PrincipalId("telegram:42".into());
+    group.binding = BindingId("tg-groups".into());
+    group.conversation = Conversation {
+        kind: ConversationKind::Channel,
+        id: "100200/-100999".into(),
+        thread: Some("77".into()),
+    };
+    group.work.attachments = vec!["telegram:ops/FILE_1".into()];
+    let group_out = build(&snap, &group, &[], &[]);
+    assert!(
+        group_out.system.contains(
+            "## Request Context\n\
+             - channel: telegram-group\n\
+             - origin: message\n\
+             - bot: ops\n\
+             - binding: tg-groups\n\
+             - chat_id: -100999\n\
+             - topic_id: 77\n\
+             - requester: telegram:42\n\
+             - format: plain text only (no Markdown; keep replies brief and direct)\n\
+             - attachments: telegram:ops/FILE_1"
+        ),
+        "{}",
+        group_out.system
+    );
+}

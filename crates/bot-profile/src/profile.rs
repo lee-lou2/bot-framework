@@ -290,29 +290,33 @@ fn parse_bindings(
         let kind = match (
             text(obj, "adapter"),
             obj.contains_key("dm"),
+            obj.contains_key("groups"),
             obj.contains_key("model"),
         ) {
             ("cli", ..) => Adapter::Cli {
                 account: text(obj, "account").to_owned(),
             },
-            ("slack", true, _) => Adapter::SlackDm {
+            ("slack", true, ..) => Adapter::SlackDm {
                 workspace: text(obj, "workspace").to_owned(),
             },
-            ("slack", false, _) => Adapter::SlackChannel {
+            ("slack", false, ..) => Adapter::SlackChannel {
                 workspace: text(obj, "workspace").to_owned(),
                 channel: text(obj, "channel").to_owned(),
                 events: channel_events(obj),
             },
-            ("telegram", true, _) => Adapter::TelegramDm {
+            ("telegram", true, false, _) => Adapter::TelegramDm {
+                bot: text(obj, "bot").to_owned(),
+            },
+            ("telegram", false, true, _) => Adapter::TelegramGroups {
                 bot: text(obj, "bot").to_owned(),
             },
             // `http` with `model` is an OpenAI-compatible binding; without `model` it is a JWT webhook.
-            ("http", _, true) => Adapter::OpenAi {
+            ("http", _, _, true) => Adapter::OpenAi {
                 endpoint: text(obj, "endpoint").to_owned(),
                 model: text(obj, "model").to_owned(),
                 approvers: parse_approvers(obj.get("approvers")),
             },
-            ("http", _, false) => Adapter::Http {
+            ("http", _, _, false) => Adapter::Http {
                 endpoint: text(obj, "endpoint").to_owned(),
             },
             // Guard against schema/parser drift instead of silently falling back to webhook.

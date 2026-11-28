@@ -32,7 +32,7 @@ use bot_gateway::{
     http::HttpGateway,
     ingress::Ingress,
     slack::{SlackGateway, api::SlackApi, cards::CardDeliverer},
-    telegram::{TelegramGateway, api::TelegramApi},
+    telegram::{TelegramGateway, api::TelegramApi, cards::TelegramCardDeliverer},
 };
 use bot_profile::{Registry, SchemaValidator};
 use bot_store::Store;
@@ -160,7 +160,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
                 Adapter::Cli { .. } => cli = true,
                 Adapter::Http { .. } | Adapter::OpenAi { .. } => http = true,
                 Adapter::SlackChannel { .. } | Adapter::SlackDm { .. } => slack = true,
-                Adapter::TelegramDm { .. } => telegram = true,
+                Adapter::TelegramDm { .. } | Adapter::TelegramGroups { .. } => telegram = true,
             }
         }
         snapshots.push(snapshot.clone());
@@ -334,13 +334,22 @@ impl Prepared {
         }
         if let Some(gateway) = telegram {
             let deliverer = Deliverer::new(
-                store as Arc<dyn Outbox>,
-                ingress,
+                store.clone() as Arc<dyn Outbox>,
+                ingress.clone(),
                 Arc::new(gateway.sender()),
             );
+            let cards =
+                TelegramCardDeliverer::new(store as Arc<dyn CardOutbox>, ingress, gateway.sender());
             tasks.spawn({
                 let stop = stop.clone();
                 async move { gateway.serve(stop).await.map_err(|e| e.to_string()) }
+            });
+            tasks.spawn({
+                let stop = stop.clone();
+                async move {
+                    cards.run(stop).await;
+                    Ok(())
+                }
             });
             tasks.spawn(async move {
                 deliverer.run(stop).await;

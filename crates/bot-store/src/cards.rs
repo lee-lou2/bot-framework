@@ -157,18 +157,28 @@ fn card_source(row: &PgRow) -> Option<CardSource> {
 }
 
 impl Store {
-    /// Sweeps stale/stalled jobs, then claims up to `limit` pending, unexpired card jobs with a lease.
-    pub(crate) async fn cards_claim(&self, limit: u32) -> R<Vec<CardJob>> {
+    /// Sweeps stale/stalled jobs, then claims up to `limit` pending, unexpired card jobs for `transport`.
+    pub(crate) async fn cards_claim(
+        &self,
+        transport: &PushTransportId,
+        limit: u32,
+    ) -> R<Vec<CardJob>> {
         self.card_sweep().await?;
         let mut tx = self.begin_authorized().await?;
+        let is_slack = *transport == PushTransportId::SLACK;
         let rows = sqlx::query(
             "with picked as (
-                 select j.nonce from bot_card_jobs j join bot_approvals a on a.nonce = j.nonce
-                 where ((j.state = 'staged' and j.not_before_ms <= bot_now_ms())
-                        or (j.state = 'leased' and j.lease_until_ms < bot_now_ms()))
-                   and a.state = 'pending' and a.expires_ms > bot_now_ms()
-                 order by j.created_ms, j.nonce
-                 limit $1 for update of j skip locked)
+                 select j.nonce
+                   from bot_card_jobs j
+                   join bot_approvals a on a.nonce = j.nonce
+                   join bot_runs r on r.profile = j.profile and r.id = j.run
+                  where ((j.state = 'staged' and j.not_before_ms <= bot_now_ms())
+                         or (j.state = 'leased' and j.lease_until_ms < bot_now_ms()))
+                    and a.state = 'pending' and a.expires_ms > bot_now_ms()
+                    and (($3 and (j.origin_binding is not null or r.reply_transport = $4))
+                         or (not $3 and j.origin_binding is null and r.reply_transport = $4))
+                  order by j.created_ms, j.nonce
+                  limit $1 for update of j skip locked)
              update bot_card_jobs j
                 set state = 'leased', lease_until_ms = bot_now_ms() + $2, attempts = j.attempts + 1, updated_ms = bot_now_ms()
                from picked, bot_approvals a, bot_runs r
@@ -182,6 +192,8 @@ impl Store {
         )
         .bind(i64::from(limit.min(64)))
         .bind(LEASE_MS)
+        .bind(is_slack)
+        .bind(transport.as_str())
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -407,7 +419,23 @@ impl Store {
 
 impl CardOutbox for Store {
     fn claim(&self, limit: u32) -> Reply<'_, Vec<CardJob>> {
-        Box::pin(async move { self.cards_claim(limit).await.map_err(Fail::into_core) })
+        Box::pin(async move {
+            self.cards_claim(&PushTransportId::SLACK, limit)
+                .await
+                .map_err(Fail::into_core)
+        })
+    }
+
+    fn claim_for<'a>(
+        &'a self,
+        transport: &'a PushTransportId,
+        limit: u32,
+    ) -> Reply<'a, Vec<CardJob>> {
+        Box::pin(async move {
+            self.cards_claim(transport, limit)
+                .await
+                .map_err(Fail::into_core)
+        })
     }
 
     fn begin(&self, key: CardKey, checked_revision: Revision) -> Reply<'_, ()> {

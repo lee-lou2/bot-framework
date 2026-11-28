@@ -15,7 +15,9 @@ pub type Active = Arc<BTreeMap<ProfileId, Arc<Snapshot>>>;
 pub(crate) fn reply_transport(adapter: &Adapter) -> Option<PushTransportId> {
     match adapter {
         Adapter::SlackDm { .. } | Adapter::SlackChannel { .. } => Some(PushTransportId::SLACK),
-        Adapter::TelegramDm { .. } => Some(PushTransportId::TELEGRAM),
+        Adapter::TelegramDm { .. } | Adapter::TelegramGroups { .. } => {
+            Some(PushTransportId::TELEGRAM)
+        }
         Adapter::Cli { .. } | Adapter::Http { .. } | Adapter::OpenAi { .. } => None,
     }
 }
@@ -259,6 +261,21 @@ fn resolve(
                 )));
             }
             Ok(Real::TelegramDm {
+                bot_id: entry.bot_id,
+            })
+        }
+        Entrance::TelegramGroups { bot } => {
+            let entry = host
+                .telegram
+                .bots
+                .get(bot)
+                .ok_or_else(|| unknown(owner, "telegram bot", bot))?;
+            if !entry.groups {
+                return Err(RoutesError(format!(
+                    "{owner}: host has not enabled group entrance for telegram bot {bot} (groups: true)"
+                )));
+            }
+            Ok(Real::TelegramGroups {
                 bot_id: entry.bot_id,
             })
         }

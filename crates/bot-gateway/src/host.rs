@@ -100,6 +100,9 @@ pub struct TelegramBot {
     /// Explicit opt-in enabling 1:1 DM bindings (`dm: true`) for this bot.
     #[serde(default)]
     pub dm: bool,
+    /// Explicit opt-in enabling group/supergroup mention and reply bindings (`groups: true`) for this bot.
+    #[serde(default)]
+    pub groups: bool,
 }
 
 /// Deserialized by `host/openai.rs`, splitting `endpoints` by `kind` into `endpoints` (webhook) and `openai`.

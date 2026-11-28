@@ -191,11 +191,15 @@ v2.0은 Slack 이벤트와 버튼 클릭을 오직 [Socket Mode](https://docs.sl
 
 ## Telegram 입구
 
-Telegram 지원은 Bot API 롱 폴링(`getUpdates`, `allowed_updates: ["message", "callback_query"]`) 기반의 **1:1 DM 전용**입니다. 그룹, 슈퍼그룹, 채널, 웹훅은 이 버전에서 지원하지 않습니다.
+Telegram 지원은 Bot API 롱 폴링(`getUpdates`, `allowed_updates: ["message", "callback_query"]`) 기반의 **1:1 DM**(`dm: true`)과 **그룹/슈퍼그룹 멘션·봇 답장**(`groups: true`)을 지원합니다. 브로드캐스트 채널과 웹훅은 지원하지 않습니다.
 
-- **봇 설정 및 검증**: `@BotFather`에서 봇을 생성해 토큰을 프로필 `SecretStore`에 저장하고, `host.json`에 `gateway.telegram.bots.<alias>`(`bot_id`, `bot_token`, `dm: true`)를 등록한 뒤 `profile.yaml`에 `{id, adapter: telegram, bot: <alias>, dm: true, agent}`를 바인딩합니다. 시작 시 `getMe`로 `bot_id`를 검증하고 설치 간 중복 봇 토큰 사용을 거부합니다. 봇 토큰을 다른 프로세스나 웹훅과 절대 공유하지 마세요. HTTP `409 Conflict`가 발생하면 폴러는 오류를 기록하고 `deleteWebhook`을 호출하지 않은 채 즉시 중단됩니다.
-- **DM 접수 및 순서 보장**: `chat.type == "private"`이고 `from.id == chat.id`인 사람 `message` 업데이트만 수락합니다(봇·그룹·채널·비멤버는 실행을 만들지 않고 무시). 요청 ID `tg.<chat_id>.<message_id>`로 현재 바인딩 내 재전달을 중복 제거합니다(나중에 다른 바인딩 ID로 교체하면 이전 메시지와 교차 중복 제거되지 않습니다). 배치 내 업데이트는 순차 처리되며 정산된 업데이트까지만 `offset`을 전진시켜 일시적 저장소 장애 시 순서대로 재시도합니다.
-- **평문 응답, 첨부 파일, 승인**: `TelegramSender`는 `PushTransportId::TELEGRAM`(`telegram`) 아웃박스 행을 점유해 `parse_mode` 없이 링크 미리보기를 끈 평문으로 전송하며, UTF-16 경계(청크당 ≤ 3,800유닛)에 맞춰 안전하게 분할합니다. 첨부 파일은 `sendDocument`(멀티파트)로 업로드합니다. 승인 카드는 인라인 **Approve** / **Deny** 버튼(`bot:a:<nonce>` / `bot:d:<nonce>`)을 표시하며, 클릭 시 멤버십과 활성 리비전을 검증한 뒤 `Broker::decide`를 호출하고 `answerCallbackQuery`로 알린 다음 `editMessageText`로 버튼을 제거하고 최종 상태를 반영합니다. 길이가 초과된 승인 카드는 인라인 버튼 없이 `gateway.admin_url` 링크를 안내합니다. 봇 토큰은 URL이나 오류 설명에 절대 기록되지 않습니다.
+- **봇 설정 및 검증**: `@BotFather`에서 봇을 생성해 토큰을 프로필 `SecretStore`에 저장하고, `host.json`에 `gateway.telegram.bots.<alias>`(`bot_id`, `bot_token`, `dm: true`, 선택적 `groups: true`)를 등록한 뒤 `profile.yaml`에 `{id, adapter: telegram, bot: <alias>, dm: true, agent}` 및/또는 `{id, adapter: telegram, bot: <alias>, groups: true, agent}`를 바인딩합니다. 시작 시 `getMe`로 `bot_id`를 검증(및 `@username` 수집)하고 `(profile, bot)`당 단일 폴러를 실행하며, 프로필 간 중복 토큰·중복 봇 공유를 거부합니다. 봇 토큰을 다른 프로세스나 웹훅과 절대 공유하지 마세요. HTTP `409 Conflict`가 발생하면 폴러는 오류를 기록하고 `deleteWebhook`을 호출하지 않은 채 즉시 중단됩니다.
+- **DM·그룹 접수, 문맥, 순서 보장**:
+  - *1:1 DM*: `chat.type == "private"`이고 `from.id == chat.id`인 사람 `message` 업데이트만 수락합니다(봇·비멤버 무시).
+  - *그룹·슈퍼그룹*: `chat.type`이 `"group"` 또는 `"supergroup"`이고 `chat.id < 0`인 사람 메시지 중 `@<bot_username>` 명시 멘션(`entities`/`caption_entities`의 `mention`·`bot_command`) 또는 봇 메시지에 대한 직접 답장(`forum_topic_created` 서비스 메시지 제외)만 수락합니다. 포럼 토픽(`is_topic_message: true` + `message_thread_id`)은 토픽별로 대화 이력과 응답을 격리하고, 일반 그룹은 그룹 채팅 단위로 이력을 공유합니다.
+  - *인용 답장·수신 첨부*: 사용자가 이전 메시지에 답장(`reply_to_message` / `quote`)하면 길이가 제한된 비신뢰 인용 접두사를 사용자 텍스트 앞에 덧붙입니다. 수신 미디어·문서는 호스트 범위 첨부 참조(`telegram:<bot>/<file_id>`)로 기록하며 캡션 없는 파일 업로드도 접수합니다. 요청 ID `tg.<chat_id>.<message_id>`로 현재 바인딩 내 재전달을 중복 제거하고, 정산된 업데이트까지만 `offset`을 전진시킵니다.
+- **진행 표시(`👀` + 입력 중)**: 수락된 실행은 즉시 `setMessageReaction`으로 👀 리액션을 달고(최선 노력) `sendChatAction("typing")`(포럼 토픽은 `message_thread_id` 포함)을 유지하며, 승인 대기 중에는 입력 중 표시를 잠시 멈췄다가 승인 후 재개합니다. 완료가 확인되면 성공(`Succeeded`) 시 👍로 바꾸고 실패·취소(`Dead` / `Cancelled`) 시 리액션을 제거합니다.
+- **평문 응답, 첨부 파일, DM 전용 승인**: `TelegramSender`는 `PushTransportId::TELEGRAM`(`telegram`) 아웃박스 행을 점유해 Markdown을 깔끔한 평문으로 정리한 뒤 `parse_mode` 없이 링크 미리보기를 꺼서 전송합니다(UTF-16 경계 청크당 ≤ 3,800유닛; 그룹 응답은 `reply_parameters`와 `message_thread_id` 포함). 이미지 첨부(`image/jpeg`, `image/png`, `image/webp` ≤ 10 MB)는 `sendPhoto`로 전송하고(HTTP 400 시 `sendDocument`로 폴백), 그 외 파일은 `sendDocument`(멀티파트)로 업로드합니다. DM 출처 승인 카드는 인라인 **Approve** / **Deny** 버튼(`bot:a:<nonce>` / `bot:d:<nonce>`)을 표시하며, 그룹 출처 승인 카드는 그룹에 절대 게시하지 않고 `TelegramCardDeliverer`가 소유자 1:1 DM으로만 전달한 뒤 그룹에는 `DM_SENT_NOTICE`만 남기며 클릭을 확인된 DM 영수증에 묶어 검증합니다. 길이가 초과된 승인 카드는 인라인 버튼 없이 `gateway.admin_url` 링크를 안내합니다. 봇 토큰은 URL이나 오류 설명에 절대 기록되지 않습니다.
 
 ## 시크릿 저장소와 명령
 

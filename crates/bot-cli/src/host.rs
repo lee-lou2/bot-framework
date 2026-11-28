@@ -257,7 +257,15 @@ fn catalog(
             .telegram
             .bots
             .iter()
-            .map(|(alias, bot)| (alias.clone(), TelegramBot { dm: bot.dm }))
+            .map(|(alias, bot)| {
+                (
+                    alias.clone(),
+                    TelegramBot {
+                        dm: bot.dm,
+                        groups: bot.groups,
+                    },
+                )
+            })
             .collect(),
         http_endpoints: gateway.http.endpoints.keys().cloned().collect(),
         openai_endpoints: gateway

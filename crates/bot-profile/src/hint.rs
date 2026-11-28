@@ -141,6 +141,8 @@ pub fn entrance_fix(key: &str, across: bool) -> String {
     }
     let (what, field) = if key.starts_with("cli:") {
         ("CLI account alias", "`account`")
+    } else if key.starts_with("telegram:") && key.ends_with(":groups") {
+        ("Telegram groups entrance (one per bot)", "`bot`")
     } else if key.starts_with("telegram:") {
         ("Telegram DM entrance (one per bot)", "`bot`")
     } else if key.ends_with(":dm") {

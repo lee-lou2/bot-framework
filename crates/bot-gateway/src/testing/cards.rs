@@ -5,6 +5,7 @@ use bot_core::{
     api::ApprovalBlock,
     cards::{CardJob, CardKey, CardOrigin, CardOutbox, CardOutcome, CardReceipt},
     id::{ApprovalId, Revision},
+    intake::PushTransportId,
     port::{Error, Reply},
     profile::ProfileCatalog,
 };
@@ -128,19 +129,31 @@ fn ready<T: Send + 'static>(value: Result<T, Error>) -> Reply<'static, T> {
 
 impl CardOutbox for MemoryCards {
     fn claim(&self, limit: u32) -> Reply<'_, Vec<CardJob>> {
+        self.claim_for(&PushTransportId::SLACK, limit)
+    }
+
+    fn claim_for<'a>(
+        &'a self,
+        transport: &'a PushTransportId,
+        limit: u32,
+    ) -> Reply<'a, Vec<CardJob>> {
         let mut inner = self.inner.lock().unwrap();
         if inner.fail_claim {
             return ready(Err(Error::Unavailable));
         }
-        let take = inner.pending.len().min(limit as usize);
-        let taken: Vec<CardJob> = inner
-            .pending
-            .drain(..take)
-            .map(|mut job| {
+        let want_telegram = *transport == PushTransportId::TELEGRAM;
+        let mut taken = Vec::new();
+        let mut remaining = Vec::new();
+        for mut job in std::mem::take(&mut inner.pending) {
+            let is_telegram = job.owner.0.starts_with("telegram:");
+            if taken.len() < limit as usize && is_telegram == want_telegram {
                 job.key.attempt += 1;
-                job
-            })
-            .collect();
+                taken.push(job);
+            } else {
+                remaining.push(job);
+            }
+        }
+        inner.pending = remaining;
         inner.leased.extend(taken.clone());
         ready(Ok(taken))
     }

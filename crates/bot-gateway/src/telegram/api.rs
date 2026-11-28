@@ -138,27 +138,52 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
-/// Builds a `multipart/form-data` payload for `sendDocument` without extra crate dependencies.
-pub(crate) fn build_document_multipart(
+/// File payload for Telegram multipart media uploads (`sendDocument` / `sendPhoto`).
+#[derive(Clone, Copy, Debug)]
+pub struct MediaFile<'a> {
+    pub name: &'a str,
+    pub mime: &'a str,
+    pub bytes: &'a [u8],
+}
+
+/// Optional routing fields for Telegram multipart media uploads (`sendDocument` / `sendPhoto`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MediaOptions<'a> {
+    pub caption: Option<&'a str>,
+    pub thread_id: Option<u64>,
+    pub reply_to_message_id: Option<u64>,
+}
+
+/// Builds a `multipart/form-data` payload for `sendDocument` or `sendPhoto` without extra crate dependencies.
+pub(crate) fn build_media_multipart(
+    field_name: &str,
     chat_id: &str,
-    filename: &str,
-    mime: &str,
-    bytes: &[u8],
-    caption: Option<&str>,
+    file: MediaFile<'_>,
+    options: MediaOptions<'_>,
 ) -> (String, Vec<u8>) {
+    let reply_params = options.reply_to_message_id.map(|message_id| {
+        serde_json::json!({
+            "message_id": message_id,
+            "allow_sending_without_reply": true,
+        })
+        .to_string()
+    });
     // Choose a boundary guaranteed not to appear inside the payload bytes.
     let mut suffix = 0u64;
     let boundary = loop {
         let candidate = format!("----botfw-tg-boundary-{suffix:016x}");
         let needle = candidate.as_bytes();
-        let clashes = bytes.windows(needle.len()).any(|w| w == needle)
-            || caption.is_some_and(|c| c.contains(&candidate));
+        let clashes = file.bytes.windows(needle.len()).any(|w| w == needle)
+            || options.caption.is_some_and(|c| c.contains(&candidate))
+            || reply_params
+                .as_ref()
+                .is_some_and(|r| r.contains(&candidate));
         if !clashes {
             break candidate;
         }
         suffix = suffix.wrapping_add(1);
     };
-    let mut out = Vec::with_capacity(bytes.len() + 512);
+    let mut out = Vec::with_capacity(file.bytes.len() + 640);
     let push_field = |out: &mut Vec<u8>, name: &str, value: &str| {
         out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         out.extend_from_slice(
@@ -168,27 +193,34 @@ pub(crate) fn build_document_multipart(
         out.extend_from_slice(b"\r\n");
     };
     push_field(&mut out, "chat_id", chat_id);
-    if let Some(caption) = caption {
+    if let Some(thread_id) = options.thread_id {
+        push_field(&mut out, "message_thread_id", &thread_id.to_string());
+    }
+    if let Some(reply_params) = reply_params.as_deref() {
+        push_field(&mut out, "reply_parameters", reply_params);
+    }
+    if let Some(caption) = options.caption {
         push_field(&mut out, "caption", caption);
     }
-    let safe_name = sanitize_filename(filename);
-    let safe_mime = if mime
+    let safe_name = sanitize_filename(file.name);
+    let safe_mime = if file
+        .mime
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'+' | b'-'))
-        && !mime.is_empty()
+        && !file.mime.is_empty()
     {
-        mime
+        file.mime
     } else {
         "application/octet-stream"
     };
     out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     out.extend_from_slice(
         format!(
-            "Content-Disposition: form-data; name=\"document\"; filename=\"{safe_name}\"\r\nContent-Type: {safe_mime}\r\n\r\n"
+            "Content-Disposition: form-data; name=\"{field_name}\"; filename=\"{safe_name}\"\r\nContent-Type: {safe_mime}\r\n\r\n"
         )
         .as_bytes(),
     );
-    out.extend_from_slice(bytes);
+    out.extend_from_slice(file.bytes);
     out.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     (boundary, out)
 }
@@ -243,19 +275,19 @@ impl TelegramApi {
         self.finish(sent, token).await
     }
 
-    pub async fn send_document(
+    async fn send_media(
         &self,
+        method: &str,
+        field_name: &str,
         token: &str,
         chat_id: &str,
-        filename: &str,
-        mime: &str,
-        bytes: &[u8],
-        caption: Option<&str>,
+        file: MediaFile<'_>,
+        options: MediaOptions<'_>,
     ) -> Raw {
-        let (boundary, payload) = build_document_multipart(chat_id, filename, mime, bytes, caption);
+        let (boundary, payload) = build_media_multipart(field_name, chat_id, file, options);
         let sent = self
             .http
-            .post(self.url(token, "sendDocument"))
+            .post(self.url(token, method))
             .timeout(UPLOAD_TIMEOUT)
             .header(
                 "content-type",
@@ -265,6 +297,48 @@ impl TelegramApi {
             .send()
             .await;
         self.finish(sent, token).await
+    }
+
+    pub async fn send_document(
+        &self,
+        token: &str,
+        chat_id: &str,
+        file: MediaFile<'_>,
+        options: MediaOptions<'_>,
+    ) -> Raw {
+        self.send_media("sendDocument", "document", token, chat_id, file, options)
+            .await
+    }
+
+    pub async fn send_photo(
+        &self,
+        token: &str,
+        chat_id: &str,
+        file: MediaFile<'_>,
+        options: MediaOptions<'_>,
+    ) -> Raw {
+        self.send_media("sendPhoto", "photo", token, chat_id, file, options)
+            .await
+    }
+
+    /// Sets or clears (`emoji: None`) the bot's emoji reaction on a Telegram message.
+    pub async fn set_message_reaction(
+        &self,
+        token: &str,
+        chat_id: i64,
+        message_id: u64,
+        emoji: Option<&str>,
+    ) -> Raw {
+        let reaction = match emoji {
+            Some(emoji) => serde_json::json!([{"type": "emoji", "emoji": emoji}]),
+            None => serde_json::json!([]),
+        };
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": reaction,
+        });
+        self.call_json("setMessageReaction", token, &body).await
     }
 
     pub async fn get_me(&self, token: &str) -> Option<BotInfo> {
@@ -368,16 +442,25 @@ mod tests {
 
     #[test]
     fn multipart_builder_avoids_boundary_collisions_and_sanitizes_filename() {
-        let (boundary, body) = build_document_multipart(
-            "777",
-            "bad\"\r\nname.txt",
-            "text/plain",
-            b"----botfw-tg-boundary-0000000000000000 payload",
-            Some("hello"),
+        let (boundary, body) = build_media_multipart(
+            "document",
+            "-100777",
+            MediaFile {
+                name: "bad\"\r\nname.txt",
+                mime: "text/plain",
+                bytes: b"----botfw-tg-boundary-0000000000000000 payload",
+            },
+            MediaOptions {
+                caption: Some("hello"),
+                thread_id: Some(12),
+                reply_to_message_id: Some(34),
+            },
         );
         assert_ne!(boundary, "----botfw-tg-boundary-0000000000000000");
         let text = String::from_utf8(body).unwrap();
-        assert!(text.contains("name=\"chat_id\"\r\n\r\n777\r\n"));
+        assert!(text.contains("name=\"chat_id\"\r\n\r\n-100777\r\n"));
+        assert!(text.contains("name=\"message_thread_id\"\r\n\r\n12\r\n"));
+        assert!(text.contains("name=\"reply_parameters\"\r\n\r\n{\"allow_sending_without_reply\":true,\"message_id\":34}\r\n"));
         assert!(text.contains("name=\"caption\"\r\n\r\nhello\r\n"));
         assert!(text.contains("filename=\"badname.txt\""));
         assert!(text.ends_with(&format!("--{boundary}--\r\n")));

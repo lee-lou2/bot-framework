@@ -19,6 +19,7 @@ fn every_known_adapter_becomes_its_own_entrance() {
         {"id": "team", "adapter": "slack", "workspace": "home", "channel": "planning", "agent": "main"},
         {"id": "direct", "adapter": "slack", "workspace": "home", "dm": true, "agent": "main"},
         {"id": "tg", "adapter": "telegram", "bot": "main", "dm": true, "agent": "main"},
+        {"id": "tg-groups", "adapter": "telegram", "bot": "main", "groups": true, "agent": "main"},
         {"id": "inbox", "adapter": "http", "endpoint": "hooks", "agent": "main"},
         {"id": "gpt", "adapter": "http", "endpoint": "openai", "model": "assistant", "agent": "main"},
     ]));
@@ -32,11 +33,12 @@ fn every_known_adapter_becomes_its_own_entrance() {
             Adapter::SlackChannel { .. } => "slack-channel",
             Adapter::SlackDm { .. } => "slack-dm",
             Adapter::TelegramDm { .. } => "telegram-dm",
+            Adapter::TelegramGroups { .. } => "telegram-groups",
             Adapter::Http { .. } => "http",
             Adapter::OpenAi { .. } => "openai",
         })
         .collect();
-    // Ordered by binding id: desk, direct, gpt, inbox, team, tg.
+    // Ordered by binding id: desk, direct, gpt, inbox, team, tg, tg-groups.
     assert_eq!(
         kinds,
         [
@@ -45,7 +47,8 @@ fn every_known_adapter_becomes_its_own_entrance() {
             "openai",
             "http",
             "slack-channel",
-            "telegram-dm"
+            "telegram-dm",
+            "telegram-groups"
         ]
     );
 }
