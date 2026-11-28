@@ -157,7 +157,7 @@ v2.0은 Slack 이벤트와 버튼 클릭을 오직 [Socket Mode](https://docs.sl
 | 리액션 (`reaction`) | 봇 스코프 `reactions:read`, `users:read`; 봇 이벤트 `reaction_added`; 바인딩 `events`에 `reaction` 추가. | 등록된 채널의 `item.type=message`에 달린 활성 사용자 리액션([`reaction_added`](https://docs.slack.dev/reference/events/reaction_added/), [`users.info`](https://docs.slack.dev/reference/methods/users.info/)). |
 | 1:1 DM | 봇 스코프 `im:history`; 봇 이벤트 `message.im`; **App Home → Messages Tab**에서 사용자 메시지 허용; 워크스페이스 `dm: true` 및 DM 바인딩 추가. | [`message.im`](https://docs.slack.dev/reference/events/message.im/) (`type: message`, `channel_type: im`). |
 | 승인 / 중지 버튼 | **Interactivity & Shortcuts → Interactivity** 활성화. | Socket Mode를 통한 `block_actions`. |
-| 채널 예약용 소유자 DM | 봇 스코프 `im:write`(및 `chat:write`, Interactivity). | [`conversations.open`](https://docs.slack.dev/reference/methods/conversations.open/)으로 소유자와 1:1 DM 열기(DM 접수가 꺼져 있어도 동작). |
+| 채널 승인용 소유자 DM | 봇 스코프 `im:write`(및 `chat:write`, Interactivity). | [`conversations.open`](https://docs.slack.dev/reference/methods/conversations.open/)으로 소유자와 1:1 DM 열기(DM 접수가 꺼져 있어도 동작). |
 | 응답 파일 첨부 | 봇 스코프 `files:write`. | [`files.getUploadURLExternal`](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) → 바이트 업로드 → `files.completeUploadExternal`. |
 | 진행 표시 및 중지 (선택) | 봇 스코프 `reactions:write`(👀/✅/❌용); 스트리밍 진행 표시 및 중지 카드를 위해 `chat:write`·Interactivity와 Slack AI App/스트리밍 활성화. | `reactions.add`/`remove`, `chat.startStream`/`appendStream`/`stopStream`/`delete`, `agent_session_stopped`. |
 
@@ -243,7 +243,7 @@ Slack 버튼과 Admin UI는 동일한 브로커 승인 경로를 공유합니다
 2. **발동**: 현재 레지스트리에서 경로를 재검증합니다. 제거된 경로는 예약을 닫고 원본 대화에 한 번 알리며, 일시적 오류는 재시도합니다.
 3. **전달**: 첨부 없이 `<quiet>`만 반환하는 조용한 실행은 원본 응답을 생략합니다. 명시적 대상 초안은 별도의 소유자 승인(`Delivery draft`)이 필요하며, 아웃박스 적재 전과 Slack 어댑터가 채널 ID로 게시하기 직전에 다시 검증됩니다([신뢰성](reliability.md)).
 
-채널 원본 예약의 경우 v2.0은 채널 바인딩의 Slack 설치를 통해 소유자와 1:1 DM을 열고(원본이 이미 DM이면 기존 DM 재사용) DM 전달을 확인한 뒤 채널에 고정 안내 문구를 한 번 게시합니다. 이 경로는 승인 전용이며 일반 응답 라우팅이나 DM 접수를 변경하지 않습니다([신뢰성](reliability.md)).
+모든 Slack 채널 기원 승인(일반 도구 호출, 위임 하위 실행, 예약)의 경우 v2.0은 채널 바인딩의 Slack 설치를 통해 소유자와 1:1 DM을 열고(원본이 이미 DM이면 기존 DM 재사용) DM 전달을 확인한 뒤 채널에 고정 안내 문구를 한 번 게시합니다. 이 경로는 승인 전용이며 일반 응답 라우팅이나 DM 접수를 변경하지 않습니다([신뢰성](reliability.md)).
 
 ### 배포 중 진행 중인 모델 요청
 

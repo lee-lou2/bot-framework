@@ -151,3 +151,25 @@ fn only_the_truncation_warning_holds_a_successful_post() {
     ));
     assert!(!truncated(&reply(json!("message_truncated"))));
 }
+
+#[test]
+fn dm_approval_notices_and_cards_are_not_final_replies() {
+    let text = |s: &str| ReplyBody {
+        text: Some(s.into()),
+        approval: None,
+        attachments: vec![],
+    };
+    assert!(is_final_reply(&text("Done.")));
+    assert!(!is_final_reply(&text(DM_SENT_NOTICE)));
+    assert!(!is_final_reply(&text(DM_UNAVAILABLE_NOTICE)));
+    assert!(!is_final_reply(&text(DM_UNCONFIRMED_NOTICE)));
+    assert!(!is_final_reply(&ReplyBody {
+        text: None,
+        approval: Some(crate::reply::Card {
+            nonce: "n1".into(),
+            title: "Approval".into(),
+            lines: vec![],
+        }),
+        attachments: vec![],
+    }));
+}

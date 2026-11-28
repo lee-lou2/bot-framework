@@ -10,6 +10,7 @@ use crate::{
     schedule_routes::{is_ts, split_route},
 };
 use bot_core::{
+    cards::{DM_SENT_NOTICE, DM_UNAVAILABLE_NOTICE, DM_UNCONFIRMED_NOTICE},
     intake::{DeliveryScope, NotSentReason, Outgoing, PushTransportId},
     profile::{Adapter, Snapshot},
     slack::{BotThread, BotThreads},
@@ -141,6 +142,16 @@ fn step(raw: Raw, done: impl FnOnce(&Value) -> Option<String>) -> Step {
         }),
         Raw::Unknown => Step::Done(Delivery::Held),
     }
+}
+
+/// Returns false for intermediate approval cards and DM approval notices so Slack progress tracking stays resumable.
+fn is_final_reply(body: &ReplyBody) -> bool {
+    body.approval.is_none()
+        && !(body.attachments.is_empty()
+            && matches!(
+                body.text.as_deref(),
+                Some(DM_SENT_NOTICE | DM_UNAVAILABLE_NOTICE | DM_UNCONFIRMED_NOTICE)
+            ))
 }
 
 fn sendable(body: &ReplyBody) -> bool {
@@ -437,7 +448,7 @@ impl Sender for SlackSender {
             let thread = item.destination.thread.as_deref();
             let reply_guard = match (&self.ux, thread) {
                 (Some(ux), Some(thread)) => Some(
-                    ux.begin_reply(channel, thread, &item.key.run, body.approval.is_none())
+                    ux.begin_reply(channel, thread, &item.key.run, is_final_reply(body))
                         .await,
                 ),
                 _ => None,

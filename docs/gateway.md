@@ -157,7 +157,7 @@ v2.0 receives Slack events and button clicks strictly via [Socket Mode](https://
 | Reactions (`reaction`) | Bot scopes `reactions:read`, `users:read`; bot event `reaction_added`; add `reaction` to binding `events`. | Active human reactions on `item.type=message` in registered channels ([`reaction_added`](https://docs.slack.dev/reference/events/reaction_added/), [`users.info`](https://docs.slack.dev/reference/methods/users.info/)). |
 | 1:1 DMs | Bot scope `im:history`; bot event `message.im`; allow user messages in **App Home → Messages Tab**; set workspace `dm: true` and add DM binding. | [`message.im`](https://docs.slack.dev/reference/events/message.im/) (`type: message`, `channel_type: im`). |
 | Approval / stop buttons | Enable **Interactivity & Shortcuts → Interactivity**. | `block_actions` over Socket Mode. |
-| Owner DM for channel schedules | Bot scope `im:write` (plus `chat:write` and Interactivity). | [`conversations.open`](https://docs.slack.dev/reference/methods/conversations.open/) to open a 1:1 DM with the owner (works even with DM intake disabled). |
+| Owner DM for channel approvals | Bot scope `im:write` (plus `chat:write` and Interactivity). | [`conversations.open`](https://docs.slack.dev/reference/methods/conversations.open/) to open a 1:1 DM with the owner (works even with DM intake disabled). |
 | Reply file attachments | Bot scope `files:write`. | [`files.getUploadURLExternal`](https://docs.slack.dev/reference/methods/files.getUploadURLExternal/) → byte upload → `files.completeUploadExternal`. |
 | Progress indicators & stop (optional) | Bot scope `reactions:write` (for 👀/✅/❌); enable Slack AI App / streaming with `chat:write` and Interactivity for streamed progress and stop cards. | `reactions.add`/`remove`, `chat.startStream`/`appendStream`/`stopStream`/`delete`, `agent_session_stopped`. |
 
@@ -243,7 +243,7 @@ Any channel registered in the profile is selectable as a schedule destination (r
 2. **Fire**: re-verifies the route against the current registry. Removed routes close the schedule and notify the origin once; transient errors retry.
 3. **Delivery**: quiet runs returning `<quiet>` with no attachments suppress origin replies; explicit-destination drafts require separate owner approval (`Delivery draft`), re-checked before outbox enqueue and again by the Slack adapter before posting by channel ID ([Reliability](reliability.md)).
 
-For channel-origin schedules, v2.0 opens a 1:1 DM with the owner via the channel binding's Slack installation (reusing the DM if the origin is already a DM) and posts a single fixed notice in the channel after confirming DM delivery. This path is approval-only and never changes normal reply routing or DM intake ([Reliability](reliability.md)).
+For all Slack channel-origin approvals (general tool calls, delegated children, and schedules), v2.0 opens a 1:1 DM with the owner via the channel binding's Slack installation (reusing the DM if the origin is already a DM) and posts a single fixed notice in the channel after confirming DM delivery. This path is approval-only and never changes normal reply routing or DM intake ([Reliability](reliability.md)).
 
 ### In-Flight Model Requests During Deployments
 
