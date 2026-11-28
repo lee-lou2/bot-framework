@@ -56,6 +56,7 @@ fn slack_destination(adapter: &Adapter) -> Result<(&str, &str, PushTransportId),
             Ok((workspace.as_str(), channel.as_str(), transport))
         }
         Adapter::SlackDm { .. }
+        | Adapter::TelegramDm { .. }
         | Adapter::Cli { .. }
         | Adapter::Http { .. }
         | Adapter::OpenAi { .. } => Err(Error::Denied),

@@ -2,9 +2,9 @@
 
 [English](../gateway.md) | 한국어
 
-게이트웨이는 CLI, Slack, HTTP 요청을 인증하고 등록된 입구, 멤버, 트리거를 검증합니다. 주체(principal)와 응답 대화는 인증된 신원에서만 결정되며 요청 본문으로 덮어쓸 수 없습니다. 요청 ID는 PostgreSQL 접수(intake) 트랜잭션이 커밋된 뒤에만 반환되며, 동일 ID의 재전달은 같은 실행(run)으로 수렴합니다([신뢰성](reliability.md)).
+게이트웨이는 CLI, Slack, Telegram, HTTP 요청을 인증하고 등록된 입구, 멤버, 트리거를 검증합니다. 주체(principal)와 응답 대화는 인증된 신원에서만 결정되며 요청 본문으로 덮어쓸 수 없습니다. 요청 ID는 PostgreSQL 접수(intake) 트랜잭션이 커밋된 뒤에만 반환되며, 동일 ID의 재전달은 같은 실행(run)으로 수렴합니다([신뢰성](reliability.md)).
 
-푸시(push) 입구는 인증된 바인딩에서 응답 전달 어댑터(`transport`)를 고정합니다(Slack 채널과 DM은 `slack`을 공유). 아웃박스(outbox) 워커는 자신의 어댑터—분리 배포 시 담당 프로필/바인딩 범위 포함—와 일치하는 응답만 점유(claim)하며, 점유 후에도 현재 바인딩과 대상 권한을 재검증합니다. CLI와 HTTP는 아웃박스가 아닌 폴링으로 응답을 받습니다([신뢰성](reliability.md)).
+푸시(push) 입구는 인증된 바인딩에서 응답 전달 어댑터(`transport`)를 고정합니다(Slack 채널과 DM은 `slack`, Telegram 1:1 DM은 `telegram` 사용). 아웃박스(outbox) 워커는 자신의 어댑터—분리 배포 시 담당 프로필/바인딩 범위 포함—와 일치하는 응답만 점유(claim)하며, 점유 후에도 현재 바인딩과 대상 권한을 재검증합니다. CLI와 HTTP는 아웃박스가 아닌 폴링으로 응답을 받습니다([신뢰성](reliability.md)).
 
 ## 호스트 레지스트리 (`BOT_HOST_CONFIG`, JSON)
 
@@ -18,7 +18,7 @@
 - `servers`: 로컬 MCP 패키지(`root`, 명령) 또는 원격 HTTP 서버(`transport: "http"`, `url`, 선택적 `bearer` 또는 `oauth` `auth`)를 등록합니다. `bot validate`는 서버 파일과 명령에서 서버 리비전을 계산합니다. 도구 러너는 `BOT_INSTALLS` 아래 읽기 전용 설치본을 사용합니다. 기본 `state`는 `ephemeral`이며, `required` 서버는 현재 `srt` 호스트에서 시작할 수 없습니다([MCP 도구](plugins.md)).
 - `sandbox` / `limits` / `embeddings` / `memory_judge` / `admin`: 모델 VM 및 샌드박스 설정(`instance`, `image`/`images`, `network` — [아키텍처](architecture.md) 참고), 도구 제한, 선택적 하이브리드 메모리 `/embeddings` 및 System One `memory_judge` 엔드포인트, Admin UI/관측성 설정(`bind`, `hosts`, `max_failures`, `trace`, `logs`, `issues` — [Admin UI](admin.md) 참고)입니다.
 
-활성 세트(active set)는 프로필 리비전과 권한에 영향을 주는 호스트 설정(CLI 사용자 매핑, Slack 팀/채널, HTTP 인증, 허용 모델/업스트림/시크릿 또는 관리형 자격 증명 이름, 서버 리비전, `egress`, `private_egress`, `super_admins`, `allow_subscription_auth`, VM `image`/`images`/네트워크, 비기본값 `limits.tool_call_max_secs`, 설정된 `embeddings`/`memory_judge`, 활성화된 `admin.trace`/`logs`/`issues`)을 함께 묶습니다. 시크릿 값은 절대 포함되지 않습니다. 호스트 매핑 변경을 적용하려면 `bot serve --activate`를 실행합니다.
+활성 세트(active set)는 프로필 리비전과 권한에 영향을 주는 호스트 설정(CLI 사용자 매핑, Slack 팀/채널, Telegram 봇, HTTP 인증, 허용 모델/업스트림/시크릿 또는 관리형 자격 증명 이름, 서버 리비전, `egress`, `private_egress`, `super_admins`, `allow_subscription_auth`, VM `image`/`images`/네트워크, 비기본값 `limits.tool_call_max_secs`, 설정된 `embeddings`/`memory_judge`, 활성화된 `admin.trace`/`logs`/`issues`)을 함께 묶습니다. 시크릿 값은 절대 포함되지 않습니다. 호스트 매핑 변경을 적용하려면 `bot serve --activate`를 실행합니다.
 
 ### `gateway` 키
 
@@ -28,6 +28,7 @@
 | `slack.workspaces.<alias>` | `team_id`, 선택적 `app_id`(Socket Mode hello 시 검증), `channels`(별칭 → 채널 ID; `D…` DM ID는 금지), `dm`(기본 `false`), `receive`, 시크릿 **이름** `bot_token`, `app_token`, `signing_secret`. |
 | `slack.dm_sent_notice` | 소유자 DM 승인 카드 게시 후 원 채널에 남기는 기본 `"Approval request sent via DM"` 안내를 대체하는 선택적 한 줄 문구(200자 이하, 제어 문자 금지, 활성화 지문 제외). |
 | `slack.note_prefix` | 선택적 공백 없는 각주 접두사(출력 가능 문자 1–16자, `-`, `*`, `>`, `#`, ASCII 숫자로 시작 불가; 활성화 지문 제외). 설정하면 이 접두사로 시작하는 말미 문단을 작은 Slack `context` 블록으로 렌더링하며, 생략하면 응답을 그대로 표시합니다. |
+| `telegram.bots.<alias>` | `bot_id`(`getMe`로 검증하는 양의 정수), `dm`(기본 `false`; DM 바인딩에 `true` 필수), 시크릿 **이름** `bot_token`. 중복 `bot_id` 별칭은 거부되며, 비어 있지 않을 때만 활성화 지문에 포함됩니다. |
 | `http.listen`, `http.remote` | 기본값 `127.0.0.1:8788`(Admin UI의 `127.0.0.1:8787`과 구분). 평문 HTTP이므로 비루프백 바인딩은 TLS 프록시 뒤에서 명시적 `http.remote: true`(기본 `false`)가 필요하며, 그렇지 않으면 `bot validate`와 `bot serve`가 `gateway.http.listen`을 거부하고 아무 포트도 열지 않습니다. |
 | `http.endpoints.<alias>` (웹훅) | `kind: "webhook"`(또는 생략): `issuer`, `audience`, `key`(HS256 시크릿 이름), `sync_wait_ms`(기본 10초, 1–60000 ms), `max_token_age_secs`(≥ 1). |
 | `http.endpoints.<alias>` (OpenAI) | `kind: "openai"`: `keys`(슬롯 → `{secret, subject}` 매핑 1–16개), `wait_ms`(기본 120초, 1–300000 ms), `max_active_runs`(기본 32, 1–256). 웹훅과 별도 별칭을 사용해야 합니다(OpenAI 엔드포인트가 하나라도 설정되면 `v1`은 예약됨). |
@@ -44,9 +45,9 @@ Slack 워크스페이스 `receive` 규칙:
 
 ## 주체와 입구
 
-- **주체 형식**: `local:<account>`, `slack:<workspace-alias>/<Slack-user-ID>`, `http:<endpoint-alias>/<sub-or-subject>`. 내부 구분 문자로 다른 주체를 위장할 수 없습니다.
+- **주체 형식**: `local:<account>`, `slack:<workspace-alias>/<Slack-user-ID>`, `telegram:<user-id>`, `http:<endpoint-alias>/<sub-or-subject>`. 내부 구분 문자로 다른 주체를 위장할 수 없습니다.
 - **입구 유일성**: 활성 프로필 전체에서 같은 입구를 중복 바인딩할 수 없습니다(별칭과 해석된 ID 모두). CLI는 `(OS 사용자, 프로필)`로 입구를 선택합니다.
-- **멤버십과 스코프**: 비멤버는 거부됩니다(Slack은 조용히 ack, HTTP는 `403`, CLI는 `forbidden`). 요청자 스코프는 `(역할 스코프 합집합) ∩ 정책 상한`이며, 에이전트 실행을 시작하려면 `run`이 필요합니다. 승인자는 기본적으로 사람 주체(CLI/Slack)이며, HTTP 서비스 주체는 승인자가 될 수 없습니다.
+- **멤버십과 스코프**: 비멤버는 거부됩니다(Slack·Telegram은 조용히 무시/ack, HTTP는 `403`, CLI는 `forbidden`). 요청자 스코프는 `(역할 스코프 합집합) ∩ 정책 상한`이며, 에이전트 실행을 시작하려면 `run`이 필요합니다. 승인자는 기본적으로 사람 주체(CLI/Slack/Telegram)이며, HTTP 서비스 주체는 승인자가 될 수 없습니다.
 - **트리거**: 같은 바인딩과 이벤트(또는 HTTP 메서드/경로)의 후보는 `order` 순으로 평가하며 첫 일치가 선택됩니다. 봉투(envelope) 매처(`body.…`, `conversation.…`)는 점 경로 조회와 리터럴 일치만 지원합니다.
 - **비공개 트리거**: 일반 접수/큐 적재 전에 `PrivateIntake`로만 라우팅되며 실패 시 일반 채팅으로 폴백하지 않습니다. 선택된 `private_pass: true` 트리거가 유효한 빈 PASS를 반환하면 원문 텍스트와 첨부 참조가 해당 바인딩의 일반 DM 접수로 전달됩니다. 영구 거부(형식/권한)만 ack되며 진행 중, 시작 전 재시도, 충돌, 장애 신호는 재전달을 위해 unack 상태로 남습니다.
 
@@ -187,6 +188,14 @@ v2.0은 Slack 이벤트와 버튼 클릭을 오직 [Socket Mode](https://docs.sl
 - **진행 표시**: 👀(`eyes`) 리액션을 달고 `chat.startStream` / `chat.appendStream` / `chat.stopStream`으로 진행 요약을 스트리밍하며(`chat.delete` 전에 `task_update`를 `complete`로 마감), 성공 시 ✅(`white_check_mark`), 실패/취소 시 ❌(`x`)로 교체합니다. 같은 스레드에 여러 요청이 동시에 돌 때는 한 번에 하나의 진행 카드만 유지하고, 표시 중이던 요청이 끝나면 `session_status: "processing"`을 유지한 채 다음 활성 요청으로 순차 인계해 모든 요청이 끝날 때까지 상태를 이어서 표시합니다. 순수 장식용(API 실패가 실행이나 전달을 막지 않음)이며 고정 상태 문구, 에이전트 약칭, 도구 이름만 표시하고 사용자 텍스트·시크릿·인자·초안은 절대 노출하지 않습니다.
 - **중지 경로**: (1) Slack Agent 중지 버튼(`agent_session_stopped`)이 확인 카드를 게시; (2) 활성 스레드의 단독 중지 명령(`"stop"`, `"cancel"`, `"abort"`, `"halt"`, `"stop please"`, `"cancel please"` — 채널에서는 봇 멘션 필요, 1:1 DM에서는 불필요; 추가 텍스트가 있으면 새 요청으로 접수)이 즉시 중지; (3) 확인 카드 버튼 **Stop here**(`bot_stop_confirm`)와 **Continue**(`bot_stop_continue`)로 최종 확정.
 - **권한과 실행**: 요청자 또는 현재 리비전의 `admin`/`owner` 역할 멤버만 중지할 수 있습니다(그 외에는 `chat.postEphemeral`로 임시 안내 표시). 확정된 중지는 실행과 하위 트리 전체에 `RunAdmin::cancel`을 호출하고 `slack_user_stop`을 감사 기록하며 ❌와 함께 중지 카드를 게시합니다. 확인 전에 이미 완료되었다면 완료 사실을 알립니다.
+
+## Telegram 입구
+
+Telegram 지원은 Bot API 롱 폴링(`getUpdates`, `allowed_updates: ["message", "callback_query"]`) 기반의 **1:1 DM 전용**입니다. 그룹, 슈퍼그룹, 채널, 웹훅은 이 버전에서 지원하지 않습니다.
+
+- **봇 설정 및 검증**: `@BotFather`에서 봇을 생성해 토큰을 프로필 `SecretStore`에 저장하고, `host.json`에 `gateway.telegram.bots.<alias>`(`bot_id`, `bot_token`, `dm: true`)를 등록한 뒤 `profile.yaml`에 `{id, adapter: telegram, bot: <alias>, dm: true, agent}`를 바인딩합니다. 시작 시 `getMe`로 `bot_id`를 검증하고 설치 간 중복 봇 토큰 사용을 거부합니다. 봇 토큰을 다른 프로세스나 웹훅과 절대 공유하지 마세요. HTTP `409 Conflict`가 발생하면 폴러는 오류를 기록하고 `deleteWebhook`을 호출하지 않은 채 즉시 중단됩니다.
+- **DM 접수 및 순서 보장**: `chat.type == "private"`이고 `from.id == chat.id`인 사람 `message` 업데이트만 수락합니다(봇·그룹·채널·비멤버는 실행을 만들지 않고 무시). 요청 ID `tg.<chat_id>.<message_id>`로 현재 바인딩 내 재전달을 중복 제거합니다(나중에 다른 바인딩 ID로 교체하면 이전 메시지와 교차 중복 제거되지 않습니다). 배치 내 업데이트는 순차 처리되며 정산된 업데이트까지만 `offset`을 전진시켜 일시적 저장소 장애 시 순서대로 재시도합니다.
+- **평문 응답, 첨부 파일, 승인**: `TelegramSender`는 `PushTransportId::TELEGRAM`(`telegram`) 아웃박스 행을 점유해 `parse_mode` 없이 링크 미리보기를 끈 평문으로 전송하며, UTF-16 경계(청크당 ≤ 3,800유닛)에 맞춰 안전하게 분할합니다. 첨부 파일은 `sendDocument`(멀티파트)로 업로드합니다. 승인 카드는 인라인 **Approve** / **Deny** 버튼(`bot:a:<nonce>` / `bot:d:<nonce>`)을 표시하며, 클릭 시 멤버십과 활성 리비전을 검증한 뒤 `Broker::decide`를 호출하고 `answerCallbackQuery`로 알린 다음 `editMessageText`로 버튼을 제거하고 최종 상태를 반영합니다. 길이가 초과된 승인 카드는 인라인 버튼 없이 `gateway.admin_url` 링크를 안내합니다. 봇 토큰은 URL이나 오류 설명에 절대 기록되지 않습니다.
 
 ## 시크릿 저장소와 명령
 

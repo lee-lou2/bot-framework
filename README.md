@@ -4,7 +4,7 @@ English | [한국어](README.ko.md)
 
 **A Rust framework for running safe agents, tools, and human-approved workflows from declarative profile directories — built on the premise that AI models are untrusted.**
 
-Declare agents, skills, tools, and approval rules in a profile directory, and a single binary (`bot`) accepts CLI, Slack, OpenAI-compatible HTTP requests, and scheduled triggers, executes them inside strict trust boundaries, and replies to the original conversation.
+Declare agents, skills, tools, and approval rules in a profile directory, and a single binary (`bot`) accepts CLI, Slack, Telegram, OpenAI-compatible HTTP requests, and scheduled triggers, executes them inside strict trust boundaries, and replies to the original conversation.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/runtime-architecture-dark.svg">
@@ -27,7 +27,7 @@ Run all four roles on one host with `bot serve --role all`, or split them into s
 
 | Role | Crate | Responsibility |
 |---|---|---|
-| **Gateway** | `bot-gateway` | CLI, Slack, and OpenAI-compatible HTTP (`/v1`) intake, auth/normalization, outbox delivery |
+| **Gateway** | `bot-gateway` | CLI, Slack, Telegram, and OpenAI-compatible HTTP (`/v1`) intake, auth/normalization, outbox delivery |
 | **Scheduler** | `bot-runtime` | Static cron and conversational schedules (can invoke tools directly without a model) |
 | **Worker & Broker** | `bot-runtime` · `bot-broker` | Queue leasing, model execution (direct API / Apple `container` VM), child delegation, tool auth/approval/MCP (`srt`) |
 | **Admin & Obs** | `bot-admin` | Web UI/API for approvals, holds, and run resume/cancel; OTLP traces/logs and Sentry-compatible issues |
@@ -40,7 +40,7 @@ Run all four roles on one host with `bot serve --role all`, or split them into s
 | Surface | Support | Notes |
 |---|---|---|
 | **Platforms** | Linux & macOS (Direct API + `srt` tools); macOS Apple Silicon (VM CLI harnesses) | `anthropic-api` and `openai-api` run on both Linux and macOS; `claude-cli`/`codex-cli`/`agy-cli` require Apple `container` VM |
-| **Channels** | CLI socket, OpenAI-compatible HTTP (`/v1`), JWT HTTP webhooks, Slack Socket Mode | Channel-neutral core with shrink-only drift checks; new channels implement gateway intake/delivery |
+| **Channels** | CLI socket, OpenAI-compatible HTTP (`/v1`), JWT HTTP webhooks, Slack Socket Mode, Telegram Bot API (1:1 DM) | Channel-neutral core with shrink-only drift checks; new channels implement gateway intake/delivery |
 | **Authentication** | Static secrets, Remote MCP OAuth 2.0 (PKCE), experimental Google Service Account (RS256) & opt-in CLI subscriptions | Host-encrypted in PostgreSQL (`bot_credentials`); models never see keys or tokens ([Auth guide](docs/auth.md)) |
 
 ## Quick Start (Local Demo)

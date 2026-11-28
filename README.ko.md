@@ -4,7 +4,7 @@
 
 **AI 모델은 신뢰할 수 없다는 전제 아래, 선언적 프로필 디렉터리에서 안전한 에이전트·도구·사람 승인 워크플로를 실행하는 Rust 프레임워크입니다.**
 
-프로필 디렉터리에 에이전트, 스킬, 도구, 승인 규칙을 선언하면 단일 바이너리(`bot`)가 CLI, Slack, OpenAI 호환 HTTP 요청, 스케줄 트리거를 수락해 엄격한 신뢰 경계 안에서 실행하고 원래 대화로 응답합니다.
+프로필 디렉터리에 에이전트, 스킬, 도구, 승인 규칙을 선언하면 단일 바이너리(`bot`)가 CLI, Slack, Telegram, OpenAI 호환 HTTP 요청, 스케줄 트리거를 수락해 엄격한 신뢰 경계 안에서 실행하고 원래 대화로 응답합니다.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/runtime-architecture-dark.svg">
@@ -27,7 +27,7 @@
 
 | 역할 | 크레이트 | 책임 |
 |---|---|---|
-| **Gateway** | `bot-gateway` | CLI, Slack, OpenAI 호환 HTTP(`/v1`) 접수, 인증/정규화, 아웃박스 전달 |
+| **Gateway** | `bot-gateway` | CLI, Slack, Telegram, OpenAI 호환 HTTP(`/v1`) 접수, 인증/정규화, 아웃박스 전달 |
 | **Scheduler** | `bot-runtime` | 정적 크론 및 대화형 스케줄(모델 없이 도구를 직접 호출 가능) |
 | **Worker & Broker** | `bot-runtime` · `bot-broker` | 큐 리스, 모델 실행(직접 API / Apple `container` VM), 자식 위임, 도구 권한/승인/MCP(`srt`) |
 | **Admin & Obs** | `bot-admin` | 승인·보류(hold)·실행 재개/취소용 웹 UI/API, OTLP 트레이스/로그 및 Sentry 호환 이슈 내보내기 |
@@ -40,7 +40,7 @@
 | 영역 | 지원 범위 | 비고 |
 |---|---|---|
 | **플랫폼** | Linux·macOS (직접 API + `srt` 도구); macOS Apple Silicon (VM CLI 하니스) | `anthropic-api`와 `openai-api`는 Linux/macOS 모두 지원; `claude-cli`/`codex-cli`/`agy-cli`는 Apple `container` VM 필요 |
-| **채널** | CLI 소켓, OpenAI 호환 HTTP(`/v1`), JWT HTTP 웹훅, Slack Socket Mode | 축소 전용 드리프트 가드로 코어 채널 중립성 유지; 새 채널은 게이트웨이 접수/전달로 추가 |
+| **채널** | CLI 소켓, OpenAI 호환 HTTP(`/v1`), JWT HTTP 웹훅, Slack Socket Mode, Telegram Bot API(1:1 DM) | 축소 전용 드리프트 가드로 코어 채널 중립성 유지; 새 채널은 게이트웨이 접수/전달로 추가 |
 | **인증** | 정적 시크릿, 원격 MCP OAuth 2.0(PKCE), 실험적 Google 서비스 계정(RS256) 및 옵트인 CLI 구독 | PostgreSQL(`bot_credentials`) 호스트 암호화; 모델은 키나 토큰에 절대 접근 불가 ([인증 가이드](docs/ko/auth.md)) |
 
 ## 빠른 시작 (로컬 데모)

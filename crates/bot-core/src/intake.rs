@@ -64,6 +64,7 @@ pub struct PushTransportId(Cow<'static, str>);
 
 impl PushTransportId {
     pub const SLACK: Self = Self(Cow::Borrowed("slack"));
+    pub const TELEGRAM: Self = Self(Cow::Borrowed("telegram"));
 
     pub fn new(name: impl Into<String>) -> Result<Self, Error> {
         let name = name.into();

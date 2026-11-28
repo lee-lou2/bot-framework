@@ -87,6 +87,7 @@ async fn an_admin_only_process_masks_a_key_rotated_after_it_started_within_the_r
         secret_admin: None,
         stop: Some(stop.clone()),
         slack_base: None,
+        telegram_base: None,
         upstream: None,
         store_config: None,
     };

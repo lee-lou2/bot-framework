@@ -191,6 +191,7 @@ pub struct Overrides {
     pub secret_admin: Option<Arc<SecretAdmin>>,
     pub stop: Option<CancellationToken>,
     pub slack_base: Option<String>,
+    pub telegram_base: Option<String>,
     pub upstream: Option<Arc<dyn bot_broker::model::Upstream>>,
     pub store_config: Option<Config>,
 }
@@ -354,6 +355,8 @@ async fn run_inner(
             tracer: observe.tracer(),
             #[cfg(any(test, feature = "testing"))]
             slack_base: overrides.slack_base.clone(),
+            #[cfg(any(test, feature = "testing"))]
+            telegram_base: overrides.telegram_base.clone(),
             active: active.clone(),
         };
         Some(gateway::prepare(&deps).await?)

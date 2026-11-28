@@ -77,7 +77,7 @@
     secret: { declared: "Declared" },
   };
   const TRIGGER_ON = { cron: "Scheduled (cron)", event: "Event", http: "HTTP request" };
-  const ADAPTER = { cli: "CLI", slack: "Slack", http: "HTTP", openai: "OpenAI API" };
+  const ADAPTER = { cli: "CLI", slack: "Slack", telegram: "Telegram", http: "HTTP", openai: "OpenAI API" };
   const RESPONSE = { accepted: "Accept immediately (202)", sync: "Return tool result" };
   const factLabel = (kind, key) => (FACT[kind] && FACT[kind][key]) || key;
 

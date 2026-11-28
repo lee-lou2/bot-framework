@@ -39,6 +39,7 @@ pub fn entrance(kind: &Adapter) -> String {
             format!("slack:{workspace}:channel:{channel}")
         }
         Adapter::SlackDm { workspace } => format!("slack:{workspace}:dm"),
+        Adapter::TelegramDm { bot } => format!("telegram:{bot}:dm"),
         Adapter::Http { endpoint } => format!("http:{endpoint}"),
         // Multiple OpenAI models can share an endpoint alias within a single profile.
         Adapter::OpenAi {
@@ -59,6 +60,7 @@ pub fn adapter_name(kind: &Adapter) -> &'static str {
     match kind {
         Adapter::Cli { .. } => "cli",
         Adapter::SlackChannel { .. } | Adapter::SlackDm { .. } => "slack",
+        Adapter::TelegramDm { .. } => "telegram",
         Adapter::Http { .. } => "http",
         Adapter::OpenAi { .. } => "openai",
     }

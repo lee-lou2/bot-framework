@@ -66,9 +66,8 @@ impl RunOrigin {
         use crate::identity::{IdentityKind, identity_kind};
         match (kind, identity_kind(&principal.0)) {
             (ConversationKind::Cli, Some(IdentityKind::Local))
-            | (ConversationKind::Direct | ConversationKind::Channel, Some(IdentityKind::Slack)) => {
-                Self::Message
-            }
+            | (ConversationKind::Direct | ConversationKind::Channel, Some(IdentityKind::Slack))
+            | (ConversationKind::Direct, Some(IdentityKind::Telegram)) => Self::Message,
             (ConversationKind::Http, Some(IdentityKind::Http)) => Self::Http,
             _ => Self::Unknown,
         }

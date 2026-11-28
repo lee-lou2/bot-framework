@@ -217,6 +217,23 @@ pub fn check_host(snap: &Snapshot, host: &HostCatalog, issues: &mut Issues) {
                 }
                 Some(_) => {}
             },
+            Adapter::TelegramDm { bot } => match host.telegram.get(bot) {
+                None => issues.error_at(
+                    "unknown-bot",
+                    "profile.yaml",
+                    &at,
+                    format!("Telegram bot is not registered on this host: {bot}"),
+                ),
+                Some(entry) if !entry.dm => {
+                    issues.error_at(
+                        "dm-not-allowed",
+                        "profile.yaml",
+                        &at,
+                        format!("Telegram bot {bot} does not allow DM ingress"),
+                    );
+                }
+                Some(_) => {}
+            },
             Adapter::Cli { .. } => {}
             Adapter::Http { endpoint } => http_endpoint(host, endpoint, false, &at, issues),
             Adapter::OpenAi {

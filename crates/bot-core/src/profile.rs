@@ -163,6 +163,9 @@ pub enum Adapter {
     SlackDm {
         workspace: String,
     },
+    TelegramDm {
+        bot: String,
+    },
     /// Legacy webhook ingress (`kind: webhook`).
     Http {
         endpoint: String,

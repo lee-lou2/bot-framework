@@ -101,21 +101,40 @@ pub(super) fn section(snapshot: &Snapshot, run: &RunContext) -> String {
             push_attachments(&mut lines, &run.work.attachments);
         }
         ConversationKind::Direct => {
-            push(&mut lines, "channel", "slack-dm");
-            push(&mut lines, "origin", run.origin.as_str());
-            if let Some(ws) = slack_workspace(snapshot, run) {
-                push(&mut lines, "workspace", ws);
+            let telegram_bot = match snapshot.bindings.get(&run.binding).map(|b| &b.source) {
+                Some(Adapter::TelegramDm { bot }) => Some(bot.as_str()),
+                _ => None,
+            };
+            if let Some(bot) = telegram_bot {
+                push(&mut lines, "channel", "telegram-dm");
+                push(&mut lines, "origin", run.origin.as_str());
+                push(&mut lines, "bot", bot);
+                push(&mut lines, "binding", &run.binding.0);
+                let chat_id = run
+                    .conversation
+                    .id
+                    .split_once('/')
+                    .map_or(run.conversation.id.as_str(), |(_, chat)| chat);
+                push(&mut lines, "chat_id", chat_id);
+                push(&mut lines, "requester", &run.principal.0);
+                push_attachments(&mut lines, &run.work.attachments);
+            } else {
+                push(&mut lines, "channel", "slack-dm");
+                push(&mut lines, "origin", run.origin.as_str());
+                if let Some(ws) = slack_workspace(snapshot, run) {
+                    push(&mut lines, "workspace", ws);
+                }
+                push(&mut lines, "binding", &run.binding.0);
+                push(&mut lines, "channel_id", &run.conversation.id);
+                if let Some(thread) = &run.conversation.thread {
+                    push(&mut lines, "thread_ts", thread);
+                }
+                if let Some(ts) = &run.intake.message_ts {
+                    push(&mut lines, "message_ts", ts);
+                }
+                push(&mut lines, "requester", &run.principal.0);
+                push_attachments(&mut lines, &run.work.attachments);
             }
-            push(&mut lines, "binding", &run.binding.0);
-            push(&mut lines, "channel_id", &run.conversation.id);
-            if let Some(thread) = &run.conversation.thread {
-                push(&mut lines, "thread_ts", thread);
-            }
-            if let Some(ts) = &run.intake.message_ts {
-                push(&mut lines, "message_ts", ts);
-            }
-            push(&mut lines, "requester", &run.principal.0);
-            push_attachments(&mut lines, &run.work.attachments);
         }
         ConversationKind::Cli => {
             push(&mut lines, "channel", "cli");

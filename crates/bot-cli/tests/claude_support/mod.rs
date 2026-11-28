@@ -299,6 +299,7 @@ impl Rig {
             secret_admin: None,
             stop: Some(stop.clone()),
             slack_base: slack_base.map(str::to_owned),
+            telegram_base: None,
         };
         let roles = roles.to_vec();
         let task = tokio::spawn(async move {

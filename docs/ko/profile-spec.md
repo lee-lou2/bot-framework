@@ -103,7 +103,7 @@ Locate relevant files and evidence in the provided workspace.
 | `limits` | `tool_call_max_secs` | 도구 호출당 타임아웃 상한(초, 기본 `60`, 최대 `900`). 기본값이 아니면 활성화 지문(fingerprint)에 포함. |
 | `embeddings` | `endpoint`, `model`, `secret`, `dimensions` | 하이브리드 메모리 회상용 선택적 OpenAI 호환 `/embeddings` API(`dimensions` `1..=4096`, 기본 `3072`; `secret`은 루프백 IP 리터럴에서만 선택 사항). 설정 시 활성화 지문에 포함([architecture.md](architecture.md#하이브리드-메모리와-자동-저장)). |
 | `memory_judge` | `endpoint`, `model`, `secret` | 1:1 DM/CLI 실행에서 턴 종료 자동 비공개 메모리 저장을 수행하는 선택적 System One 판단 모델(`d1.2-ultra`/`jev-latest`; `secret`은 루프백 IP 리터럴에서만 선택 사항). 설정 시 활성화 지문에 포함. |
-| `gateway` | `cli` (`accounts`, `uid`, `os_user`), `slack` (`workspaces`, `team_id`, `bot_token`, `app_token`, `dm`, `channels`), `http` (`endpoints`, `kind`, `keys`, `secret`, `subject`, `wait_ms`, `max_active_runs`, `issuer`, `audience`, `key`) | 활성화 시 검증되는 입구 매핑([gateway.md](gateway.md)). |
+| `gateway` | `cli` (`accounts`, `uid`, `os_user`), `slack` (`workspaces`, `team_id`, `bot_token`, `app_token`, `dm`, `channels`), `telegram` (`bots`, `bot_id`, `bot_token`, `dm`), `http` (`endpoints`, `kind`, `keys`, `secret`, `subject`, `wait_ms`, `max_active_runs`, `issuer`, `audience`, `key`) | 활성화 시 검증되는 입구 매핑([gateway.md](gateway.md)). |
 | `admin` | `bind` | 로컬 관리자 UI/API 주소(`Admin UI: http://...`, [admin.md](admin.md) 참고). |
 
 ## 전체 프로필: 예약, 상속, 메모리
@@ -129,7 +129,7 @@ policy:
   approve: []
 ```
 
-- **바인딩(`bindings`):** 외부 입구 하나를 에이전트 하나에 연결합니다. CLI(`adapter: cli`, `account`), Slack 채널(`adapter: slack`, `workspace`, `channel`, 선택적 `events`), Slack DM(`adapter: slack`, `workspace`, `dm: true`, 선택적 `events: [dm]`), 웹훅 HTTP(`adapter: http`, `endpoint`), 또는 OpenAI 호환 HTTP(`model` 및 선택적 `approvers` 추가)를 지원합니다. 활성 프로필 전체에서 동일한 입구를 중복 바인딩할 수 없습니다.
+- **바인딩(`bindings`):** 외부 입구 하나를 에이전트 하나에 연결합니다. CLI(`adapter: cli`, `account`), Slack 채널(`adapter: slack`, `workspace`, `channel`, 선택적 `events`), Slack DM(`adapter: slack`, `workspace`, `dm: true`, 선택적 `events: [dm]`), Telegram 1:1 DM(`adapter: telegram`, `bot`, `dm: true`), 웹훅 HTTP(`adapter: http`, `endpoint`), 또는 OpenAI 호환 HTTP(`model` 및 선택적 `approvers` 추가)를 지원합니다. 활성 프로필 전체에서 동일한 입구를 중복 바인딩할 수 없습니다.
 - **상속:** 지침은 `rules.md` -> 루트 `AGENT.md` -> ... -> 현재 `AGENT.md` 순으로 이어집니다. 에이전트는 자신과 조상의 `skills/`·`knowledge/`만 볼 수 있으며, 가시 경로 내 스킬 이름 충돌은 거부됩니다. 지식 검색은 요청당 최대 8개 문서 / 32 KiB를 출처 인용과 함께 읽습니다. `AGENT.md` 프런트매터는 `model`(부모 또는 프로필 `model` 상속), `description`(한 줄 <= 200자, 비상속, 기본값은 폴더명), `builtin`을 받습니다. `env.yaml`은 비비밀 문자열 맵으로 위에서 아래로 상속되며 자식이 덮어쓸 수 있고, 셸 확장이나 호스트 환경 변수 상속은 하지 않습니다.
 - **메모리 시드(`memory/`) 및 런타임 메모리:** 시드는 `(profile, agent, relative path, content hash)` 기준으로 최초 한 번만 부트스트랩됩니다. 프런트매터에는 프로필 멤버인 `owner`가 필수이며, `visibility` 기본값은 `private`(공유는 `profile`)입니다. 회상 시 프로필·에이전트·요청자 가시성(`private`은 소유자의 DM/CLI에서만, 채널·HTTP·예약은 `profile`만 조회)으로 필터링되며 회상된 항목은 신뢰할 수 없는 참고 입력으로 표시됩니다. 자식 위임 시 요청자와 대화 종류가 유지됩니다. 기본 템플릿(`bot init`)과 `personal`/`team` 예시는 기본적으로 `memory.search`, `memory.save`, `memory.forget`을 포함합니다([plugins.md](plugins.md)). 런타임 메모리는 `owner`를 인증된 주체에 고정하며, 소유자만 비공개 항목을 갱신(`supersedes`)·삭제하거나 `profile` 공유를 승인할 수 있습니다.
 
@@ -336,7 +336,7 @@ Slack 이벤트에 여러 직접 도구 트리거가 일치하면 접수 시점�
 | 대기 중인 승인 | 현재 권한, 승인자, 위험 등급, 정책, 도구, 설치 리비전을 재검사; 폐기된 도구는 `stale`로 종결. |
 
 - **카탈로그 및 번들 포맷:** `bot_core::profile::ProfileCatalog`는 `active`, `current`, `lookup`을 제공합니다. `ProfileSource::validate`는 집합 리비전을 반환하고, `Accept.revision`은 프로필 리비전을 기록합니다. `SKILL.md` 프런트매터가 있는 번들은 `BOTPROFILE2` 헤더를 쓰며, 없는 프로필은 안정적인 해시와 레거시 복원 호환성을 위해 `BOTPROFILE1`을 유지합니다.
-- **주체 식별자와 개발용 비밀:** 허용 형식은 `local:<account>`, `slack:<workspace-alias>/<U|W...>`(Slack 사용자 ID <= 32자), `http:<endpoint-alias>/<sub>`, 그리고 cron 전용 `service:<name>`입니다. 사람 승인자는 `local:*`과 `slack:*`만 가능합니다. `env` 비밀 저장소는 `(personal, calendar-reader)`를 `BOT_SECRET__personal__calendar_reader`로 매핑합니다(소문자, 하이픈은 단일 밑줄, 경계는 이중 밑줄; 값은 진단에 절대 출력되지 않음).
+- **주체 식별자와 개발용 비밀:** 허용 형식은 `local:<account>`, `slack:<workspace-alias>/<U|W...>`(Slack 사용자 ID <= 32자), `telegram:<user-id>`(양의 Telegram 숫자 사용자 ID), `http:<endpoint-alias>/<sub>`, 그리고 cron 전용 `service:<name>`입니다. 사람 승인자는 `local:*`, `slack:*`, `telegram:*`만 가능합니다. `env` 비밀 저장소는 `(personal, calendar-reader)`를 `BOT_SECRET__personal__calendar_reader`로 매핑합니다(소문자, 하이픈은 단일 밑줄, 경계는 이중 밑줄; 값은 진단에 절대 출력되지 않음).
 
 ### `bot-profile` 검증 규칙
 

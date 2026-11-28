@@ -24,7 +24,9 @@ fn m1_a_wrong_adapter_lists_every_allowed_value_and_the_closest_one() {
         ("schema", "personal/profile.yaml", "/bindings/0/adapter")
     );
     assert!(
-        issue.message.contains(r#""cli", "slack", "http""#),
+        issue
+            .message
+            .contains(r#""cli", "slack", "telegram", "http""#),
         "{}",
         issue.message
     );

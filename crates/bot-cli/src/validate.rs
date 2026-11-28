@@ -76,6 +76,11 @@ pub fn entrance_secrets(snapshot: &Snapshot, gateway: &HostConfig) -> BTreeSet<S
                     names.extend(ws.app_token.clone());
                 }
             }
+            Adapter::TelegramDm { bot } => {
+                if let Some(entry) = gateway.telegram.bots.get(bot) {
+                    names.insert(entry.bot_token.clone());
+                }
+            }
             Adapter::Http { endpoint } => {
                 if let Some(config) = gateway.http.endpoints.get(endpoint) {
                     names.insert(config.key.clone());

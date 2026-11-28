@@ -32,6 +32,7 @@ use bot_gateway::{
     http::HttpGateway,
     ingress::Ingress,
     slack::{SlackGateway, api::SlackApi, cards::CardDeliverer},
+    telegram::{TelegramGateway, api::TelegramApi},
 };
 use bot_profile::{Registry, SchemaValidator};
 use bot_store::Store;
@@ -52,6 +53,8 @@ pub struct Deps {
     pub tracer: Arc<dyn Tracer>,
     #[cfg(any(test, feature = "testing"))]
     pub slack_base: Option<String>,
+    #[cfg(any(test, feature = "testing"))]
+    pub telegram_base: Option<String>,
     pub active: Arc<dyn ActiveCheck>,
 }
 
@@ -130,6 +133,7 @@ pub struct Prepared {
     secrets: Arc<Watched>,
     stop: CancellationToken,
     slack: Option<Arc<SlackGateway>>,
+    telegram: Option<Arc<TelegramGateway>>,
     cli: Option<UnixListener>,
     http: Option<TcpListener>,
 }
@@ -147,7 +151,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         .with_active(deps.active.clone()),
     );
     let routes = ingress.routes().map_err(|e| e.to_string())?;
-    let (mut cli, mut http, mut slack) = (false, false, false);
+    let (mut cli, mut http, mut slack, mut telegram) = (false, false, false, false);
     let mut problems = Vec::new();
     let mut snapshots = Vec::new();
     for snapshot in routes.profiles() {
@@ -156,6 +160,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
                 Adapter::Cli { .. } => cli = true,
                 Adapter::Http { .. } | Adapter::OpenAi { .. } => http = true,
                 Adapter::SlackChannel { .. } | Adapter::SlackDm { .. } => slack = true,
+                Adapter::TelegramDm { .. } => telegram = true,
             }
         }
         snapshots.push(snapshot.clone());
@@ -196,6 +201,26 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     } else {
         None
     };
+    let telegram_gateway = if telegram {
+        #[cfg(any(test, feature = "testing"))]
+        let telegram_base = deps.telegram_base.as_deref();
+        #[cfg(not(any(test, feature = "testing")))]
+        let telegram_base: Option<&str> = None;
+        let gateway = Arc::new(
+            TelegramGateway::new(
+                ingress.clone(),
+                deps.decisions.clone(),
+                deps.store.clone() as Arc<dyn CallLedger>,
+                deps.secrets.clone(),
+                TelegramApi::new(telegram_base),
+            )
+            .with_runs(deps.store.clone() as Arc<dyn RunStore>),
+        );
+        gateway.plan().await.map_err(|e| e.to_string())?;
+        Some(gateway)
+    } else {
+        None
+    };
     let cli_listener = if cli {
         let path = socket::socket_path(
             deps.settings
@@ -222,7 +247,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
     } else {
         None
     };
-    if !(cli || http || slack) {
+    if !(cli || http || slack || telegram) {
         eprintln!("gateway: no ingress bound (profiles define no bindings)");
     }
     Ok(Prepared {
@@ -231,6 +256,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         secrets: deps.secrets.clone(),
         stop: deps.stop.clone(),
         slack: slack_gateway,
+        telegram: telegram_gateway,
         cli: cli_listener,
         http: http_listener,
     })
@@ -245,6 +271,7 @@ impl Prepared {
             secrets,
             stop,
             slack,
+            telegram,
             cli,
             http,
         } = self;
@@ -281,7 +308,11 @@ impl Prepared {
                 ingress.clone(),
                 Arc::new(gateway.sender()),
             );
-            let cards = CardDeliverer::new(store as Arc<dyn CardOutbox>, ingress, gateway.sender());
+            let cards = CardDeliverer::new(
+                store.clone() as Arc<dyn CardOutbox>,
+                ingress.clone(),
+                gateway.sender(),
+            );
             tasks.spawn({
                 let stop = stop.clone();
                 async move { gateway.serve(stop).await.map_err(|e| e.to_string()) }
@@ -292,6 +323,24 @@ impl Prepared {
                     cards.run(stop).await;
                     Ok(())
                 }
+            });
+            tasks.spawn({
+                let stop = stop.clone();
+                async move {
+                    deliverer.run(stop).await;
+                    Ok(())
+                }
+            });
+        }
+        if let Some(gateway) = telegram {
+            let deliverer = Deliverer::new(
+                store as Arc<dyn Outbox>,
+                ingress,
+                Arc::new(gateway.sender()),
+            );
+            tasks.spawn({
+                let stop = stop.clone();
+                async move { gateway.serve(stop).await.map_err(|e| e.to_string()) }
             });
             tasks.spawn(async move {
                 deliverer.run(stop).await;

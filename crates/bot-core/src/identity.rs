@@ -5,13 +5,14 @@ use crate::id::{PrincipalId, is_name};
 pub enum IdentityKind {
     Local,
     Slack,
+    Telegram,
     Http,
     Service,
 }
 
 impl IdentityKind {
     pub fn is_human(self) -> bool {
-        matches!(self, Self::Local | Self::Slack)
+        matches!(self, Self::Local | Self::Slack | Self::Telegram)
     }
 }
 
@@ -30,6 +31,15 @@ pub fn identity_kind(identity: &str) -> Option<IdentityKind> {
                     .iter()
                     .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()))
             .then_some(IdentityKind::Slack)
+        }
+        "telegram" => {
+            let bytes = value.as_bytes();
+            ((1..=20).contains(&bytes.len())
+                && bytes[0].is_ascii_digit()
+                && bytes[0] != b'0'
+                && bytes.iter().all(u8::is_ascii_digit)
+                && value.parse::<u64>().is_ok())
+            .then_some(IdentityKind::Telegram)
         }
         "http" => {
             let (endpoint, subject) = value.split_once('/')?;
@@ -56,7 +66,13 @@ mod tests {
 
     #[test]
     fn only_supported_human_identities_can_approve() {
-        for id in ["local:owner", "slack:home/U1", "slack:home/W2ABC"] {
+        for id in [
+            "local:owner",
+            "slack:home/U1",
+            "slack:home/W2ABC",
+            "telegram:1",
+            "telegram:1234567890",
+        ] {
             assert!(PrincipalId(id.into()).is_human(), "{id}");
         }
         for id in ["http:inbox/alice", "service:morning"] {
@@ -68,6 +84,12 @@ mod tests {
             "slack:home/U",
             "slack:home/B123",
             "slack:home/U1/extra",
+            "telegram:0",
+            "telegram:0123",
+            "telegram:-100",
+            "telegram:bot/123",
+            "telegram:abc",
+            "telegram:99999999999999999999",
             "local:a--b",
             "http:a/x:y",
             "other:owner",

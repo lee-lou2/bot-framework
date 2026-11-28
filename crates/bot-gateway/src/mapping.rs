@@ -91,6 +91,16 @@ pub fn fingerprint_with(
             }
         }
     }
+    if !config.telegram.bots.is_empty() {
+        hash.update(b"telegram");
+        count(&mut hash, config.telegram.bots.len());
+        for (alias, bot) in &config.telegram.bots {
+            field(&mut hash, alias.as_bytes());
+            hash.update(bot.bot_id.to_be_bytes());
+            hash.update([u8::from(bot.dm)]);
+            field(&mut hash, bot.bot_token.as_bytes());
+        }
+    }
     Ok(hash.finalize().into())
 }
 
@@ -388,5 +398,48 @@ mod tests {
                 .unwrap();
         let result = fingerprint_with(&config, &|_| Err(HostError("cannot resolve".into())));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn telegram_bots_join_the_fingerprint_only_when_configured() {
+        let without = print(base());
+        let mut with_empty = base();
+        with_empty["telegram"] = json!({"bots": {}});
+        assert_eq!(print(with_empty), without);
+        let mut with_bot = base();
+        with_bot["telegram"] = json!({"bots": {
+            "ops": {"bot_id": 1001, "bot_token": "tg-token", "dm": true}
+        }});
+        let original = print(with_bot.clone());
+        assert_ne!(original, without);
+        for (name, edit) in [
+            (
+                "bot_id",
+                Box::new(|v: &mut Value| v["telegram"]["bots"]["ops"]["bot_id"] = json!(1002))
+                    as Box<dyn FnOnce(&mut Value)>,
+            ),
+            (
+                "dm",
+                Box::new(|v: &mut Value| v["telegram"]["bots"]["ops"]["dm"] = json!(false)),
+            ),
+            (
+                "bot_token",
+                Box::new(|v: &mut Value| {
+                    v["telegram"]["bots"]["ops"]["bot_token"] = json!("tg-token-2")
+                }),
+            ),
+            (
+                "alias",
+                Box::new(|v: &mut Value| {
+                    let bots = v["telegram"]["bots"].as_object_mut().unwrap();
+                    let bot = bots.remove("ops").unwrap();
+                    bots.insert("helper".into(), bot);
+                }),
+            ),
+        ] {
+            let mut copy = with_bot.clone();
+            edit(&mut copy);
+            assert_ne!(print(copy), original, "{name}");
+        }
     }
 }

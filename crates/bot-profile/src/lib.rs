@@ -40,7 +40,7 @@ mod vocab;
 mod yaml;
 
 pub use bot_core::cron::Cron;
-pub use host::{HostCatalog, SlackWorkspace};
+pub use host::{HostCatalog, SlackWorkspace, TelegramBot};
 pub use issue::{Issue, Severity};
 pub use limits::{KNOWLEDGE_MAX_BYTES, KNOWLEDGE_MAX_DOCS, Limits, SKILL_MAX_BYTES};
 pub use registry::{ProfileSet, Registry, Report, load};
