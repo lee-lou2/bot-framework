@@ -325,6 +325,7 @@ pub fn cards(s: &Snapshot) -> Vec<Card> {
             } => ("slack", format!("{workspace} #{channel}")),
             Adapter::SlackDm { workspace } => ("slack", format!("{workspace} dm")),
             Adapter::TelegramDm { bot } => ("telegram", format!("{bot} dm")),
+            Adapter::TelegramGroups { bot } => ("telegram", format!("{bot} groups")),
             Adapter::Http { endpoint } => ("http", format!("endpoint {endpoint}")),
             Adapter::OpenAi {
                 endpoint, model, ..

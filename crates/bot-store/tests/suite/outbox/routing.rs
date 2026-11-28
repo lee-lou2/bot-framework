@@ -240,6 +240,49 @@ async fn a_child_approval_and_its_owner_dm_notice_keep_the_original_transport() 
         serde_json::from_str::<serde_json::Value>(&notice.body.0).unwrap()["text"],
         DM_SENT_NOTICE
     );
+
+    // Telegram group-origin approval stages an owner-DM card job claimed only by Telegram transport.
+    let db = TestDb::new().await.unwrap();
+    let tg_child = channel_child(&db, PushTransportId::TELEGRAM).await;
+    begin_call(&db, &tg_child.attempt, "tg-c1").await;
+    calls(&db)
+        .open_approval(open_approval(binding(&tg_child.attempt, "tg-c1", "tg-dm")))
+        .await
+        .unwrap();
+    assert!(
+        ob(&db)
+            .claim(&DeliveryScope::all(PushTransportId::TELEGRAM), 1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "Telegram group approvals must not enter the group outbox directly"
+    );
+    assert!(
+        CardOutbox::claim(&db.store, 8).await.unwrap().is_empty(),
+        "Slack card claim must ignore Telegram card jobs"
+    );
+    let tg_job = CardOutbox::claim_for(&db.store, &PushTransportId::TELEGRAM, 8)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(tg_job.key.nonce.0, "tg-dm");
+    CardOutbox::begin(&db.store, tg_job.key.clone(), rev("r1"))
+        .await
+        .unwrap();
+    CardOutbox::settle(&db.store, tg_job.key, cards::posted())
+        .await
+        .unwrap();
+    let tg_notice = ob(&db)
+        .claim(&DeliveryScope::all(PushTransportId::TELEGRAM), 1)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(tg_notice.key.run, tg_child.attempt.run);
+    assert_eq!(tg_notice.transport, PushTransportId::TELEGRAM);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&tg_notice.body.0).unwrap()["text"],
+        DM_SENT_NOTICE
+    );
 }
 
 #[tokio::test]

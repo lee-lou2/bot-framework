@@ -166,6 +166,9 @@ pub enum Adapter {
     TelegramDm {
         bot: String,
     },
+    TelegramGroups {
+        bot: String,
+    },
     /// Legacy webhook ingress (`kind: webhook`).
     Http {
         endpoint: String,

@@ -79,26 +79,53 @@ pub(super) fn section(snapshot: &Snapshot, run: &RunContext) -> String {
     let mut lines = vec!["## Request Context".to_owned()];
     match &run.conversation.kind {
         ConversationKind::Channel => {
-            push(&mut lines, "channel", "slack-channel");
-            push(&mut lines, "origin", run.origin.as_str());
-            if let Some(ws) = slack_workspace(snapshot, run) {
-                push(&mut lines, "workspace", ws);
-            }
-            push(&mut lines, "binding", &run.binding.0);
-            if let Some((team, channel)) = run.conversation.id.split_once('/') {
-                push(&mut lines, "team_id", team);
-                push(&mut lines, "channel_id", channel);
+            let telegram_bot = match snapshot.bindings.get(&run.binding).map(|b| &b.source) {
+                Some(Adapter::TelegramGroups { bot }) => Some(bot.as_str()),
+                _ => None,
+            };
+            if let Some(bot) = telegram_bot {
+                push(&mut lines, "channel", "telegram-group");
+                push(&mut lines, "origin", run.origin.as_str());
+                push(&mut lines, "bot", bot);
+                push(&mut lines, "binding", &run.binding.0);
+                let chat_id = run
+                    .conversation
+                    .id
+                    .split_once('/')
+                    .map_or(run.conversation.id.as_str(), |(_, chat)| chat);
+                push(&mut lines, "chat_id", chat_id);
+                if let Some(topic) = &run.conversation.thread {
+                    push(&mut lines, "topic_id", topic);
+                }
+                push(&mut lines, "requester", &run.principal.0);
+                push(
+                    &mut lines,
+                    "format",
+                    "plain text only (no Markdown; keep replies brief and direct)",
+                );
+                push_attachments(&mut lines, &run.work.attachments);
             } else {
-                push(&mut lines, "channel_id", &run.conversation.id);
+                push(&mut lines, "channel", "slack-channel");
+                push(&mut lines, "origin", run.origin.as_str());
+                if let Some(ws) = slack_workspace(snapshot, run) {
+                    push(&mut lines, "workspace", ws);
+                }
+                push(&mut lines, "binding", &run.binding.0);
+                if let Some((team, channel)) = run.conversation.id.split_once('/') {
+                    push(&mut lines, "team_id", team);
+                    push(&mut lines, "channel_id", channel);
+                } else {
+                    push(&mut lines, "channel_id", &run.conversation.id);
+                }
+                if let Some(thread) = &run.conversation.thread {
+                    push(&mut lines, "thread_ts", thread);
+                }
+                if let Some(ts) = &run.intake.message_ts {
+                    push(&mut lines, "message_ts", ts);
+                }
+                push(&mut lines, "requester", &run.principal.0);
+                push_attachments(&mut lines, &run.work.attachments);
             }
-            if let Some(thread) = &run.conversation.thread {
-                push(&mut lines, "thread_ts", thread);
-            }
-            if let Some(ts) = &run.intake.message_ts {
-                push(&mut lines, "message_ts", ts);
-            }
-            push(&mut lines, "requester", &run.principal.0);
-            push_attachments(&mut lines, &run.work.attachments);
         }
         ConversationKind::Direct => {
             let telegram_bot = match snapshot.bindings.get(&run.binding).map(|b| &b.source) {
@@ -117,6 +144,11 @@ pub(super) fn section(snapshot: &Snapshot, run: &RunContext) -> String {
                     .map_or(run.conversation.id.as_str(), |(_, chat)| chat);
                 push(&mut lines, "chat_id", chat_id);
                 push(&mut lines, "requester", &run.principal.0);
+                push(
+                    &mut lines,
+                    "format",
+                    "plain text only (no Markdown; keep replies brief and direct)",
+                );
                 push_attachments(&mut lines, &run.work.attachments);
             } else {
                 push(&mut lines, "channel", "slack-dm");

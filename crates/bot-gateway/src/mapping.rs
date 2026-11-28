@@ -100,6 +100,21 @@ pub fn fingerprint_with(
             hash.update([u8::from(bot.dm)]);
             field(&mut hash, bot.bot_token.as_bytes());
         }
+        // Append separately only when any bot enables groups so existing DM-only deployments keep identical bytes.
+        let group_bots: Vec<&String> = config
+            .telegram
+            .bots
+            .iter()
+            .filter(|(_, bot)| bot.groups)
+            .map(|(alias, _)| alias)
+            .collect();
+        if !group_bots.is_empty() {
+            hash.update(b"telegram_groups");
+            count(&mut hash, group_bots.len());
+            for alias in group_bots {
+                field(&mut hash, alias.as_bytes());
+            }
+        }
     }
     Ok(hash.finalize().into())
 }
@@ -423,6 +438,10 @@ mod tests {
                 Box::new(|v: &mut Value| v["telegram"]["bots"]["ops"]["dm"] = json!(false)),
             ),
             (
+                "groups",
+                Box::new(|v: &mut Value| v["telegram"]["bots"]["ops"]["groups"] = json!(true)),
+            ),
+            (
                 "bot_token",
                 Box::new(|v: &mut Value| {
                     v["telegram"]["bots"]["ops"]["bot_token"] = json!("tg-token-2")
@@ -441,5 +460,9 @@ mod tests {
             edit(&mut copy);
             assert_ne!(print(copy), original, "{name}");
         }
+        // Explicitly setting `groups: false` preserves DM-only fingerprint bytes.
+        let mut with_groups_false = with_bot;
+        with_groups_false["telegram"]["bots"]["ops"]["groups"] = json!(false);
+        assert_eq!(print(with_groups_false), original);
     }
 }

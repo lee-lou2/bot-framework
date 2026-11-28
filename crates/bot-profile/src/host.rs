@@ -10,6 +10,7 @@ pub struct SlackWorkspace {
 #[derive(Clone, Debug, Default)]
 pub struct TelegramBot {
     pub dm: bool,
+    pub groups: bool,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -1,13 +1,16 @@
-//! Telegram Bot API long-polling gateway managing per-bot pollers, DM intake, approval callbacks, and reply delivery.
+//! Telegram Bot API long-polling gateway managing per-bot pollers, DM/group intake, approvals, and reply delivery.
 //!
 //! Each poller serves one authenticated `(profile, bot)` installation with no cross-profile fallback; startup
-//! rejects two installations sharing the same bot token, and HTTP 409 Conflict terminates polling immediately
-//! without retrying or calling `deleteWebhook`.
+//! rejects two installations sharing the same bot token or bot ID, and HTTP 409 Conflict terminates polling
+//! immediately without retrying or calling `deleteWebhook`.
 pub mod api;
+pub mod cards;
 pub mod creds;
 mod handle;
+mod parse;
 pub mod render;
 pub mod send;
+mod ux;
 
 use crate::ingress::Ingress;
 use api::{Raw, TelegramApi};
@@ -27,6 +30,7 @@ use std::{
 };
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use ux::{ReplyTargets, TelegramUx};
 
 const POLL_TIMEOUT_SECS: u64 = 30;
 const ERROR_BACKOFF: Duration = Duration::from_secs(2);
@@ -47,6 +51,7 @@ pub struct Installation {
     pub profile: ProfileId,
     pub alias: String,
     pub bot_id: u64,
+    pub username: Option<String>,
 }
 
 pub struct TelegramGateway {
@@ -54,7 +59,8 @@ pub struct TelegramGateway {
     broker: Arc<dyn Broker>,
     ledger: Arc<dyn CallLedger>,
     creds: Arc<Credentials>,
-    runs: Option<Arc<dyn RunStore>>,
+    ux: Option<Arc<TelegramUx>>,
+    reply_targets: Arc<ReplyTargets>,
     poll_timeout_secs: u64,
     error_backoff: Duration,
 }
@@ -73,7 +79,8 @@ impl TelegramGateway {
             broker,
             ledger,
             creds,
-            runs: None,
+            ux: None,
+            reply_targets: ReplyTargets::new(),
             poll_timeout_secs: POLL_TIMEOUT_SECS,
             error_backoff: ERROR_BACKOFF,
         }
@@ -81,7 +88,26 @@ impl TelegramGateway {
 
     #[must_use]
     pub fn with_runs(mut self, runs: Arc<dyn RunStore>) -> Self {
-        self.runs = Some(runs);
+        self.ux = Some(Arc::new(TelegramUx::new(self.creds.clone(), runs)));
+        self
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn with_ux_timing(
+        mut self,
+        runs: Arc<dyn RunStore>,
+        poll_every: Duration,
+        typing_every: Duration,
+        watch_limit: Duration,
+    ) -> Self {
+        self.ux = Some(Arc::new(
+            TelegramUx::new(self.creds.clone(), runs).with_timing(
+                poll_every,
+                typing_every,
+                watch_limit,
+            ),
+        ));
         self
     }
 
@@ -94,10 +120,10 @@ impl TelegramGateway {
     }
 
     pub fn sender(&self) -> send::TelegramSender {
-        send::TelegramSender::new(self.creds.clone())
+        send::TelegramSender::new(self.creds.clone(), self.reply_targets.clone())
     }
 
-    /// Validates host config, verifies each Telegram bot token via `getMe`, and rejects duplicate tokens.
+    /// Validates host config, verifies each Telegram bot token via `getMe`, and rejects duplicate tokens or cross-profile bots.
     pub async fn plan(&self) -> Result<Vec<Installation>, TelegramError> {
         let host = self.ingress.host().clone();
         host.validate()
@@ -109,8 +135,10 @@ impl TelegramGateway {
         let mut pairs: BTreeMap<(ProfileId, String), u64> = BTreeMap::new();
         for snapshot in routes.profiles() {
             for binding in snapshot.bindings.values() {
-                let Adapter::TelegramDm { bot } = &binding.source else {
-                    continue;
+                let (bot, need_groups) = match &binding.source {
+                    Adapter::TelegramDm { bot } => (bot, false),
+                    Adapter::TelegramGroups { bot } => (bot, true),
+                    _ => continue,
                 };
                 let entry = host.telegram.bots.get(bot).ok_or_else(|| {
                     TelegramError(format!(
@@ -118,20 +146,35 @@ impl TelegramGateway {
                         snapshot.id.0
                     ))
                 })?;
-                if !entry.dm {
+                if !need_groups && !entry.dm {
                     return Err(TelegramError(format!(
                         "{}: telegram bot {bot} does not allow DM ingress (dm: true)",
+                        snapshot.id.0
+                    )));
+                }
+                if need_groups && !entry.groups {
+                    return Err(TelegramError(format!(
+                        "{}: telegram bot {bot} does not allow group ingress (groups: true)",
                         snapshot.id.0
                     )));
                 }
                 pairs.insert((snapshot.id.clone(), bot.clone()), entry.bot_id);
             }
         }
+        let mut seen_bots: HashMap<u64, (ProfileId, String)> = HashMap::new();
         let mut seen_tokens: HashMap<String, (ProfileId, String)> = HashMap::new();
         let mut installations = Vec::with_capacity(pairs.len());
         for ((profile, alias), bot_id) in pairs {
-            let token = match self.creds.check_bot(&profile, &alias).await {
-                BotCheck::Verified(token, _) => token,
+            if let Some((first_profile, first_alias)) =
+                seen_bots.insert(bot_id, (profile.clone(), alias.clone()))
+            {
+                return Err(TelegramError(format!(
+                    "Telegram bot_id is shared by {}/{first_alias} and {}/{alias}; one bot may belong to only one profile",
+                    first_profile.0, profile.0
+                )));
+            }
+            let (token, info) = match self.creds.check_bot(&profile, &alias).await {
+                BotCheck::Verified(token, info) => (token, info),
                 BotCheck::Unreadable => {
                     return Err(TelegramError(format!(
                         "{}/{alias}: missing or unreadable Telegram bot_token secret",
@@ -163,6 +206,7 @@ impl TelegramGateway {
                 profile,
                 alias,
                 bot_id,
+                username: info.username,
             });
         }
         Ok(installations)
@@ -207,8 +251,8 @@ impl TelegramGateway {
         offset: &mut Option<i64>,
         stop: &CancellationToken,
     ) -> Result<Duration, TelegramError> {
-        let token = match self.creds.check_bot(&install.profile, &install.alias).await {
-            BotCheck::Verified(token, _) => token,
+        let (token, info) = match self.creds.check_bot(&install.profile, &install.alias).await {
+            BotCheck::Verified(token, info) => (token, info),
             BotCheck::WrongBot => {
                 return Err(TelegramError(format!(
                     "{}/{}: Telegram bot_token rotated to a different bot_id",
@@ -216,6 +260,10 @@ impl TelegramGateway {
                 )));
             }
             BotCheck::Unreadable | BotCheck::Unverified => return Ok(self.error_backoff),
+        };
+        let current = Installation {
+            username: info.username.or_else(|| install.username.clone()),
+            ..install.clone()
         };
         let raw = tokio::select! {
             _ = stop.cancelled() => return Ok(Duration::ZERO),
@@ -230,7 +278,7 @@ impl TelegramGateway {
                     if stop.is_cancelled() {
                         return Ok(Duration::ZERO);
                     }
-                    let settled = self.on_update(install, &update, stop).await;
+                    let settled = self.on_update(&current, &update, stop).await;
                     if !settled {
                         // Stop before advancing offset past an unsettled update so transient DB errors retry in order.
                         return Ok(self.error_backoff);
