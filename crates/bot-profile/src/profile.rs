@@ -303,6 +303,9 @@ fn parse_bindings(
                 channel: text(obj, "channel").to_owned(),
                 events: channel_events(obj),
             },
+            ("telegram", true, _) => Adapter::TelegramDm {
+                bot: text(obj, "bot").to_owned(),
+            },
             // `http` with `model` is an OpenAI-compatible binding; without `model` it is a JWT webhook.
             ("http", _, true) => Adapter::OpenAi {
                 endpoint: text(obj, "endpoint").to_owned(),
@@ -319,7 +322,7 @@ fn parse_bindings(
                     "profile.yaml",
                     format!("{at}/adapter"),
                     format!(
-                        "unknown adapter `{other}` (expected cli, slack, or http); schema and parser are out of sync"
+                        "unknown adapter `{other}` (expected cli, slack, telegram, or http); schema and parser are out of sync"
                     ),
                 );
                 continue;

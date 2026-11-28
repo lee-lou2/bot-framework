@@ -1,6 +1,6 @@
 //! Validated principal ID builders derived solely from adapter-authenticated facts.
 //!
-//! Formats: `local:<account>`, `slack:<workspace>/<user_id>`, and `http:<endpoint>/<sub>`.
+//! Formats: `local:<account>`, `slack:<workspace>/<user_id>`, `telegram:<user_id>`, and `http:<endpoint>/<sub>`.
 //! Rejects delimiter injection, whitespace, and control characters.
 use bot_core::id::PrincipalId;
 
@@ -18,6 +18,12 @@ pub fn slack(workspace: &str, user: &str) -> Option<PrincipalId> {
     validated(format!("slack:{workspace}/{user}"))
 }
 
+pub fn telegram(user_id: u64) -> Option<PrincipalId> {
+    (user_id > 0)
+        .then(|| format!("telegram:{user_id}"))
+        .and_then(validated)
+}
+
 pub fn http(endpoint: &str, subject: &str) -> Option<PrincipalId> {
     validated(format!("http:{endpoint}/{subject}"))
 }
@@ -30,6 +36,8 @@ mod tests {
     fn builds_the_documented_shapes() {
         assert_eq!(local("owner").unwrap().0, "local:owner");
         assert_eq!(slack("home", "U0123ABC").unwrap().0, "slack:home/U0123ABC");
+        assert_eq!(telegram(424242).unwrap().0, "telegram:424242");
+        assert!(telegram(0).is_none());
         assert_eq!(
             http("reminders", "ana@example.org").unwrap().0,
             "http:reminders/ana@example.org"

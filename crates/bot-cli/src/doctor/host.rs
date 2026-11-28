@@ -53,12 +53,13 @@ pub fn check(settings: &Settings, items: &mut Vec<Item>) -> Option<Checked> {
 fn summary(host: &HostFile, settings: &Settings) -> Item {
     let aliases: BTreeSet<&String> = host.catalog.models.values().flatten().collect();
     let counts = format!(
-        "model aliases {} · providers {} · tool servers {} · CLI accounts {} · Slack workspaces {} · HTTP endpoints {} · OpenAI endpoints {}",
+        "model aliases {} · providers {} · tool servers {} · CLI accounts {} · Slack workspaces {} · Telegram bots {} · HTTP endpoints {} · OpenAI endpoints {}",
         aliases.len(),
         host.providers.len(),
         host.servers.len() + host.remote_servers.len(),
         host.gateway.cli.accounts.len(),
         host.gateway.slack.workspaces.len(),
+        host.gateway.telegram.bots.len(),
         host.gateway.http.endpoints.len(),
         host.gateway.http.openai.len()
     );

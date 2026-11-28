@@ -182,6 +182,7 @@ policy:
         secret_admin: Some(secret_admin),
         stop: Some(stop.clone()),
         slack_base: None,
+        telegram_base: None,
         upstream: None,
         store_config: None,
     };

@@ -9,7 +9,7 @@ use crate::{
 use bot_admin::AdminSettings;
 use bot_broker::mcp::remote::Remote;
 use bot_gateway::host::{CliAccount, HostConfig};
-use bot_profile::{HostCatalog, SlackWorkspace};
+use bot_profile::{HostCatalog, SlackWorkspace, TelegramBot};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -252,6 +252,12 @@ fn catalog(
                     },
                 )
             })
+            .collect(),
+        telegram: gateway
+            .telegram
+            .bots
+            .iter()
+            .map(|(alias, bot)| (alias.clone(), TelegramBot { dm: bot.dm }))
             .collect(),
         http_endpoints: gateway.http.endpoints.keys().cloned().collect(),
         openai_endpoints: gateway

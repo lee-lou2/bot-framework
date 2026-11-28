@@ -14,6 +14,7 @@ pub enum Entrance {
     Cli { account: String },
     SlackChannel { workspace: String, channel: String },
     SlackDm { workspace: String },
+    TelegramDm { bot: String },
     Http { endpoint: String },
     HttpModel { endpoint: String, model: String },
 }
@@ -33,6 +34,7 @@ impl From<&Adapter> for Entrance {
             Adapter::SlackDm { workspace } => Entrance::SlackDm {
                 workspace: workspace.clone(),
             },
+            Adapter::TelegramDm { bot } => Entrance::TelegramDm { bot: bot.clone() },
             Adapter::Http { endpoint } => Entrance::Http {
                 endpoint: endpoint.clone(),
             },
@@ -54,6 +56,7 @@ impl fmt::Display for Entrance {
                 write!(f, "slack {workspace} channel {channel}")
             }
             Entrance::SlackDm { workspace } => write!(f, "slack {workspace} DM"),
+            Entrance::TelegramDm { bot } => write!(f, "telegram {bot} DM"),
             Entrance::Http { endpoint } => write!(f, "http endpoint {endpoint}"),
             Entrance::HttpModel { endpoint, model } => {
                 write!(f, "http endpoint {endpoint} model {model}")
@@ -68,6 +71,7 @@ pub enum Real {
     Cli { uid: u32, profile: ProfileId },
     SlackChannel { team: String, channel: String },
     SlackDm { team: String },
+    TelegramDm { bot_id: u64 },
     Http { endpoint: String },
     HttpModel { endpoint: String, model: String },
 }
@@ -108,6 +112,12 @@ impl Conflict {
             }
             (Entrance::SlackChannel { .. } | Entrance::SlackDm { .. }, false) => {
                 "Two aliases resolve to the same Slack channel (or team) in `gateway.slack.workspaces` — point one alias to a different channel or remove one binding."
+            }
+            (Entrance::TelegramDm { .. }, true) => {
+                "Each entrance can only belong to one binding. Change `bot` on one binding to a different bot alias or remove one binding."
+            }
+            (Entrance::TelegramDm { .. }, false) => {
+                "Two aliases resolve to the same Telegram bot in `gateway.telegram.bots` — point one alias to a different bot or remove one binding."
             }
             (Entrance::Http { .. } | Entrance::HttpModel { .. }, _) => {
                 "Each entrance can only belong to one binding. Change `endpoint` on one binding or remove one binding."

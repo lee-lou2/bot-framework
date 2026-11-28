@@ -63,6 +63,8 @@ mod slack_reactions;
 mod slack_ux;
 #[path = "suite/slack_ux_stream.rs"]
 mod slack_ux_stream;
+#[path = "suite/telegram.rs"]
+mod telegram;
 #[path = "suite/token_rejected.rs"]
 mod token_rejected;
 #[path = "suite/trace.rs"]

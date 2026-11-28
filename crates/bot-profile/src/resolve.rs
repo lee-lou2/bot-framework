@@ -381,7 +381,7 @@ fn binding_of<'a>(
     let ok = match &t.on {
         Source::Message { .. } => matches!(
             binding.kind,
-            Adapter::SlackChannel { .. } | Adapter::SlackDm { .. }
+            Adapter::SlackChannel { .. } | Adapter::SlackDm { .. } | Adapter::TelegramDm { .. }
         ),
         Source::ThreadReply { .. } | Source::Reaction { .. } => {
             matches!(binding.kind, Adapter::SlackChannel { .. })
@@ -393,7 +393,7 @@ fn binding_of<'a>(
         let want = match t.on {
             Source::Http { .. } => "http",
             Source::ThreadReply { .. } | Source::Reaction { .. } => "slack channel",
-            _ => "slack",
+            _ => "slack or telegram",
         };
         issues.error_at(
             "binding-kind-mismatch",

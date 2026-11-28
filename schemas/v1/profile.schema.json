@@ -284,6 +284,44 @@
               "maxLength": 63
             },
             "adapter": {
+              "const": "telegram"
+            },
+            "agent": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:/[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$",
+              "allOf": [
+                {
+                  "pattern": "^[a-z0-9-]{1,63}(?:/[a-z0-9-]{1,63})*$"
+                }
+              ]
+            },
+            "bot": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "dm": {
+              "const": true
+            }
+          },
+          "required": [
+            "id",
+            "adapter",
+            "agent",
+            "bot",
+            "dm"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+              "maxLength": 63
+            },
+            "adapter": {
               "const": "http"
             },
             "agent": {

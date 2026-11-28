@@ -18,6 +18,7 @@ fn every_known_adapter_becomes_its_own_entrance() {
         {"id": "desk", "adapter": "cli", "account": "owner", "agent": "main"},
         {"id": "team", "adapter": "slack", "workspace": "home", "channel": "planning", "agent": "main"},
         {"id": "direct", "adapter": "slack", "workspace": "home", "dm": true, "agent": "main"},
+        {"id": "tg", "adapter": "telegram", "bot": "main", "dm": true, "agent": "main"},
         {"id": "inbox", "adapter": "http", "endpoint": "hooks", "agent": "main"},
         {"id": "gpt", "adapter": "http", "endpoint": "openai", "model": "assistant", "agent": "main"},
     ]));
@@ -30,14 +31,22 @@ fn every_known_adapter_becomes_its_own_entrance() {
             Adapter::Cli { .. } => "cli",
             Adapter::SlackChannel { .. } => "slack-channel",
             Adapter::SlackDm { .. } => "slack-dm",
+            Adapter::TelegramDm { .. } => "telegram-dm",
             Adapter::Http { .. } => "http",
             Adapter::OpenAi { .. } => "openai",
         })
         .collect();
-    // Ordered by binding id: desk, direct, gpt, inbox, team.
+    // Ordered by binding id: desk, direct, gpt, inbox, team, tg.
     assert_eq!(
         kinds,
-        ["cli", "slack-dm", "openai", "http", "slack-channel"]
+        [
+            "cli",
+            "slack-dm",
+            "openai",
+            "http",
+            "slack-channel",
+            "telegram-dm"
+        ]
     );
 }
 

@@ -17,6 +17,7 @@ impl Rig {
             secret_admin: None,
             stop: Some(stop),
             slack_base: self.slack_base.clone(),
+            telegram_base: None,
             store_config: self.store_config.clone(),
         }
     }

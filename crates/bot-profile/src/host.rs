@@ -8,12 +8,18 @@ pub struct SlackWorkspace {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct TelegramBot {
+    pub dm: bool,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct HostCatalog {
     pub servers: BTreeSet<String>,
     /// Profile -> allowed model aliases; missing profile denies all models.
     pub models: BTreeMap<String, BTreeSet<String>>,
     pub cli_accounts: BTreeSet<String>,
     pub slack: BTreeMap<String, SlackWorkspace>,
+    pub telegram: BTreeMap<String, TelegramBot>,
     /// Authenticated webhook HTTP endpoints (`kind: webhook`, including legacy omitted kind).
     pub http_endpoints: BTreeSet<String>,
     /// OpenAI-compatible endpoints (`kind: openai`): alias -> key-slot subjects (never key material).

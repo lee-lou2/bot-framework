@@ -1,4 +1,4 @@
-//! Authenticated ingress, private DM routing, and reply delivery across CLI, Slack, and HTTP adapters.
+//! Authenticated ingress, private DM routing, and reply delivery across CLI, Slack, Telegram, and HTTP adapters.
 //!
 //! Every adapter follows the same ingress sequence: `verify → normalize → durable accept → ack`.
 pub mod active;
@@ -17,6 +17,7 @@ pub mod reply;
 pub mod routes;
 pub mod schedule_routes;
 pub mod slack;
+pub mod telegram;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod trigger;
