@@ -76,16 +76,20 @@ fn parse_retry_after(header: Option<&str>, body: Option<&Value>) -> Duration {
 
 /// Classifies a Telegram Bot API HTTP response without leaking token material.
 pub fn classify(status: u16, retry_after: Option<&str>, body: &[u8], token: &str) -> Raw {
-    if body.len() > MAX_RESPONSE {
-        return Raw::Unknown;
-    }
-    let parsed = serde_json::from_slice::<Value>(body).ok();
     if status == 409 {
         return Raw::Conflict;
     }
     if status == 401 {
         return Raw::TokenRejected;
     }
+    if body.len() > MAX_RESPONSE {
+        return if status == 429 {
+            Raw::RateLimited(parse_retry_after(retry_after, None))
+        } else {
+            Raw::Unknown
+        };
+    }
+    let parsed = serde_json::from_slice::<Value>(body).ok();
     if status == 429 {
         return Raw::RateLimited(parse_retry_after(retry_after, parsed.as_ref()));
     }
@@ -281,6 +285,13 @@ impl TelegramApi {
             Err(_) => return Raw::Unknown,
         };
         let status = response.status().as_u16();
+        // Classify HTTP 409/401 immediately from status before waiting on or bounding the response body.
+        if status == 409 {
+            return Raw::Conflict;
+        }
+        if status == 401 {
+            return Raw::TokenRejected;
+        }
         let retry_after = response
             .headers()
             .get("retry-after")
@@ -319,6 +330,13 @@ mod tests {
         assert_eq!(
             classify(401, None, br#"{"ok":false,"error_code":401}"#, tok),
             Raw::TokenRejected
+        );
+        let oversized = vec![b'x'; MAX_RESPONSE + 1];
+        assert_eq!(classify(409, None, &oversized, tok), Raw::Conflict);
+        assert_eq!(classify(401, None, &oversized, tok), Raw::TokenRejected);
+        assert_eq!(
+            classify(429, Some("9"), &oversized, tok),
+            Raw::RateLimited(Duration::from_secs(9))
         );
         assert_eq!(
             classify(

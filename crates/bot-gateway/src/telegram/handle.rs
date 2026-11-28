@@ -3,6 +3,7 @@
 //! Never falls back across profiles: updates whose bot or route does not match this installation are ignored.
 use super::{
     Installation, TelegramGateway,
+    api::Raw,
     creds::BotCheck,
     render::{parse_callback, resolved_card_text, status_line},
 };
@@ -218,7 +219,7 @@ impl TelegramGateway {
         let Ok(routes) = self.ingress.routes() else {
             self.answer_callback(install, callback_id, Some(RETRY_NOTICE))
                 .await;
-            return true;
+            return false;
         };
         let real = Real::TelegramDm {
             bot_id: install.bot_id,
@@ -266,7 +267,7 @@ impl TelegramGateway {
             outcome,
             started,
         );
-        true
+        outcome != "unavailable"
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -364,7 +365,30 @@ impl TelegramGateway {
             "text": text,
             "reply_markup": {"inline_keyboard": []},
         });
-        let _ = self.creds.call_json("editMessageText", &token, &body).await;
+        let first = self.creds.call_json("editMessageText", &token, &body).await;
+        let retry_pause = match first {
+            Raw::Ok(_) => return,
+            Raw::RateLimited(wait) => Some(wait.min(Duration::from_secs(2))),
+            Raw::BeforeWrite | Raw::TokenRejected | Raw::Unknown => {
+                Some(Duration::from_millis(250))
+            }
+            Raw::Conflict | Raw::Error(_, _) => None,
+        };
+        if let Some(pause) = retry_pause {
+            tokio::time::sleep(pause).await;
+            if let BotCheck::Verified(fresh, _) = self.creds.check_bot(profile, alias).await
+                && matches!(
+                    self.creds.call_json("editMessageText", &fresh, &body).await,
+                    Raw::Ok(_)
+                )
+            {
+                return;
+            }
+        }
+        tracing::warn!(
+            profile = %profile.0,
+            "failed to refresh Telegram approval card (decision already recorded)"
+        );
     }
 
     async fn answer_callback(&self, install: &Installation, callback_id: &str, text: Option<&str>) {

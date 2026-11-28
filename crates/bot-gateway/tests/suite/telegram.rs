@@ -49,6 +49,7 @@ struct FakeState {
     updates: Mutex<VecDeque<(StatusCode, Value)>>,
     get_me_id: Mutex<u64>,
     next_msg_id: Mutex<u64>,
+    fail_next_edit: Mutex<bool>,
 }
 
 struct FakeTelegram {
@@ -63,6 +64,7 @@ impl FakeTelegram {
             updates: Mutex::new(VecDeque::new()),
             get_me_id: Mutex::new(BOT_ID),
             next_msg_id: Mutex::new(10),
+            fail_next_edit: Mutex::new(false),
         });
         let app = Router::new()
             .route("/{bot}/{method}", post(handle_tg))
@@ -132,7 +134,18 @@ async fn handle_tg(
                 ),
             )
         }
-        "answerCallbackQuery" | "editMessageText" | "sendChatAction" => {
+        "editMessageText" => {
+            let mut fail = state.fail_next_edit.lock().unwrap();
+            if *fail {
+                *fail = false;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"ok": false, "error_code": 500, "description": "temporary error"})),
+                );
+            }
+            (StatusCode::OK, Json(json!({"ok": true, "result": true})))
+        }
+        "answerCallbackQuery" | "sendChatAction" => {
             (StatusCode::OK, Json(json!({"ok": true, "result": true})))
         }
         _ => (
@@ -390,10 +403,24 @@ async fn approval_callbacks_decide_answer_and_edit_card_while_rejecting_unauthor
         .put("n1", "personal", ApprovalState::Approved, &card);
     rig.ledger.put("n2", "other", ApprovalState::Pending, &card);
 
-    rig.tg.push_updates(
-        StatusCode::OK,
-        json!({"ok": true, "result": [callback_update(300, "cb-1", USER_ID, 50, "bot:a:n1")]}),
+    rig.broker.fail_next(Error::Unavailable);
+    let approve_batch =
+        json!({"ok": true, "result": [callback_update(300, "cb-1", USER_ID, 50, "bot:a:n1")]});
+    rig.tg.push_updates(StatusCode::OK, approve_batch.clone());
+    assert!(
+        rig.gateway
+            .poll_once(&installs[0], &mut offset, &stop)
+            .await
+            .unwrap()
+            > Duration::ZERO
     );
+    assert_eq!(
+        offset, None,
+        "transient callback outage must not advance offset"
+    );
+
+    *rig.tg.state.fail_next_edit.lock().unwrap() = true;
+    rig.tg.push_updates(StatusCode::OK, approve_batch);
     rig.gateway
         .poll_once(&installs[0], &mut offset, &stop)
         .await
@@ -404,13 +431,21 @@ async fn approval_callbacks_decide_answer_and_edit_card_while_rejecting_unauthor
         [("n1".to_owned(), format!("telegram:{USER_ID}"), true)]
     );
     assert_eq!(
-        rig.tg.calls("answerCallbackQuery")[0]
+        rig.tg
+            .calls("answerCallbackQuery")
+            .last()
+            .unwrap()
             .body_json
             .as_ref()
             .unwrap()["text"],
         "Approved"
     );
-    let edit_body = rig.tg.calls("editMessageText")[0]
+    assert_eq!(
+        rig.tg.calls("editMessageText").len(),
+        2,
+        "transient 500 on editMessageText must retry once"
+    );
+    let edit_body = rig.tg.calls("editMessageText")[1]
         .body_json
         .clone()
         .unwrap();
@@ -435,7 +470,7 @@ async fn approval_callbacks_decide_answer_and_edit_card_while_rejecting_unauthor
         .unwrap();
     assert!(!rig.broker.decisions()[1].2);
     assert!(
-        rig.tg.calls("editMessageText")[1]
+        rig.tg.calls("editMessageText")[2]
             .body_json
             .as_ref()
             .unwrap()["text"]
@@ -447,14 +482,7 @@ async fn approval_callbacks_decide_answer_and_edit_card_while_rejecting_unauthor
     rig.broker.fail_next(Error::Denied);
     rig.tg.push_updates(
         StatusCode::OK,
-        json!({
-            "ok": true,
-            "result": [
-                callback_update(302, "cb-3", 999_999, 51, "bot:a:n1"),
-                callback_update(303, "cb-4", USER_ID, 52, "bot:a:n2"),
-                callback_update(304, "cb-5", USER_ID, 53, "bot:a:n1")
-            ]
-        }),
+        json!({"ok": true, "result": [callback_update(302, "cb-3", 999_999, 51, "bot:a:n1"), callback_update(303, "cb-4", USER_ID, 52, "bot:a:n2"), callback_update(304, "cb-5", USER_ID, 53, "bot:a:n1")]}),
     );
     rig.gateway
         .poll_once(&installs[0], &mut offset, &stop)
@@ -462,7 +490,7 @@ async fn approval_callbacks_decide_answer_and_edit_card_while_rejecting_unauthor
         .unwrap();
     assert_eq!(offset, Some(305));
     assert_eq!(rig.broker.decisions().len(), 2);
-    assert_eq!(rig.tg.calls("editMessageText").len(), 2);
+    assert_eq!(rig.tg.calls("editMessageText").len(), 3);
 }
 
 #[tokio::test]
