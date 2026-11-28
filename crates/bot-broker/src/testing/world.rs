@@ -78,6 +78,7 @@ pub fn run_context(
         trigger: None,
         binding: bot_core::id::BindingId("desk".into()),
         api: None,
+        intake: bot_core::state::IntakeMeta::default(),
     }
 }
 

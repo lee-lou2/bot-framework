@@ -58,9 +58,18 @@ pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunConte
     let r = sqlx::query(&format!(
         "select {}, x.private_memory_read as tree_private, x.agent as root_agent,
                 x.trigger as root_trigger, x.run_origin as root_origin,
-                q.api_endpoint as root_api_endpoint, q.api_model as root_api_model
+                x.attachments as root_attachments,
+                q.api_endpoint as root_api_endpoint, q.api_model as root_api_model,
+                q.http_method as root_http_method, q.http_path as root_http_path,
+                q.slack_key as root_slack_key
          from bot_runs r join bot_runs x on x.profile = r.profile and x.id = r.root
-              left join bot_requests q on q.profile = x.profile and q.run = x.id and q.api_endpoint is not null
+              left join lateral (
+                  select api_endpoint, api_model, http_method, http_path, slack_key
+                  from bot_requests
+                  where profile = x.profile and run = x.id
+                  order by created_ms asc
+                  limit 1
+              ) q on true
          where r.profile = $1 and r.id = $2",
         crate::cols::prefixed(crate::cols::RUNS, "r")
     ))
@@ -83,6 +92,28 @@ pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunConte
     let target: Value = r.get("target");
     let scopes: Vec<String> = r.get("scopes");
     let thread: Option<String> = r.get("thread");
+    let api = r
+        .get::<Option<String>, _>("root_api_endpoint")
+        .zip(r.get::<Option<String>, _>("root_api_model"))
+        .map(|(endpoint, model)| ApiOrigin { endpoint, model });
+    let intake = IntakeMeta {
+        message_ts: r
+            .get::<Option<String>, _>("root_slack_key")
+            .as_deref()
+            .and_then(bot_core::slack::message_ts_from_key),
+        http_route: if api.is_none() {
+            r.get::<Option<String>, _>("root_http_method")
+                .zip(r.get::<Option<String>, _>("root_http_path"))
+        } else {
+            None
+        },
+    };
+    let own_attachments: Vec<String> = r.get("attachments");
+    let attachments = if own_attachments.is_empty() {
+        r.get("root_attachments")
+    } else {
+        own_attachments
+    };
     Ok(RunContext {
         attempt: Attempt {
             profile: ProfileId(profile.to_owned()),
@@ -101,10 +132,8 @@ pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunConte
         },
         binding: BindingId(r.get("binding")),
         // Authenticated OpenAI-compatible API origin pinned on the root request row (inherited by children).
-        api: r
-            .get::<Option<String>, _>("root_api_endpoint")
-            .zip(r.get::<Option<String>, _>("root_api_model"))
-            .map(|(endpoint, model)| ApiOrigin { endpoint, model }),
+        api,
+        intake,
         scopes: scopes.into_iter().collect::<BTreeSet<_>>(),
         private_memory_read: r.get("tree_private"),
         approver: r.get::<Option<String>, _>("approver").map(PrincipalId),
@@ -118,7 +147,7 @@ pub(crate) async fn load(tx: &mut Tx<'_>, profile: &str, id: &str) -> R<RunConte
             revision: Revision(r.get("revision")),
             target: target_from(&target)?,
             input: JsonPayload(r.get("input")),
-            attachments: r.get("attachments"),
+            attachments,
             steps,
             pass_pos: r
                 .get::<Option<i32>, _>("pass_pos")

@@ -53,6 +53,7 @@ fn assemble_system(snapshot: &Snapshot) -> String {
         },
         binding: BindingId("desk".into()),
         api: None,
+        intake: bot_core::state::IntakeMeta::default(),
         scopes: BTreeSet::from(["run".to_owned()]),
         private_memory_read: false,
         work: Work {
@@ -94,16 +95,16 @@ fn v1_restored_prompt_matches_legacy_bytes_and_differs_in_revision_from_v2() {
     let id = ProfileId("personal".into());
     let limits = Limits::default();
 
-    // 1) Legacy V1 restore preserves front matter verbatim (152 bytes).
+    // 1) Legacy V1 restore preserves front matter verbatim (263 bytes with Request Context).
     let v1_bytes = build_v1_bundle(VALID_FM);
     let v1_rev = revision_of(&v1_bytes);
     let v1_snap = from_bundle(&v1_bytes, &id, &v1_rev, &limits).expect("V1 restore");
     let v1_system = assemble_system(&v1_snap);
     assert!(v1_system.contains("HEADER_SENTINEL"), "{v1_system}");
     assert!(v1_system.contains("---\nname: memo\n"), "{v1_system}");
-    assert_eq!(v1_system.len(), 152, "{v1_system:?}");
+    assert_eq!(v1_system.len(), 263, "{v1_system:?}");
 
-    // 2) Current V2 load strips front matter (104 bytes) and yields a different revision.
+    // 2) Current V2 load strips front matter (215 bytes with Request Context) and yields a different revision.
     let set = load(dir.path(), &HostCatalog::demo(), &limits).expect("V2 load");
     let v2_snap = set.profile(&id).unwrap();
     assert!(set.bundle(&id).unwrap().starts_with(b"BOTPROFILE2\n"));
@@ -114,7 +115,7 @@ fn v1_restored_prompt_matches_legacy_bytes_and_differs_in_revision_from_v2() {
     let v2_system = assemble_system(v2_snap);
     assert!(!v2_system.contains("HEADER_SENTINEL"), "{v2_system}");
     assert!(!v2_system.contains("---"), "{v2_system}");
-    assert_eq!(v2_system.len(), 104, "{v2_system:?}");
+    assert_eq!(v2_system.len(), 215, "{v2_system:?}");
 
     // 3) Plain SKILL.md without front matter keeps identical bytes and revision across V1 and V2.
     fs::write(root.join("skills/memo/SKILL.md"), BODY).unwrap();

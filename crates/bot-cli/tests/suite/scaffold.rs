@@ -473,6 +473,7 @@ fn scaffolded_skills_validate_and_reach_model_prompts_without_front_matter() {
         },
         binding: BindingId("desk".into()),
         api: None,
+        intake: bot_core::state::IntakeMeta::default(),
         scopes: BTreeSet::from(["run".into()]),
         private_memory_read: false,
         work: Work {

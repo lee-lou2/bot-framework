@@ -110,6 +110,7 @@ fn base(run: &str, generation: u64, target: Target, kind: ConversationKind) -> R
         },
         binding: BindingId("desk".into()),
         api: None,
+        intake: bot_core::state::IntakeMeta::default(),
         scopes: scopes(&["run", "calendar.read", "calendar.delete"]),
         private_memory_read: false,
         work: Work {

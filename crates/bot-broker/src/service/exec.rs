@@ -114,6 +114,7 @@ impl BrokerService {
             tool: flow.resolved.clone(),
             args: flow.sealed.canonical.clone(),
             env: flow.env.clone(),
+            conversation: flow.ctx.conversation.clone(),
             reply_to,
             owner,
         };

@@ -533,6 +533,9 @@ async fn the_private_jobs_progress_origin_is_the_authenticated_ingress_and_never
             Some(origin) => {
                 assert_eq!(jobs.len(), 1, "{principal}");
                 assert_eq!(jobs[0].origin, origin, "{principal}");
+                assert_eq!(jobs[0].conversation.kind, ConversationKind::Direct);
+                assert_eq!(jobs[0].conversation.id, "dm-1");
+                assert_eq!(jobs[0].conversation.thread, None);
             }
             None => assert!(jobs.is_empty(), "{principal}"),
         }

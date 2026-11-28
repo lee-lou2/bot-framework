@@ -87,6 +87,29 @@ impl SlackSource {
     }
 }
 
+/// Extracts the triggering Slack message `ts` from a stored `slack_key` (returns `None` for reactions).
+pub fn message_ts_from_key(slack_key: &str) -> Option<String> {
+    let mut parts = slack_key.split('\u{1f}');
+    match parts.next()? {
+        "m" => {
+            let (team, channel, ts) = (parts.next()?, parts.next()?, parts.next()?);
+            if parts.next().is_some() || team.is_empty() || channel.is_empty() || ts.is_empty() {
+                return None;
+            }
+            Some(ts.to_owned())
+        }
+        "l" => {
+            let raw = parts.next()?;
+            if parts.next().is_some() {
+                return None;
+            }
+            let (channel, ts) = raw.split_once('.')?;
+            (!channel.is_empty() && !ts.is_empty()).then(|| ts.to_owned())
+        }
+        _ => None,
+    }
+}
+
 /// Proof that a specific bot installation participated in a thread; changing team or bot creates a distinct ownership key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BotThread {
@@ -176,5 +199,30 @@ mod tests {
         assert_eq!(SlackEvent::ThreadReply.trigger_event(), "thread-reply");
         assert_eq!(SlackEvent::Reaction.trigger_event(), "reaction");
         assert_eq!(default_channel_events().len(), 1);
+    }
+
+    #[test]
+    fn message_ts_from_key_extracts_message_and_legacy_timestamps_only() {
+        assert_eq!(
+            message_ts_from_key("m\u{1f}T1\u{1f}C1\u{1f}1700000000.000100").as_deref(),
+            Some("1700000000.000100")
+        );
+        assert_eq!(
+            message_ts_from_key("l\u{1f}C1.1700000000.000100").as_deref(),
+            Some("1700000000.000100")
+        );
+        for non_message in [
+            "r\u{1f}T1\u{1f}Ev1",
+            "",
+            "m\u{1f}T1\u{1f}C1",
+            "m\u{1f}T1\u{1f}C1\u{1f}",
+            "m\u{1f}T1\u{1f}C1\u{1f}1.2\u{1f}extra",
+            "l\u{1f}C1",
+            "l\u{1f}.1.2",
+            "l\u{1f}C1.",
+            "l\u{1f}C1.1.2\u{1f}extra",
+        ] {
+            assert_eq!(message_ts_from_key(non_message), None, "{non_message:?}");
+        }
     }
 }
