@@ -12,8 +12,12 @@ use crate::model::{
 };
 use bot_core::{
     active::ActiveCheck,
+    auth::{
+        AuthError, AuthResolver, AuthSource, CallerSurface, HeaderMode, ResolvedAuth,
+        StaticAuthResolver,
+    },
     id::{ProfileId, SecretName},
-    port::{Error, SecretStore},
+    port::SecretStore,
 };
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -84,29 +88,44 @@ pub struct ApiSettings {
     pub kind: ApiKind,
     pub endpoint: ApiEndpoint,
     pub model: String,
-    /// Profile secret name; `None` is allowed only for loopback endpoints.
+    /// Profile secret name; `None` is allowed only for loopback endpoints or when `auth` is set.
     pub secret: Option<SecretName>,
+    /// Managed host credential source (mutually exclusive with `secret`; takes precedence if set).
+    pub auth: Option<AuthSource>,
     pub max_tokens: Option<u32>,
     pub limit_field: LimitField,
     pub effort: Option<Effort>,
 }
 
 impl ApiSettings {
+    pub(crate) fn auth_source(&self) -> Option<AuthSource> {
+        self.auth
+            .clone()
+            .or_else(|| self.secret.clone().map(AuthSource::Secret))
+    }
+
     /// Provider fingerprint bound to opaque turn state so provider-specific IDs/signatures replay only to the same target.
     pub(crate) fn fingerprint(&self) -> String {
+        let cred = match self.auth_source() {
+            Some(AuthSource::Secret(name)) => name.as_str().to_owned(),
+            Some(AuthSource::Credential {
+                name,
+                expected_kind,
+            }) => format!("{}:{}", expected_kind.as_str(), name.as_str()),
+            None => String::new(),
+        };
         format!(
-            "{:?}|{}|{}|{}",
+            "{:?}|{}|{}|{cred}",
             self.kind,
             self.endpoint.url(""),
             self.model,
-            self.secret.as_ref().map_or("", |name| name.as_str())
         )
     }
 }
 
 pub struct ApiRunner {
     settings: ApiSettings,
-    secrets: Arc<dyn SecretStore>,
+    auth: Arc<dyn AuthResolver>,
     gate: Arc<dyn ActiveCheck>,
     client: ApiClient,
 }
@@ -117,7 +136,15 @@ impl ApiRunner {
         secrets: Arc<S>,
         gate: Arc<dyn ActiveCheck>,
     ) -> Result<Self, String> {
-        if settings.secret.is_none() && !settings.endpoint.is_loopback() {
+        Self::with_resolver(settings, Arc::new(StaticAuthResolver::new(secrets)), gate)
+    }
+
+    pub fn with_resolver(
+        settings: ApiSettings,
+        auth: Arc<dyn AuthResolver>,
+        gate: Arc<dyn ActiveCheck>,
+    ) -> Result<Self, String> {
+        if settings.auth_source().is_none() && !settings.endpoint.is_loopback() {
             return Err("only loopback endpoints may omit a provider secret".to_owned());
         }
         if settings.model.trim().is_empty() {
@@ -126,24 +153,41 @@ impl ApiRunner {
         let client = ApiClient::new(settings.endpoint.is_loopback())?;
         Ok(Self {
             settings,
-            secrets,
+            auth,
             gate,
             client,
         })
     }
 
-    async fn key(&self, profile: &ProfileId, name: &SecretName) -> Result<String, ModelError> {
-        let unusable = |error: Error| match error {
-            Error::Unavailable => fail("secret_unavailable", true),
-            _ => fail("model_key_missing", false),
-        };
-        let handle = self
-            .secrets
-            .for_profile(profile.clone())
+    fn header_mode(&self, source: &AuthSource) -> HeaderMode {
+        match (self.settings.kind, source) {
+            (ApiKind::Anthropic, AuthSource::Secret(_)) => HeaderMode::ApiKey("x-api-key"),
+            (ApiKind::Anthropic, AuthSource::Credential { .. }) | (ApiKind::OpenAi, _) => {
+                HeaderMode::Bearer
+            }
+        }
+    }
+
+    async fn resolve_auth(
+        &self,
+        profile: &ProfileId,
+        source: AuthSource,
+    ) -> Result<(String, Vec<(String, String)>, Vec<Vec<u8>>), ModelError> {
+        let resolved: ResolvedAuth = self
+            .auth
+            .resolve(profile.clone(), source, CallerSurface::DirectApi, false)
             .await
-            .map_err(unusable)?;
-        let value = handle.resolve(name.clone()).await.map_err(unusable)?;
-        let text = std::str::from_utf8(&value.0)
+            .map_err(|error| match error {
+                AuthError::Unavailable => fail("secret_unavailable", true),
+                AuthError::Stale => fail("stale_worker", true),
+                AuthError::NeedsLogin => fail("credential_needs_login", false),
+                AuthError::Denied => fail("credential_denied", false),
+                AuthError::Conflict => fail("credential_conflict", true),
+                AuthError::Invalid => fail("model_key_invalid", false),
+                AuthError::Missing => fail("model_key_missing", false),
+            })?;
+        let scan = resolved.scan_values();
+        let text = std::str::from_utf8(&resolved.secret.0)
             .map_err(|_| fail("model_key_invalid", false))?
             .trim()
             .to_owned();
@@ -151,7 +195,7 @@ impl ApiRunner {
         if text.len() < MIN_KEY_BYTES || !text.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
             return Err(fail("model_key_invalid", false));
         }
-        Ok(text)
+        Ok((text, resolved.headers, scan))
     }
 
     /// Confirms this process still owns the active set within `GATE_WAIT` (same deadline rule as `GuardedUpstream::confirm`).
@@ -159,23 +203,25 @@ impl ApiRunner {
         let limit = Instant::now() + GATE_WAIT;
         match timeout_at(limit, self.gate.verify()).await {
             Ok(Ok(())) if Instant::now() < limit => Ok(()),
-            Ok(Err(Error::Stale)) => Err(fail("stale_worker", true)),
+            Ok(Err(bot_core::port::Error::Stale)) => Err(fail("stale_worker", true)),
             _ => Err(fail("activation_unverified", true)),
         }
     }
 
-    /// Double-checks activation before reading the secret and again right before POST so stale workers neither read nor transmit keys.
+    /// Double-checks activation before reading auth and again right before POST so stale workers neither read nor transmit keys.
     async fn send(&self, request: &ModelRequest, body: Vec<u8>) -> Result<Sent, ModelError> {
         self.confirm().await?;
-        let key = match &self.settings.secret {
-            Some(name) => {
-                let key = self.key(&request.attempt.profile, name).await?;
+        let (mode, key, extra, scan) = match self.settings.auth_source() {
+            Some(source) => {
+                let mode = self.header_mode(&source);
+                let (key, extra, scan) =
+                    self.resolve_auth(&request.attempt.profile, source).await?;
                 self.confirm().await?;
-                Some(key)
+                (Some(mode), Some(key), extra, scan)
             }
-            None => None,
+            None => (None, None, Vec::new(), Vec::new()),
         };
-        let headers = self.settings.kind.headers(key.as_deref());
+        let headers = self.settings.kind.headers(mode, key.as_deref(), &extra);
         let url = self.settings.endpoint.url(self.settings.kind.path());
         match self
             .client
@@ -184,6 +230,7 @@ impl ApiRunner {
         {
             Ok(answer) => Ok(Sent {
                 key,
+                scan,
                 status: answer.status,
                 body: answer.body,
             }),
@@ -223,22 +270,23 @@ impl ApiRunner {
             return Err(error);
         }
         let text = std::str::from_utf8(&sent.body).map_err(|_| wire::invalid())?;
-        // Reject the entire response if the request's provider key appears anywhere in raw or decoded output.
-        let needles = sent.key.as_deref().map(Needles::new);
-        if needles
-            .as_ref()
-            .is_some_and(|needles| needles.in_body(text))
-        {
+        // Reject the entire response if any resolved credential appears in raw or decoded output.
+        let mut needles: Vec<Needles> = sent.key.as_deref().map(Needles::new).into_iter().collect();
+        for bytes in &sent.scan {
+            if let Ok(text) = std::str::from_utf8(bytes)
+                && Some(text) != sent.key.as_deref()
+            {
+                needles.push(Needles::new(text));
+            }
+        }
+        if needles.iter().any(|n| n.in_body(text)) {
             return Err(fail("secret_in_response", false));
         }
         let step = self
             .settings
             .kind
             .parse(&self.settings, &sent.body, &request, &names)?;
-        if needles
-            .as_ref()
-            .is_some_and(|needles| needles.in_step(&step))
-        {
+        if needles.iter().any(|n| n.in_step(&step)) {
             return Err(fail("secret_in_response", false));
         }
         Ok(step)
@@ -268,6 +316,7 @@ impl ModelRunner for ApiRunner {
 
 struct Sent {
     key: Option<String>,
+    scan: Vec<Vec<u8>>,
     status: u16,
     body: Vec<u8>,
 }

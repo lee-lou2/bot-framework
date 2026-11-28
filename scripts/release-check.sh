@@ -288,6 +288,7 @@ bot-cli team_template
 bot-cli secret_sweep
 bot-cli openai_compat
 bot-cli mcp_http
+bot-cli mcp_sync_stdio
 bot-cli mcp_http_real
 bot-cli mcp_http_review
 '

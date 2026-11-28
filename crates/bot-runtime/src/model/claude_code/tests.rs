@@ -18,7 +18,6 @@ fn model() -> CliModel {
         effort: "high".into(),
         max_output_tokens: 777,
         retries: 3,
-        context_window: 1000,
     }
 }
 

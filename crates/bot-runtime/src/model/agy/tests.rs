@@ -36,7 +36,6 @@ fn model(effort: &str) -> CliModel {
         effort: effort.into(),
         max_output_tokens: 4096,
         retries: 2,
-        context_window: 1_000_000,
     }
 }
 

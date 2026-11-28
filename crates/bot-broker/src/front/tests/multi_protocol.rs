@@ -97,10 +97,16 @@ async fn proto_rig(protocol: Protocol, planning_runs: bool) -> ProtoRig {
         },
         Config::default(),
     ));
-    let (path, header, scheme) = match protocol {
-        Protocol::Anthropic => ("/v1/messages", "x-api-key", None),
-        Protocol::OpenAiResponses => ("/v1/responses", "authorization", Some("Bearer".to_owned())),
-        Protocol::Gemini => ("/v1beta", "x-goog-api-key", None),
+    let (path, header_mode) = match protocol {
+        Protocol::Anthropic => (
+            "/v1/messages",
+            bot_core::auth::HeaderMode::ApiKey("x-api-key"),
+        ),
+        Protocol::OpenAiResponses => ("/v1/responses", bot_core::auth::HeaderMode::Bearer),
+        Protocol::Gemini => (
+            "/v1beta",
+            bot_core::auth::HeaderMode::ApiKey("x-goog-api-key"),
+        ),
     };
     let host = ModelHost {
         providers: [(
@@ -112,9 +118,8 @@ async fn proto_rig(protocol: Protocol, planning_runs: bool) -> ProtoRig {
                     port: 443,
                 },
                 path: path.into(),
-                secret: SecretName::parse("model-key").unwrap(),
-                header: header.into(),
-                scheme,
+                auth: bot_core::auth::AuthSource::Secret(SecretName::parse("model-key").unwrap()),
+                header_mode,
                 headers: vec![],
                 forward_headers: vec![],
                 body_fields: vec![],

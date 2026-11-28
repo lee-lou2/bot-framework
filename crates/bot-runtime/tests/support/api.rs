@@ -181,6 +181,7 @@ pub fn settings(kind: ApiKind, api: &FakeApi, secret: Option<&str>) -> ApiSettin
         endpoint: endpoint(kind, api),
         model: "model-x".into(),
         secret: secret.and_then(SecretName::parse),
+        auth: None,
         max_tokens: None,
         limit_field: Default::default(),
         effort: None,

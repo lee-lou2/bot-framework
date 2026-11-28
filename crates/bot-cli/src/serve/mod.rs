@@ -15,7 +15,7 @@ mod models;
 mod quiesce;
 pub mod remote;
 mod restore;
-mod runner;
+pub(crate) mod runner;
 mod scheduler;
 pub(crate) mod seed;
 mod token_file;
@@ -72,7 +72,9 @@ pub(crate) fn check_model_aliases(host: &HostFile) -> Result<(), String> {
         (bot_runtime::model::CliKind::Agy, demo),
     ]);
     let api = models::ApiParts {
-        secrets: trace::inert_secrets(),
+        auth: Arc::new(bot_core::auth::StaticAuthResolver::new(
+            trace::inert_secrets(),
+        )),
         gate: Arc::new(Open),
     };
     models::build(host, &cli_runners, Some(&api)).map(|_| ())

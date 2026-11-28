@@ -9,7 +9,7 @@ use super::{
 };
 use crate::model::{
     ModelError, ModelRequest, ModelStep, PendingCall,
-    api::{names::NameTable, runner::ApiSettings, transport::Header},
+    api::{names::NameTable, runner::ApiSettings},
     call_id,
 };
 use bot_core::command::{JsonPayload, RunOutcome, TokenUsage};
@@ -21,15 +21,11 @@ const STATE_KIND: &str = "openai";
 const MAX_SIGNATURE: usize = 32 * 1024;
 const MAX_ORIGINAL_ID: usize = 128;
 
-pub(super) fn headers(key: Option<&str>) -> Vec<Header> {
-    let mut headers: Vec<Header> = vec![
-        ("content-type", "application/json".to_owned(), false),
-        ("accept", "application/json".to_owned(), false),
-    ];
-    if let Some(key) = key {
-        headers.push(("authorization", format!("Bearer {key}"), true));
-    }
-    headers
+pub(super) fn base_headers() -> Vec<(String, String)> {
+    vec![
+        ("content-type".into(), "application/json".into()),
+        ("accept".into(), "application/json".into()),
+    ]
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

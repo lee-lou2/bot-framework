@@ -1,5 +1,6 @@
 //! Library modules for the `bot` binary: settings, host config, secret stores, commands, and role wiring.
 
+pub mod auth;
 pub mod chat;
 pub mod cli;
 pub mod doctor;

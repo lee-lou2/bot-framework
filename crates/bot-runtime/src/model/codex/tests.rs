@@ -46,7 +46,6 @@ fn model() -> CliModel {
         effort: "medium".into(),
         max_output_tokens: 4096,
         retries: 2,
-        context_window: 200_000,
     }
 }
 

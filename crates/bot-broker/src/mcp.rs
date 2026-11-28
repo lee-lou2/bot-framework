@@ -29,6 +29,7 @@ pub const SUPPORTED: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 pub const MAX_FRAME: usize = 1 << 20;
 const MAX_SKIPPED: usize = 256;
 const MAX_PAGES: usize = 16;
+const MAX_LISTED: usize = 4096;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum McpError {
@@ -166,6 +167,38 @@ impl Session {
             .await
     }
 
+    /// Fetches all paginated tool definitions; fails on cursor loops or exceeded caps.
+    pub async fn tools(&mut self, limit: Duration) -> Result<Vec<Value>, McpError> {
+        let mut all = Vec::new();
+        let (mut cursor, mut used): (Option<String>, Vec<String>) = (None, Vec::new());
+        for _ in 0..MAX_PAGES {
+            let params = match &cursor {
+                Some(cursor) => format!("{{\"cursor\":{}}}", json_quote(cursor)),
+                None => "{}".to_owned(),
+            };
+            let result = self.request("tools/list", &params, limit).await?;
+            let page = result
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or(McpError::Protocol)?;
+            if all.len() + page.len() > MAX_LISTED {
+                return Err(McpError::Protocol);
+            }
+            all.extend(page.iter().cloned());
+            match result.get("nextCursor") {
+                None => return Ok(all),
+                Some(Value::String(next)) if !next.is_empty() && !used.contains(next) => {
+                    used.push(next.clone());
+                    cursor = Some(next.clone());
+                }
+                Some(Value::Null) => return Ok(all),
+                Some(Value::String(empty)) if empty.is_empty() => return Ok(all),
+                Some(_) => return Err(McpError::Protocol),
+            }
+        }
+        Err(McpError::Protocol)
+    }
+
     /// Finds tool `name` across paginated `tools/list`; returns an error if duplicated.
     pub async fn find_tool(
         &mut self,
@@ -173,31 +206,15 @@ impl Session {
         limit: Duration,
     ) -> Result<Option<Value>, McpError> {
         let mut found: Option<Value> = None;
-        let mut cursor: Option<String> = None;
-        for _ in 0..MAX_PAGES {
-            let params = match &cursor {
-                Some(cursor) => format!("{{\"cursor\":{}}}", json_quote(cursor)),
-                None => "{}".to_owned(),
-            };
-            let result = self.request("tools/list", &params, limit).await?;
-            let tools = result
-                .get("tools")
-                .and_then(Value::as_array)
-                .ok_or(McpError::Protocol)?;
-            for tool in tools {
-                if tool.get("name").and_then(Value::as_str) == Some(name) {
-                    if found.is_some() {
-                        return Err(McpError::Protocol);
-                    }
-                    found = Some(tool.clone());
+        for tool in self.tools(limit).await? {
+            if tool.get("name").and_then(Value::as_str) == Some(name) {
+                if found.is_some() {
+                    return Err(McpError::Protocol);
                 }
-            }
-            match result.get("nextCursor").and_then(Value::as_str) {
-                Some(next) if !next.is_empty() => cursor = Some(next.to_owned()),
-                _ => return Ok(found),
+                found = Some(tool);
             }
         }
-        Err(McpError::Protocol)
+        Ok(found)
     }
 
     /// Sends `tools/call` with canonical `arguments` and `_meta` JSON; failure after write leaves delivery uncertain.

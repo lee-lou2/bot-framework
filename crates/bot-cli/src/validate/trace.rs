@@ -53,6 +53,12 @@ pub fn all_needed_secrets<'a>(
             .or_default()
             .extend(super::needed_secrets(snapshot, host));
     }
+    if crate::auth::host_needs_credential_key(host) {
+        merged
+            .entry(ProfileId(crate::auth::CREDENTIAL_KEY_PROFILE.to_owned()))
+            .or_default()
+            .insert(crate::auth::CREDENTIAL_KEY_NAME.to_owned());
+    }
     merged
 }
 

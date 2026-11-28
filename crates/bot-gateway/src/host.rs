@@ -49,6 +49,8 @@ pub struct SlackHost {
     pub workspaces: BTreeMap<String, SlackWorkspace>,
     /// Optional single-line channel notice replacing the default `DM_SENT_NOTICE` copy when an approval card is delivered via DM.
     pub dm_sent_notice: Option<String>,
+    /// Optional trailing footnote line prefix (e.g. `"※"`) split into a Slack `context` block; disabled when unset.
+    pub note_prefix: Option<String>,
 }
 
 /// Kept private because `validate` rejects `http`; all validated workspaces use Socket Mode.
@@ -257,6 +259,20 @@ impl HostConfig {
                 "slack.dm_sent_notice",
                 "must be a non-empty single-line string of at most 200 chars without control characters",
             ));
+        }
+        if let Some(prefix) = &self.slack.note_prefix {
+            let first = prefix.chars().next();
+            let bad_start =
+                first.is_none_or(|c| matches!(c, '-' | '*' | '>' | '#') || c.is_ascii_digit());
+            if bad_start
+                || prefix.chars().count() > 16
+                || prefix.chars().any(|c| c.is_whitespace() || c.is_control())
+            {
+                return Err(bad(
+                    "slack.note_prefix",
+                    "must be 1..=16 non-whitespace printable chars and cannot start with '-', '*', '>', '#', or an ASCII digit",
+                ));
+            }
         }
         if let Some(url) = &self.admin_url
             && (!(url.starts_with("https://") || url.starts_with("http://"))
@@ -540,6 +556,20 @@ mod tests {
                 message.contains("slack.dm_sent_notice"),
                 "{bad} -> {message}"
             );
+        }
+        let np = HostConfig::from_json(r#"{"slack":{"note_prefix":"※"}}"#).unwrap();
+        assert_eq!(np.slack.note_prefix.as_deref(), Some("※"));
+        for bad in [
+            r#"{"slack":{"note_prefix":""}}"#,
+            r#"{"slack":{"note_prefix":"- "}}"#,
+            r#"{"slack":{"note_prefix":"*"}}"#,
+            r#"{"slack":{"note_prefix":">"}}"#,
+            r##"{"slack":{"note_prefix":"#"}}"##,
+            r#"{"slack":{"note_prefix":"1."}}"#,
+            r#"{"slack":{"note_prefix":"a b"}}"#,
+            &format!(r#"{{"slack":{{"note_prefix":"{}"}}}}"#, "a".repeat(17)),
+        ] {
+            assert!(rejects(bad).contains("slack.note_prefix"), "{bad}");
         }
     }
 }

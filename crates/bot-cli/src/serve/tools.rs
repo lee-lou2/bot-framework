@@ -37,6 +37,7 @@ pub struct ToolDeps<'a> {
     pub live_installed: LiveInstalled,
     /// Accepts `Watched` only so every read tool credential enters the redactor before use.
     pub secrets: Arc<Watched>,
+    pub auth: Arc<dyn bot_core::auth::AuthResolver>,
     pub secrets_admin: Arc<SecretAdmin>,
     pub tracer: Arc<dyn Tracer>,
     pub uid: u32,
@@ -62,6 +63,7 @@ pub async fn build(deps: ToolDeps<'_>) -> Result<Tools, String> {
         live_revision,
         live_installed,
         secrets,
+        auth,
         secrets_admin,
         tracer,
         uid,
@@ -73,6 +75,7 @@ pub async fn build(deps: ToolDeps<'_>) -> Result<Tools, String> {
         host,
         settings,
         &secrets,
+        auth,
         store.clone() as Arc<dyn EffectJournal>,
         uid,
         active.clone(),

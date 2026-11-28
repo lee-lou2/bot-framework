@@ -279,6 +279,7 @@ pub(super) async fn build(
     host: &HostFile,
     settings: &Settings,
     secrets: &Arc<Watched>,
+    auth: Arc<dyn bot_core::auth::AuthResolver>,
     effects: Arc<dyn EffectJournal>,
     uid: u32,
     active: Arc<dyn ActiveCheck>,
@@ -303,6 +304,7 @@ pub(super) async fn build(
         registry,
         runner_config(host),
     )
+    .with_auth(auth)
     .with_wire(Arc::new(GuardedWire::new(Arc::new(wire), active)));
     Ok(LiveRunner {
         runner: Arc::new(runner),
@@ -311,7 +313,7 @@ pub(super) async fn build(
     })
 }
 
-async fn local_sandbox(
+pub(crate) async fn local_sandbox(
     host: &HostFile,
     settings: &Settings,
     uid: u32,
@@ -507,18 +509,28 @@ mod tests {
         })
         .unwrap();
         let secrets = Watched::plain(Arc::new(bot_broker::testing::FakeSecrets::new(&[])));
+        let auth: Arc<dyn bot_core::auth::AuthResolver> =
+            Arc::new(bot_core::auth::StaticAuthResolver::new(secrets.clone()));
         let effects: Arc<dyn EffectJournal> = Arc::new(bot_broker::testing::FakeEffects::new());
         let active: Arc<dyn ActiveCheck> = MemoryActive::new(Some("set-1")).check("set-1");
-        let error = build(&host, &settings, &secrets, effects, 0, active.clone())
-            .await
-            .err()
-            .unwrap();
+        let error = build(
+            &host,
+            &settings,
+            &secrets,
+            auth.clone(),
+            effects,
+            0,
+            active.clone(),
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(error.contains("servers.stateful.state=required"), "{error}");
         assert!(!installs.exists(), "must not create installs directory");
         let none = crate::host::parse(r#"{"version": 1}"#).unwrap();
         let effects: Arc<dyn EffectJournal> = Arc::new(bot_broker::testing::FakeEffects::new());
         assert!(
-            build(&none, &settings, &secrets, effects, 0, active)
+            build(&none, &settings, &secrets, auth, effects, 0, active)
                 .await
                 .is_ok()
         );

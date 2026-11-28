@@ -284,3 +284,23 @@ pub fn parse_tools_yaml(
         value,
     })
 }
+
+/// Reads non-secret `key: string` entries from an optional `env.yaml` file.
+pub fn read_env_yaml(path: &Path, limits: &Limits) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    let Ok(val) = yaml::parse("env.yaml", &raw, limits) else {
+        return out;
+    };
+    let Some(map) = val.as_object() else {
+        return out;
+    };
+    for (k, v) in map {
+        if let Some(s) = v.as_str() {
+            out.insert(k.clone(), s.to_owned());
+        }
+    }
+    out
+}

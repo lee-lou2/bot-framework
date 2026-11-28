@@ -101,6 +101,11 @@ pub(super) fn is_super_admin(text: &str) -> bool {
         .is_some_and(|kind| kind != bot_core::identity::IdentityKind::Service)
 }
 
+/// Only opt-in Claude and Codex CLI subscription relays are permitted; Google consumer OAuth is never allowed.
+pub(super) fn is_subscription_vendor(text: &str) -> bool {
+    matches!(text, "claude" | "codex")
+}
+
 /// Binds `private_egress` into the activation fingerprint only when non-empty to preserve existing bytes.
 pub(super) fn bind_private_egress(base: [u8; 32], map: &PrivateEgressMap) -> [u8; 32] {
     if map.is_empty() {
@@ -135,6 +140,31 @@ pub(super) fn bind_super_admins(
         hash.update(b"\0");
         for admin in list {
             hash.update(admin.as_bytes());
+            hash.update(b"\0");
+        }
+    }
+    hash.finalize().into()
+}
+
+/// Binds `allow_subscription_auth` into the activation fingerprint only when non-empty to preserve existing bytes.
+pub(super) fn bind_subscription_auth(
+    base: [u8; 32],
+    allow: &BTreeMap<String, BTreeSet<String>>,
+) -> [u8; 32] {
+    if allow.values().all(BTreeSet::is_empty) {
+        return base;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"bot-authority-subscription-auth-v1\0");
+    hash.update(base);
+    for (profile, vendors) in allow {
+        if vendors.is_empty() {
+            continue;
+        }
+        hash.update(profile.as_bytes());
+        hash.update(b"\0");
+        for vendor in vendors {
+            hash.update(vendor.as_bytes());
             hash.update(b"\0");
         }
     }
@@ -238,5 +268,28 @@ mod tests {
             hex(super::bind_super_admins(fixed, &admins_map)),
             "eadfe4b1b57504ef97b9e06a881990976c66da1fbacfe9d8cd572aea417963f1"
         );
+        // allow_subscription_auth preserves bytes when empty, binds when set, and rejects Google/unknown vendors.
+        let sub_base = parse(r#"{"version": 1}"#).unwrap();
+        let sub_empty =
+            parse(r#"{"version": 1, "allow_subscription_auth": {"personal": []}}"#).unwrap();
+        let sub_on = parse(
+            r#"{"version": 1, "allow_subscription_auth": {"personal": ["claude", "codex"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            sub_base.authority_fingerprint(&rev).unwrap(),
+            sub_empty.authority_fingerprint(&rev).unwrap()
+        );
+        assert_ne!(
+            sub_base.authority_fingerprint(&rev).unwrap(),
+            sub_on.authority_fingerprint(&rev).unwrap()
+        );
+        for bad in [
+            r#"{"version": 1, "allow_subscription_auth": {"personal": ["google"]}}"#,
+            r#"{"version": 1, "allow_subscription_auth": {"personal": ["agy"]}}"#,
+            r#"{"version": 1, "allow_subscription_auth": {"personal": ["gemini"]}}"#,
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 }

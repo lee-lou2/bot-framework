@@ -227,11 +227,15 @@ fn consecutive_roles_merge_empty_lines_drop_and_two_speakers_get_labels() {
 
 #[test]
 fn headers_carry_the_key_only_as_a_secret_header() {
-    let headers = KIND.headers(Some("sk-test-key-123"));
+    let headers = KIND.headers(
+        Some(bot_core::auth::HeaderMode::ApiKey("x-api-key")),
+        Some("sk-test-key-123"),
+        &[],
+    );
     let secret: Vec<_> = headers.iter().filter(|(_, _, secret)| *secret).collect();
     assert_eq!(secret.len(), 1);
     assert_eq!(
-        (secret[0].0, secret[0].1.as_str()),
+        (secret[0].0.as_str(), secret[0].1.as_str()),
         ("x-api-key", "sk-test-key-123")
     );
     assert!(
@@ -241,9 +245,13 @@ fn headers_carry_the_key_only_as_a_secret_header() {
     assert!(
         headers
             .iter()
-            .any(|(name, _, _)| *name == "anthropic-version")
+            .any(|(name, _, _)| name == "anthropic-version")
     );
-    assert!(KIND.headers(None).iter().all(|(_, _, secret)| !secret));
+    assert!(
+        KIND.headers(None, None, &[])
+            .iter()
+            .all(|(_, _, secret)| !secret)
+    );
     assert_eq!(KIND.path(), "/v1/messages");
 }
 

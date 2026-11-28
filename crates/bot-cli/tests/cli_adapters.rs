@@ -238,7 +238,6 @@ impl Rig {
             effort: "high".into(),
             max_output_tokens: 8192,
             retries: 1,
-            context_window: 200_000,
         };
         let cfg = CliConfig::new(dir.path())
             .with_model("codex", mk("gpt-5.4"))

@@ -41,7 +41,7 @@
 ```
 
 - **URL 및 HTTP 규칙:** `https`가 필수이며, `http`는 정규 IPv4 루프백 리터럴(`127.0.0.0/8`)에서만 허용됩니다. IPv6 리터럴(`[::1]` 포함), `user:pass@`, `#` 프래그먼트, 잘못된 포트, 비정규 숫자 IPv4 표기(`0x7f000001`, `2130706433`, `0177.0.0.1`, `127.1`, 끝 마침표)는 거부합니다. 리다이렉트와 숨겨진 재시도 없이 응답 크기와 타임아웃을 제한합니다.
-- **Bearer 인증(`auth`):** 선택 사항이며 호출 프로필의 비밀 저장소에 있는 비밀 이름을 지정합니다(`Authorization` 헤더에만 사용, 로그/감사 미기록). 서버 응답 어디에서든(원본 본문, 디코딩 텍스트, 키, 숫자 인코딩, `nextCursor`, 세션 ID) 비밀 값이 감지되면 거부됩니다(탐색/목록 조회는 `response_credential`, 도구 호출은 `result_credential`). 비밀이 없으면 호출이 차단됩니다.
+- **인증(`auth`):** 선택 사항이며 정적 `{"kind": "bearer", "secret": "<name>"}`(호출 프로필의 `SecretStore` 조회) 또는 관리형 OAuth `{"kind": "oauth", "credential": "<name>"}`(호스트 암호화 `bot_credentials`에서 조회, `bot auth login --profile <p> --server <alias>`로 PKCE 로그인, `tools/call` 전송 전 `401` + `WWW-Authenticate` 응답 시 1회 강제 갱신 후 재시도 — 전송 후에는 재시도 금지; [auth.md](auth.md) 참고)를 지원합니다. 토큰은 `Authorization` 헤더에만 실리며 로그·감사에 기록되지 않습니다. 서버 응답 어디에서든(원본 본문, 디코딩 텍스트, 키, 숫자 인코딩, `nextCursor`, 세션 ID) 자격 증명 값이 감지되면 거부됩니다(탐색/목록 조회는 `response_credential`, 도구 호출은 `result_credential`). 자격 증명이 없으면 호출이 차단됩니다.
 - **Egress 및 DNS 고정:** `url`의 정확한 `host:port`가 도구 `egress` ∩ 프로필 상한에 포함되어야 합니다. 매 연결마다 모든 DNS 응답을 검증해 사설·루프백·링크로컬 IP를 거부하고(전역 사설망 설정으로 완화 불가) 검증된 IP로 직접 연결합니다. 모든 아웃바운드 단계(`server/discover`, `tools/list`, 레거시 `initialize`, `tools/call`, 세션 종료) 직전에 브로커는 프로세스의 활성 리비전을 재확인하며 오래되었거나 읽을 수 없으면 전송 전에 중단합니다.
 - **프로토콜 협상:** MCP `2026-07-28`(읽기 전용 `server/discover`로 탐색, `x-mcp-header` 인자를 `Mcp-Param-*` 헤더로 반복 전송)과 레거시 `2025-11-25`, `2025-06-18`, `2025-03-26`(`initialize` -> `initialized` 및 세션 ID 사용, `2025-06-18`부터 `MCP-Protocol-Version` 전송)을 지원합니다. 버전 탐색이나 재시도에 쓰기 `tools/call`을 절대 사용하지 않습니다.
 - **제약 및 실패 의미론:** 원격 도구는 `effects: true`, `secrets`, `env`를 선언할 수 없으며(활성화 시 거부), 아웃바운드 `_meta`에는 `bot/call-id`, `bot/profile-id`, `bot/run-id`만 실립니다(`bot/principal`, `bot/trigger`, `bot/conversation`, `bot/destination` 제외). JSON-RPC 요청 ID가 일치하는 `2xx` 응답만 확정 결과로 인정하며, 연결 끊김·타임아웃·비`2xx` 응답(`401`/`403`/`5xx` 포함)은 실행 결과를 불명확 상태로 남깁니다(쓰기는 보류, 읽기는 일시적 재시도). 설치 리비전은 `url`, `transport`, bearer 비밀 이름을 묶습니다.
@@ -58,7 +58,7 @@ bot mcp sync <skill-dir-under-BOT_PROFILES>
 
 - `bot validate`와 동일한 로더로 디렉터리 구조, 심볼릭 링크 부재, `profile.yaml`(`id == folder`), 대상 `SKILL.md`(프런트매터, 이름 일치, 단일 파일 64 KiB 상한)를 검증하며 해당 프로필의 비밀 저장소에서만 자격 증명을 읽습니다.
 - 모든 `tools/list` 페이지를 가져와(최대 16페이지 / 4,096개 도구; 잘못되거나 반복되는 `nextCursor`, 조회 도중 `list_changed` 거부), `tools.yaml`에 선언된 도구만 필터링하고(누락·중복 서버 이름 실패), 수락 전 전체 응답에서 자격 증명 유출을 검사한 뒤, 프로필 어휘 기준으로 입력 스키마를 검증하고 결정적 `{id, name, description, input_schema, sha256}` 항목을 기록합니다. 여기서 `sha256`은 `{"name","description","inputSchema"}`의 RFC 8785 정규 JSON 다이제스트입니다.
-- 현재 원격(`transport: "http"`) 서버를 지원합니다. 실행 후 `bot validate`로 전체 프로필 참조와 에이전트당 64 KiB 스킬 합계를 확인하세요.
+- 원격(`transport: "http"`, 정적 bearer 또는 OAuth)과 로컬(`stdio`) 서버를 모두 지원합니다. 로컬 stdio 동기화는 읽기 전용 설치본에서 `srt` 샌드박스 안에 네트워크 이그레스 0, 시크릿 0, 선언된 비시크릿 `env.yaml` 항목만으로 실행한 뒤 프로세스 그룹을 종료·회수합니다. 실행 후 `bot validate`로 전체 프로필 참조와 에이전트당 64 KiB 스킬 합계를 확인하세요.
 - 실행 시점에 브로커는 HTTP와 stdio 서버 모두에서 호출 전 서버의 실시간 도구 정의 다이제스트를 잠금 파일과 비교합니다(`tool_definition_changed`, `tool_missing`).
 
 ## 도구 선언과 표준 호출 흐름

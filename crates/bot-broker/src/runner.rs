@@ -20,6 +20,7 @@ use crate::{
     text::{hex, json_quote},
 };
 use bot_core::{
+    auth::{AuthResolver, StaticAuthResolver},
     command::JsonPayload,
     id::{ProfileId, SecretName},
     port::{EffectJournal, Error, Reply, SecretStore},
@@ -58,6 +59,7 @@ pub struct Deps {
 
 pub struct McpRunner {
     deps: Deps,
+    auth: Arc<dyn AuthResolver>,
     host: std::sync::RwLock<HostRegistry>,
     cfg: RunnerConfig,
     wire: Option<Arc<dyn RemoteWire>>,
@@ -164,12 +166,19 @@ fn structured_blocked(value: &Value, credentials: &[Vec<u8>]) -> bool {
 
 impl McpRunner {
     pub fn new(deps: Deps, host: HostRegistry, cfg: RunnerConfig) -> Self {
+        let auth = Arc::new(StaticAuthResolver::new(deps.secrets.clone()));
         Self {
             deps,
+            auth,
             host: std::sync::RwLock::new(host),
             cfg,
             wire: None,
         }
+    }
+
+    pub fn with_auth(mut self, auth: Arc<dyn AuthResolver>) -> Self {
+        self.auth = auth;
+        self
     }
 
     pub fn with_wire(mut self, wire: Arc<dyn RemoteWire>) -> Self {
@@ -542,6 +551,18 @@ impl ToolRunner for McpRunner {
             }
             Ok(())
         })
+    }
+
+    fn has_server_auth(&self, server: &str) -> bool {
+        self.host()
+            .remote
+            .get(server)
+            .is_some_and(|remote| remote.oauth.is_some())
+    }
+
+    fn admit_server_auth(&self, profile: &ProfileId, server: &str) -> Reply<'_, ()> {
+        let (profile, server) = (profile.clone(), server.to_owned());
+        Box::pin(async move { self.admit_remote_auth(profile, server).await })
     }
 
     fn run(&self, job: ToolJob) -> Reply<'_, Ran> {

@@ -127,10 +127,11 @@ fn servers(host: &HostFile) -> (Item, Option<BTreeMap<String, Revision>>) {
                 "servers.{alias}: disallowed IP literal — https requires a public IP and http allows loopback only (private/reserved addresses are rejected)"
             ));
         }
-        let auth = remote.bearer.as_ref().map_or_else(
-            || "no auth".to_owned(),
-            |name| format!("bearer secret {}", name.as_str()),
-        );
+        let auth = match (&remote.bearer, &remote.oauth) {
+            (Some(name), _) => format!("bearer secret {}", name.as_str()),
+            (None, Some(name)) => format!("oauth credential {}", name.as_str()),
+            (None, None) => "no auth".to_owned(),
+        };
         let scheme = if remote.tls { "https" } else { "http" };
         let resolve = if literal {
             ""

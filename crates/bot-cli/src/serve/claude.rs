@@ -1,5 +1,5 @@
 //! Host assembly for VM-hosted CLI model runs (`claude-cli`, `codex-cli`, `agy-cli`): broker relay front, Apple VM, and park tracking.
-use super::{guard::GuardedUpstream, watched::Watched};
+use super::guard::GuardedUpstream;
 use crate::{
     execution::{CliProvider, Provider, reachable_aliases},
     host::HostFile,
@@ -20,7 +20,8 @@ use bot_broker::{
 };
 use bot_core::{
     active::ActiveCheck,
-    id::{AgentId, Attempt, ProfileId, SecretName},
+    auth::{AuthResolver, AuthSource, CredentialKind, HeaderMode},
+    id::{AgentId, Attempt, ProfileId},
     ledger::CallLedger,
     port::{Broker, DelegationStore, RunStore, SecretStore},
     profile::ProfileCatalog,
@@ -49,7 +50,6 @@ use std::{
 const EFFORT: &str = "medium";
 const MAX_OUTPUT_TOKENS: u32 = 8192;
 const RETRIES: u32 = 1;
-const CONTEXT_WINDOW: u64 = 200_000;
 const CLAUDE_DEFAULT_PATH: &str = "/v1/messages";
 const CODEX_DEFAULT_PATH: &str = "/v1/responses";
 const AGY_DEFAULT_PATH: &str = "/v1beta";
@@ -71,8 +71,8 @@ pub struct Input<'a> {
     pub host: &'a HostFile,
     pub registry: Arc<Registry>,
     pub store: Arc<Store>,
-    /// Accepts `Watched` only so every read model key is registered in the redactor before use.
-    pub secrets: Arc<Watched>,
+    /// Accepts `HostAuthResolver` built via `for_serve(Arc<Watched>)` so every read/minted credential enters the redactor.
+    pub auth: Arc<dyn AuthResolver>,
     pub broker: Arc<dyn Broker>,
     pub preflight: Arc<dyn Preflight>,
     pub runs: Arc<dyn RunStore>,
@@ -132,7 +132,7 @@ fn upstream_target(kind: CliKind, endpoint: &str) -> Option<(HostPort, String)> 
             let trimmed = raw_path.trim_end_matches('/');
             if trimmed.is_empty() || trimmed == "v1" {
                 CODEX_DEFAULT_PATH.to_owned()
-            } else if trimmed.ends_with("/v1") {
+            } else if trimmed.ends_with("/v1") || trimmed == "backend-api/codex" {
                 format!("/{trimmed}/responses")
             } else {
                 format!("/{raw_path}")
@@ -163,7 +163,9 @@ pub fn model_host(host: &HostFile) -> Result<ModelHost, String> {
             kind,
             model,
             endpoint,
-            secret,
+            secret: _,
+            auth: _,
+            max_tokens: _,
             effort: _,
             fallback: _,
         }) = provider
@@ -172,20 +174,43 @@ pub fn model_host(host: &HostFile) -> Result<ModelHost, String> {
         };
         let (target, path) = upstream_target(*kind, endpoint)
             .ok_or_else(|| format!("cannot parse providers.{alias}.endpoint"))?;
-        let secret = SecretName::parse(secret)
-            .ok_or_else(|| format!("providers.{alias}.secret is not a valid secret name"))?;
-        let (header, scheme, forward_headers) = match kind {
-            CliKind::Claude => (
-                "x-api-key".into(),
-                None,
+        let auth = provider
+            .auth_source(alias)?
+            .ok_or_else(|| format!("providers.{alias}: missing auth configuration"))?;
+        let (header_mode, forward_headers) = match (kind, &auth) {
+            (CliKind::Claude, AuthSource::Secret(_)) => (
+                HeaderMode::ApiKey("x-api-key"),
                 vec!["anthropic-version".into(), "anthropic-beta".into()],
             ),
-            CliKind::Codex => (
-                "authorization".into(),
-                Some("Bearer".into()),
-                vec!["openai-beta".into()],
+            (
+                CliKind::Claude,
+                AuthSource::Credential {
+                    expected_kind: CredentialKind::SubscriptionToken,
+                    ..
+                },
+            ) => (
+                HeaderMode::BearerMergeHeader {
+                    header: "anthropic-beta",
+                    token: "oauth-2025-04-20",
+                },
+                vec!["anthropic-version".into(), "anthropic-beta".into()],
             ),
-            CliKind::Agy => ("x-goog-api-key".into(), None, Vec::new()),
+            (CliKind::Claude, AuthSource::Credential { .. }) => (
+                HeaderMode::Bearer,
+                vec!["anthropic-version".into(), "anthropic-beta".into()],
+            ),
+            (CliKind::Codex, _) => (
+                HeaderMode::Bearer,
+                vec![
+                    "openai-beta".into(),
+                    "originator".into(),
+                    "user-agent".into(),
+                ],
+            ),
+            (CliKind::Agy, AuthSource::Secret(_)) => {
+                (HeaderMode::ApiKey("x-goog-api-key"), Vec::new())
+            }
+            (CliKind::Agy, AuthSource::Credential { .. }) => (HeaderMode::Bearer, Vec::new()),
         };
         providers.insert(
             alias.clone(),
@@ -193,9 +218,8 @@ pub fn model_host(host: &HostFile) -> Result<ModelHost, String> {
                 protocol: cli_protocol(*kind),
                 endpoint: target,
                 path,
-                secret,
-                header,
-                scheme,
+                auth,
+                header_mode,
                 headers: Vec::new(),
                 forward_headers,
                 models: BTreeMap::from([(alias.clone(), model.clone())]),
@@ -339,11 +363,22 @@ impl Claude {
 }
 
 pub async fn start(parts: ClaudeParts, input: Input<'_>) -> Result<Claude, String> {
+    if input
+        .host
+        .allow_subscription_auth
+        .values()
+        .any(|vendors| !vendors.is_empty())
+    {
+        tracing::warn!(
+            code = "subscription_auth_enabled",
+            "experimental opt-in CLI subscription authentication is enabled for one or more profiles (not yet verified against live vendor upstreams)"
+        );
+    }
     let ledger = input.store.clone() as Arc<dyn CallLedger>;
-    let model = Arc::new(ModelProxy::new(
+    let model = Arc::new(ModelProxy::with_auth(
         model_host(input.host)?,
         ledger.clone(),
-        input.secrets,
+        input.auth,
         // Guard every upstream request and open stream against stale activation revisions.
         Arc::new(GuardedUpstream::new(parts.upstream, input.active)),
         Arc::new(SystemClock),
@@ -391,6 +426,7 @@ pub async fn start(parts: ClaudeParts, input: Input<'_>) -> Result<Claude, Strin
         let Provider::Cli(CliProvider {
             kind,
             model,
+            max_tokens,
             effort,
             ..
         }) = provider
@@ -413,9 +449,8 @@ pub async fn start(parts: ClaudeParts, input: Input<'_>) -> Result<Claude, Strin
                 effort: effort
                     .map_or(EFFORT, bot_runtime::model::Effort::as_str)
                     .into(),
-                max_output_tokens: MAX_OUTPUT_TOKENS,
+                max_output_tokens: max_tokens.unwrap_or(MAX_OUTPUT_TOKENS),
                 retries: RETRIES,
-                context_window: CONTEXT_WINDOW,
             },
         );
     }
@@ -445,142 +480,4 @@ pub async fn start(parts: ClaudeParts, input: Input<'_>) -> Result<Claude, Strin
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::host;
-
-    fn parsed(extra: &str) -> HostFile {
-        host::parse(&format!(
-            r#"{{"version": 1, "models": {{"personal": ["assistant", "plain"], "work": ["other"]}}{extra}}}"#
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn the_upstream_endpoint_is_split_into_target_and_path() {
-        let (target, path) = upstream_target(CliKind::Claude, "https://api.example").unwrap();
-        assert_eq!((target.host.as_str(), target.port), ("api.example", 443));
-        assert_eq!(path, "/v1/messages");
-        let (target, path) = upstream_target(
-            CliKind::Claude,
-            "https://api.example:8443/proxy/v1/messages",
-        )
-        .unwrap();
-        assert_eq!((target.host.as_str(), target.port), ("api.example", 8443));
-        assert_eq!(path, "/proxy/v1/messages");
-        assert_eq!(
-            upstream_target(CliKind::Claude, "https://api.example/")
-                .unwrap()
-                .1,
-            CLAUDE_DEFAULT_PATH
-        );
-        assert_eq!(
-            upstream_target(CliKind::Codex, "https://api.openai.com/v1")
-                .unwrap()
-                .1,
-            "/v1/responses"
-        );
-        assert_eq!(
-            upstream_target(CliKind::Codex, "https://api.openai.com")
-                .unwrap()
-                .1,
-            "/v1/responses"
-        );
-        assert_eq!(
-            upstream_target(CliKind::Agy, "https://generativelanguage.googleapis.com")
-                .unwrap()
-                .1,
-            "/v1beta"
-        );
-        assert_eq!(
-            upstream_target(
-                CliKind::Agy,
-                "https://generativelanguage.googleapis.com/v1beta/models"
-            )
-            .unwrap()
-            .1,
-            "/v1beta"
-        );
-        assert!(upstream_target(CliKind::Claude, "http://api.example").is_none());
-        assert!(upstream_target(CliKind::Claude, "https://api.example:99999").is_none());
-    }
-
-    #[test]
-    fn cli_aliases_become_protocol_pinned_upstream_providers_per_profile() {
-        let host = host::parse(
-            r#"{"version": 1, "models": {"personal": ["assistant", "codex", "agy", "plain"], "work": ["other"]},
-                "providers": {
-                    "assistant": {"kind": "claude-cli", "model": "model-large", "endpoint": "https://api.example", "secret": "model-key"},
-                    "codex": {"kind": "codex-cli", "model": "gpt-5", "endpoint": "https://api.openai.com/v1", "secret": "openai-key"},
-                    "agy": {"kind": "agy-cli", "model": "gemini-3.1-pro-preview", "endpoint": "https://generativelanguage.googleapis.com", "secret": "gemini-key"},
-                    "plain": {"kind": "demo"},
-                    "other": {"kind": "claude-cli", "model": "model-small", "endpoint": "https://api.example:8443/v1/messages", "secret": "other-key"}}}"#,
-        )
-        .unwrap();
-        assert!(needed(&host));
-        let table = model_host(&host).unwrap();
-        assert_eq!(
-            table.providers.keys().cloned().collect::<Vec<_>>(),
-            ["agy", "assistant", "codex", "other"]
-        );
-        let assistant = &table.providers["assistant"];
-        assert_eq!(assistant.protocol, Protocol::Anthropic);
-        assert_eq!(assistant.models["assistant"], "model-large");
-        assert_eq!(assistant.secret, SecretName::parse("model-key").unwrap());
-        assert_eq!(assistant.header, "x-api-key");
-        let codex = &table.providers["codex"];
-        assert_eq!(codex.protocol, Protocol::OpenAiResponses);
-        assert_eq!(codex.path, "/v1/responses");
-        assert_eq!(codex.header, "authorization");
-        assert_eq!(codex.scheme.as_deref(), Some("Bearer"));
-        let agy = &table.providers["agy"];
-        assert_eq!(agy.protocol, Protocol::Gemini);
-        assert_eq!(agy.path, "/v1beta");
-        assert_eq!(agy.header, "x-goog-api-key");
-        assert_eq!(agy.scheme, None);
-        let personal = &table.allow[&ProfileId("personal".into())];
-        assert_eq!(
-            personal.iter().cloned().collect::<Vec<_>>(),
-            ["agy", "assistant", "codex"]
-        );
-        let work = &table.allow[&ProfileId("work".into())];
-        assert_eq!(work.iter().cloned().collect::<Vec<_>>(), ["other"]);
-    }
-
-    #[test]
-    fn a_host_without_claude_aliases_does_not_need_the_front() {
-        let demo =
-            parsed(r#", "providers": {"assistant": {"kind": "demo"}, "plain": {"kind": "demo"}}"#);
-        assert!(!needed(&demo));
-        assert!(model_host(&demo).unwrap().providers.is_empty());
-        let unused = parsed(
-            r#", "providers": {"assistant": {"kind": "demo"}, "plain": {"kind": "demo"},
-                "spare": {"kind": "claude-cli", "model": "m", "endpoint": "https://api.example", "secret": "k"}}"#,
-        );
-        assert!(!needed(&unused));
-    }
-
-    #[test]
-    fn the_park_notice_counts_by_reason() {
-        let park = HostPark::default();
-        let attempt = Attempt {
-            profile: ProfileId("personal".into()),
-            run: bot_core::id::RunId("run-1".into()),
-            claim: None,
-            generation: bot_core::id::Generation(1),
-        };
-        park.parked(&attempt, ParkReason::Approval);
-        park.parked(&attempt, ParkReason::Child);
-        park.parked(&attempt, ParkReason::Child);
-        assert_eq!(park.counts(), (1, 0, 2));
-        assert_eq!(
-            park.recent().iter().map(|(_, r)| *r).collect::<Vec<_>>(),
-            [ParkReason::Approval, ParkReason::Child, ParkReason::Child]
-        );
-        for _ in 0..40 {
-            park.parked(&attempt, ParkReason::Held);
-        }
-        assert_eq!(park.recent().len(), 32);
-        assert_eq!(park.counts().1, 40);
-    }
-}
+mod tests;

@@ -45,6 +45,14 @@ impl CliKind {
             Self::Agy => "google",
         }
     }
+
+    pub fn vendor(self) -> bot_core::auth::CliVendor {
+        match self {
+            Self::Claude => bot_core::auth::CliVendor::Claude,
+            Self::Codex => bot_core::auth::CliVendor::Codex,
+            Self::Agy => bot_core::auth::CliVendor::Google,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,7 +61,6 @@ pub struct CliModel {
     pub effort: String,
     pub max_output_tokens: u32,
     pub retries: u32,
-    pub context_window: u64,
 }
 
 #[derive(Clone, Debug)]

@@ -28,10 +28,12 @@ use std::sync::Arc;
 
 /// Profile-scoped HMAC key name for private intake deduplication; intake fails closed if absent.
 pub const FINGERPRINT_SECRET: &str = "private-intake";
+/// Host-scoped 32-byte AEAD master key (`bot/host/credential-key`) encrypting managed credentials in PostgreSQL.
+pub const CREDENTIAL_KEY_SECRET: &str = "credential-key";
 
 /// Host-only secret names that are never resolved into any tool's environment.
 pub fn reserved_secret(name: &SecretName) -> bool {
-    name.as_str() == FINGERPRINT_SECRET
+    name.as_str() == FINGERPRINT_SECRET || name.as_str() == CREDENTIAL_KEY_SECRET
 }
 
 pub struct PrivateParts {

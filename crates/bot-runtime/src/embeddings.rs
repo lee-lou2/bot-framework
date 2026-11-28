@@ -84,10 +84,14 @@ impl EmbeddingClient {
         let key = self.resolve_key(profile).await?;
         self.gate.verify().await?;
 
-        let mut headers = vec![("content-type", "application/json".to_owned(), false)];
+        let mut headers = vec![(
+            "content-type".to_owned(),
+            "application/json".to_owned(),
+            false,
+        )];
         let needles = key.as_deref().map(Needles::new);
         if let Some(token) = &key {
-            headers.push(("authorization", format!("Bearer {token}"), true));
+            headers.push(("authorization".to_owned(), format!("Bearer {token}"), true));
         }
         let body = json!({
             "model": self.settings.model,

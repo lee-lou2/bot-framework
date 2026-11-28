@@ -59,6 +59,7 @@ pub struct Http {
     era: Era,
     next: u64,
     changed: AtomicBool,
+    auth_challenge: AtomicBool,
     /// Per-call transport timeout (`limit + AUX_LIMIT`) set only during `tools/call`.
     wire_timeout: Option<Duration>,
 }
@@ -82,8 +83,14 @@ impl Http {
             era: Era::Probe,
             next: 1,
             changed: AtomicBool::new(false),
+            auth_challenge: AtomicBool::new(false),
             wire_timeout: None,
         }
+    }
+
+    /// True if the last HTTP 401 response included a `WWW-Authenticate` header (value is never retained).
+    pub fn auth_challenge(&self) -> bool {
+        self.auth_challenge.load(Ordering::SeqCst)
     }
 
     /// Rejects any server-supplied bytes echoing our bearer credential.
@@ -216,6 +223,10 @@ impl Http {
             self.guard(session.as_bytes())?;
         }
         if !(200..300).contains(&status) {
+            self.auth_challenge.store(
+                status == 401 && header_value(&reply, "www-authenticate").is_some(),
+                Ordering::SeqCst,
+            );
             let message = error_message(&mut *stream, id, self.bearer.as_deref()).await?;
             return Ok(Answer {
                 status,
@@ -223,6 +234,7 @@ impl Http {
                 message,
             });
         }
+        self.auth_challenge.store(false, Ordering::SeqCst);
         if matches!(status, 202 | 204) {
             return Ok(Answer {
                 status,

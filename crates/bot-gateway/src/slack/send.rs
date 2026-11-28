@@ -154,12 +154,12 @@ fn is_final_reply(body: &ReplyBody) -> bool {
             ))
 }
 
-fn sendable(body: &ReplyBody) -> bool {
+fn sendable(body: &ReplyBody, note_prefix: Option<&str>) -> bool {
     if body.approval.is_some() && !body.attachments.is_empty() {
         return false;
     }
     match body.text.as_deref() {
-        Some(text) if text_blocks(text).is_none() => {
+        Some(text) if text_blocks(text, note_prefix).is_none() => {
             body.approval.is_none() && neutralize(text).chars().count() <= PLAIN_LIMIT
         }
         _ => true,
@@ -242,9 +242,10 @@ impl SlackSender {
         body: &ReplyBody,
     ) -> Delivery {
         let card = body.approval.as_ref();
+        let note_prefix = self.creds.host().slack.note_prefix.as_deref();
         // Never truncate message text: use plain text when it exceeds Block Kit limits.
         let mut blocks = match body.text.as_deref() {
-            Some(text) => match text_blocks(text) {
+            Some(text) => match text_blocks(text, note_prefix) {
                 Some(blocks) => blocks,
                 None if card.is_none() => {
                     return self
@@ -449,7 +450,8 @@ impl Sender for SlackSender {
                 return Delivery::Rejected;
             };
             let effective = self.display_body(body);
-            if !sendable(&effective) {
+            let note_prefix = self.creds.host().slack.note_prefix.as_deref();
+            if !sendable(&effective, note_prefix) {
                 return Delivery::Rejected;
             }
             let (token, bot) = match self.creds.check_bot(&item.key.profile, workspace).await {

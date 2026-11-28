@@ -12,10 +12,16 @@ use super::{
     trace::Observe,
     watched::Watched,
 };
-use crate::{host::HostFile, secrets::admin::SecretAdmin, settings::Settings};
+use crate::{
+    auth::{HostAuthResolver, cli::host_egress_map, http::AuthHttp},
+    host::HostFile,
+    secrets::admin::SecretAdmin,
+    settings::Settings,
+};
 use bot_core::{
     active::ActiveCheck,
-    id::Revision,
+    auth::{AuthResolver, CredentialStore},
+    id::{ProfileId, Revision},
     ledger::CallLedger,
     port::{Broker, DelegationStore, MemoryStore, RunStore},
     profile::ProfileCatalog,
@@ -66,6 +72,7 @@ pub struct Prepared {
     stop: CancellationToken,
     tools: Tools,
     claude: Option<Claude>,
+    auth: HostAuthResolver,
 }
 
 pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
@@ -82,6 +89,61 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
             missing.join("\n")
         ));
     }
+    let egress = host_egress_map(&deps.host)?;
+    let allow_sub = deps
+        .host
+        .allow_subscription_auth
+        .iter()
+        .map(|(p, v)| (ProfileId(p.clone()), v.clone()))
+        .collect();
+    let pinned_issuers = deps
+        .host
+        .remote_servers
+        .values()
+        .filter_map(|remote| {
+            Some((
+                remote.oauth.as_ref()?.as_str().to_owned(),
+                remote.oauth_issuer.clone()?,
+            ))
+        })
+        .collect();
+    let mut provider_hosts: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for provider in deps.host.providers.values() {
+        if let Some(auth) = provider.auth() {
+            let endpoint = match provider {
+                crate::execution::Provider::Cli(c) => Some(c.endpoint.as_str()),
+                crate::execution::Provider::Api(a) => Some(a.endpoint.as_str()),
+                crate::execution::Provider::Demo => None,
+            };
+            if let Some(ep) = endpoint {
+                let rest = ep.split_once("://").map_or(ep, |(_, r)| r);
+                let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+                let host = authority
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !host.is_empty() {
+                    provider_hosts
+                        .entry(auth.credential.clone())
+                        .or_default()
+                        .insert(host);
+                }
+            }
+        }
+    }
+    let auth_engine = HostAuthResolver::for_serve(
+        deps.secrets.clone(),
+        Some(deps.raw_store.clone() as Arc<dyn CredentialStore>),
+        deps.active.clone(),
+        AuthHttp::new()?,
+        egress,
+        allow_sub,
+        pinned_issuers,
+        provider_hosts,
+    );
+    let auth: Arc<dyn AuthResolver> = Arc::new(auth_engine.clone());
     let tools = tools::build(ToolDeps {
         host: &deps.host,
         settings: &deps.settings,
@@ -91,6 +153,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         live_revision: deps.live_revision.clone(),
         live_installed: deps.live_installed.clone(),
         secrets: deps.secrets.clone(),
+        auth: auth.clone(),
         secrets_admin: deps.secrets_admin.clone(),
         tracer: deps.observe.tracer(),
         uid: deps.uid,
@@ -125,7 +188,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
                     host: &deps.host,
                     registry: deps.registry.clone(),
                     store: deps.store.clone(),
-                    secrets: deps.secrets.clone(),
+                    auth: auth.clone(),
                     broker: broker.clone(),
                     preflight: tools.preflight.clone(),
                     runs: deps.store.clone() as Arc<dyn RunStore>,
@@ -137,7 +200,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         None => None,
     };
     let api = models::ApiParts {
-        secrets: deps.secrets.clone(),
+        auth,
         gate: deps.active.clone(),
     };
     let empty_cli = std::collections::BTreeMap::new();
@@ -216,6 +279,7 @@ pub async fn prepare(deps: &Deps) -> Result<Prepared, String> {
         stop: deps.stop.clone(),
         tools,
         claude,
+        auth: auth_engine,
     })
 }
 
@@ -224,6 +288,7 @@ impl Prepared {
         if let Some(claude) = self.claude {
             claude.stop().await;
         }
+        self.auth.shutdown().await;
     }
 
     pub fn open(self, tasks: &mut JoinSet<Result<(), String>>) {
@@ -232,6 +297,7 @@ impl Prepared {
             stop,
             tools,
             claude,
+            auth,
         } = self;
         tasks.spawn(async move {
             let (tx, rx) = watch::channel(false);
@@ -243,6 +309,7 @@ impl Prepared {
             if let Some(claude) = claude {
                 claude.stop().await;
             }
+            auth.shutdown().await;
             // Drop after VM shutdown to release shared installation locks cleanly.
             drop(tools);
             Ok(())

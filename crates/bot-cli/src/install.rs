@@ -89,8 +89,8 @@ fn parse_remote(alias: &str, entry: &Value) -> Result<Remote, String> {
         .get("url")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("servers.{alias}.url: URL string is required"))?;
-    let bearer = match fields.get("auth") {
-        None => None,
+    match fields.get("auth") {
+        None => Remote::parse(url, None).map_err(|why| format!("servers.{alias}.url: {why}")),
         Some(Value::Object(auth))
             if auth.get("kind").and_then(Value::as_str) == Some("bearer")
                 && auth.keys().all(|k| matches!(k.as_str(), "kind" | "secret")) =>
@@ -105,15 +105,40 @@ fn parse_remote(alias: &str, entry: &Value) -> Result<Remote, String> {
                         "servers.{alias}.auth.secret: valid secret name (lowercase, digits, hyphens) required"
                     )
                 })?;
-            Some(name)
+            Remote::parse(url, Some(name)).map_err(|why| format!("servers.{alias}.url: {why}"))
         }
-        Some(_) => {
-            return Err(format!(
-                "servers.{alias}.auth: expected {{\"kind\": \"bearer\", \"secret\": \"<secret-name>\"}}"
-            ));
+        Some(Value::Object(auth))
+            if auth.get("kind").and_then(Value::as_str) == Some("oauth")
+                && auth
+                    .keys()
+                    .all(|k| matches!(k.as_str(), "kind" | "credential" | "issuer")) =>
+        {
+            let name = auth
+                .get("credential")
+                .and_then(Value::as_str)
+                .and_then(SecretName::parse)
+                .filter(|name| !bot_broker::private::reserved_secret(name))
+                .ok_or_else(|| {
+                    format!(
+                        "servers.{alias}.auth.credential: valid credential name (lowercase, digits, hyphens) required"
+                    )
+                })?;
+            let issuer = match auth.get("issuer") {
+                None => None,
+                Some(Value::String(raw)) if !raw.is_empty() => Some(raw.as_str()),
+                Some(_) => {
+                    return Err(format!(
+                        "servers.{alias}.auth.issuer: non-empty https URL string required"
+                    ));
+                }
+            };
+            Remote::parse_oauth_pinned(url, name, issuer)
+                .map_err(|why| format!("servers.{alias}: {why}"))
         }
-    };
-    Remote::parse(url, bearer).map_err(|why| format!("servers.{alias}.url: {why}"))
+        Some(_) => Err(format!(
+            "servers.{alias}.auth: expected {{\"kind\": \"bearer\", \"secret\": \"<name>\"}} or {{\"kind\": \"oauth\", \"credential\": \"<name>\", \"issuer\"?: \"https://...\"}}"
+        )),
+    }
 }
 
 pub fn parse_servers(value: &Value) -> Result<BTreeMap<String, ServerSpec>, String> {
